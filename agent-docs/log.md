@@ -4723,3 +4723,83 @@ representatives remained on the original path and were runtime-neutral within lo
 
 **Worked locally: yes (reencode and whole-profile wins on large overlapping workloads; unchanged
 outputs on representative OpenVM and SP1 inputs; full-set result pending CI).**
+
+### 137. Runtime: registry `register` no longer copies `byId` per registration (#205)
+
+The struct literal in `VarRegistry.register` read `r.byId.size` after `r.byId.push v`, so the
+compiler kept `byId` alive across the push and `lean_array_push` copied the whole registry-sized
+array on every fresh registration (`lean_copy_expand_array`, 5.7 % of the sha256_big run,
+concentrated in the pipeline-entry encode). Binding `n := r.byId.size` before the push makes the
+push the array's last use. Definitionally transparent — proofs untouched.
+
+sha256_big encode: 80,486 → 1,074 ms. Working rule (generalizes entry 106's arity rule): in a
+struct literal or update, bind scalar reads of a field *before* the expression that consumes the
+field linearly, and check the generated C for `lean_copy_expand_array` when an array-heavy
+function is slow.
+
+**Worked locally: yes (75× on encode; byte-identical fixtures; merged as #205).**
+
+### 138. Runtime: domainFold applies accepted folds with `Array.modify` (#206)
+
+The indexed fold loop threaded the list system and re-materialized it per accepted fold:
+`denseFoldOutIdxV` mapped over `algebraicConstraints.zipIdx`/`busInteractions.zipIdx` (each an
+O(system) `toArray` — `List.length`'s pointer chase alone was ~8 % of the run — plus a full map
+rebuild), and `DenseFoldIdx.refresh` converted the folded lists back to arrays. The array-native
+loop (`denseFoldLoopArrV`) threads only the already-array-backed `DenseFoldIdx`, applies accepted
+folds with `Array.modify` at the touched (bucketed) positions, and materializes lists once at the
+pass exit. `denseDomainFoldFV_eq_fast` proves the twin equal (generic `foldl`-`Array.modify` =
+sparse positional map lemma) and installs it via `@[csimp]`, so the pass proofs stay on the list
+specification.
+
+sha256_big domainFold: 172,784 → 6,933 ms; reencode dropped 264 → 178 s with no reencode change
+(shared-subtree RC traffic and allocator pressure). Total for #205+#206: 989 → 643 s.
+
+**Worked locally: yes (25× on the pass; byte-identical fixtures incl. ecrecover_53k).**
+
+### 139. Runtime: pointwiseDupDrop slot-0-indexed representatives + hoisted singles (#208)
+
+The sweep tested each interaction against every representative in its (busId, mult, len) class
+(`densePdSigsCompatible` 3.4 % of whole-run CPU), and the verdicts construction spelled
+`denseSingleVarCs d.algebraicConstraints` inside the `filterMap` closure, recomputing the
+O(system) single-variable filter per proposed drop. A certified twin's slot pair is value-equal
+or shares a decomposition carrier (`denseSlotEqCert`), so representatives are now indexed by
+slot-0 value hash and per-variable buckets and only those candidates are re-checked with the
+unchanged full tests — the proposed drop set is identical, and `densePdKeep` still re-verifies
+every proposal. Systems under `pointwiseDupDropIndexThreshold = 4096` interactions keep the
+direct per-class scan (the index's pair-keyed map overhead measured +2.5 % on fixture-scale
+inputs; the CI wall row's +51 % was runner noise — its own per-pass table showed ≤1.04×).
+
+sha256_big flagFold: 85.0 → 15.6 s (from 296 s two days ago).
+
+**Worked locally: yes (byte-identical fixtures; gate restores fixture parity).**
+
+### 140. Runtime: rootPairUnify serves bound queries from per-variable indexes (#209)
+
+`denseAnyVarBound` was queried per candidate pair against the full lists: `denseFindVarBound`
+walked every interaction, on failure `denseScaledSlotBound` walked them again, and each offset
+variable's finite domain came from an O(constraints) `denseFindDomainAlg` scan. The pass now
+builds a per-variable interaction bucket (`denseVarBucket`, moved to the shared `VarBucket.lean`)
+and a tabulated first-yield domain map (`denseFindDomainMap`) once per invocation. An interaction
+can only bound `x` if it mentions `x` (a bounding slot is literally `.var x`; an accepted scaled
+slot has a nonzero `splitAt` coefficient once `1 ≠ 0`), and the bucket is exactly the
+mention-filtered sublist in source order, so every query answer is unchanged;
+`denseRootPairUnifyF_eq_fast` installs the indexed body via `@[csimp]`.
+
+sha256_big rootPairUnify: 49.6 → 33.7 s. The remainder is candidate/two-root machinery — R9's
+instance-reconstruction chain, not scanning.
+
+**Worked locally: yes (byte-identical fixtures incl. ecrecover_53k).**
+
+### 141. Runtime: busPairCancel scans candidate regions on array segments (#210)
+
+R8 design (a): per candidate pair, `denseFindCancelGoIdx` materialized the live prefix
+(`denseLiveArr`, an O(i)-node list) for the shield check and the mid segment for the between
+check — O(live²) allocation per pass invocation. `denseLiveAllSeg` and `denseShieldScanSeg`
+compute the same folds directly on the array segment, structurally mirroring `denseLiveSeg` so
+the proven equalities rewrite the region hypotheses back onto the `denseLiveSeg` forms the drop
+proofs consume.
+
+sha256_big busPairCancel: 107.4 → 89.5 s; stack total 989 → 550 s (−44 % vs main-of-today,
+2.4× vs two days ago). The remaining 89 s is the certificate work itself — R8 design (b).
+
+**Worked locally: yes (byte-identical fixtures incl. ecrecover_53k).**

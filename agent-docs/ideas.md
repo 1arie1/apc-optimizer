@@ -150,6 +150,18 @@ keccak, so anything superlinear is fatal there.
 - gdb samples (keccak, mid-run): `findConsumer` (busUnify), `reencodeLoop`, `foldLoopDirect`
   (domainFold's unindexed path), `collectForBus` — matching the analysis below.
 
+### Where the time goes at SHA scale (2026-07-24, PRs #205–#210)
+
+sha256_big (146k constraints / 71k interactions / 168k vars, `profile`, quiet 48-core box):
+**989 s (main-of-2026-07-24) → 550 s** across #205 (registry array-copy, encode 80.5 → 0.8 s),
+#206 (domainFold Array.modify accepts, 173 → 6.9 s, reencode −86 s from allocator pressure alone),
+#208 (pointwiseDupDrop slot-0 index + hoisted singles, flagFold 85 → 15.6 s), #209 (rootPairUnify
+per-variable bound indexes, 49.6 → 33.7 s), #210 (busPairCancel segment scans, 107 → 89.5 s).
+Remaining per-pass: reencode 188 s, busPairCancel 89 s, busUnify 52 s, gauss 36 s, rootPairUnify
+33 s, domainBatch 21 s (parallel), bytePack 17 s, flagFold 15 s, normalize1 14 s, carryBranch
+13 s. Cycles 0–2 are still ~80 % of the total. Whole-run perf: ~25 % `lean_dec_ref_cold` +
+~17 % allocator + ~8 % `lean_apply_1` — the budget is still memory traffic, not arithmetic.
+
 ### Open runtime ideas, priority order
 
 Priority = impact at SHA scale (8× keccak) ÷ effort. The pattern for all index work stays the
@@ -166,13 +178,9 @@ these need no new proof.
      thunked; the pass body's per-invocation `HashSet.ofList cs.vars` replaced by the
      by-construction variable guarantee (`memEqConstraints_vars`) and the hash-bucket build
      gated on nonempty candidates. Output byte-identical.
-   - `busPairCancel`: `shieldOk` re-scans (and `liveArr` **materializes**) the whole before-region
-     per candidate send (`BusPairCancel.lean` `shieldOk`/`findCancelGoIdx`) — O(B²) time *and*
-     allocation on the long same-address chains the pass exists for; in coda mode the `addrHash`
-     bucket is O(B) per hot address — add a position cursor. **Still open**, but whole-run
-     samples put busPairCancel at only ~4 % on keccak post-111; the same per-key sweep pattern
-     as busUnify applies (`shieldOk` left-folds to a single per-key `pending` bit), complicated
-     by the tombstone-drop restarts. ~~`dropWits` from-0 array scan per
+   - `busPairCancel`: ~~`liveArr` materialization per candidate~~ **done (#210)** — see R8.
+     The O(B²) *certificate* scans remain (R8 design (b)); in coda mode the `addrHash`
+     bucket is O(B) per hot address — add a position cursor. ~~`dropWits` from-0 array scan per
      queried variable~~ **done (entry 105)**: per-variable position index (`buildBoundIdx`),
      re-checked at use.
    - ~~`dedup` constraint-side `List.dedup` O(C²·E)~~ **done (entry 104)**: bucketed
@@ -301,17 +309,51 @@ reencode's per-target *gating* work is also independent between accepts, but the
 if their serial remainder grows relative to the rest. busPairCancel/busUnify are inherently
 sequential scans (window state).
 
-**R8. busPairCancel residual quadratics** (formerly part of R1)  ·  ~7 % of the post-114 keccak
-profile. `shieldOk` re-scans (and `liveArr` materializes) the whole live before-region per
-candidate send; `midRefuted` likewise materializes the between-region. Two designs, in
-increasing effort: (a) fuse the materialization away — array-index twins of
-`liveArr`+`shieldScan`/`List.all` with `…_eq` lemmas (the `liveArr_eq` pattern), removing the
-O(i) allocation per candidate but keeping the O(i) scan; (b) the busUnify entry-111 treatment —
-`shieldOk` left-folds to a single per-address-key `pending` bit, maintainable across one sweep,
-but the pass's tombstone-and-restart structure (drops invalidate prefix state: removing a
-consumed receive un-shields earlier messages) forces a recompute-on-drop scheme, bounded by
-#drops × O(B). The whole-run sample share (~5 %) says (a) first, (b) only if SHA-scale profiles
-promote it.
+**R8. busPairCancel residual quadratics** (formerly part of R1). Design (a) — array-segment
+twins of `liveArr`+`shieldScan`/`List.all` (`denseLiveAllSeg`/`denseShieldScanSeg` with `…_eq`
+lemmas) — is **done (#210)**: sha256_big busPairCancel 107 → 89.5 s. The remaining 89 s
+(~16 % of the SHA run, now promoted) is the O(live²) certificate work itself: `shieldOk` still
+evaluates `densePreRefuted` over the whole live prefix per candidate send, and `midRefuted` over
+the between-region. Design (b) stands: the busUnify entry-111 treatment — `shieldOk` left-folds
+to a single per-address-key `pending` bit, maintainable across one sweep — but the pass's
+tombstone-and-restart structure (drops invalidate prefix state: removing a consumed receive
+un-shields earlier messages) forces a recompute-on-drop scheme, bounded by #drops × O(B).
+
+**R9. Stop rebuilding `ZMod.commRing` per helper call**  ·  *horizontal, medium value / medium
+effort*. Any helper doing `ZMod` arithmetic without a threaded `DenseZModOps` re-materializes the
+whole Mathlib `CommRing` structure (plus 3–4 hierarchy projections) **per call** — visible as
+`lp_mathlib_ZMod_commRing` + projections at ~3 % (sha) to ~10 % (ecrecover) of whole-run CPU
+*before* counting their allocator/dec_ref share; the generated C shows the rebuild at every entry
+(e.g. `denseRootsOfTerms`). Hot chain: `denseLinearize`, `DenseLinExpr.norm/scale/coeff/others`,
+`denseTwoRootOf?`, `DenseExpr.fold`, `denseRootsIn`, `denseBitCM` — called per constraint per
+cycle by the TwoRootMap/AddrCerts/candidate builders of busUnify/busPairCancel/rootPairUnify.
+Thread `ops` through `@[csimp]` fast twins (the gauss entries 118–119 pattern; rootPairUnify's
+remaining 33 s is mostly this).
+
+**R10. busUnify symbolic-window sweep at SHA scale**  ·  *52 s on sha256_big*. `denseSweepGo`
+tests every symbolic-address message against every open window: `constOpen.toList` is rebuilt per
+non-all-const message, and each open `symOpen` window pays the full `denseStepTest` certificate
+chain per message. The sweep is an untrusted proposal (`denseCheckPair` re-verifies), **but its
+consumer/excluded/blocker decisions choose which candidates are proposed**, so any restructuring
+must keep decisions bit-identical — memoize `denseStepTest` only under full structural keys, or
+index windows by address-expression hash with the existing tests re-run on hits.
+
+**R11. `decide (A ∧ B)` evaluates both sides eagerly**  ·  *latent bignum landmine, cheap fix*.
+`Decidable (A ∧ B)` instances are strict in both arguments in compiled code, so
+`decide (widthValue.val ≤ 17 ∧ xValue.val < 2 ^ widthValue.val)`
+(`DomainBatchRuntime.lean:166`, `.varRange` evaluator) computes `2 ^ widthValue.val` even when
+the guard fails — for a symbolic width slot that is a 2^31-bit GMP number per evaluated point.
+`OpenVmSemantics.lean:95` already uses the short-circuiting `decide … && decide …` form;
+rewrite the evaluator arms the same way (`Bool.decide_and` bridges proofs). Audit other
+`decide (… ∧ …)` in per-point code (`denseScaledSlotBound`'s guard is a cheaper instance of the
+same pattern).
+
+**R12. Array-index the dense per-variable maps**  ·  *speculative, measure first*. Every
+`Std.HashMap`/`HashSet` operation dispatches `BEq`/`Hashable` through boxed closures
+(`lean_apply_1/2`, ~8 % whole-run). `VarId.index` is dense and bounded by the registry size, so
+the per-variable bucket maps (`DenseCovIndex.buckets`, `denseVarBucket`, `denseTouchedSet`) could
+be `Array (List Nat)` / bitsets keyed directly — no hashing, no dispatch. Wide but mechanical;
+worth a prototype on one index first.
 
 ### Runtime dead ends (measured; do not re-propose without new evidence)
 
@@ -326,7 +368,9 @@ promote it.
   indexes are the pattern.
 - **Feeding whole regions into per-query justification arms**: 63 s/case for −3 interactions
   (entry 102). Use a position index or nothing.
-- CI notes: the effectiveness-matrix runtime row is parallel-contended (±10 % noise); the serial
+- CI notes (updated 2026-07-24): the effectiveness-matrix runtime row swung **+51 % → +15 % on
+  identical code** for openvm-eth while its own per-pass table showed ≤1.04× — treat the wall row
+  as ±50 % noise on the small parallel sets and read the per-pass table instead; the serial
   `Runtime Bench` workflow (dispatch-only, openvm sets only) is the real A/B. This container has
   ±15 % run-to-run variance; keccak numbers above were taken serially, and the per-cycle keccak
   run was inflated ~30 % by a concurrent gdb sampler — compare shapes, not absolutes, and let CI
