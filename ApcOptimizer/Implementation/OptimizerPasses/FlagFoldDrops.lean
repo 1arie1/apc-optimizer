@@ -146,13 +146,17 @@ def densePdValHash (bi : BusInteraction (DenseExpr p)) : UInt64 :=
   mixHash (hash bi.busId) (mixHash bi.multiplicity.bHash
     (bi.payload.foldl (fun h e => mixHash h e.bHash) 7))
 
-/-- One bucket entry of the sweep: position, the interaction, its slot signatures, and whether it
-    was kept. -/
+/-- One sweep representative: the interaction and its per-slot signatures. -/
 structure DensePdEntry (p : ℕ) where
-  pos : Nat
   bi : BusInteraction (DenseExpr p)
   sigs : Array (UInt64 × UInt64)
-  kept : Bool
+
+/-- The coarse class key (bus id, constant multiplicity, payload length) and per-slot signatures
+    of one interaction — shared by both sweep paths. -/
+@[inline] def densePdKeySigs (bi : BusInteraction (DenseExpr p)) (m : ZMod p) :
+    UInt64 × Array (UInt64 × UInt64) :=
+  (mixHash (hash bi.busId) (mixHash (hash m.val) (hash bi.payload.length)),
+    (bi.payload.map (fun e => (e.bHash, e.pdVarBloom))).toArray)
 
 /-- The value-keyed set of interactions the sweep decides to drop — the same set `densePdKeep`
     would drop (drops are value-based: `findIdx?` evaluates each duplicate at its first occurrence). -/
@@ -178,16 +182,14 @@ def densePdDropSet (bs : BusSemantics p) (singles : List (DenseExpr p))
         match bi.multiplicity.constValue? with
         | none => pure ()
         | some m =>
-          let key := mixHash (hash bi.busId) (mixHash (hash m.val) (hash bi.payload.length))
-          let sigs : Array (UInt64 × UInt64) :=
-            (bi.payload.map (fun e => (e.bHash, e.pdVarBloom))).toArray
+          let (key, sigs) := densePdKeySigs bi m
           let entries := reps.getD key []
           if entries.any (fun e =>
               densePdSigsCompatible e.sigs sigs && denseMsgEqCert singles e.bi bi) then
             let vk := densePdValHash bi
             drops := drops.insert vk (bi :: (drops.getD vk []))
           else
-            reps := reps.insert key ({ pos := 0, bi, sigs, kept := true } :: entries)
+            reps := reps.insert key ({ bi, sigs } :: entries)
     return drops
   else
   let mut repsByHash : Std.HashMap (UInt64 × UInt64) (List (DensePdEntry p)) := ∅
@@ -199,9 +201,7 @@ def densePdDropSet (bs : BusSemantics p) (singles : List (DenseExpr p))
       match bi.multiplicity.constValue? with
       | none => pure ()
       | some m =>
-        let key := mixHash (hash bi.busId) (mixHash (hash m.val) (hash bi.payload.length))
-        let sigs : Array (UInt64 × UInt64) :=
-          (bi.payload.map (fun e => (e.bHash, e.pdVarBloom))).toArray
+        let (key, sigs) := densePdKeySigs bi m
         let hit :=
           match bi.payload with
           | [] =>
@@ -217,7 +217,7 @@ def densePdDropSet (bs : BusSemantics p) (singles : List (DenseExpr p))
           let vk := densePdValHash bi
           drops := drops.insert vk (bi :: (drops.getD vk []))
         else
-          let entry : DensePdEntry p := { pos := 0, bi, sigs, kept := true }
+          let entry : DensePdEntry p := { bi, sigs }
           match bi.payload with
           | [] => repsEmpty := repsEmpty.insert key (entry :: repsEmpty.getD key [])
           | e0 :: _ =>

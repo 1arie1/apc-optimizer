@@ -309,10 +309,14 @@ def denseRpLoopIdx (bs : BusSemantics p) (facts : BusFacts p bs)
 def denseRootPairUnifyFFast (pw : PrimeWitness p) (bs : BusSemantics p) (facts : BusFacts p bs)
     (d : DenseConstraintSystem p) : DenseConstraintSystem p :=
   if pw.isPrime = true then
-    let witsIdx := denseVarBucket denseBIVars d.busInteractions
-    let domMap := denseFindDomainMap d.algebraicConstraints
-    let σ := denseRpLoopIdx bs facts (denseVarBucketLookup witsIdx) (fun v => domMap[v]?)
-      d.algebraicConstraints ∅ DenseSolved.empty
+    -- Thunked: bound queries only happen on key-matched candidate pairs, so systems without
+    -- two-root twins never pay for the index builds.
+    let witsIdx : Thunk (Std.HashMap VarId (List (BusInteraction (DenseExpr p)))) :=
+      Thunk.mk fun _ => denseVarBucket denseBIVars d.busInteractions
+    let domMap : Thunk (Std.HashMap VarId (List (ZMod p))) :=
+      Thunk.mk fun _ => denseFindDomainMap d.algebraicConstraints
+    let σ := denseRpLoopIdx bs facts (fun x => denseVarBucketLookup witsIdx.get x)
+      (fun v => (domMap.get)[v]?) d.algebraicConstraints ∅ DenseSolved.empty
     if σ.map.isEmpty then d else d.substF σ.fn
   else d
 
