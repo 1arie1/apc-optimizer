@@ -202,18 +202,16 @@ def denseFindCancelGoIdx (cs0 : DenseConstraintSystem p) (bs : BusSemantics p) (
             by_contra hc
             rw [Array.getElem?_eq_none (Nat.le_of_not_lt hc)] at hR; simp at hR
           have hSget : arr[i]? = some S := Array.getElem?_eq_getElem hi
-          let B := denseLiveArr arr alive hsz (i + 1) (j - i - 1) (by omega)
-          if hmidB : B.all (denseMidRefuted ops shape T busId S) = true then
-          let A := denseLiveArr arr alive hsz 0 i (by omega)
-          if hshieldA : denseShieldOk ops shape T busId S A = true then
-          have hBeq : B = denseLiveSeg arr alive (i + 1) (j - i - 1) :=
-            denseLiveArr_eq arr alive hsz (i + 1) (j - i - 1) (by omega)
-          have hAeq : A = denseLiveSeg arr alive 0 i := denseLiveArr_eq arr alive hsz 0 i (by omega)
+          if hmidB : denseLiveAllSeg arr alive (denseMidRefuted ops shape T busId S)
+              (i + 1) (j - i - 1) = true then
+          if hshieldA : (denseShieldScanSeg ops shape T busId S arr alive 0 i).2 = true then
           have hmid : ∀ m0 ∈ denseLiveSeg arr alive (i + 1) (j - i - 1),
               denseMidRefuted ops shape T busId S m0 = true := by
-            rw [← hBeq]; exact fun m0 hm0 => List.all_eq_true.mp hmidB m0 hm0
+            rw [denseLiveAllSeg_eq] at hmidB
+            exact fun m0 hm0 => List.all_eq_true.mp hmidB m0 hm0
           have hshield : denseShieldOk ops shape T busId S (denseLiveSeg arr alive 0 i) = true := by
-            rw [← hAeq]; exact hshieldA
+            rw [denseShieldScanSeg_eq] at hshieldA
+            exact hshieldA
           match hslots : facts.recvByteSlots busId (R.payload.map DenseExpr.constValue?) with
           | none => next ()
           | some (slots, bound) =>
