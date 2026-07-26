@@ -226,12 +226,22 @@ and candidate-mask scanner, and hot-variable bucket capping (not byte-identical 
 `esFull`).
 
 **R3. domainFold/reencode: fuse the duplicate whole-system scans; retire the 8192 raw-count
-index gate**  ·  mostly **done (entries 105/107/109)**:
+index gate**  ·  mostly **done (entries 105/107/109/145)**:
+   - ~~domainFold's 8192 raw-count gate~~ **done (entry 145)**: replaced by a *candidate-group*
+     count gate (`domainFoldTargetIndexThreshold := 2`). The direct path costs `groups × system`,
+     so the raw constraint count was the wrong quantity to gate on — a small system with many
+     groups needs the index, a huge one with a single group does not. Replica ladder: exponent
+     **2.07 → 1.10**, `k=4` 29.0 → 0.74 s, total exponent 1.99 → 1.86. Not byte-identical
+     (see the entry: the direct path's no-op gate also constant-folds variable-free subexpressions
+     in group-disjoint items), but size-identical on every fixture checked.
    - reencode: the pruned index (`CoveredIndex.buildPruned`, entry 105 — items with more than 8
      distinct variables can never be covered by a ≤8-variable target, so pruning keeps covered
      sets identical) stays, but **behind the 8192 gate again** (entry 107): CI measured
      always-indexed at 1.19× on the dense openvm-eth blocks with no keccak gain — the entry-73a
      direct-path trade-off is real. Do not retire the gate without a same-runner A/B on eth.
+     **Re-confirmed on the ladder (entry 145)**: forcing `useIdx` on made reencode *worse*
+     (82.4 → 97.5 s at `k=4`), because the accept path then also pays a per-accept
+     `denseBuildPruned`. reencode's cost is not in the covered-set scan.
    - ~~domainFold's direct-path double `coveredBy` sweep~~ **done**: one `partition` per target
      feeds both the covered set and the no-op gate (`systemHasFoldableW`).
    - ~~both passes' doubled `c.vars.dedup` setup~~ **done** (`hashedDedup`, computed once).
@@ -262,6 +272,33 @@ index gate**  ·  mostly **done (entries 105/107/109)**:
      proof-free (`denseCheckReencode` re-verifies), so a prefix-pruned DFS enumeration with an
      early abort once the survivor count passes `2 ^ (|xs| − 1)` (above which `k < xs.length`
      fails) needs no new proof — only the same survivor *list order* to stay byte-identical.
+   - **Still open — reencode is the last exponent ≈ 2.3, and it is the *accept* path.** gdb
+     attribution on the ladder's `k=4` rung (35 samples, all inside `denseReencodeStep`), with the
+     indexed path forced on so the shape matches sha256's:
+     `denseBuildPruned` 20 %, `denseDegPreReject` 20 % (of which the thunked `denseBuildUseIdx`
+     rebuild 11 %), `denseReencodeOut` 17 %, `denseCheckReencode` 14 %, the remaining 23 % directly
+     in the step (`toArray`, `HashSet.ofList ro.occ`, `withinDegreeB`). That is **~70 % in six
+     whole-system passes per accepted re-encoding**, and accepts grow with the circuit, so the pass
+     is `O(accepts × system)`.
+     Three of those six recompute `DenseExpr.vars` over the whole system independently
+     (`denseBuildPruned`, `occ`, `denseBuildUseIdx`) — a shared per-item var list would cut ~25 % of
+     the pass with a pure `@[csimp]` twin (the values must be *identical*, which a shared fold
+     gives; `varSet` is compared as a `Std.HashSet`, so it cannot be replaced by an equivalent
+     structure, only computed from shared inputs).
+     Getting the **exponent** down needs `denseReencodeOut` to stop rewriting the whole system per
+     accept, and that is blocked on one specific fact: `denseGroupRewrite` is *not* the identity on
+     items sharing no variable with the group — `varsInF xs` is vacuously true for a variable-free
+     subexpression, so the rewrite constant-folds those too. A sparse, index-driven rewrite is equal
+     to the spec only under a **fold-normality** precondition (`hasConstFoldableNode = false`
+     everywhere), which is checkable in one pass per invocation and, after an accept, on the touched
+     items only — with a fall-back to the current loop when the check fails, so the twin stays
+     byte-identical. Sketch: `denseUsePositions`-driven `zipIdx` rewrite (`use` is already built and
+     forced per accept, so no new index), `L_id : hasConstFoldableNode e = false → anyVarIn xs e =
+     false → denseGroupRewrite … e = e`, and the `denseCandidates` completeness already proven for
+     `denseCoveredIdx_eq_filter_of_complete` (variable-free items land in `idx.varless`, so they are
+     candidates and keep being dropped as covered). That removes 17 %; the other four per-accept
+     sweeps additionally need position preservation (tombstoned `alive` mask + bool constraints
+     appended to the array), which is the larger half of the project.
 
 **R4. Constant-factor levers that touch every pass**  ·  *medium value, cheap*:
    - **Variable interning-lite, `Implementation/`-only**: parse-time interning is **done (entry

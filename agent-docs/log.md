@@ -4903,3 +4903,54 @@ Cumulative for entries 142–144: sha256_big **523.9 → 377.6 s (−28 %)**.
 
 **Worked locally: yes (byte-identical `opt-export` on openvm-eth apc_044/apc_067, keccak, wasm-eth
 apc_036 and the 168k-var OpenVM sha256 case).**
+
+### 145. Runtime: domainFold gates its index on the candidate-group count
+
+Measured with a **disjoint-replica ladder** — `k` renamed copies of one APC in a single circuit, so
+every per-item quantity scales exactly `k×` while the cleanup-iteration count stays flat, which
+turns a per-pass wall time into a per-pass *exponent* (`Benchmarks/scaling_bench.py`, PR #216).
+On `openvm-eth/apc_005` at `k = 1,2,4` the two top passes were `reencode` (exponent 2.4) and
+`domainFold` (2.07), together 83 % of the `k=4` run.
+
+`domainFold`'s inverted index was gated on `8192 ≤ d.algebraicConstraints.length`, so every smaller
+system ran `denseFoldLoopDirectV`: one `partition` **and** one whole-system
+`denseSystemHasFoldableWV` scan *per candidate group*. The gate scan is the expensive half —
+`hasFoldableV` calls `denseConstOnSurvsV` (compile plus up to 256 point evaluations) at every node
+it visits. Candidate groups grow with the circuit, so the direct path is `O(groups × system)`.
+
+The gate now reads the **candidate-group count** (`domainFoldTargetIndexThreshold := 2`): with 0 or
+1 groups the direct path's single pass beats building the index, from 2 on the index amortizes.
+Nothing else moves — both loops were already proven separately and the indexed one is already the
+array-native `Array.modify` twin (entry 138). Gating on the group count rather than the raw
+constraint count is the point: the direct path's cost is `groups × system`, so a 500-constraint
+system with 40 groups needs the index while a 50k-constraint system with one group does not.
+
+Replica ladder (`apc_005`, k = 1/2/4, same 4-core box, both sides built from source):
+
+| ms | k=1 | k=2 | k=4 | exponent |
+|---|---|---|---|---|
+| domainFold before | 1641 | 6345 | 28976 | 2.07 |
+| domainFold after | 161 | 326 | 741 | **1.10** |
+| total before | 8121 | 25454 | 127826 | 1.99 |
+| total after | 6854 | 19385 | 90468 | **1.86** |
+
+keccak `profile` 39.0 → 34.0 s; the openvm-eth spread (apc_001/005/010/020/040/060/080/100) is
+0.93–1.03× except `apc_001`, whose 49 → 68 ms is the one case with too few groups to amortize an
+index — the group-count gate is what keeps that from being a size-gate-wide regression, and the
+crossover constant (2) is the only tuning knob left.
+
+**The two paths are not equal**, and the pass never claimed they were by accident:
+`denseFoldRewriteV`'s gate (`anyVarIn xs || hasConstFoldableNode`) also rewrites items sharing *no*
+variable with the group, because a variable-free subexpression is vacuously `varsInF xs` and folds
+to a constant — the indexed path's bucket scan skips those items. Eight of nine local fixtures stay
+byte-identical under `opt-export`; `openvm-eth/apc_020` differs only in which fresh `rnc` bits
+`reencode` mints afterwards, at identical variable / bus / constraint counts (786 / 422 / 309).
+The `SearchBudgets.lean` doc comment now says so instead of claiming an identical fold.
+
+**Do not read this as "retire the other index gates".** Entry 107 measured *reencode's* 8192 gate
+at 1.19× worse when always-indexed, and lowering it again here reproduced that: on the ladder,
+reencode with `useIdx` forced on went `82.4 → 97.5 s` at `k=4`, because the accept path then also
+pays a per-accept `denseBuildPruned`. The gate that helped is the one whose *shape* was wrong
+(size instead of work), not gates in general.
+
+**Worked locally: yes** (byte-identical `opt-export` on 8 of 9 fixtures; `apc_020` size-identical).
