@@ -315,5 +315,75 @@ Two things to take from this:
   `O(bits × system)` freshness scan. Those two are the remaining per-candidate whole-system scans
   (R13).
 
-The top three passes are 57 % of the run and all three are still quadratic; the per-cycle
-front-loading is unchanged (cycles 0–2 are 78 %).
+The top three passes are 57 % of the run; the per-cycle front-loading is unchanged (cycles 0–2 are
+78 %).
+
+## 8. What it would take to remove the superlinearity
+
+Four tiers, in descending value per unit of work. Effort figures are estimates for focused agent
+work; the projected times are *projections*, not measurements — re-measure with the §6 replica
+ladder after each tier, since that is the only instrument here that makes the exponent visible
+(adding a generator for it under `Benchmarks/` is itself ~half a day and worth doing first).
+
+### Tier 1 — index the untrusted gates. ~1–2 weeks, 5–6 PRs, outputs byte-identical
+
+Every item here is a gate that is either untrusted (both branches sound, so rejecting a candidate
+only forgoes an optimization) or a witness re-checked at use, and every one has an existing pattern
+in the tree to copy. No new soundness arguments.
+
+| change | reuses | effort |
+| --- | --- | --- |
+| `denseCheckReencode`: index the `denseCoveredCsOf` filter; decide freshness from #211's posting index (empty bucket ⇒ bit unused) | the pruned `csIdx`; `denseBuild_complete` (`Proofs/DomainFold.lean`) for the freshness direction, which *is* trusted | ~1 d |
+| `domainFold`: index the direct path's `partition` + `denseSystemHasFoldableWV` — **not** by flipping the 8192 gate (entry 107 measured that 1.19× worse on dense openvm-eth) | `denseCoveredIdx_eq_filter_of_complete` | ~1–2 d |
+| `subsumedRange`/`subsumedCheck`: replace the per-check `denseFindVarBound` full scan | #209's `denseAnyVarBoundIdx` + `witsOf` | ~0.5 d |
+| `flagUnify`: tabulate domains once instead of per variable per pair | `denseFindDomainMap` (#209) | ~0.5 d |
+| `bytePack`/`tupleRange`: resume cursor in the drain's `σ`, and return `revPre` instead of `revPre.reverse` | `denseCancelLoop`'s `resumeIdx`/`resumePos` | ~1–2 d |
+| `busUnify`: store `revPre`, phrase the split lemma with `revPre.reverse` (proofs are erased, so the runtime stops copying the prefix) | — | ~0.5 d |
+
+Projected: sha256 790 s → ~350–450 s, replica-ladder exponent ~1.77 → ~1.25.
+
+### Tier 2 — the constant factors that then dominate. ~1.5 weeks, 2–3 PRs
+
+Neither changes the exponent, but together they are 20–30 % of CPU, and after tier 1 they are most
+of what is left (`busUnify`'s 104 s is essentially all of R9).
+
+- **R9**: thread `DenseZModOps` through the hot helper chain (`denseLinearize`,
+  `DenseLinExpr.norm/scale/coeff/others`, `denseTwoRootOf?`, `densePtrReductions`, `denseRootsIn`)
+  via `@[csimp]` twins — the entries 118–119 pattern. Repetitive but mechanical. ~1 week.
+- **R12**: array-index the per-variable bucket maps (`VarId` is dense and registry-bounded), killing
+  the boxed `BEq`/`Hashable` dispatch. Prototype one index first. ~3–5 d.
+
+Projected: → ~200–280 s.
+
+### Tier 3 — the one genuine proof project: `busPairCancel`. ~2–4 weeks
+
+This is the part that is expensive *because* the optimizer is verified. Two things have to change
+together:
+
+1. The shield condition must become **incremental** — prove that the sweep's invariant implies each
+   candidate's shield condition, instead of re-deriving it from the live prefix per candidate. This
+   is a proof-carrying fold with an inductive invariant relating the sweep state to the prefix
+   classification. Budget a week on the invariant alone before writing Lean.
+2. Drops must be **batched** per sweep, the way Rust's `to_remove` is, so cost is O(rounds × B)
+   instead of O(drops × B). The obstacle R8 names is real: dropping a consumed receive can un-shield
+   an earlier message, so a batch must establish that the pairs it drops together do not interfere.
+
+Projected: → ~130–200 s, and the last unconditional Θ(N²) is gone — exponent ~1.1–1.2, i.e. the same
+*shape* as Rust. R10's latent `symOpen` quadratic can wait until a benchmark triggers it.
+
+### Tier 4 — the floor. Weeks more; probably not worth it
+
+What remains after tiers 1–3 is ~N^1.1–1.2 from two sources: allocation/refcount traffic (~40 % of
+CPU today, partly addressed by tier 2) and the cleanup fixpoint's round count growing ~N^0.2 on real
+circuits. Removing the latter means fine-grained cross-cycle dirtiness — powdr's worklist
+architecture, R6 — which `ideas.md` records as a multi-week refactor whose cheap version was
+measured as a dead end (keccak reuses 62 of 16 748 enumerations). Rust's own curve is not perfectly
+flat either, so parity does not require this.
+
+### Risk
+
+Tiers 1 and 2 should be byte-identical by construction, so the CI effectiveness matrix is a
+sufficient guard. Tier 3 must also be byte-identical, which is the main reason to budget design time
+up front. The one non-obvious trap is the `reencode`↔`domainFold` coupling in §3: they consume the
+same candidate groups, so indexing one can move cost to the other on some circuits (it did on the
+replica fixture, it did not on sha256). Always read both passes' rows.
