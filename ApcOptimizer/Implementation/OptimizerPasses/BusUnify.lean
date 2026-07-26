@@ -279,7 +279,7 @@ def denseBusUnifyF (bs : BusSemantics p) (facts : BusFacts p bs) (d : DenseConst
   if (1 : ZMod p) ≠ 0 then
     -- Thunked: built only when a window test reaches the two-root / nonzero-witness arms.
     let T : Thunk (DenseTwoRootMap p) :=
-      Thunk.mk fun _ => DenseTwoRootMap.build d.algebraicConstraints
+      Thunk.mk fun _ => DenseTwoRootMap.buildForAddrs facts.memShape d.busInteractions d.algebraicConstraints
     let nw : Thunk (DenseNonzeroWits p) :=
       Thunk.mk fun _ => DenseNonzeroWits.build d.algebraicConstraints
     let eqs := denseCollectAllBuses d bs facts T nw

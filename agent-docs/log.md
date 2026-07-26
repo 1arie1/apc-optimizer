@@ -4870,3 +4870,36 @@ busPairCancel 8.5 → 7.3 s, redundantByteDrop 172 → 61 ms.
 
 **Worked locally: yes (byte-identical `opt-export` on openvm-eth apc_044/apc_067, keccak, wasm-eth
 apc_036 and the 168k-var OpenVM sha256 case).**
+
+### 144. Runtime: two-root certificate map — address-scoped build, factors linearized once
+
+`DenseTwoRootMap.build` (the address-disequality certificate table busUnify and busPairCancel
+consult) was ~4.9 % of whole-run CPU on sha256_big, rebuilt per pass invocation over the **whole**
+constraint list. Two independent fixes:
+
+1. **Scope the build to what can be queried.** Only variables sitting at an address-slot position
+   of some declared memory shape are ever looked up: `denseAddrTwoRootNeq` reads
+   `S.payload[slot]`/`m.payload[slot]` for `slot ∈ shape.addressFields`, and `densePtrReductions`
+   keys on the queried form's own variables. `DenseTwoRootMap.buildForAddrs` therefore indexes only
+   the constraints mentioning such a variable (`denseAddrSlotVars` collects them across every
+   interaction — the candidate's shape decides the slots, so an interaction on any bus can be read
+   at another bus's address positions). Entries for queried variables are unchanged: an entry for
+   `v` is only inserted by a constraint mentioning `v` (`addVars` folds over `c.vars`), and such a
+   constraint mentions an address variable, so it survives the filter. Soundness needed one lemma,
+   `DenseTwoRootMap.Sound.mono` — `Sound` only asserts *some* witnessing constraint in the list.
+2. **Linearize a product's factors once per constraint, not once per variable.**
+   `denseTwoRootOf? c v` re-ran `denseLinearize` on both factors for every variable of `c`.
+   `addVarsFast` hoists the two linearizations out of the per-variable loop and is wired in as the
+   compiled twin (`@[csimp] addVars_eq_fast`), so every proof still sees `addVars`. This was the
+   larger half of the win.
+
+sha256_big (`profile`, quiet 48-core box, on top of #212): busUnify **54.1 → 40.2 s (−26 %)**,
+busPairCancel **50.1 → 39.6 s (−21 %)**, total **404.4 → 377.6 s (−6.6 %)**. The address scoping
+alone was 404.4 → 398.2 s: much less than its 4.9 % CPU share suggested, because sha256's
+bridge-bus address slots mention variables that appear in a large share of the constraints — the
+filter keeps more than expected. wasm-eth apc_036 `opt-export`: 39 → 33 s.
+
+Cumulative for entries 142–144: sha256_big **523.9 → 377.6 s (−28 %)**.
+
+**Worked locally: yes (byte-identical `opt-export` on openvm-eth apc_044/apc_067, keccak, wasm-eth
+apc_036 and the 168k-var OpenVM sha256 case).**
