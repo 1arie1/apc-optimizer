@@ -128,6 +128,42 @@ claimed to help at SHA scale — entries 142–144 cut 524 → 378 s without mov
 count flat (it is reported; a drifting rung is not comparable), which is what separates per-pass cost
 from "bigger circuits need more rounds".
 
+### The exponent is owned by `reencode` and `domainFold` (measured, entry 145)
+
+First ladder run, `openvm-eth/apc_005`, rungs 1–4 (4652 → 18608 constraints), this container, main at
+`ce9a820`. Iterations flat at 5–6, so every number below is per-pass cost, not extra rounds.
+**Total exponent 1.95.**
+
+| pass | k=1 | k=4 | growth for 4× size | exponent |
+|---|---|---|---|---|
+| `reencode` | 2746 ms | 78.3 s | **28.5×** | **2.36** |
+| `domainFold` | 1659 ms | 28.0 s | **16.9×** | **2.07** |
+| `busPairCancel` | 156 ms | 1608 ms | 10.3× | 1.68 |
+| `flagUnify` | 107 ms | 899 ms | 8.4× | 1.54 |
+| `flagFold` | 439 ms | 3213 ms | 7.3× | 1.44 |
+| `gauss` | 565 ms | 2650 ms | 4.7× | 1.13 |
+| everything else | — | — | 4.2–5.5× | 1.05–1.2 |
+
+`reencode` + `domainFold` are **83 % of the k=4 run**. Everything else is at or near the
+allocation floor. So: *stop tuning the small passes; the exponent lives in the candidate-group
+family.*
+
+**Why they are quadratic here, specifically.** Under disjoint replication a variable's index bucket
+does *not* grow — the copies share nothing — so every per-variable lookup (`denseCoveredIdx`,
+`denseUsePositions`, `denseDegPreReject` since entry 142) is constant per target and contributes
+only linearly. What grows is the **per-accept whole-system work**, and the number of accepts scales
+with `k`: `denseReencodeOut` rewrites the entire system, and then the accept rebuilds
+`denseBuildPruned` + `arrCs.toArray` + `HashSet.ofList ro.occ` + `denseBuildUseIdx`, each O(system).
+O(accepts) × O(system) = O(k²). This is exactly the shape entry 109 removed from `domainFold`
+(order-preserving in-place rewrite, `FoldIdx.refresh` with no rebuild, sparse `foldOutIdx`), and R3
+already names `reencode` as the next candidate — it needs the position remap or a
+pruned-completeness argument because its rewrite *adds* bit columns and drops covered constraints.
+That is now the highest-value runtime work in the tree, ahead of everything else in R1–R12.
+
+`domainFold` still measuring 2.07 after #206 says its own per-accept path retains an O(system) term —
+re-check `denseFoldOutArrV`'s `Array.modify` chain for a copy when the array is still shared, and
+`DenseFoldIdx.mk'`/`refresh`.
+
 Rewritten 2026-07-18 from a fresh profiling session (per-pass `profile`, per-cycle timing, gdb
 stack sampling, and a size-scaling sweep — all on this container, serial). **Runtime is
 end-to-end quadratic in circuit size** (openvm-eth sweep: input 2.3k → 8.8k items costs
