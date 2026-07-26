@@ -7,9 +7,9 @@ set_option autoImplicit false
 
 The hot evaluators (`denseGroupSurvivorsEV`, `denseConstOnSurvsV`) compile the group's covered
 constraints once (via `DomainBatch.lean`'s `IExpr`) and evaluate every enumerated point by index,
-value-only (`List (ZMod p)` points, no `VarId` per point). Systems at least
-`domainFoldIndexThreshold` large use the index-preserving indexed loop; smaller ones the direct
-loop. Runtime only — correctness is in `Proofs/DomainFold.lean`. -/
+value-only (`List (ZMod p)` points, no `VarId` per point). Runs with at least
+`domainFoldTargetIndexThreshold` candidate groups use the index-preserving indexed loop; fewer use
+the direct loop. Runtime only — correctness is in `Proofs/DomainFold.lean`. -/
 
 namespace ApcOptimizer.Dense
 
@@ -148,7 +148,7 @@ def denseSystemHasFoldableIdxV (fidx : DenseFoldIdx p) (xs : List VarId)
 
 /-! ## The direct (unindexed) fold loop
 
-For systems smaller than `domainFoldIndexThreshold`. -/
+For runs with fewer than `domainFoldTargetIndexThreshold` candidate groups. -/
 
 /-- One checked fold for a candidate group, given the covered set `es` and its complement `csRest`
     (the non-covered constraints, feeding the no-op gate). -/
@@ -222,8 +222,8 @@ def denseFoldOutIdxV (d : DenseConstraintSystem p) (fidx : DenseFoldIdx p) (xs :
 
 /-! ## The indexed fold loop
 
-For systems at least `domainFoldIndexThreshold` large; the covered set is served from the prebuilt
-`DenseFoldIdx`, refreshed (no rebuild) only on an accepted fold. -/
+For runs with at least `domainFoldTargetIndexThreshold` candidate groups; the covered set is served
+from the prebuilt `DenseFoldIdx`, refreshed (no rebuild) only on an accepted fold. -/
 
 /-- One checked fold served from the prebuilt covered-constraint index; an accepted fold is computed
     sparsely (`denseFoldOutIdxV`) and the index refreshed without rebuild (`fidx.refresh`). -/
@@ -316,7 +316,7 @@ def denseTargetsV (d : DenseConstraintSystem p) : List (List VarId) :=
 def denseDomainFoldFV (pw : PrimeWitness p) (d : DenseConstraintSystem p) : DenseConstraintSystem p :=
   if pw.isPrime = true then
     let targets := denseTargetsV d
-    if domainFoldIndexThreshold ≤ d.algebraicConstraints.length then
+    if domainFoldTargetIndexThreshold ≤ targets.length then
       denseFoldLoopV targets d (DenseFoldIdx.mk' d)
     else denseFoldLoopDirectV targets d
   else d
@@ -327,7 +327,7 @@ def denseDomainFoldFVFast (pw : PrimeWitness p) (d : DenseConstraintSystem p) :
     DenseConstraintSystem p :=
   if pw.isPrime = true then
     let targets := denseTargetsV d
-    if domainFoldIndexThreshold ≤ d.algebraicConstraints.length then
+    if domainFoldTargetIndexThreshold ≤ targets.length then
       let fidx := denseFoldLoopArrV targets (DenseFoldIdx.mk' d)
       { algebraicConstraints := fidx.arr.toList, busInteractions := fidx.arrBis.toList }
     else denseFoldLoopDirectV targets d

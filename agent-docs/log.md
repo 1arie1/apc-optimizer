@@ -4903,3 +4903,91 @@ Cumulative for entries 142–144: sha256_big **523.9 → 377.6 s (−28 %)**.
 
 **Worked locally: yes (byte-identical `opt-export` on openvm-eth apc_044/apc_067, keccak, wasm-eth
 apc_036 and the 168k-var OpenVM sha256 case).**
+
+### 145. Runtime: domainFold gates its index on the candidate-group count
+
+Measured with a **disjoint-replica ladder** — `k` renamed copies of one APC in a single circuit, so
+every per-item quantity scales exactly `k×` while the cleanup-iteration count stays flat, which
+turns a per-pass wall time into a per-pass *exponent* (`Benchmarks/scaling_bench.py`, PR #216).
+On `openvm-eth/apc_005` at `k = 1,2,4` the two top passes were `reencode` (exponent 2.4) and
+`domainFold` (2.07), together 83 % of the `k=4` run.
+
+`domainFold`'s inverted index was gated on `8192 ≤ d.algebraicConstraints.length`, so every smaller
+system ran `denseFoldLoopDirectV`: one `partition` **and** one whole-system
+`denseSystemHasFoldableWV` scan *per candidate group*. The gate scan is the expensive half —
+`hasFoldableV` calls `denseConstOnSurvsV` (compile plus up to 256 point evaluations) at every node
+it visits. Candidate groups grow with the circuit, so the direct path is `O(groups × system)`.
+
+The gate now reads the **candidate-group count** (`domainFoldTargetIndexThreshold := 2`): with 0 or
+1 groups the direct path's single pass beats building the index, from 2 on the index amortizes.
+Nothing else moves — both loops were already proven separately and the indexed one is already the
+array-native `Array.modify` twin (entry 138). Gating on the group count rather than the raw
+constraint count is the point: the direct path's cost is `groups × system`, so a 500-constraint
+system with 40 groups needs the index while a 50k-constraint system with one group does not.
+
+Replica ladder (`apc_005`, k = 1/2/4, same 4-core box, both sides built from source):
+
+| ms | k=1 | k=2 | k=4 | exponent |
+|---|---|---|---|---|
+| domainFold before | 1641 | 6345 | 28976 | 2.07 |
+| domainFold after | 161 | 326 | 741 | **1.10** |
+| total before | 8121 | 25454 | 127826 | 1.99 |
+| total after | 6854 | 19385 | 90468 | **1.86** |
+
+keccak `profile` 39.0 → 34.0 s; the openvm-eth spread (apc_001/005/010/020/040/060/080/100) is
+0.93–1.03× except `apc_001`, whose 49 → 68 ms is the one case with too few groups to amortize an
+index — the group-count gate is what keeps that from being a size-gate-wide regression, and the
+crossover constant (2) is the only tuning knob left.
+
+**The two paths are not equal**, and the pass never claimed they were by accident:
+`denseFoldRewriteV`'s gate (`anyVarIn xs || hasConstFoldableNode`) also rewrites items sharing *no*
+variable with the group, because a variable-free subexpression is vacuously `varsInF xs` and folds
+to a constant — the indexed path's bucket scan skips those items. Eight of nine local fixtures stay
+byte-identical under `opt-export`; `openvm-eth/apc_020` differs only in which fresh `rnc` bits
+`reencode` mints afterwards, at identical variable / bus / constraint counts (786 / 422 / 309).
+The `SearchBudgets.lean` doc comment now says so instead of claiming an identical fold.
+
+**Do not read this as "retire the other index gates".** Entry 107 measured *reencode's* 8192 gate
+at 1.19× worse when always-indexed, and lowering it again here reproduced that: on the ladder,
+reencode with `useIdx` forced on went `82.4 → 97.5 s` at `k=4`, because the accept path then also
+pays a per-accept `denseBuildPruned`. The gate that helped is the one whose *shape* was wrong
+(size instead of work), not gates in general.
+
+**CI effectiveness matrix (PR #217, `59f2967` vs main `ce9a820`).** Variables and bus interactions
+are **identical on all six sets**; runtime −10 % on wasm-eth and on OpenVM keccak, +2 % on sha256
+(report-only row, ±noisy). One delta: SP1 `rsp` constraints **9.372× → 9.365×**, from two of 100
+cases going 175 → 177 constraints at unchanged variable and bus counts. Diffing
+`rsp/apc_024` shows it is **not** lost constant folding but a butterfly: the fresh reencode bit is
+`rnc1617_1136_37_0` on main and `rnc1617_1136_49_0` here, i.e. the changed constraint list moved
+`reencode`'s greedy accept order — 9 constraints leave and 11 arrive. It could as easily have gone
+the other way.
+
+The deeper reason the two paths differ at all is *not only* the constant folding: `denseFoldOutV`
+emits `(non-covered, folded) ++ coveredCsOf`, moving the covered constraints to the **end**, while
+`denseFoldOutIdxV` rewrites in place. So no gate tuning makes the paths byte-identical; they are
+different transforms.
+
+**The byte-identical version of this fix, for whoever takes it next.** Keep the *direct* path's
+transform exactly and serve only its **no-op gate** from an index. `denseSystemHasFoldableWV` is a
+`Bool` built with `any`, so order and multiplicity do not matter, and
+`hasFoldableV xs survsV e = true → e.anyVarIn xs = true ∨ e.hasConstFoldableNode = true` (one
+induction: a `varsInF xs` node with no variable of `xs` is variable-free, which is exactly
+`hasConstFoldableNode`). So the gate can scan the `xs` buckets plus a per-invocation list of
+positions carrying a variable-free node, and decide identically; `es` comes from
+`denseCoveredIdx` (already `= filter` by `denseCoveredIdx_eq_filter_of_complete`), which also
+retires the per-target `partition`. Both indexes are rebuilt per *accept*, which is free against the
+`O(system)` `denseFoldOutV` an accept already pays. That leaves the pass at
+`O(accepts × system + groups × (bucket + foldable))` with the current output preserved exactly —
+strictly better than this entry's gate change, and about 250–400 lines of proof.
+
+**Tried in the same session and reverted (no code change):** a `@[csimp]` twin of
+`denseCheckReencode` walking the system once for all bits (`DenseExpr.anyVarIn bits`) instead of once
+per bit, with the box cap tested before the survivor box is enumerated. Proven equal and
+byte-identical on eight fixtures, but interleaved best-of-3 on `openvm-eth/apc_005` gave
+**6387/6697/6503 vs 6353/6696/6375 ms** — noise, so it was not worth ~120 lines of proof. Two lessons
+worth more than the change: the |bits| comparisons at the variable nodes survive the rewrite (only
+the tree-walk overhead goes) and the conjunct is last in the `&&` chain, so it runs about once per
+accept; and a *sequential* A/B of the two binaries showed a 2–6 % "win" that interleaving erased
+entirely — run-ordering bias on this box is larger than the effect being measured. Always interleave.
+
+**Worked locally: yes** (byte-identical `opt-export` on 8 of 9 fixtures; `apc_020` size-identical).
