@@ -28,10 +28,16 @@ def basisFuel : Nat := 3
 /-- Work cap for one joint enumeration: box size × number of covered targets. -/
 def maxEnumWork : Nat := 524288
 
-/-- Systems with at least this many algebraic constraints use the inverted index; smaller ones use
-    the direct per-target `coveredCsOf` scan. Purely a runtime gate — both paths compute the
-    identical fold. -/
-def domainFoldIndexThreshold : Nat := 8192
+/-- From this many candidate groups on, `domainFold` uses the inverted index; below it the direct
+    per-target `coveredCsOf` scan is cheaper than building the index. Gating on the group count
+    rather than the system size is what makes the pass linear: the direct path costs
+    `O(groups × system)`, the indexed one one build plus per-group bucket work.
+
+    The two paths are separately proven and agree on every group they fold; they differ only in how
+    much constant folding their no-op gates let through — `denseFoldRewriteV` also rewrites items
+    sharing *no* variable with the group (a variable-free subexpression is vacuously `varsInF xs`),
+    which the indexed path's bucket scan skips. -/
+def domainFoldTargetIndexThreshold : Nat := 2
 
 /-- Systems with at least this many bus interactions use the slot-0-indexed representative store in
     `densePdDropSet`; smaller ones scan the per-class representative list directly (the index's

@@ -927,7 +927,7 @@ theorem denseDomainFoldFV_correct (pw : PrimeWitness p) (bs : BusSemantics p) (i
   by_cases hpB : pw.isPrime = true
   · rw [if_pos hpB]
     haveI : Fact p.Prime := ⟨pw.correct hpB⟩
-    by_cases hthr : domainFoldIndexThreshold ≤ d.algebraicConstraints.length
+    by_cases hthr : domainFoldTargetIndexThreshold ≤ (denseTargetsV d).length
     · rw [if_pos hthr]
       exact denseFoldLoopV_correct bs isInput (denseTargetsV d) d (DenseFoldIdx.mk' d)
         (fun i hi v hv => denseBuild_complete denseDedupVarsOf d.algebraicConstraints i hi v (by
@@ -948,7 +948,7 @@ theorem denseDomainFoldFV_covered (pw : PrimeWitness p) (reg : VarRegistry)
   unfold denseDomainFoldFV
   by_cases hpB : pw.isPrime = true
   · rw [if_pos hpB]
-    by_cases hthr : domainFoldIndexThreshold ≤ d.algebraicConstraints.length
+    by_cases hthr : domainFoldTargetIndexThreshold ≤ (denseTargetsV d).length
     · rw [if_pos hthr]
       exact denseFoldLoopV_covered reg (denseTargetsV d) d (DenseFoldIdx.mk' d) hcov
     · rw [if_neg hthr]
@@ -1115,7 +1115,7 @@ theorem denseFoldLoopArrV_eq :
   unfold denseDomainFoldFV denseDomainFoldFVFast
   by_cases hpB : pw.isPrime = true
   · rw [if_pos hpB, if_pos hpB]
-    by_cases hthr : domainFoldIndexThreshold ≤ d.algebraicConstraints.length
+    by_cases hthr : domainFoldTargetIndexThreshold ≤ (denseTargetsV d).length
     · rw [if_pos hthr, if_pos hthr]
       obtain ⟨h1, h2⟩ := denseFoldLoopArrV_eq (denseTargetsV d) d (DenseFoldIdx.mk' d) rfl rfl
       show denseFoldLoopV (denseTargetsV d) d (DenseFoldIdx.mk' d)
