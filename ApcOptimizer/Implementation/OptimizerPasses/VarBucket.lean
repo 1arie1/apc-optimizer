@@ -6,8 +6,10 @@ set_option autoImplicit false
 
 Maps each variable to the items mentioning it (`denseVarBucket`), uncapped and order-preserving so
 a lookup returns exactly the same list a `filter (mentions x)` would. Shared by
-`RedundantByteDrop.lean` (operand justification) and `RootPairUnify.lean` (per-variable bound
-lookups); the soundness/exactness lemmas live with their consumers. -/
+`RedundantByteDrop.lean` (operand justification), `RootPairUnify.lean` (per-variable bound lookups)
+and the `busPairCancel` justification chain (domain lookups). Membership soundness is
+`denseVarBucket_mem` (`Proofs/BusPairCancelJustify.lean`); the exactness lemmas live with their
+consumers. -/
 
 namespace ApcOptimizer.Dense
 

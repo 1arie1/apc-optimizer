@@ -13,6 +13,46 @@ namespace ApcOptimizer.Dense
 
 variable {p : ℕ}
 
+/-! ## Soundness of the per-variable bucket index: every looked-up item was indexed -/
+
+/-- Inserting `a` (already in `S`) under any variable list preserves "every bucket value is in
+    `S`". -/
+theorem denseVarBucketAdd_mem {α : Type} {S : List α} (a : α) (ha : a ∈ S) :
+    ∀ (vs : List VarId) (m : Std.HashMap VarId (List α)),
+      (∀ x, ∀ b ∈ m.getD x [], b ∈ S) →
+      ∀ x, ∀ b ∈ (denseVarBucketAdd m vs a).getD x [], b ∈ S := by
+  intro vs
+  induction vs with
+  | nil => intro m hm; simpa [denseVarBucketAdd] using hm
+  | cons y rest ih =>
+    intro m hm
+    have hstep : ∀ x, ∀ b ∈ (m.insert y (a :: m.getD y [])).getD x [], b ∈ S := by
+      intro x b hb
+      by_cases hxy : y = x
+      · subst hxy
+        rw [Std.HashMap.getD_insert_self] at hb
+        rcases List.mem_cons.1 hb with h | h
+        · exact h ▸ ha
+        · exact hm y b h
+      · rw [Std.HashMap.getD_insert, if_neg (by simpa using hxy)] at hb
+        exact hm x b hb
+    have := ih (m.insert y (a :: m.getD y [])) hstep
+    simpa [denseVarBucketAdd, List.foldl_cons] using this
+
+/-- Every item returned by a bucket lookup was one of the indexed items. -/
+theorem denseVarBucket_mem {α : Type} (varsOf : α → List VarId) (items : List α) :
+    ∀ x, ∀ a ∈ denseVarBucketLookup (denseVarBucket varsOf items) x, a ∈ items := by
+  unfold denseVarBucketLookup denseVarBucket
+  induction items with
+  | nil =>
+    intro x a ha; simp only [List.foldr_nil, Std.HashMap.getD_empty, List.not_mem_nil] at ha
+  | cons c rest ih =>
+    intro x a ha
+    rw [List.foldr_cons] at ha
+    exact denseVarBucketAdd_mem c (List.mem_cons_self ..) ((varsOf c).eraseDups)
+      (List.foldr (fun a m => denseVarBucketAdd m ((varsOf a).eraseDups) a) ∅ rest)
+      (fun x' b hb => List.mem_cons_of_mem _ (ih x' b hb)) x a ha
+
 /-- If the per-point certificate accepts, the enumerated `keys` of `c` are pinned to `pt` under
     `denv`, `c` is satisfied, and the precomputed `byteVars` are bytes, then `x` is a byte here. -/
 theorem densePointByteOk_sound [Fact p.Prime] (x : VarId) (c : DenseExpr p)
@@ -111,24 +151,24 @@ theorem densePointByteOk_sound [Fact p.Prime] (x : VarId) (c : DenseExpr p)
             | cons t3 tail3 =>
               rw [hterms] at h; simp at h
 
-/-- If the deep bound certificate accepts for `x` from `c`, `c` and every `domCs` hold, and each
-    witness interaction never violates when active, then `x` is a byte. -/
-theorem denseDeepBoundOk_sound [Fact p.Prime] (domCs : List (DenseExpr p))
+/-- If the deep bound certificate accepts for `x` from `c`, `c` and every looked-up domain
+    constraint hold, and each witness interaction never violates when active, then `x` is a byte. -/
+theorem denseDeepBoundOk_sound [Fact p.Prime] (domIdx : Std.HashMap VarId (List (DenseExpr p)))
     (bs : BusSemantics p) (facts : BusFacts p bs)
     (wits : VarId → List (BusInteraction (DenseExpr p))) (x : VarId) (c : DenseExpr p)
-    (h : denseDeepBoundOk domCs bs facts wits x c = true) (denv : VarId → ZMod p)
-    (hdom : ∀ c' ∈ domCs, c'.eval denv = 0) (hc0 : c.eval denv = 0)
+    (h : denseDeepBoundOk domIdx bs facts wits x c = true) (denv : VarId → ZMod p)
+    (hdom : ∀ v, ∀ c' ∈ denseVarBucketLookup domIdx v, c'.eval denv = 0) (hc0 : c.eval denv = 0)
     (hbus : ∀ v, ∀ bi ∈ wits v, (denseBIEval bi denv).multiplicity ≠ 0 →
       bs.violatesConstraint (denseBIEval bi denv) = false) :
     (denv x).val < 256 := by
   unfold denseDeepBoundOk at h
   simp only [] at h
   split_ifs at h with hcap
-  have hdomsound : ∀ vd ∈ denseDeepEnumDoms domCs x c, denv vd.1 ∈ vd.2 := by
+  have hdomsound : ∀ vd ∈ denseDeepEnumDoms domIdx x c, denv vd.1 ∈ vd.2 := by
     intro vd hvd
     unfold denseDeepEnumDoms at hvd
     obtain ⟨v, _, hfn⟩ := List.mem_filterMap.mp hvd
-    cases hfd : denseFindDomainAlg domCs v with
+    cases hfd : denseFindDomainAlg (denseVarBucketLookup domIdx v) v with
     | none => rw [hfd] at hfn; exact absurd hfn (by simp)
     | some d =>
       rw [hfd] at hfn
@@ -136,7 +176,7 @@ theorem denseDeepBoundOk_sound [Fact p.Prime] (domCs : List (DenseExpr p))
       split_ifs at hfn
       simp only [Option.some.injEq] at hfn
       subst hfn
-      exact denseFindDomainAlg_sound denv domCs v d hfd hdom
+      exact denseFindDomainAlg_sound denv (denseVarBucketLookup domIdx v) v d hfd (hdom v)
   have hbyteVars : ∀ v ∈ denseDeepByteVars bs facts wits x c, (denv v).val < 256 := by
     intro v hv
     unfold denseDeepByteVars at hv
@@ -148,33 +188,34 @@ theorem denseDeepBoundOk_sound [Fact p.Prime] (domCs : List (DenseExpr p))
       dsimp only at hv2
       exact lt_of_lt_of_le (denseFindVarBound_sound bs facts (wits v) v b hb denv (hbus v))
         (of_decide_eq_true hv2)
-  have hmem : (denseDeepEnumDoms domCs x c).map (fun vd => (vd.1, denv vd.1))
-      ∈ denseAssignments (denseDeepEnumDoms domCs x c) :=
+  have hmem : (denseDeepEnumDoms domIdx x c).map (fun vd => (vd.1, denv vd.1))
+      ∈ denseAssignments (denseDeepEnumDoms domIdx x c) :=
     mem_denseAssignments _ denv hdomsound
   have hpoint := List.all_eq_true.mp h _ hmem
   refine densePointByteOk_sound x c (denseDeepByteVars bs facts wits x c)
-    ((denseDeepEnumDoms domCs x c).map Prod.fst)
-    ((denseDeepEnumDoms domCs x c).map (fun vd => (vd.1, denv vd.1))) hpoint denv ?_
+    ((denseDeepEnumDoms domIdx x c).map Prod.fst)
+    ((denseDeepEnumDoms domIdx x c).map (fun vd => (vd.1, denv vd.1))) hpoint denv ?_
     hc0 hbyteVars
   intro y hy
-  exact denseEnvOfFast_map (denseDeepEnumDoms domCs x c) denv y (List.contains_iff_mem.mp hy)
+  exact denseEnvOfFast_map (denseDeepEnumDoms domIdx x c) denv y (List.contains_iff_mem.mp hy)
 
 /-- If one candidate constraint deep-justifies `x` as a byte, every constraint in `all` (⊇
-    `domCs`/`cands`) holds, and each witness interaction never violates, then `x` is a byte. -/
+    `domOf`/`cands`) holds, and each witness interaction never violates, then `x` is a byte. -/
 theorem denseDeepByteJustified_sound [Fact p.Prime] [NeZero p]
-    (all domCs cands : List (DenseExpr p))
+    (all cands : List (DenseExpr p)) (domIdx : Std.HashMap VarId (List (DenseExpr p)))
     (bs : BusSemantics p) (facts : BusFacts p bs)
     (wits : VarId → List (BusInteraction (DenseExpr p))) (x : VarId)
-    (hdomCs : ∀ c ∈ domCs, c ∈ all) (hcands : ∀ c ∈ cands, c ∈ all)
-    (h : denseDeepByteJustified domCs cands bs facts wits x = true) (denv : VarId → ZMod p)
+    (hdomIdx : ∀ v, ∀ c ∈ denseVarBucketLookup domIdx v, c ∈ all)
+    (hcands : ∀ c ∈ cands, c ∈ all)
+    (h : denseDeepByteJustified domIdx cands bs facts wits x = true) (denv : VarId → ZMod p)
     (hall : ∀ c' ∈ all, c'.eval denv = 0)
     (hbus : ∀ v, ∀ bi ∈ wits v, (denseBIEval bi denv).multiplicity ≠ 0 →
       bs.violatesConstraint (denseBIEval bi denv) = false) :
     (denv x).val < 256 := by
   obtain ⟨c, hc, hck⟩ := List.any_eq_true.1 h
   have hc' : c ∈ all := hcands c (List.mem_of_mem_take hc)
-  exact denseDeepBoundOk_sound domCs bs facts wits x c hck denv
-    (fun c' hc'' => hall c' (hdomCs c' hc'')) (hall c hc') hbus
+  exact denseDeepBoundOk_sound domIdx bs facts wits x c hck denv
+    (fun v c' hc'' => hall c' (hdomIdx v c' hc'')) (hall c hc') hbus
 
 /-- If the single-variable expression `e` evaluates (with its variable fixed to `denv x`) to a byte
     constant, then `e` is a byte under `denv`. -/
@@ -208,9 +249,10 @@ theorem denseExprPointByte_sound (e : DenseExpr p) (x : VarId) (denv : VarId →
 /-- If `e` is a single-variable expression whose variable's constraint-derived finite domain makes
     `e` a byte at every point, then `e` is a byte under any assignment zeroing the domain
     constraints. -/
-theorem denseDomainByteJustified_sound [Fact p.Prime] (domCs : List (DenseExpr p)) (e : DenseExpr p)
-    (h : denseDomainByteJustified domCs e = true) (denv : VarId → ZMod p)
-    (hdom : ∀ c ∈ domCs, c.eval denv = 0) :
+theorem denseDomainByteJustified_sound [Fact p.Prime]
+    (domIdx : Std.HashMap VarId (List (DenseExpr p))) (e : DenseExpr p)
+    (h : denseDomainByteJustified domIdx e = true) (denv : VarId → ZMod p)
+    (hdom : ∀ v, ∀ c ∈ denseVarBucketLookup domIdx v, c.eval denv = 0) :
     (e.eval denv).val < 256 := by
   unfold denseDomainByteJustified at h
   cases hsv : e.singleVarAux with
@@ -221,12 +263,13 @@ theorem denseDomainByteJustified_sound [Fact p.Prime] (domCs : List (DenseExpr p
     | some x =>
       rw [hsv] at h
       dsimp only at h
-      cases hfd : denseFindDomainAlg domCs x with
+      cases hfd : denseFindDomainAlg (denseVarBucketLookup domIdx x) x with
       | none => rw [hfd] at h; simp at h
       | some d =>
         rw [hfd, Bool.and_eq_true] at h
         obtain ⟨_, hall⟩ := h
-        have hmem : denv x ∈ d := denseFindDomainAlg_sound denv domCs x d hfd hdom
+        have hmem : denv x ∈ d :=
+          denseFindDomainAlg_sound denv (denseVarBucketLookup domIdx x) x d hfd (hdom x)
         have hpt : denseExprPointByte e x (denv x) = true := List.all_eq_true.mp hall _ hmem
         exact denseExprPointByte_sound e x denv hpt
 
@@ -463,18 +506,20 @@ theorem denseBasisJustified_sound (bound : Nat) (bnd : VarId → Option Nat) {bs
 `denseRecvSlotsJustified_sound`'s conclusion is exactly `denseDropPair_correct`'s `hbyte` obligation
 (with `all := d.algebraicConstraints`, `rest := A ++ B ++ C ++ checks`). -/
 
-/-- If the dispatcher accepts, every constraint in the superset `all` (⊇ `domCs`/`candsOf`) holds,
+/-- If the dispatcher accepts, every constraint in the superset `all` (⊇ `domOf`/`candsOf`) holds,
     and every witnessed remaining interaction (`wits`/`fwits ⊆ rest`) never violates when active,
     then `e` is a byte/limb (`< bound`) under `denv`. -/
-theorem denseByteJustifiedW_sound (bound : Nat) (deep : Bool) (all domCs : List (DenseExpr p))
+theorem denseByteJustifiedW_sound (bound : Nat) (deep : Bool) (all : List (DenseExpr p))
+    (domIdx : Std.HashMap VarId (List (DenseExpr p)))
     (candsOf : VarId → List (DenseExpr p)) (bs : BusSemantics p)
     (facts : BusFacts p bs) (rest : List (BusInteraction (DenseExpr p)))
     (wits fwits : VarId → List (BusInteraction (DenseExpr p))) (e : DenseExpr p)
     (hdeep : deep = true → p.Prime)
-    (hdomCs : ∀ c ∈ domCs, c ∈ all) (hcands : ∀ x, ∀ c ∈ candsOf x, c ∈ all)
+    (hdomIdx : ∀ v, ∀ c ∈ denseVarBucketLookup domIdx v, c ∈ all)
+    (hcands : ∀ x, ∀ c ∈ candsOf x, c ∈ all)
     (hwits : ∀ v, ∀ bi ∈ wits v, bi ∈ rest)
     (hfwits : ∀ v, ∀ bi ∈ fwits v, bi ∈ rest)
-    (h : denseByteJustifiedW bound deep domCs candsOf bs facts wits fwits e = true)
+    (h : denseByteJustifiedW bound deep domIdx candsOf bs facts wits fwits e = true)
     (denv : VarId → ZMod p)
     (hall : ∀ c' ∈ all, c'.eval denv = 0)
     (hbus : ∀ bi ∈ rest, (denseBIEval bi denv).multiplicity ≠ 0 →
@@ -513,7 +558,7 @@ theorem denseByteJustifiedW_sound (bound : Nat) (deep : Bool) (all domCs : List 
           haveI : Fact p.Prime := ⟨hdeep h'.1.1⟩
           haveI : NeZero p := ⟨(hdeep h'.1.1).ne_zero⟩
           exact lt_of_lt_of_le
-            (denseDeepByteJustified_sound all domCs (candsOf x) bs facts wits x hdomCs (hcands x)
+            (denseDeepByteJustified_sound all (candsOf x) domIdx bs facts wits x hdomIdx (hcands x)
               h'.2 denv hall hbusW)
             (of_decide_eq_true h'.1.2)
       | const n => simp at h
@@ -523,7 +568,8 @@ theorem denseByteJustifiedW_sound (bound : Nat) (deep : Bool) (all domCs : List 
       rw [Bool.and_eq_true, Bool.and_eq_true] at h
       haveI : Fact p.Prime := ⟨hdeep h.1.1⟩
       exact lt_of_lt_of_le
-        (denseDomainByteJustified_sound domCs e h.2 denv (fun c' hc' => hall c' (hdomCs c' hc')))
+        (denseDomainByteJustified_sound domIdx e h.2 denv
+          (fun v c' hc' => hall c' (hdomIdx v c' hc')))
         (of_decide_eq_true h.1.2)
     ·
       exact denseAffineJustified_sound bound (fun x => denseFindVarBound bs facts (wits x) x) e denv
@@ -536,15 +582,17 @@ theorem denseByteJustifiedW_sound (bound : Nat) (deep : Bool) (all domCs : List 
 /-- If every declared byte slot of `R` is justified, then at every such slot the evaluated payload
     entry of `R` (under any `denv` zeroing `all` and never violating the remaining witnessed
     interactions) is a byte/limb (`< bound`) — `denseDropPair_correct`'s `hbyte` obligation. -/
-theorem denseRecvSlotsJustified_sound (bound : Nat) (deep : Bool) (all domCs : List (DenseExpr p))
+theorem denseRecvSlotsJustified_sound (bound : Nat) (deep : Bool) (all : List (DenseExpr p))
+    (domIdx : Std.HashMap VarId (List (DenseExpr p)))
     (candsOf : VarId → List (DenseExpr p)) (bs : BusSemantics p)
     (facts : BusFacts p bs) (rest : List (BusInteraction (DenseExpr p)))
     (wits fwits : VarId → List (BusInteraction (DenseExpr p))) (slots : List Nat)
     (R : BusInteraction (DenseExpr p)) (hdeep : deep = true → p.Prime)
-    (hdomCs : ∀ c ∈ domCs, c ∈ all) (hcands : ∀ x, ∀ c ∈ candsOf x, c ∈ all)
+    (hdomIdx : ∀ v, ∀ c ∈ denseVarBucketLookup domIdx v, c ∈ all)
+    (hcands : ∀ x, ∀ c ∈ candsOf x, c ∈ all)
     (hwits : ∀ v, ∀ bi ∈ wits v, bi ∈ rest)
     (hfwits : ∀ v, ∀ bi ∈ fwits v, bi ∈ rest)
-    (h : denseRecvSlotsJustified bound deep domCs candsOf bs facts wits fwits slots R = true)
+    (h : denseRecvSlotsJustified bound deep domIdx candsOf bs facts wits fwits slots R = true)
     (denv : VarId → ZMod p)
     (hall : ∀ c' ∈ all, c'.eval denv = 0)
     (hbus : ∀ bi ∈ rest, (denseBIEval bi denv).multiplicity ≠ 0 →
@@ -561,7 +609,7 @@ theorem denseRecvSlotsJustified_sound (bound : Nat) (deep : Bool) (all domCs : L
     rw [he] at hget' hcheck
     simp only [Option.map_some, Option.some.injEq] at hget'
     subst hget'
-    exact denseByteJustifiedW_sound bound deep all domCs candsOf bs facts rest wits fwits e hdeep
-      hdomCs hcands hwits hfwits hcheck denv hall hbus
+    exact denseByteJustifiedW_sound bound deep all domIdx candsOf bs facts rest wits fwits e hdeep
+      hdomIdx hcands hwits hfwits hcheck denv hall hbus
 
 end ApcOptimizer.Dense

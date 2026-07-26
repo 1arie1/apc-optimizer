@@ -291,7 +291,7 @@ theorem denseCheckCancel_sound (isInput : VarId → Bool)
     (hTtworoot : T.get.tworoot.Sound d.algebraicConstraints)
     (hTnonzero : T.get.nonzero = DenseNonzeroWits.build d.algebraicConstraints)
     (M : Thunk (DenseEqConstraintMap p)) (hM : M.get.Sound d.algebraicConstraints)
-    (domCs : List (DenseExpr p)) (candsOf : VarId → List (DenseExpr p))
+    (domIdx : Std.HashMap VarId (List (DenseExpr p))) (candsOf : VarId → List (DenseExpr p))
     (wits fwits : VarId → List (BusInteraction (DenseExpr p)))
     (A : List (BusInteraction (DenseExpr p))) (S : BusInteraction (DenseExpr p))
     (B : List (BusInteraction (DenseExpr p))) (R : BusInteraction (DenseExpr p))
@@ -299,13 +299,13 @@ theorem denseCheckCancel_sound (isInput : VarId → Bool)
     (hslots : facts.recvByteSlots busId (R.payload.map DenseExpr.constValue?) = some (slots, bound))
     (checks : List (BusInteraction (DenseExpr p)))
     (hsplit : d.busInteractions = A ++ S :: B ++ R :: C)
-    (hdomCs : ∀ c ∈ domCs, c ∈ d.algebraicConstraints)
+    (hdomIdx : ∀ v, ∀ c ∈ denseVarBucketLookup domIdx v, c ∈ d.algebraicConstraints)
     (hcands : ∀ x, ∀ c ∈ candsOf x, c ∈ d.algebraicConstraints)
     (hwits : ∀ v, ∀ bi ∈ wits v, bi ∈ A ++ B ++ C ++ checks)
     (hfwits : ∀ v, ∀ bi ∈ fwits v, bi ∈ A ++ B ++ C ++ checks)
     (hmid : ∀ m0 ∈ B, denseMidRefuted ops shape T busId S m0 = true)
     (hshield : denseShieldOk ops shape T busId S A = true)
-    (h : denseCheckCancel ops deep bs facts M domCs candsOf wits fwits busId shape slots bound S R checks
+    (h : denseCheckCancel ops deep bs facts M domIdx candsOf wits fwits busId shape slots bound S R checks
       = true) :
     DensePassCorrect isInput d { d with busInteractions := A ++ B ++ C ++ checks } [] bs := by
   unfold denseCheckCancel at h
@@ -322,8 +322,8 @@ theorem denseCheckCancel_sound (isInput : VarId → Bool)
     (fun denv => denseMatches_evalPattern R.payload denv) checks
     (fun ck hck => denseEmitOk_sound ops bs facts busId shape slots R ck
       (List.all_eq_true.mp hemit ck hck) (of_decide_eq_true hRb) hRmEv)
-    (fun denv hall hbus => denseRecvSlotsJustified_sound bound deep d.algebraicConstraints domCs
-      candsOf bs facts (A ++ B ++ C ++ checks) wits fwits slots R hdeep hdomCs hcands hwits hfwits
+    (fun denv hall hbus => denseRecvSlotsJustified_sound bound deep d.algebraicConstraints domIdx
+      candsOf bs facts (A ++ B ++ C ++ checks) wits fwits slots R hdeep hdomIdx hcands hwits hfwits
       hjust denv hall hbus)
     hsplit
     (of_decide_eq_true hSb) (of_decide_eq_true hRb)

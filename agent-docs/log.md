@@ -4836,3 +4836,37 @@ sha256_big (`profile`, quiet 48-core box): reencode **183.7 → 97.4 s (−47 %)
 
 **Worked locally: yes (byte-identical `opt-export` on openvm-eth apc_044/apc_067, keccak,
 wasm-eth apc_036 and the 168k-var OpenVM sha256 case).**
+
+### 143. Runtime: busPairCancel serves domain lookups from a per-variable index
+
+`denseFindDomainAlg domCs v` — the finite-domain lookup behind the byte justification — scanned the
+**whole** single-variable-constraint list per query (55k constraints in sha256_big's cycle 0),
+testing `mentions` on each. `perf` charged 4.7 % of whole-run CPU to `denseFindDomainAlg` and
+another 1.5 % to `DenseExpr.mentions`, all under `denseUnjustifiedSlots`/`denseCheckCancel`, i.e.
+per candidate send/receive pair per declared byte slot.
+
+The justification chain (`denseDeepEnumDoms`, `denseDomainByteJustified`, `denseByteJustifiedW`,
+`denseRecvSlotsJustified`, `denseUnjustifiedSlots`, `denseCheckCancel`) now takes a per-variable
+index instead of the list, and looks each variable's domain up in it. The index is `denseVarBucket`
+(`VarBucket.lean`) over the single-variable constraints — uncapped and order-preserving, so the
+bucket for `v` is exactly the sublist a `filter (mentions v)` would give and `denseFindDomainAlg`
+returns the identical first match. Soundness needs only membership (`denseVarBucket_mem`, moved to
+`Proofs/BusPairCancelJustify.lean` so all three consumers see it), so the hypotheses just changed
+shape: `∀ c ∈ domCs, P c` → `∀ v, ∀ c ∈ lookup domIdx v, P c`. `redundantByteDrop` builds the same
+index for its own domain queries.
+
+**The index must be passed as a value, not as a lookup closure.** The first version put
+`denseVarBucketLookup (denseVarBucket … (filter isSingleVar …))` into the threaded thunk's subtype
+payload; the compiler re-evaluated the filter *and* the index build **per query** — wasm-eth
+apc_036 busPairCancel 8.5 → 113 s (32 % of the run in `DenseExpr.singleVarAux`). Passing the
+`HashMap` itself and applying `denseVarBucketLookup` inside the callees fixed it (7.3 s). This
+extends entry 106's arity rule: **a partial application stored in a structure (or a thunk payload)
+re-runs its argument's computation per call, exactly like `let heavy := …; fun y => …`** — store
+the data, apply the lookup at the use site.
+
+sha256_big (`profile`, quiet 48-core box): busPairCancel **90.2 → 50.1 s (−44 %)**, total
+**444.7 → 404.4 s (−9 %)**; cumulative with entry 142, 523.9 → 404.4 s (−23 %). wasm-eth apc_036:
+busPairCancel 8.5 → 7.3 s, redundantByteDrop 172 → 61 ms.
+
+**Worked locally: yes (byte-identical `opt-export` on openvm-eth apc_044/apc_067, keccak, wasm-eth
+apc_036 and the 168k-var OpenVM sha256 case).**
