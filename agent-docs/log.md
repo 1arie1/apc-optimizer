@@ -4953,6 +4953,33 @@ reencode with `useIdx` forced on went `82.4 → 97.5 s` at `k=4`, because the ac
 pays a per-accept `denseBuildPruned`. The gate that helped is the one whose *shape* was wrong
 (size instead of work), not gates in general.
 
+**CI effectiveness matrix (PR #217, `59f2967` vs main `ce9a820`).** Variables and bus interactions
+are **identical on all six sets**; runtime −10 % on wasm-eth and on OpenVM keccak, +2 % on sha256
+(report-only row, ±noisy). One delta: SP1 `rsp` constraints **9.372× → 9.365×**, from two of 100
+cases going 175 → 177 constraints at unchanged variable and bus counts. Diffing
+`rsp/apc_024` shows it is **not** lost constant folding but a butterfly: the fresh reencode bit is
+`rnc1617_1136_37_0` on main and `rnc1617_1136_49_0` here, i.e. the changed constraint list moved
+`reencode`'s greedy accept order — 9 constraints leave and 11 arrive. It could as easily have gone
+the other way.
+
+The deeper reason the two paths differ at all is *not only* the constant folding: `denseFoldOutV`
+emits `(non-covered, folded) ++ coveredCsOf`, moving the covered constraints to the **end**, while
+`denseFoldOutIdxV` rewrites in place. So no gate tuning makes the paths byte-identical; they are
+different transforms.
+
+**The byte-identical version of this fix, for whoever takes it next.** Keep the *direct* path's
+transform exactly and serve only its **no-op gate** from an index. `denseSystemHasFoldableWV` is a
+`Bool` built with `any`, so order and multiplicity do not matter, and
+`hasFoldableV xs survsV e = true → e.anyVarIn xs = true ∨ e.hasConstFoldableNode = true` (one
+induction: a `varsInF xs` node with no variable of `xs` is variable-free, which is exactly
+`hasConstFoldableNode`). So the gate can scan the `xs` buckets plus a per-invocation list of
+positions carrying a variable-free node, and decide identically; `es` comes from
+`denseCoveredIdx` (already `= filter` by `denseCoveredIdx_eq_filter_of_complete`), which also
+retires the per-target `partition`. Both indexes are rebuilt per *accept*, which is free against the
+`O(system)` `denseFoldOutV` an accept already pays. That leaves the pass at
+`O(accepts × system + groups × (bucket + foldable))` with the current output preserved exactly —
+strictly better than this entry's gate change, and about 250–400 lines of proof.
+
 **Tried in the same session and reverted (no code change):** a `@[csimp]` twin of
 `denseCheckReencode` walking the system once for all bits (`DenseExpr.anyVarIn bits`) instead of once
 per bit, with the box cap tested before the survivor box is enumerated. Proven equal and
