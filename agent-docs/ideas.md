@@ -120,6 +120,11 @@ touching these files anyway):
 
 ## Runtime
 
+For the cross-implementation picture — Lean at ~N^1.5–1.8 against powdr Rust's ~N^1.0, the
+disjoint-replica scaling experiment that isolates per-pass cost from fixpoint rounds, and why the
+gap is a proof-obligation shape rather than a port defect — see
+[`runtime-scaling.md`](runtime-scaling.md).
+
 Rewritten 2026-07-18 from a fresh profiling session (per-pass `profile`, per-cycle timing, gdb
 stack sampling, and a size-scaling sweep — all on this container, serial). **Runtime is
 end-to-end quadratic in circuit size** (openvm-eth sweep: input 2.3k → 8.8k items costs
@@ -374,6 +379,49 @@ same pattern).
 the per-variable bucket maps (`DenseCovIndex.buckets`, `denseVarBucket`, `denseTouchedSet`) could
 be `Array (List Nat)` / bitsets keyed directly — no hashing, no dispatch. Wide but mechanical;
 worth a prototype on one index first.
+
+**R13. Finish the candidate-group family: `domainFold`'s per-target gates and
+`denseCheckReencode`**  ·  *high value / medium effort*. `reencode`'s degree pre-gate is **done
+(#211 / entry 142)** — but `reencode` and `domainFold` enumerate the *identical* candidate shape
+(2-to-8-variable groups pinned by single-variable constraints: `denseTargetsV` vs `reencode`'s
+`targets`, same predicate), so the cost is shared and moves between them. Measured on the
+disjoint-replica ladder at `ff15446`: deleting `reencode` from `cleanupPasses` sped the pipeline up
+by **nothing** (k=4: 90.1 s vs 91.5 s) because its 44 s reappeared as `domainFold` growing
+26.0 → 57.1 s (and the output got worse, 7546 vs 5498 vars). Remaining work:
+   - `domainFold`'s per-target gates: the direct path (`DomainFoldRuntime.lean:170`
+     `denseFoldLoopDirectV` → `denseSystemHasFoldableWV`) still walks the whole system per target
+     below the 8192-constraint gate, which is where big circuits spend their *tail* cycles
+     (keccak 28 627 → 4 529 constraints by cycle 2; sha256 199 740 → 3 194 by cycle 6). Heed entry
+     107: retiring the analogous `reencode` gate measured 1.19× *worse* on dense openvm-eth, so
+     A/B on the same runner. Separately the *indexed* path measured exponent ≈ 2.0 between k=2 and
+     k=3 on the replica ladder — re-measure directly before acting.
+   - `denseCheckReencode` (`Reencode.lean:135`): its `denseCoveredCsOf` filter and its
+     explicitly-`O(bits × system)` freshness scan are the two per-candidate whole-system scans
+     #211 did not touch (already flagged open under R3; #211's fresh-name counts made the
+     freshness conjunct the only remaining one).
+
+   See [`runtime-scaling.md`](runtime-scaling.md) §3–§4.
+
+**R14. `subsumedRange`/`subsumedCheck`: reuse the #209 bound index**  ·  *low effort, cheap win*.
+`SubsumedCheck.lean:53` `denseSubsumedDropKeep` calls `denseFindVarBound` — a linear scan of the
+whole `base` interaction list — once per recognized check: Θ(checks × interactions), the cleanest
+quadratic left in the tree (exponent 2.24 on the disjoint-replica ladder; 9.0 s on sha256 today,
+small only because coda passes run once on the shrunk system). `RootPairUnify.lean` already has the
+indexed twin, `denseAnyVarBoundIdx` over the per-variable `witsOf` map. Drop-side is
+untrusted-then-rechecked, so no new proof.
+
+**R15. `bytePack`/`tupleRange`: stop restarting the scan at the list head**  ·  *low-medium value /
+low effort*. `ByteCheckPack.lean:102` `denseFindGo` is driven by `DenseNativeStep.drain` and
+re-scans the prefix (plus a fresh `revPre.reverse`) for every packed pair; `TupleRange.lean:98/104`
+is the same shape. Θ(rewrites × B), 5 % of the sha256 run (`bytePack` 33.6 s + `bytePackLate`
+11.7 s + `tupleRange` 5.7 s), `tupleRange` exponent 2.10 on the replica ladder. A resume cursor
+(`denseCancelLoop`'s `resumeIdx`/`resumePos` pattern) keeps the output byte-identical: the step
+emits `pre ++ pairCheck :: mid ++ post`, `pre` is unchanged and by construction holds no recognized
+single-value check, and the emitted `.pair` check is not one either (`denseSvCheck?` fires only for
+single-operand shapes), so resuming at `|pre| + 1` visits the same candidates in the same order.
+Also fold in `flagUnify`'s `denseFuPairData?` (`FlagUnify.lean:34`), which
+still resolves domains with the unindexed `denseFindDomainAlg` per variable per matched pair while
+`rootPairUnify` tabulates them once (`denseFindDomainMap`, #209); exponent 1.54.
 
 ### Runtime dead ends (measured; do not re-propose without new evidence)
 
