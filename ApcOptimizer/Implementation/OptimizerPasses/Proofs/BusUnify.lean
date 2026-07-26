@@ -495,7 +495,7 @@ theorem denseCollectAllBuses_sound (d : DenseConstraintSystem p) (bs : BusSemant
     (denv : VarId → ZMod p) (hadm : d.admissible bs denv) (hsat : d.satisfies bs denv) :
     ∀ (busIds : List Nat),
     ∀ c ∈ denseCollectAllBuses d bs facts
-        (Thunk.mk fun _ => DenseTwoRootMap.build d.algebraicConstraints)
+        (Thunk.mk fun _ => DenseTwoRootMap.buildForAddrs facts.memShape d.busInteractions d.algebraicConstraints)
         (Thunk.mk fun _ => DenseNonzeroWits.build d.algebraicConstraints) busIds,
       c.eval denv = 0 := by
   intro busIds
@@ -510,8 +510,8 @@ theorem denseCollectAllBuses_sound (d : DenseConstraintSystem p) (bs : BusSemant
       rw [hms, List.mem_append] at hc
       rcases hc with hc | hc
       · refine denseCollectForBus_sound d bs facts hp1 reg hcov
-          (DenseTwoRootMap.build d.algebraicConstraints)
-          (DenseTwoRootMap.build_sound d.algebraicConstraints) busId shape hms denv hadm hsat _ ?_ c
+          (DenseTwoRootMap.buildForAddrs facts.memShape d.busInteractions d.algebraicConstraints)
+          (DenseTwoRootMap.buildForAddrs_sound facts.memShape d.busInteractions d.algebraicConstraints) busId shape hms denv hadm hsat _ ?_ c
           hc
         intro cand hcand
         exact denseCandidateSplitsSweep_split
@@ -525,7 +525,7 @@ theorem denseCollectAllBuses_sound (d : DenseConstraintSystem p) (bs : BusSemant
 def denseBusUnifyNew (bs : BusSemantics p) (facts : BusFacts p bs) (d : DenseConstraintSystem p) :
     List (DenseExpr p) :=
   let T : Thunk (DenseTwoRootMap p) :=
-    Thunk.mk fun _ => DenseTwoRootMap.build d.algebraicConstraints
+    Thunk.mk fun _ => DenseTwoRootMap.buildForAddrs facts.memShape d.busInteractions d.algebraicConstraints
   let nw : Thunk (DenseNonzeroWits p) :=
     Thunk.mk fun _ => DenseNonzeroWits.build d.algebraicConstraints
   let eqs := denseCollectAllBuses d bs facts T nw
@@ -576,7 +576,7 @@ theorem denseBusUnifyNew_sound (bs : BusSemantics p) (facts : BusFacts p bs) (re
     ∀ c ∈ denseBusUnifyNew bs facts d, c.eval denv = 0 := by
   intro c hc
   have hmem : c ∈ denseCollectAllBuses d bs facts
-      (Thunk.mk fun _ => DenseTwoRootMap.build d.algebraicConstraints)
+      (Thunk.mk fun _ => DenseTwoRootMap.buildForAddrs facts.memShape d.busInteractions d.algebraicConstraints)
       (Thunk.mk fun _ => DenseNonzeroWits.build d.algebraicConstraints)
       ((d.busInteractions.map (fun bi => bi.busId)).dedup) := List.mem_of_mem_filter hc
   exact denseCollectAllBuses_sound d bs facts hp1 reg hcov denv hadm hsat _ c hmem

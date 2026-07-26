@@ -162,6 +162,14 @@ theorem DenseTwoRootMap.Sound.addAll {dcs : List (DenseExpr p)} (hp : Nat.Prime 
       exact ih _ (fun c' h => hmem c' (List.mem_cons_of_mem _ h))
         (DenseTwoRootMap.Sound.addVars hp (hmem c (List.mem_cons_self ..)) T _ hT)
 
+/-- `Sound` only asserts the existence of a witnessing constraint, so it survives passing to a
+    superset of the indexed list. -/
+theorem DenseTwoRootMap.Sound.mono {l1 l2 : List (DenseExpr p)} {T : DenseTwoRootMap p}
+    (hsub : ∀ c ∈ l1, c ∈ l2) (hT : T.Sound l1) : T.Sound l2 := by
+  intro v k A δ h
+  obtain ⟨hp, hu, c, hc, hwit⟩ := hT v k A δ h
+  exact ⟨hp, hu, c, hsub c hc, hwit⟩
+
 theorem DenseTwoRootMap.build_sound (dcs : List (DenseExpr p)) :
     (DenseTwoRootMap.build dcs).Sound dcs := by
   rw [DenseTwoRootMap.build]
@@ -170,6 +178,12 @@ theorem DenseTwoRootMap.build_sound (dcs : List (DenseExpr p)) :
     exact DenseTwoRootMap.Sound.addAll hp DenseTwoRootMap.empty dcs (fun _ h => h)
       (DenseTwoRootMap.empty_sound dcs)
   · rw [if_neg hp]; exact DenseTwoRootMap.empty_sound dcs
+
+/-- The address-restricted build is sound for the whole constraint list. -/
+theorem DenseTwoRootMap.buildForAddrs_sound (memShape : Nat → Option MemoryBusShape)
+    (bis : List (BusInteraction (DenseExpr p))) (dcs : List (DenseExpr p)) :
+    (DenseTwoRootMap.buildForAddrs memShape bis dcs).Sound dcs :=
+  (DenseTwoRootMap.build_sound _).mono (fun _ hc => List.mem_of_mem_filter hc)
 
 /-! ## Two-root decomposition soundness (value-level)
 
@@ -200,7 +214,7 @@ theorem denseTwoRootOf?_sound [Fact p.Prime] (c : DenseExpr p) (x : VarId)
         cases hl2 : denseLinearize f2 with
         | none => simp only [hl1, hl2] at h; exact absurd h (by simp)
         | some l2 =>
-          simp only [hl1, hl2] at h
+          simp only [hl1, hl2, denseTwoRootOfLins] at h
           split_ifs at h with hcond
           · obtain ⟨hk0, hcoeff, hterms⟩ := hcond
             simp only [Option.some.injEq, Prod.mk.injEq] at h

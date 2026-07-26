@@ -150,7 +150,7 @@ keccak, so anything superlinear is fatal there.
 - gdb samples (keccak, mid-run): `findConsumer` (busUnify), `reencodeLoop`, `foldLoopDirect`
   (domainFold's unindexed path), `collectForBus` — matching the analysis below.
 
-### Where the time goes at SHA scale (2026-07-26, PRs #205–#210 + entries 142–143)
+### Where the time goes at SHA scale (2026-07-26, PRs #205–#210 + entries 142–144)
 
 sha256_big (146k constraints / 71k interactions / 168k vars, `profile`, quiet 48-core box):
 **989 s (main-of-2026-07-24) → 550 s** across #205 (registry array-copy, encode 80.5 → 0.8 s),
@@ -158,14 +158,17 @@ sha256_big (146k constraints / 71k interactions / 168k vars, `profile`, quiet 48
 #208 (pointwiseDupDrop slot-0 index + hoisted singles, flagFold 85 → 15.6 s), #209 (rootPairUnify
 per-variable bound indexes, 49.6 → 33.7 s), #210 (busPairCancel segment scans, 107 → 89.5 s), then
 **524 → 445 s** with entry 142 (reencode's two per-candidate whole-system scans, 184 → 97 s) and
-**445 → 404 s** with entry 143 (busPairCancel's per-query domain scans, 90 → 50 s).
-Remaining per-pass: **reencode 98 s, busUnify 54 s, busPairCancel 50 s, gauss 36 s, domainBatch
+**445 → 404 s** with entry 143 (busPairCancel's per-query domain scans, 90 → 50 s) and
+**404 → 378 s** with entry 144 (two-root map: address-scoped build + factors linearized once).
+Remaining per-pass: **reencode 96 s, busUnify 40 s, busPairCancel 40 s, gauss 36 s, domainBatch
 20 s (parallel), bytePack 17 s, flagFold 15 s, normalize1 14 s, rootPairUnify 13 s, carryBranch
 13 s**; the tail below that is ~60 s over 25 passes. Cycles 0–2 are still ~78 % of the total.
 Whole-run perf: ~25 % `lean_dec_ref_cold` + ~17 % allocator + ~8 % `lean_apply_1` — the budget is
-still memory traffic, not arithmetic. `DenseTwoRootMap.build` (busUnify/busPairCancel certificate
-tables, via `denseLinearize`) is ~4 % of whole-run CPU on its own, and the `ZMod.commRing` rebuild
-chain (R9) another ~5 %.
+still memory traffic, not arithmetic; the `ZMod.commRing` rebuild chain (R9) is ~5 %.
+**reencode is again the top pass (96 s)** and its cost is now diffuse: `denseLookupIx` +
+`denseAssignments` (the survivor enumeration) ~1.6 % of CPU, `DenseExpr.vars`/`hashedDedup` ~2 %
+(per-target `c.vars.eraseDups` gates and the per-accept `denseBuildPruned`), `denseGroupRewrite` +
+`denseDegPreReject` ~1.7 %.
 
 **Measurement note:** the profiler's per-pass wall times and `perf`'s CPU shares are not the same
 denominator — domainBatch is parallel, so it burns ~25 % of CPU for 4 % of wall. For a serial pass,
@@ -347,6 +350,11 @@ between-region. Design (b) stands: the busUnify entry-111 treatment — `shieldO
 to a single per-address-key `pending` bit, maintainable across one sweep — but the pass's
 tombstone-and-restart structure (drops invalidate prefix state: removing a consumed receive
 un-shields earlier messages) forces a recompute-on-drop scheme, bounded by #drops × O(B).
+
+**R9a (done, entry 144).** `DenseTwoRootMap.addVars` re-linearized a product's factors per
+variable; `addVarsFast` + `@[csimp] addVars_eq_fast` hoists them. The `@[csimp]` twin is the
+zero-proof-churn way to swap an implementation — prefer it over threading a fast path through the
+proofs. Same shape may still apply to `denseDeepEnumDoms`/`denseRootsIn`-style per-variable loops.
 
 **R9. Stop rebuilding `ZMod.commRing` per helper call**  ·  *horizontal, medium value / medium
 effort*. Any helper doing `ZMod` arithmetic without a threaded `DenseZModOps` re-materializes the

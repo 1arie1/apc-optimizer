@@ -364,7 +364,7 @@ def denseBusPairCancelPass (pw : PrimeWitness p) (aggressive : Bool) : DenseVeri
     let idx := denseRecvIndexAll facts aggressive ops arr
     let alive : Array Bool := Array.replicate arr.size true
     let T : Thunk (DenseAddrCerts p) :=
-      Thunk.mk fun _ => DenseAddrCerts.build d.algebraicConstraints
+      Thunk.mk fun _ => DenseAddrCerts.build facts.memShape d.busInteractions d.algebraicConstraints
     let M : Thunk (DenseEqConstraintMap p) :=
       Thunk.mk fun _ =>
         if aggressive then DenseEqConstraintMap.build d.algebraicConstraints
@@ -385,7 +385,7 @@ def denseBusPairCancelPass (pw : PrimeWitness p) (aggressive : Bool) : DenseVeri
       intro k hk
       simp only [alive, Array.getElem?_replicate, hk, if_true, Option.getD_some]
     have hTtworoot : T.get.tworoot.Sound d.algebraicConstraints :=
-      DenseTwoRootMap.build_sound d.algebraicConstraints
+      DenseTwoRootMap.buildForAddrs_sound facts.memShape d.busInteractions d.algebraicConstraints
     have hTnonzero : T.get.nonzero = DenseNonzeroWits.build d.algebraicConstraints := rfl
     have hM : M.get.Sound d.algebraicConstraints := by
       show (if aggressive then DenseEqConstraintMap.build d.algebraicConstraints
