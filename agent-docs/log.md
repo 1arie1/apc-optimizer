@@ -4803,3 +4803,36 @@ sha256_big busPairCancel: 107.4 → 89.5 s; stack total 989 → 550 s (−44 % v
 2.4× vs two days ago). The remaining 89 s is the certificate work itself — R8 design (b).
 
 **Worked locally: yes (byte-identical fixtures incl. ecrecover_53k).**
+
+### 142. Runtime: reencode stops rescanning the whole system per candidate group
+
+Two whole-system scans ran per candidate group, and `perf` (LBR, sha256_big) charged **77 % of
+the pass** to them: `List.lengthTR` 5.2 % and `DenseExpr.sharesVarIn` 8.4 % of all CPU, both
+under `denseReencodeLoop`/`denseReencodeLoopCached`.
+
+1. **The fresh-name prefix.** `s!"rnc{d.algebraicConstraints.length}_{d.busInteractions.length}_{idx}"`
+   walked both lists (146k + 71k nodes) per group just to name the bits a group might mint —
+   ~12.8k groups per cycle. `nc`/`nb` are threaded through the loops instead and re-read only
+   after a step that rewrote `d`. `denseReencodeNameCounts` recognizes those steps by their
+   derivations: a step derives one method per minted bit, so nonempty derivations mark exactly
+   the accepts (every reject branch returns `(_, d, [], _)`).
+2. **The degree pre-gate.** `denseDegPreReject` walked every constraint and interaction with
+   `sharesVarIn`, though only items sharing a variable with the group can fire. It now takes a
+   thunked whole-system posting index (`denseBuildUseIdx`: `denseCovBuild` buckets over
+   constraints and over interactions, plus the interaction array) and visits only the candidate
+   positions for `xs`, deduplicated (`denseUsePositions`) because each visit rewrites the item.
+   The index rides the same accept marker as the counts, and the thunk keeps invocations that
+   never construct a candidate from paying for it.
+
+Both are untrusted, so no proof obligation beyond threading the new arguments: the gate's `any`
+is order- and multiplicity-independent and `denseCovBuild`'s buckets are complete, so the indexed
+scan decides identically; the fresh name is re-checked by `denseCheckReencode`'s freshness
+conjunct. The `entry 106` arity rule applies to neither — this is the coarser mistake of
+recomputing a whole-system quantity inside a per-candidate loop; when a pass's profile is
+dominated by `lengthTR` or a whole-system predicate, look for that first.
+
+sha256_big (`profile`, quiet 48-core box): reencode **183.7 → 97.4 s (−47 %)**, total
+**523.9 → 444.7 s (−15 %)**; other passes unchanged within run-to-run noise. Cycle 0 202 → 161 s.
+
+**Worked locally: yes (byte-identical `opt-export` on openvm-eth apc_044/apc_067, keccak,
+wasm-eth apc_036 and the 168k-var OpenVM sha256 case).**
