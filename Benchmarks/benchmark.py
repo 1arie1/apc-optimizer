@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import re
 import subprocess
@@ -54,9 +53,10 @@ except ModuleNotFoundError:  # allow plain `python3 benchmark.py` without uv
 
 HERE = Path(__file__).resolve().parent       # Benchmarks
 REPO = Path(__file__).resolve().parents[1]    # Benchmarks -> repo root
-# VM -> its benchmark directory under Benchmarks/ and its default (main) set.
+# VM -> its benchmark directory under Benchmarks/, its default (main) set, and its report name.
 VM_DIR = {"openvm": "OpenVM", "sp1": "SP1"}
 DEFAULT_BENCHMARK = {"openvm": "openvm-eth", "sp1": "rsp"}
+VM_LABEL = {"openvm": "OpenVM", "sp1": "SP1"}
 NAME_RE = re.compile(r"apc_(\d+)_pc(.+)\.json\.gz$")
 # `apc-optimizer compare` stat lines, e.g. "  before: 62 vars, 55 constraints, 12 bus interactions".
 # Capture all three measures per role (variables, constraints, bus interactions).
@@ -84,16 +84,6 @@ def _pick(main_str, branch_str, main_val, branch_val, higher_better):
         return main_str, branch_str
     branch_better = branch_val > main_val if higher_better else branch_val < main_val
     return (main_str, f"**{branch_str}**") if branch_better else (f"**{main_str}**", branch_str)
-
-
-def _ratio(before, after):
-    """Shrink factor `before / after`, guarding the degenerate zero cases so geomean stays finite:
-    nothing to shrink (before == 0) -> 1; everything removed (after == 0) -> before (i.e. / 1)."""
-    if before == 0:
-        return 1.0
-    if after == 0:
-        return float(before)
-    return before / after
 
 
 def parse_compare(text):
@@ -184,18 +174,14 @@ def available_benchmarks(bench_root):
 
 def summarize(results):
     """Aggregate effectiveness of a result list [(name, {role: {vars, constraints, bus}})]:
-    agg (Σbefore ⁄ Σafter) and geomean per role and measure, plus per-case wins/losses on the
-    primary metric (variables)."""
+    Σbefore ⁄ Σafter per role and measure, plus per-case wins/losses on the primary metric
+    (variables)."""
     n = len(results)
 
     def agg(role, mt):
         sb = sum(m["before"][mt] for _, m in results)
         sa = sum(m[role][mt] for _, m in results)
         return sb / sa if sa else float("inf")
-
-    def geo(role, mt):
-        return math.exp(sum(math.log(_ratio(m["before"][mt], m[role][mt]))
-                            for _, m in results) / n)
 
     summary = {
         "n": n,
@@ -205,30 +191,28 @@ def summarize(results):
     for role in ("apc-optimizer", "powdr"):
         for mt in METRICS:
             summary[f"{role}_{mt}_agg"] = agg(role, mt)
-            summary[f"{role}_{mt}_geo"] = geo(role, mt)
     return summary
 
 
-def _bench_label(benchmark, vm):
-    """Report label for a set: bare for openvm (the unmarked default), else `vm/set`, so
-    same-named sets across VMs (e.g. OpenVM `keccak` vs SP1 `keccak`) stay distinguishable."""
-    return benchmark if vm == "openvm" else f"{vm}/{benchmark}"
+def _title(benchmark, n, vm):
+    """Report heading for a set, e.g. `### OpenVM — openvm-eth (100 basic blocks)`. The VM is
+    always named, so same-named sets across VMs (OpenVM `keccak` vs SP1 `keccak`) stay distinct."""
+    blocks = "basic block" if n == 1 else "basic blocks"
+    return f"### {VM_LABEL.get(vm, vm)} — {benchmark} ({n} {blocks})"
 
 
 def emit_summary_md(benchmark, summary, skipped, vm="openvm"):
     """Markdown summary of one benchmark run (apc-optimizer vs powdr)."""
-    lines = [f"### Effectiveness — {_bench_label(benchmark, vm)}, {summary['n']} cases, "
-             "apc-optimizer vs powdr", "",
-             "Effectiveness = size before / size after (larger is better); "
-             "priority: variables > bus interactions > constraints. "
-             "agg = Σbefore ⁄ Σafter, geo = geomean of per-case factors.", "",
-             "| measure | apc-optimizer (agg / geo) | powdr (agg / geo) | diff (agg) |",
+    lines = [_title(benchmark, summary["n"], vm), "",
+             "Effectiveness = size before / size after, aggregated over the set "
+             "(Σbefore ⁄ Σafter); larger is better. "
+             "Priority: variables > bus interactions > constraints.", "",
+             "| measure | apc-optimizer | powdr | diff |",
              "|---|---|---|---|"]
     for mt in METRICS:
-        la, lg = summary[f"apc-optimizer_{mt}_agg"], summary[f"apc-optimizer_{mt}_geo"]
-        pa, pg = summary[f"powdr_{mt}_agg"], summary[f"powdr_{mt}_geo"]
-        lines.append(f"| {METRIC_LABEL[mt]} | {la:.3f}× / {lg:.3f}× "
-                     f"| {pa:.3f}× / {pg:.3f}× | {la - pa:+.3f}× |")
+        la = summary[f"apc-optimizer_{mt}_agg"]
+        pa = summary[f"powdr_{mt}_agg"]
+        lines.append(f"| {METRIC_LABEL[mt]} | {la:.3f}× | {pa:.3f}× | {la - pa:+.3f}× |")
     lines.append("")
     lines.append(f"Per-case (by variables): apc-optimizer wins {summary['wins']}, "
                  f"loses {summary['losses']}, "
@@ -253,18 +237,16 @@ def emit_compare_md(base, target):
     b_results = [(name, base["results"][name]) for name in common]
     ts, bs = summarize(t_results), summarize(b_results)
 
-    lines = [f"### Effectiveness — {_bench_label(target['benchmark'], target.get('vm', 'openvm'))}, "
-             f"{len(common)} cases, this branch vs main", "",
+    lines = [_title(target["benchmark"], len(common), target.get("vm", "openvm")), "",
              "| measure | main | this branch | Δ | powdr |",
              "|---|---|---|---|---|"]
     for mt in METRICS:
-        ta, tg = ts[f"apc-optimizer_{mt}_agg"], ts[f"apc-optimizer_{mt}_geo"]
-        ba, bg = bs[f"apc-optimizer_{mt}_agg"], bs[f"apc-optimizer_{mt}_geo"]
-        pa, pg = ts[f"powdr_{mt}_agg"], ts[f"powdr_{mt}_geo"]
-        main_c, branch_c = _pick(f"{ba:.3f}× / {bg:.3f}×", f"{ta:.3f}× / {tg:.3f}×",
-                                 ba, ta, higher_better=True)
+        ta = ts[f"apc-optimizer_{mt}_agg"]
+        ba = bs[f"apc-optimizer_{mt}_agg"]
+        pa = ts[f"powdr_{mt}_agg"]
+        main_c, branch_c = _pick(f"{ba:.3f}×", f"{ta:.3f}×", ba, ta, higher_better=True)
         lines.append(f"| {METRIC_LABEL[mt]} | {main_c} | {branch_c} "
-                     f"| {ta - ba:+.3f}× | {pa:.3f}× / {pg:.3f}× |")
+                     f"| {ta - ba:+.3f}× | {pa:.3f}× |")
 
     # Runtime as a table row: empty powdr cell, Δ as a percentage relative to main.
     tb = sum(target.get("runtime_ms", {}).get(n, 0) for n in common)
@@ -390,14 +372,13 @@ def main():
     summary["runtime_ms_total"] = sum(runtimes.values()) if runtimes else None
 
     print(f"\n=== {args.vm}/{benchmark}: apc-optimizer vs powdr over {n} cases ===")
-    print("effectiveness = size before / size after (larger is better); "
-          "priority: variables > bus interactions > constraints")
-    print(f"  {'measure':<18}{'apc-optimizer (agg / geo)':<26}{'powdr (agg / geo)':<26}diff (agg)")
+    print("effectiveness = size before / size after, aggregated (Σbefore / Σafter; larger is "
+          "better); priority: variables > bus interactions > constraints")
+    print(f"  {'measure':<18}{'apc-optimizer':<16}{'powdr':<16}diff")
     for mt in METRICS:
-        la, lg = summary[f"apc-optimizer_{mt}_agg"], summary[f"apc-optimizer_{mt}_geo"]
-        pa, pg = summary[f"powdr_{mt}_agg"], summary[f"powdr_{mt}_geo"]
-        print(f"  {METRIC_LABEL[mt]:<18}{f'{la:.3f}x / {lg:.3f}x':<26}"
-              f"{f'{pa:.3f}x / {pg:.3f}x':<26}{la - pa:+.3f}x")
+        la = summary[f"apc-optimizer_{mt}_agg"]
+        pa = summary[f"powdr_{mt}_agg"]
+        print(f"  {METRIC_LABEL[mt]:<18}{f'{la:.3f}x':<16}{f'{pa:.3f}x':<16}{la - pa:+.3f}x")
     print(f"per-case (by variables): apc-optimizer wins {summary['wins']}, loses {summary['losses']}, "
           f"ties {n - summary['wins'] - summary['losses']}")
     if skipped:
@@ -587,13 +568,12 @@ function diffToOtherHTML(opt, other, otherName) {
     col(removed, "rem", "removed vs " + otherName) + '</span></span>';
 }
 
-// Aggregate effectiveness per measure (priority order), apc-optimizer vs powdr; geomean in the tooltip.
+// Aggregate effectiveness per measure (priority order), apc-optimizer vs powdr.
 document.getElementById("summary").innerHTML =
   '<div class="srow shead"><span class="slbl"></span><span class="el">apc-optimizer</span><span class="ep">powdr</span></div>' +
   METRICS.map(function(mt) {
     var k = mt[0];
-    return '<div class="srow" title="geomean — apc-optimizer ' + SUM["apc-optimizer_" + k + "_geo"].toFixed(2) +
-      '× · powdr ' + SUM["powdr_" + k + "_geo"].toFixed(2) + '×">' +
+    return '<div class="srow">' +
       '<span class="slbl">' + mt[1] + '</span>' +
       '<span class="el">' + SUM["apc-optimizer_" + k + "_agg"].toFixed(2) + '×</span>' +
       '<span class="ep">' + SUM["powdr_" + k + "_agg"].toFixed(2) + '×</span></div>';

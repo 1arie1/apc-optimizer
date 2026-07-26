@@ -32,7 +32,7 @@ bus interactions or constraints without regressing variables is still an improve
 landing. Report all three factors in the log.
 
 Optimization is slow; sampling a few cases per iteration might be fine. You can use the `*.powdr_opt.*` files for inspiration of new ideas that are possible. For the full picture, `Benchmarks/benchmark.py` runs `apc-optimizer compare` over all 100 cases in parallel (or `--n N` for the top N by cost; `--report out.html` for a
-click-through comparison of the original / powdr / apc-optimizer circuits) and reports aggregate/geomean
+click-through comparison of the original / powdr / apc-optimizer circuits) and reports aggregate
 effectiveness against powdr — this is the final evaluation. It runs the main `openvm-eth` benchmark
 by default; a positional argument selects another set under `Benchmarks/<VM>/` (`--vm sp1` for SP1). Report the result
 in the log.
