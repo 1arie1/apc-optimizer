@@ -150,16 +150,17 @@ keccak, so anything superlinear is fatal there.
 - gdb samples (keccak, mid-run): `findConsumer` (busUnify), `reencodeLoop`, `foldLoopDirect`
   (domainFold's unindexed path), `collectForBus` — matching the analysis below.
 
-### Where the time goes at SHA scale (2026-07-26, PRs #205–#210 + entry 142)
+### Where the time goes at SHA scale (2026-07-26, PRs #205–#210 + entries 142–143)
 
 sha256_big (146k constraints / 71k interactions / 168k vars, `profile`, quiet 48-core box):
 **989 s (main-of-2026-07-24) → 550 s** across #205 (registry array-copy, encode 80.5 → 0.8 s),
 #206 (domainFold Array.modify accepts, 173 → 6.9 s, reencode −86 s from allocator pressure alone),
 #208 (pointwiseDupDrop slot-0 index + hoisted singles, flagFold 85 → 15.6 s), #209 (rootPairUnify
 per-variable bound indexes, 49.6 → 33.7 s), #210 (busPairCancel segment scans, 107 → 89.5 s), then
-**524 → 445 s** with entry 142 (reencode's two per-candidate whole-system scans, 184 → 97 s).
-Remaining per-pass: **reencode 97 s, busPairCancel 90 s, busUnify 54 s, gauss 36 s, domainBatch
-20 s (parallel), bytePack 17 s, flagFold 16 s, normalize1 14 s, rootPairUnify 13 s, carryBranch
+**524 → 445 s** with entry 142 (reencode's two per-candidate whole-system scans, 184 → 97 s) and
+**445 → 404 s** with entry 143 (busPairCancel's per-query domain scans, 90 → 50 s).
+Remaining per-pass: **reencode 98 s, busUnify 54 s, busPairCancel 50 s, gauss 36 s, domainBatch
+20 s (parallel), bytePack 17 s, flagFold 15 s, normalize1 14 s, rootPairUnify 13 s, carryBranch
 13 s**; the tail below that is ~60 s over 25 passes. Cycles 0–2 are still ~78 % of the total.
 Whole-run perf: ~25 % `lean_dec_ref_cold` + ~17 % allocator + ~8 % `lean_apply_1` — the budget is
 still memory traffic, not arithmetic. `DenseTwoRootMap.build` (busUnify/busPairCancel certificate
@@ -186,6 +187,13 @@ these need no new proof.
      thunked; the pass body's per-invocation `HashSet.ofList cs.vars` replaced by the
      by-construction variable guarantee (`memEqConstraints_vars`) and the hash-bucket build
      gated on nonempty candidates. Output byte-identical.
+   - ~~`busPairCancel`/`redundantByteDrop` byte-justification domain scans~~ **done (entry 143)**:
+     `denseFindDomainAlg` is served from a `denseVarBucket` over the single-variable constraints
+     (uncapped, order-preserving → identical first match), threaded as a *value* — a lookup closure
+     in the thunk payload re-ran the whole index build per query (13× regression, see the entry).
+     busPairCancel 90 → 50 s. `flagUnify`, `flagFoldDrops`, `boxRewrite`, `fxSubst` and
+     `rootPairUnify` still call `denseFindDomainAlg` on whole lists; same fix applies if they show
+     up in a profile (flagFold 15 s and rootPairUnify 13 s are the candidates).
    - `busPairCancel`: ~~`liveArr` materialization per candidate~~ **done (#210)** — see R8.
      The O(B²) *certificate* scans remain (R8 design (b)); in coda mode the `addrHash`
      bucket is O(B) per hot address — add a position cursor. ~~`dropWits` from-0 array scan per
@@ -331,10 +339,11 @@ sequential scans (window state).
 
 **R8. busPairCancel residual quadratics** (formerly part of R1). Design (a) — array-segment
 twins of `liveArr`+`shieldScan`/`List.all` (`denseLiveAllSeg`/`denseShieldScanSeg` with `…_eq`
-lemmas) — is **done (#210)**: sha256_big busPairCancel 107 → 89.5 s. The remaining 89 s
-(~16 % of the SHA run, now promoted) is the O(live²) certificate work itself: `shieldOk` still
-evaluates `densePreRefuted` over the whole live prefix per candidate send, and `midRefuted` over
-the between-region. Design (b) stands: the busUnify entry-111 treatment — `shieldOk` left-folds
+lemmas) — is **done (#210)**: sha256_big busPairCancel 107 → 89.5 s, and entry 143 took the
+justification's domain scans out (89.5 → 50 s). The remaining 50 s is the O(live²) certificate work
+itself — `denseShieldScanSeg` is ~4 % of whole-run CPU: `shieldOk` still evaluates
+`densePreRefuted` over the whole live prefix per candidate send, and `midRefuted` over the
+between-region. Design (b) stands: the busUnify entry-111 treatment — `shieldOk` left-folds
 to a single per-address-key `pending` bit, maintainable across one sweep — but the pass's
 tombstone-and-restart structure (drops invalidate prefix state: removing a consumed receive
 un-shields earlier messages) forces a recompute-on-drop scheme, bounded by #drops × O(B).

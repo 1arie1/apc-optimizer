@@ -152,13 +152,14 @@ def denseEmitOk (ops : DenseZModOps p) (bs : BusSemantics p) (facts : BusFacts p
      | none => false)
 
 /-- The declared byte slots of `R` whose payload entries the witnesses do not justify. -/
-def denseUnjustifiedSlots (bound : Nat) (deep : Bool) (domCs : List (DenseExpr p))
+def denseUnjustifiedSlots (bound : Nat) (deep : Bool)
+    (domIdx : Std.HashMap VarId (List (DenseExpr p)))
     (candsOf : VarId → List (DenseExpr p)) (bs : BusSemantics p)
     (facts : BusFacts p bs) (wits fwits : VarId → List (BusInteraction (DenseExpr p)))
     (slots : List Nat) (R : BusInteraction (DenseExpr p)) : List Nat :=
   slots.filter (fun slot =>
     match R.payload[slot]? with
-    | some e => !denseByteJustifiedW bound deep domCs candsOf bs facts wits fwits e
+    | some e => !denseByteJustifiedW bound deep domIdx candsOf bs facts wits fwits e
     | none => false)
 
 /-- The per-candidate certificate: bus/multiplicity/payload of the pair, the emitted checks'
@@ -168,7 +169,7 @@ def denseUnjustifiedSlots (bound : Nat) (deep : Bool) (domCs : List (DenseExpr p
 def denseCheckCancel (ops : DenseZModOps p) (deep : Bool) (bs : BusSemantics p)
     (facts : BusFacts p bs)
     (M : Thunk (DenseEqConstraintMap p))
-    (domCs : List (DenseExpr p)) (candsOf : VarId → List (DenseExpr p))
+    (domIdx : Std.HashMap VarId (List (DenseExpr p))) (candsOf : VarId → List (DenseExpr p))
     (wits fwits : VarId → List (BusInteraction (DenseExpr p)))
     (busId : Nat) (shape : MemoryBusShape) (slots : List Nat) (bound : Nat)
     (S R : BusInteraction (DenseExpr p))
@@ -178,6 +179,6 @@ def denseCheckCancel (ops : DenseZModOps p) (deep : Bool) (bs : BusSemantics p)
     decide (denseMultConst R = some (denseGetPreviousMult ops shape)) &&
   densePayloadEntailedEq M S.payload R.payload &&
   checks.all (denseEmitOk ops bs facts busId shape slots R) &&
-  denseRecvSlotsJustified bound deep domCs candsOf bs facts wits fwits slots R
+  denseRecvSlotsJustified bound deep domIdx candsOf bs facts wits fwits slots R
 
 end ApcOptimizer.Dense

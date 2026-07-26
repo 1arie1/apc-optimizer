@@ -37,17 +37,17 @@ def denseByteDropBase (bs : BusSemantics p) (facts : BusFacts p bs) (d : DenseCo
   d.busInteractions.filter (fun bi => (denseByteCheckOperands? bs facts bi).isNone)
 
 /-- Keep `bi` unless it is a recognized byte check whose operands are all byte-justified through the
-    prebuilt per-variable indexes `domCs`/`candsOf` (constraints) and `wits` (base interactions).
+    prebuilt per-variable indexes `domIdx`/`candsOf` (constraints) and `wits` (base interactions).
     Consumes `denseByteJustifiedW`, so the O(system) per-operand scans in `denseByteJustified` become
     per-variable bucket lookups. -/
 def denseByteDropKeepW (pw : PrimeWitness p) (bs : BusSemantics p) (facts : BusFacts p bs)
-    (domCs : List (DenseExpr p)) (candsOf : VarId → List (DenseExpr p))
+    (domIdx : Std.HashMap VarId (List (DenseExpr p))) (candsOf : VarId → List (DenseExpr p))
     (wits : VarId → List (BusInteraction (DenseExpr p)))
     (bi : BusInteraction (DenseExpr p)) : Bool :=
   match denseByteCheckOperands? bs facts bi with
   | some ops =>
     !(ops.all (fun e =>
-      denseByteJustifiedW 256 pw.isPrime domCs candsOf bs facts wits (fun _ => []) e))
+      denseByteJustifiedW 256 pw.isPrime domIdx candsOf bs facts wits (fun _ => []) e))
   | none => true
 
 /-- Drops a byte-check interaction when all its operands are already proven to be bytes elsewhere —
@@ -57,10 +57,10 @@ def denseByteDropKeepW (pw : PrimeWitness p) (bs : BusSemantics p) (facts : BusF
 def denseRedundantByteDropF (pw : PrimeWitness p) (bs : BusSemantics p) (facts : BusFacts p bs)
     (d : DenseConstraintSystem p) : DenseConstraintSystem p :=
   let base := denseByteDropBase bs facts d
-  let domCs := d.algebraicConstraints.filter DenseExpr.isSingleVar
+  let domIdx := denseVarBucket DenseExpr.vars (d.algebraicConstraints.filter DenseExpr.isSingleVar)
   let candsIdx := denseVarBucket DenseExpr.vars d.algebraicConstraints
   let witsIdx := denseVarBucket denseBIVars base
-  d.filterBus (denseByteDropKeepW pw bs facts domCs
+  d.filterBus (denseByteDropKeepW pw bs facts domIdx
     (denseVarBucketLookup candsIdx) (denseVarBucketLookup witsIdx))
 
 end ApcOptimizer.Dense

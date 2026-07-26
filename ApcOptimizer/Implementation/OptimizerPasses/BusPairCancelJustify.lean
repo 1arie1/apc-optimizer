@@ -69,20 +69,21 @@ def denseDeepByteVars (bs : BusSemantics p) (facts : BusFacts p bs)
 
 /-- The variables of `c` other than `x` that carry a small proven *constraint-derived* finite domain
     (selector flags) — the candidates for enumeration in the deep justification. -/
-def denseDeepEnumDoms (domCs : List (DenseExpr p)) (x : VarId) (c : DenseExpr p) :
+def denseDeepEnumDoms (domIdx : Std.HashMap VarId (List (DenseExpr p))) (x : VarId)
+    (c : DenseExpr p) :
     List (VarId × List (ZMod p)) :=
   (c.vars.dedup.filter (fun v => v ≠ x)).filterMap (fun v =>
-    match denseFindDomainAlg domCs v with
+    match denseFindDomainAlg (denseVarBucketLookup domIdx v) v with
     | some d => if d.length ≤ maxDeepDomain then some (v, d) else none
     | none => none)
 
 /-- Deep byte bound for `x` from one constraint `c`: enumerate the small proven finite domains of
     `c`'s other variables (e.g. one-hot selector flags) and require `densePointByteOk` at every
     point. -/
-def denseDeepBoundOk (domCs : List (DenseExpr p)) (bs : BusSemantics p) (facts : BusFacts p bs)
-    (wits : VarId → List (BusInteraction (DenseExpr p))) (x : VarId) (c : DenseExpr p) :
-    Bool :=
-  let enum := denseDeepEnumDoms domCs x c
+def denseDeepBoundOk (domIdx : Std.HashMap VarId (List (DenseExpr p))) (bs : BusSemantics p)
+    (facts : BusFacts p bs) (wits : VarId → List (BusInteraction (DenseExpr p))) (x : VarId)
+    (c : DenseExpr p) : Bool :=
+  let enum := denseDeepEnumDoms domIdx x c
   if (c.vars.dedup.filter (fun v => v ≠ x)).length ≤ maxDeepVars &&
       (enum.map (fun vd => vd.2.length)).prod ≤ maxDeepPoints then
     (denseAssignments enum).all
@@ -91,10 +92,10 @@ def denseDeepBoundOk (domCs : List (DenseExpr p)) (bs : BusSemantics p) (facts :
 
 /-- Deep byte justification for `x`: one of the first `maxDeepConstraints` constraints mentioning `x`
     (the caller passes them as `cands`) pins it via `denseDeepBoundOk`. -/
-def denseDeepByteJustified (domCs cands : List (DenseExpr p)) (bs : BusSemantics p)
-    (facts : BusFacts p bs)
+def denseDeepByteJustified (domIdx : Std.HashMap VarId (List (DenseExpr p)))
+    (cands : List (DenseExpr p)) (bs : BusSemantics p) (facts : BusFacts p bs)
     (wits : VarId → List (BusInteraction (DenseExpr p))) (x : VarId) : Bool :=
-  (cands.take maxDeepConstraints).any (fun c => denseDeepBoundOk domCs bs facts wits x c)
+  (cands.take maxDeepConstraints).any (fun c => denseDeepBoundOk domIdx bs facts wits x c)
 
 /-- Evaluate the single-variable expression `e` with its variable fixed to `d` and check the result
     is a byte constant. -/
@@ -105,10 +106,11 @@ def denseExprPointByte (e : DenseExpr p) (x : VarId) (d : ZMod p) : Bool :=
 
 /-- Is `e` a byte because its single variable `x` ranges over a small constraint-derived finite
     domain at every point of which `e` evaluates to a byte? -/
-def denseDomainByteJustified (domCs : List (DenseExpr p)) (e : DenseExpr p) : Bool :=
+def denseDomainByteJustified (domIdx : Std.HashMap VarId (List (DenseExpr p)))
+    (e : DenseExpr p) : Bool :=
   match e.singleVarAux with
   | some (some x) =>
-    match denseFindDomainAlg domCs x with
+    match denseFindDomainAlg (denseVarBucketLookup domIdx x) x with
     | some d => decide (d.length ≤ maxDeepDomain) && d.all (denseExprPointByte e x)
     | none => false
   | _ => false
@@ -190,9 +192,11 @@ def denseBasisJustified (bound : Nat) (bnd : VarId → Option Nat) {bs : BusSema
     a constant `< bound`; a variable with a bus-fact bound `≤ bound`; (when `deep`) a
     selector-flag-domain deep justification or a single-variable finite-domain justification; an
     affine recomposition of bounded limbs; or a basis reduction against range-checked slot forms
-    (`fwits`). Remaining interactions are consulted through `wits`; `domCs`/`candsOf` are precomputed
-    by the caller. -/
-def denseByteJustifiedW (bound : Nat) (deep : Bool) (domCs : List (DenseExpr p))
+    (`fwits`). Remaining interactions are consulted through `wits`; `domIdx`/`candsOf` are
+    precomputed per-variable indexes (passed as values — a closure payload would be re-evaluated
+    per call, cf. `agent-docs/log.md` entry 106). -/
+def denseByteJustifiedW (bound : Nat) (deep : Bool)
+    (domIdx : Std.HashMap VarId (List (DenseExpr p)))
     (candsOf : VarId → List (DenseExpr p)) (bs : BusSemantics p)
     (facts : BusFacts p bs) (wits fwits : VarId → List (BusInteraction (DenseExpr p)))
     (e : DenseExpr p) : Bool :=
@@ -205,21 +209,22 @@ def denseByteJustifiedW (bound : Nat) (deep : Bool) (domCs : List (DenseExpr p))
         | some b => decide (b ≤ bound)
         | none => false) ||
        (deep && decide (256 ≤ bound) &&
-         denseDeepByteJustified domCs (candsOf x) bs facts wits x)
+         denseDeepByteJustified domIdx (candsOf x) bs facts wits x)
      | _ => false) ||
-    (deep && decide (256 ≤ bound) && denseDomainByteJustified domCs e) ||
+    (deep && decide (256 ≤ bound) && denseDomainByteJustified domIdx e) ||
     denseAffineJustified bound (fun x => denseFindVarBound bs facts (wits x) x) e ||
     denseBasisJustified bound (fun x => denseFindVarBound bs facts (wits x) x) facts fwits e
 
 /-- Are all of `R`'s payload entries at the declared byte slots justified (through the witness
-    lookup `wits` and precomputed `domCs`/`candsOf`, see `denseByteJustifiedW`)? -/
-def denseRecvSlotsJustified (bound : Nat) (deep : Bool) (domCs : List (DenseExpr p))
+    lookup `wits` and precomputed `domIdx`/`candsOf`, see `denseByteJustifiedW`)? -/
+def denseRecvSlotsJustified (bound : Nat) (deep : Bool)
+    (domIdx : Std.HashMap VarId (List (DenseExpr p)))
     (candsOf : VarId → List (DenseExpr p)) (bs : BusSemantics p)
     (facts : BusFacts p bs) (wits fwits : VarId → List (BusInteraction (DenseExpr p)))
     (slots : List Nat) (R : BusInteraction (DenseExpr p)) : Bool :=
   slots.all (fun slot =>
     match R.payload[slot]? with
-    | some e => denseByteJustifiedW bound deep domCs candsOf bs facts wits fwits e
+    | some e => denseByteJustifiedW bound deep domIdx candsOf bs facts wits fwits e
     | none => true)
 
 end ApcOptimizer.Dense
