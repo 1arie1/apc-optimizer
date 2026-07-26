@@ -150,17 +150,25 @@ keccak, so anything superlinear is fatal there.
 - gdb samples (keccak, mid-run): `findConsumer` (busUnify), `reencodeLoop`, `foldLoopDirect`
   (domainFold's unindexed path), `collectForBus` — matching the analysis below.
 
-### Where the time goes at SHA scale (2026-07-24, PRs #205–#210)
+### Where the time goes at SHA scale (2026-07-26, PRs #205–#210 + entry 142)
 
 sha256_big (146k constraints / 71k interactions / 168k vars, `profile`, quiet 48-core box):
 **989 s (main-of-2026-07-24) → 550 s** across #205 (registry array-copy, encode 80.5 → 0.8 s),
 #206 (domainFold Array.modify accepts, 173 → 6.9 s, reencode −86 s from allocator pressure alone),
 #208 (pointwiseDupDrop slot-0 index + hoisted singles, flagFold 85 → 15.6 s), #209 (rootPairUnify
-per-variable bound indexes, 49.6 → 33.7 s), #210 (busPairCancel segment scans, 107 → 89.5 s).
-Remaining per-pass: reencode 188 s, busPairCancel 89 s, busUnify 52 s, gauss 36 s, rootPairUnify
-33 s, domainBatch 21 s (parallel), bytePack 17 s, flagFold 15 s, normalize1 14 s, carryBranch
-13 s. Cycles 0–2 are still ~80 % of the total. Whole-run perf: ~25 % `lean_dec_ref_cold` +
-~17 % allocator + ~8 % `lean_apply_1` — the budget is still memory traffic, not arithmetic.
+per-variable bound indexes, 49.6 → 33.7 s), #210 (busPairCancel segment scans, 107 → 89.5 s), then
+**524 → 445 s** with entry 142 (reencode's two per-candidate whole-system scans, 184 → 97 s).
+Remaining per-pass: **reencode 97 s, busPairCancel 90 s, busUnify 54 s, gauss 36 s, domainBatch
+20 s (parallel), bytePack 17 s, flagFold 16 s, normalize1 14 s, rootPairUnify 13 s, carryBranch
+13 s**; the tail below that is ~60 s over 25 passes. Cycles 0–2 are still ~78 % of the total.
+Whole-run perf: ~25 % `lean_dec_ref_cold` + ~17 % allocator + ~8 % `lean_apply_1` — the budget is
+still memory traffic, not arithmetic. `DenseTwoRootMap.build` (busUnify/busPairCancel certificate
+tables, via `denseLinearize`) is ~4 % of whole-run CPU on its own, and the `ZMod.commRing` rebuild
+chain (R9) another ~5 %.
+
+**Measurement note:** the profiler's per-pass wall times and `perf`'s CPU shares are not the same
+denominator — domainBatch is parallel, so it burns ~25 % of CPU for 4 % of wall. For a serial pass,
+`perf` share × total CPU ≈ its wall time; check both before sizing a change.
 
 ### Open runtime ideas, priority order
 
@@ -229,8 +237,20 @@ index gate**  ·  mostly **done (entries 105/107/109)**:
      `coveredIdx_eq_filter_of_complete`; reencode is the next candidate (its rewrite *adds* bit
      columns and drops covered constraints, so it needs the remap or a pruned-completeness
      argument).
+   - ~~reencode's per-candidate whole-system scans~~ **done (entry 142)**: the fresh-name prefix's
+     `List.length` of both item lists and the degree pre-gate's `sharesVarIn` walk are gone
+     (threaded counts + thunked posting index, both riding the "nonempty derivations = accept"
+     marker). reencode 184 → 97 s. Note PR #194 (open, stale on `docs/`) indexes the same pre-gate
+     with a per-invocation root-use plan plus a degree-only traversal twin — the traversal twin is
+     the part entry 142 does *not* do (it still builds the rewritten tree to measure its degree).
    - **Still open — reencode's `checkReencode`** re-runs the covered scan after `buildReencode`
      (`Reencode.lean:852/858`); rarely reached (post-gates), so low value now.
+   - **Still open — reencode's remaining 97 s**: `denseGroupSurvivorsE` filters the whole
+     `denseAssignments` box (≤256 points × covered constraints) for every target, and
+     `denseCoveredIdxPos` rebuilds a HashSet + `mergeSort` per target. The build path is
+     proof-free (`denseCheckReencode` re-verifies), so a prefix-pruned DFS enumeration with an
+     early abort once the survivor count passes `2 ^ (|xs| − 1)` (above which `k < xs.length`
+     fails) needs no new proof — only the same survivor *list order* to stay byte-identical.
 
 **R4. Constant-factor levers that touch every pass**  ·  *medium value, cheap*:
    - **Variable interning-lite, `Implementation/`-only**: parse-time interning is **done (entry
