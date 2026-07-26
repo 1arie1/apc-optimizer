@@ -4953,4 +4953,14 @@ reencode with `useIdx` forced on went `82.4 → 97.5 s` at `k=4`, because the ac
 pays a per-accept `denseBuildPruned`. The gate that helped is the one whose *shape* was wrong
 (size instead of work), not gates in general.
 
+**Tried in the same session and reverted (no code change):** a `@[csimp]` twin of
+`denseCheckReencode` walking the system once for all bits (`DenseExpr.anyVarIn bits`) instead of once
+per bit, with the box cap tested before the survivor box is enumerated. Proven equal and
+byte-identical on eight fixtures, but interleaved best-of-3 on `openvm-eth/apc_005` gave
+**6387/6697/6503 vs 6353/6696/6375 ms** — noise, so it was not worth ~120 lines of proof. Two lessons
+worth more than the change: the |bits| comparisons at the variable nodes survive the rewrite (only
+the tree-walk overhead goes) and the conjunct is last in the `&&` chain, so it runs about once per
+accept; and a *sequential* A/B of the two binaries showed a 2–6 % "win" that interleaving erased
+entirely — run-ordering bias on this box is larger than the effect being measured. Always interleave.
+
 **Worked locally: yes** (byte-identical `opt-export` on 8 of 9 fixtures; `apc_020` size-identical).

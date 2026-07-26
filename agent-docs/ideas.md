@@ -280,6 +280,20 @@ index gate**  ·  mostly **done (entries 105/107/109/145)**:
      in the step (`toArray`, `HashSet.ofList ro.occ`, `withinDegreeB`). That is **~70 % in six
      whole-system passes per accepted re-encoding**, and accepts grow with the circuit, so the pass
      is `O(accepts × system)`.
+     **Tried and reverted (no code change):** a `@[csimp]` twin walking the system *once* for all
+     bits (`DenseExpr.anyVarIn bits`) instead of once per bit, plus the box cap tested before
+     `denseGroupSurvivorsE` enumerates. Proven equal (`denseFreshScan_eq`, from
+     `anyVarIn bits e = false ↔ ∀ b ∈ bits, e.mentions b = false`) and byte-identical on 8 fixtures,
+     but interleaved best-of-3 on `openvm-eth/apc_005` is **6387/6697/6503 vs 6353/6696/6375 ms** —
+     noise. Reason: the |bits| comparisons at the variable nodes stay, only the tree-walk overhead
+     goes, and the conjunct is last in the `&&` chain so it is reached about once per accept. A
+     sequential A/B looked like a 2–6 % win purely from run-ordering bias; always interleave.
+     The version worth building instead decides freshness in `O(|bits|)` from the `varSet` the loop
+     already threads (`varSet = Std.HashSet.ofList d.occ` is maintained exactly: accept sets it to
+     `ofList ro.occ` with `d := ro`, every reject leaves both alone), which deletes the scan rather
+     than speeding it up — but it needs a twin of `denseReencodeStep`/`StepCached`/`Loop`/
+     `LoopCached`/`F` carrying that equation, since the equality cannot be stated on
+     `denseCheckReencode` alone.
      Three of those six recompute `DenseExpr.vars` over the whole system independently
      (`denseBuildPruned`, `occ`, `denseBuildUseIdx`) — a shared per-item var list would cut ~25 % of
      the pass with a pure `@[csimp]` twin (the values must be *identical*, which a shared fold
