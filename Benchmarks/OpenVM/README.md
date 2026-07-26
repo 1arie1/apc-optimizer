@@ -15,8 +15,8 @@ by name. The **main** benchmark — used for optimization and the script's defau
 You'll need [uv](https://docs.astral.sh/uv/). The optional positional argument names the benchmark
 (a subdirectory here; default `openvm-eth`). To sweep a set in parallel and report aggregate
 apc-optimizer-vs-powdr effectiveness — the factor by which each of three size measures shrinks (in priority
-order: variables, then bus interactions, then algebraic constraints), as both aggregate
-(Σbefore ⁄ Σafter) and geomean:
+order: variables, then bus interactions, then algebraic constraints), aggregated over the set
+(Σbefore ⁄ Σafter):
 
 ```bash
 Benchmarks/benchmark.py                # all openvm-eth cases (--jobs = cores)
