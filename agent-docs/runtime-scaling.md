@@ -40,8 +40,15 @@ A log-log fit over the APCs with ≥ 5000 variables gives exponent **1.26 for Le
 for Rust** (Rust's sub-linear fit is an artifact of noise in the mid range — the honest reading is
 "flat" — while Lean's is a real upward trend). The crossover is around 8k–10k variables.
 
-The two data points in the top bucket are this repo's own stress benchmarks: `sha256`
-(168 915 vars) and the largest `openvm-eth` block (170 361 vars).
+The same table with sums instead of medians gives the same picture in every bucket above 16k vars.
+The five largest APCs in the set: three at 53 238 vars (Rust 62 s, Lean 166–191 s) and two at
+~170k (Rust 113 / 117 s, Lean 633 / 752 s) — the latter are this repo's `sha256` stress benchmark
+and the largest `openvm-eth` block.
+
+Worth keeping in proportion: summed over all 20 115 APCs, Lean is still **32 % faster** than Rust
+(13 700 s vs 20 161 s), because almost every APC is small and Lean wins there. The problem is
+confined to the large tail — but that tail is where a single call costs minutes, so it is what
+bounds the worst case.
 
 ## 2. The controlled experiment: k disjoint copies
 
@@ -102,7 +109,7 @@ the #205–#210 numbers in `ideas.md`, but the same ranking):
 | `domainBatch` | 47 700 | 4.6 % |
 | `bytePack` | 33 643 | 3.2 % |
 | `flagFold` | 31 717 | 3.0 % |
-| rest (30 passes) | 181 855 | 17.4 % |
+| rest (33 entries + encode/decode) | 181 855 | 17.4 % |
 
 `keccak` (27 521 vars, 40.3 s): `busUnify` 21 %, `domainFold` 13 %, `reencode` 10 %, `gauss` 9.5 %,
 `busPairCancel` 9 %, `domainBatch` 6.4 %. Cycle 0 alone is 36 % of the sha256 run and cycles 0–2
@@ -209,6 +216,15 @@ shared by many interactions is re-certified against every later candidate.
   reads `pre`/`post` (they exist only so the positional split can be stated). Making those two
   fields lazy or position-only removes Θ(N) per candidate without touching the sweep's decisions,
   which R10 correctly insists must stay bit-identical.
+
+### Secondary: the cleanup fixpoint's round count
+
+On *real* circuits the number of cleanup iterations grows with size — 3–7 below 8k variables, 8–10
+at 15k–170k (fit exponent ≈ 0.2) — multiplying every pass's cost. It stays at 5–6 under disjoint
+replication, so this is a property of real circuits (longer substitution chains need more rounds),
+not of the schedule, and it is a real but second-order contribution: N^0.2 against the N^0.5–0.8
+from the per-candidate scans. The cost is also front-loaded — cycles 0–2 are 68 % of the sha256 run
+— so the tail rounds are cheap.
 
 ## 5. Why Rust does not have this
 
