@@ -144,11 +144,13 @@ Three recurring shapes produce all of the measured superlinearity:
 
 1. **Per-candidate whole-system scan** — a gate or certificate walks every constraint and every
    interaction, once per candidate (`reencode`, `domainFold`, and the three sites below).
-2. **Per-candidate whole-interval scan** — for stateful buses, a matched send/receive pair's
-   certificate quantifies over every interaction *between* them, and for `busPairCancel` over the
-   entire *prefix* before the send. Cost is Σ over pairs of the gap length: Θ(N²) when matched
-   pairs are far apart, which is precisely what a long basic block like sha256/keccak looks like.
-   Already tracked as R8 (`busPairCancel`) and R10 (`busUnify`).
+2. **Per-candidate prefix scan** — for stateful buses, `busPairCancel`'s shield condition
+   quantifies over the entire live *prefix* before the candidate send, so the cost is Σ over
+   candidates of their position: Θ(N²) unconditionally, independent of circuit shape. Tracked as R8.
+   The sibling *between-region* scans are cheap on these circuits — measured on the raw exports,
+   **every** same-address memory pair is adjacent (gap = 1 at p100 on both sha256 and keccak:
+   powdr emits each access as a read/write pair), so Σ gap lengths is O(N), not O(N²). Do not
+   spend effort capping the mid scans; the prefix scan is the one that matters.
 3. **Find-first-then-restart drains** — "find the first rewritable pair from the head, rewrite,
    repeat" re-scans the prefix and rebuilds `revPre.reverse` for every rewrite: Θ(rewrites × N).
 
@@ -207,15 +209,28 @@ shared by many interactions is re-certified against every later candidate.
   buckets and group variables are typically flags with very long buckets. Worth re-measuring
   directly before acting on.
 - `busPairCancel` (R8): `BusPairCancel.lean:207` `denseShieldScanSeg … arr alive 0 i` is a full
-  live-prefix scan per candidate send, and `:205` `denseLiveAllSeg … (i+1) (j-i-1)` the
-  between-region scan. 17.8 % of sha256 here (89.5 s / ~16 % on the 48-core box post-#210) — the
-  R8 design (b) sweep remains the fix.
-- `busUnify` (R10): `denseCheckPair` (`BusUnify.lean:82`) re-verifies `mid.all` for each candidate
-  the sweep proposed, and `denseEmitCand` (`:159`) materializes `w.revPre.reverse` — a fresh copy
-  of the whole prefix — per emitted candidate, even though `denseCollectForBus` (`:248`) never
-  reads `pre`/`post` (they exist only so the positional split can be stated). Making those two
-  fields lazy or position-only removes Θ(N) per candidate without touching the sweep's decisions,
-  which R10 correctly insists must stay bit-identical.
+  live-prefix scan per candidate send — the unconditional Θ(N²), and the strongest genuine
+  quadratic left after `reencode` (exponent 1.67, 21 % of sha256 post-#211). `:205`
+  `denseLiveAllSeg … (i+1) (j-i-1)` is the between-region scan and is cheap (gap = 1 in practice).
+  Beyond R8's design (b): the pass drops **one pair per `denseFindCancel` call and re-enters**,
+  whereas Rust's sweep collects every removable index in one pass and applies them together, so its
+  cost is O(rounds × B) rather than O(drops × B). Batching the drops is the shape to aim for; the
+  obstacle R8 already names is that dropping a consumed receive can un-shield an earlier message,
+  so a batch has to establish that the pairs it drops together do not interfere.
+- `busUnify` (R10, R9): 13 % of sha256 but exponent only **1.26** on the replica ladder — barely
+  above the 1.08–1.28 floor, so on these circuits it is a *constant-factor* problem, not a
+  quadratic one. The gdb stacks show why: `denseCheckPair` (`BusUnify.lean:82`) re-verifies
+  `mid.all` per candidate, and each element runs
+  `denseAddrTwoRootNeq → densePtrReductions → DenseLinExpr.scale`, which rebuilds the Mathlib
+  `ZMod.commRing` structure per call (R9). `mid` is short (see shape 2 above); the per-element
+  constant is what costs. R10's latent quadratic — `symOpen` windows tested against every later
+  message — is real but not triggered by this fixture.
+
+  One free win regardless: `denseEmitCand` (`:159`) materializes `w.revPre.reverse`, a fresh copy of
+  the whole prefix, per emitted candidate, even though `denseCollectForBus` (`:248`) never reads
+  `pre`/`post` — they exist only so the positional split can be *stated*. Store `revPre` and phrase
+  the split lemma with `revPre.reverse`: proofs are erased, so the runtime stops reversing and the
+  sweep's decisions are untouched.
 
 ### Secondary: the cleanup fixpoint's round count
 
@@ -271,3 +286,34 @@ gdb -p <pid> -batch -ex "thread apply all bt 40" -ex "thread apply all bt -8"
 ```
 
 Sampling inflates the sampled run (~30 %); use it for attribution, not for timings.
+
+## 7. Re-measured on top of #211
+
+Same container, same input, `a812c76`: sha256 **1046.7 s → 790.3 s (−25 %)**, `reencode`
+399.3 → 182.4 s (−54 %).
+
+| pass | `ff15446` | `a812c76` | share |
+| --- | --- | --- | --- |
+| `reencode` | 399 276 | 182 405 | 23.1 % |
+| `busPairCancel` | 186 121 | 166 493 | 21.1 % |
+| `busUnify` | 117 529 | 103 927 | 13.2 % |
+| `gauss` | 48 903 | 53 474 | 6.8 % |
+| `domainBatch` | 47 700 | 43 186 | 5.5 % |
+| `flagFold` | 31 717 | 32 917 | 4.2 % |
+| `bytePack` (+ `bytePackLate`) | 45 327 | 43 965 | 5.6 % |
+| `rootPairUnify` | 22 888 | 23 568 | 3.0 % |
+| `domainFold` | 9 528 | 9 855 | 1.2 % |
+
+Two things to take from this:
+
+- **The cost did not shift here.** `domainFold` stayed at ~9.9 s, so on sha256 the reencode
+  indexing was a clean win. The §3 ablation's cost-shifting is real but *circuit-dependent*: it
+  showed up on the replica fixture, where `domainFold` was the pass holding the candidate groups.
+  Check both passes when touching either, but do not assume the shift.
+- **`reencode` is still the largest single pass** at 23 %, because #211 indexed the degree pre-gate
+  and the fresh-name counts, not `denseCheckReencode`'s `denseCoveredCsOf` filter or its
+  `O(bits × system)` freshness scan. Those two are the remaining per-candidate whole-system scans
+  (R13).
+
+The top three passes are 57 % of the run and all three are still quadratic; the per-cycle
+front-loading is unchanged (cycles 0–2 are 78 %).
