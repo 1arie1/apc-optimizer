@@ -400,12 +400,25 @@ congruence); and `denseLiveSeg_congr` for the `alive → aliveNew` transport. Cl
 change and on `emitted`. Modelled at 62× (mixed keys) to 186× (32 keys). A wrong entry costs time,
 never soundness — the O(|addressFields|) slot check is the guard, falling back to `w = 0`.
 
-Two independent wins found alongside: (i) with `addressFields = []`, `denseAddrNonzeroNeq` degenerates
-to a witness scan *independent of both `S` and `m`*, yet is re-evaluated per prefix message with
-`DenseLinExpr.scale`/`norm` allocations — hoist it (pure refactor, and the bridge is 8006 of
-sha256's 71k interactions); (ii) the off-bus fold identity also licenses scanning only the bus's own
-positions, modelled at 3.45× on the memory bus — but that one is *trusted*, so it needs a
-completeness proof for the per-bus position index.
+Two independent wins found alongside.
+
+**(i) `denseAddrNonzeroNeq` on the execution bridge — likely the largest single constant factor left
+in this pass.** `addressFields = []` there (`OpenVmSemantics.lean`), and `[].sublists = [[]]`, so the
+`any` runs exactly once with `T = []`; `denseDiffSumOver S m [] = some ⟨0, []⟩`, so the body reduces
+to `nw.wits.any (fun g => denseIsZeroLin (0 − g) || denseIsZeroLin (0 + g))` — **independent of both
+`S` and `m`**, i.e. a constant for the whole invocation. But it is re-evaluated for *every* prefix
+message of *every* candidate, and each witness costs two `DenseLinExpr` `add`/`scale` allocations.
+`nw.wits` is `constraints.flatMap denseReciprocalWits?`, so on sha256_big (146k constraints) that
+inner scan can be thousands of allocations per message. The bridge is 8006 of sha256's 71k
+interactions and `addressFields = []` makes every message same-address, so this is on the hot path
+for the whole bridge sweep. Fix: carry the `T = []` value once per invocation (a `Bool` alongside the
+witness list) rather than recomputing it. Note it cannot simply be replaced by `false`: a
+syntactically-zero witness would make it `true`, which `DenseNonzeroWits.Sound` only rules out for
+satisfiable systems — so hoist the computation, do not assume its result.
+
+**(ii)** The off-bus fold identity also licenses scanning only the bus's own positions, modelled at
+3.45× on the memory bus — but that one is *trusted*, so it needs a completeness proof for the per-bus
+position index.
 
 **R9a (done, entry 144).** `DenseTwoRootMap.addVars` re-linearized a product's factors per
 variable; `addVarsFast` + `@[csimp] addVars_eq_fast` hoists them. The `@[csimp]` twin is the
