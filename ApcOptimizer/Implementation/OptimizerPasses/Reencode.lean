@@ -127,6 +127,34 @@ def denseGroupSurvivorsE (es : List (DenseExpr p)) (doms : List (VarId × List (
     (denseAssignments doms).filter
       (fun a => es.all (fun c => decide (c.evalFast (denseEnvOfFast a) = 0)))
 
+/-- `filter P l` if it keeps at most `cap` elements, `none` as soon as a `cap + 1`-st hit shows
+    up — the tail is not scanned. -/
+def denseFilterCap {α : Type} (P : α → Bool) : Nat → List α → Option (List α)
+  | _, [] => some []
+  | cap, x :: rest =>
+    if P x then
+      match cap with
+      | 0 => none
+      | cap + 1 =>
+        match denseFilterCap P cap rest with
+        | some l => some (x :: l)
+        | none => none
+    else denseFilterCap P cap rest
+
+/-- `denseGroupSurvivorsE`, stopping as soon as more than `cap` survivors exist. The build uses
+    `cap = 2 ^ (xs.length − 1)`: any larger survivor count makes `Nat.clog 2` reach the group
+    size and the `k < xs.length` gate reject, so the outcome is the full enumeration's. -/
+def denseGroupSurvivorsECap (es : List (DenseExpr p)) (doms : List (VarId × List (ZMod p)))
+    (cap : Nat) : Option (List (List (VarId × ZMod p))) :=
+  match denseCompileEs (doms.map Prod.fst) es with
+  | some ces =>
+    denseFilterCap
+      (denseSurvZeroCW (inferInstance : Add (ZMod p)).add (inferInstance : Mul (ZMod p)).mul ces)
+      cap (denseAssignments doms)
+  | none =>
+    denseFilterCap (fun a => es.all (fun c => decide (c.evalFast (denseEnvOfFast a) = 0)))
+      cap (denseAssignments doms)
+
 /-! ## The checked re-encoding certificate -/
 
 /-- All checked side conditions for one re-encoding step. The freshness conjunct is deliberately
@@ -434,7 +462,9 @@ def denseBuildReencode (reg : VarRegistry) (useIdx : Bool) (csIdx : DenseCovInde
         -- single-var-only covered set (one per variable): survivors = box; unencodable
         (reg, none)
       else
-      let survs := denseGroupSurvivorsE es doms
+      match denseGroupSurvivorsECap es doms (2 ^ (xs.length - 1)) with
+      | none => (reg, none)
+      | some survs =>
       if 2 ≤ survs.length then
         let k := Nat.clog 2 survs.length
         if k < xs.length then
@@ -467,7 +497,9 @@ def denseBuildReencodeCached (reg : VarRegistry) (useIdx : Bool) (csIdx : DenseC
           && xs.length ≤ Nat.clog 2 boxSize then
         (reg, none, cache)
       else
-      let survs := denseGroupSurvivorsE es doms
+      match denseGroupSurvivorsECap es doms (2 ^ (xs.length - 1)) with
+      | none => (reg, none, cache)
+      | some survs =>
       if 2 ≤ survs.length then
         let k := Nat.clog 2 survs.length
         if k < xs.length then
