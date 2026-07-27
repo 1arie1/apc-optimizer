@@ -231,6 +231,60 @@ def denseLinAdd (a b : DenseLinExpr p) : DenseLinExpr p :=
 def denseLinScale (k : ZMod p) (l : DenseLinExpr p) : DenseLinExpr p :=
   (l.scale k).norm
 
+/-- Boxed twin of `denseLinSubstF`, sharing one `DenseZModOps p` with the normal form it builds. -/
+def denseLinSubstFWith (ops : DenseZModOps p) (l : DenseLinExpr p)
+    (σ : VarId → Option (DenseLinExpr p)) : DenseLinExpr p :=
+  let const := l.terms.foldl (fun out yc =>
+    match σ yc.1 with
+    | some t => ops.add out (ops.mul yc.2 t.const)
+    | none => out) l.const
+  let terms := l.terms.flatMap (fun yc =>
+    match σ yc.1 with
+    | some t => denseScaleTermsWith ops yc.2 t.terms
+    | none => [yc])
+  (DenseLinExpr.mk const terms).normWith ops
+
+def denseLinSubstFFast (l : DenseLinExpr p) (σ : VarId → Option (DenseLinExpr p)) :
+    DenseLinExpr p :=
+  denseLinSubstFWith denseZModOps l σ
+
+theorem denseLinSubstFWith_eq (ops : DenseZModOps p) (l : DenseLinExpr p)
+    (σ : VarId → Option (DenseLinExpr p)) : denseLinSubstFWith ops l σ = denseLinSubstF l σ := by
+  simp only [denseLinSubstFWith, denseLinSubstF, DenseLinExpr.normWith_eq, ops.add_eq, ops.mul_eq,
+    denseScaleTermsWith_eq]
+
+@[csimp] theorem denseLinSubstF_eq_fast : @denseLinSubstF = @denseLinSubstFFast := by
+  funext p l σ
+  exact (denseLinSubstFWith_eq denseZModOps l σ).symm
+
+def denseLinAddWith (ops : DenseZModOps p) (a b : DenseLinExpr p) : DenseLinExpr p :=
+  (a.addWith ops b).normWith ops
+
+def denseLinAddFast (a b : DenseLinExpr p) : DenseLinExpr p :=
+  denseLinAddWith denseZModOps a b
+
+theorem denseLinAddWith_eq (ops : DenseZModOps p) (a b : DenseLinExpr p) :
+    denseLinAddWith ops a b = denseLinAdd a b := by
+  simp only [denseLinAddWith, denseLinAdd, DenseLinExpr.addWith_eq, DenseLinExpr.normWith_eq]
+
+@[csimp] theorem denseLinAdd_eq_fast : @denseLinAdd = @denseLinAddFast := by
+  funext p a b
+  exact (denseLinAddWith_eq denseZModOps a b).symm
+
+def denseLinScaleWith (ops : DenseZModOps p) (k : ZMod p) (l : DenseLinExpr p) : DenseLinExpr p :=
+  (l.scaleWith ops k).normWith ops
+
+def denseLinScaleFast (k : ZMod p) (l : DenseLinExpr p) : DenseLinExpr p :=
+  denseLinScaleWith denseZModOps k l
+
+theorem denseLinScaleWith_eq (ops : DenseZModOps p) (k : ZMod p) (l : DenseLinExpr p) :
+    denseLinScaleWith ops k l = denseLinScale k l := by
+  simp only [denseLinScaleWith, denseLinScale, DenseLinExpr.scaleWith_eq, DenseLinExpr.normWith_eq]
+
+@[csimp] theorem denseLinScale_eq_fast : @denseLinScale = @denseLinScaleFast := by
+  funext p k l
+  exact (denseLinScaleWith_eq denseZModOps k l).symm
+
 def DenseLinExpr.mentions (l : DenseLinExpr p) (x : VarId) : Bool :=
   l.terms.any (fun yc => yc.1 = x)
 
@@ -341,6 +395,52 @@ def denseSparseSubstFused (σ : VarId → Option (DenseLinExpr p)) :
           else .opq (denseReducedMul (ra.reduced σ) (rb.reduced σ))
       | _, _ => .opq (denseReducedMul (ra.reduced σ) (rb.reduced σ))
 
+/-- Boxed twin of the fused walk. Its `var` leaf builds `⟨0, [(x, 1)]⟩`, so without a shared
+    `DenseZModOps p` every variable occurrence of every constraint costs two instance chains. -/
+def denseSparseSubstFusedWith (ops : DenseZModOps p) (σ : VarId → Option (DenseLinExpr p)) :
+    DenseExpr p → DenseSubstRes p
+  | .const n => .pre (.affine ⟨n, []⟩) ⟨n, []⟩
+  | .var x =>
+      .pre (match σ x with | some row => .affine row | none => .affine ⟨ops.zero, [(x, ops.one)]⟩)
+        ⟨ops.zero, [(x, ops.one)]⟩
+  | .add a b =>
+      let ra := denseSparseSubstFusedWith ops σ a
+      let rb := denseSparseSubstFusedWith ops σ b
+      match ra.lin?, rb.lin? with
+      | some la, some lb => .lin (la.addWith ops lb)
+      | _, _ => .opq (denseReducedAdd (ra.reduced σ) (rb.reduced σ))
+  | .mul a b =>
+      let ra := denseSparseSubstFusedWith ops σ a
+      let rb := denseSparseSubstFusedWith ops σ b
+      match ra.lin?, rb.lin? with
+      | some la, some lb =>
+          if la.terms.isEmpty then .lin (lb.scaleWith ops la.const)
+          else if lb.terms.isEmpty then .lin (la.scaleWith ops lb.const)
+          else .opq (denseReducedMul (ra.reduced σ) (rb.reduced σ))
+      | _, _ => .opq (denseReducedMul (ra.reduced σ) (rb.reduced σ))
+
+theorem denseSparseSubstFusedWith_eq (ops : DenseZModOps p) (σ : VarId → Option (DenseLinExpr p))
+    (e : DenseExpr p) : denseSparseSubstFusedWith ops σ e = denseSparseSubstFused σ e := by
+  induction e with
+  | const n => rfl
+  | var x =>
+      simp only [denseSparseSubstFusedWith, denseSparseSubstFused, ops.zero_eq, ops.one_eq]
+  | add a b iha ihb =>
+      simp only [denseSparseSubstFusedWith, denseSparseSubstFused, iha, ihb,
+        DenseLinExpr.addWith_eq]
+  | mul a b iha ihb =>
+      simp only [denseSparseSubstFusedWith, denseSparseSubstFused, iha, ihb,
+        DenseLinExpr.scaleWith_eq]
+
+def denseSparseSubstFusedFast (σ : VarId → Option (DenseLinExpr p)) (e : DenseExpr p) :
+    DenseSubstRes p :=
+  denseSparseSubstFusedWith denseZModOps σ e
+
+@[csimp] theorem denseSparseSubstFused_eq_fast :
+    @denseSparseSubstFused = @denseSparseSubstFusedFast := by
+  funext p σ e
+  exact (denseSparseSubstFusedWith_eq denseZModOps σ e).symm
+
 def denseSparseSubstFFast (σ : VarId → Option (DenseLinExpr p)) (e : DenseExpr p) :
     DenseGaussReduced p :=
   (denseSparseSubstFused σ e).reduced σ
@@ -430,6 +530,29 @@ def denseSparseSolveAt (l : DenseLinExpr p) (x : VarId) :
   else if l.coeff x * (l.coeff x)⁻¹ = 1 then
     some (x, denseLinScale (-(l.coeff x)⁻¹) (l.others x))
   else none
+
+/-- Boxed twin of `denseSparseSolveAt`, binding the pivot coefficient once. -/
+def denseSparseSolveAtWith (ops : DenseZModOps p) (l : DenseLinExpr p) (x : VarId) :
+    Option (VarId × DenseLinExpr p) :=
+  let c := denseCoeffSumWith ops x l.terms
+  if c = ops.one then some (x, denseLinScaleWith ops ops.negOne (l.others x))
+  else if c = ops.negOne then some (x, l.others x)
+  else if ops.mul c c⁻¹ = ops.one then
+    some (x, denseLinScaleWith ops (ops.mul ops.negOne c⁻¹) (l.others x))
+  else none
+
+def denseSparseSolveAtFast (l : DenseLinExpr p) (x : VarId) : Option (VarId × DenseLinExpr p) :=
+  denseSparseSolveAtWith denseZModOps l x
+
+theorem denseSparseSolveAtWith_eq (ops : DenseZModOps p) (l : DenseLinExpr p) (x : VarId) :
+    denseSparseSolveAtWith ops l x = denseSparseSolveAt l x := by
+  simp only [denseSparseSolveAtWith, denseSparseSolveAt, DenseLinExpr.coeff,
+    denseCoeffSumWith_eq, denseLinScaleWith_eq, ops.one_eq, ops.negOne_eq, ops.mul_eq,
+    ← neg_eq_neg_one_mul]
+
+@[csimp] theorem denseSparseSolveAt_eq_fast : @denseSparseSolveAt = @denseSparseSolveAtFast := by
+  funext p l x
+  exact (denseSparseSolveAtWith_eq denseZModOps l x).symm
 
 def denseSparseBest (l : DenseLinExpr p) (occ : Std.HashMap VarId Nat)
     (prot : Std.HashSet VarId) : Option (VarId × DenseLinExpr p) :=
@@ -521,6 +644,43 @@ def denseMarkowitzPivots (r : DenseGaussReduced p) (occ : Std.HashMap VarId Nat)
           ({ var := x, rhsNnz := l.terms.length - cv.2 } :: out, seen.insert x))
         (([], ∅) : List DenseMarkowitzPivot × Std.HashSet VarId)
       out.1.reverse
+
+/-- Boxed twin of `denseMarkowitzPivots`. The body re-inlines `densePivotDescs` rather than calling
+    it, so that function's `@[csimp]` does not reach the two descriptor scans here. -/
+def denseMarkowitzPivotsWith (ops : DenseZModOps p) (r : DenseGaussReduced p)
+    (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId) : List DenseMarkowitzPivot :=
+  match r with
+  | .nonlinear _ => []
+  | .affine l =>
+      let idx := denseCoeffIdxWith ops l.terms ∅
+      let vars := l.terms.map Prod.fst
+      let descs := vars.filterMap (densePm1DescWith ops idx l.terms.length occ prot) ++
+        vars.filterMap (denseUnitDescWith ops idx l.terms.length occ prot)
+      let out := descs.foldl (fun (out, seen) (x, _) =>
+        if seen.contains x then (out, seen)
+        else
+          let cv := (idx[x]?).getD (ops.zero, 0)
+          ({ var := x, rhsNnz := l.terms.length - cv.2 } :: out, seen.insert x))
+        (([], ∅) : List DenseMarkowitzPivot × Std.HashSet VarId)
+      out.1.reverse
+
+def denseMarkowitzPivotsFast (r : DenseGaussReduced p) (occ : Std.HashMap VarId Nat)
+    (prot : Std.HashSet VarId) : List DenseMarkowitzPivot :=
+  denseMarkowitzPivotsWith denseZModOps r occ prot
+
+theorem denseMarkowitzPivotsWith_eq (ops : DenseZModOps p) (r : DenseGaussReduced p)
+    (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId) :
+    denseMarkowitzPivotsWith ops r occ prot = denseMarkowitzPivots r occ prot := by
+  cases r with
+  | nonlinear _ => rfl
+  | affine l =>
+      simp only [denseMarkowitzPivotsWith, denseMarkowitzPivots, denseCoeffIdx,
+        denseCoeffIdxWith_eq, densePm1DescWith_eq, denseUnitDescWith_eq, ops.zero_eq]
+
+@[csimp] theorem denseMarkowitzPivots_eq_fast :
+    @denseMarkowitzPivots = @denseMarkowitzPivotsFast := by
+  funext p r occ prot
+  exact (denseMarkowitzPivotsWith_eq denseZModOps r occ prot).symm
 
 def denseMarkowitzRow (rowId : Nat) (e : DenseExpr p) (occ : Std.HashMap VarId Nat)
     (prot : Std.HashSet VarId) (generation : Nat := 0) : DenseMarkowitzRow p :=

@@ -27,6 +27,50 @@ def DenseLinExpr.add (a b : DenseLinExpr p) : DenseLinExpr p :=
 def DenseLinExpr.scale (k : ZMod p) (a : DenseLinExpr p) : DenseLinExpr p :=
   ⟨k * a.const, a.terms.map (fun t => (t.1, k * t.2))⟩
 
+/-! ## Boxed runtime twins
+
+`p` is a runtime value, so every `ZMod p` operation Lean compiles inline re-derives the whole
+`CommRing (ZMod p)` instance chain — `ZMod.commRing` alone allocates nine closures. A `…With ops`
+twin takes a `DenseZModOps p` (`Encoding.lean`) instead, so a traversal costs one instance chain
+rather than one per element. Same pattern as `denseCoeffIdxWith` in `Gauss.lean`.
+
+A twin gets a `@[csimp]` only when it loops: building a `DenseZModOps p` costs about one instance
+chain itself, so for a function performing a single operation (`add`) the twin stays a plain helper
+for callers that already hold an `ops`. -/
+
+def DenseLinExpr.addWith (ops : DenseZModOps p) (a b : DenseLinExpr p) : DenseLinExpr p :=
+  ⟨ops.add a.const b.const, a.terms ++ b.terms⟩
+
+theorem DenseLinExpr.addWith_eq (ops : DenseZModOps p) (a b : DenseLinExpr p) :
+    a.addWith ops b = a.add b := by
+  simp only [DenseLinExpr.addWith, DenseLinExpr.add, ops.add_eq]
+
+def denseScaleTermsWith (ops : DenseZModOps p) (k : ZMod p) :
+    List (VarId × ZMod p) → List (VarId × ZMod p)
+  | [] => []
+  | t :: ts => (t.1, ops.mul k t.2) :: denseScaleTermsWith ops k ts
+
+theorem denseScaleTermsWith_eq (ops : DenseZModOps p) (k : ZMod p)
+    (l : List (VarId × ZMod p)) : denseScaleTermsWith ops k l = l.map (fun t => (t.1, k * t.2)) := by
+  induction l with
+  | nil => rfl
+  | cons t ts ih => simp only [denseScaleTermsWith, List.map_cons, ops.mul_eq, ih]
+
+def DenseLinExpr.scaleWith (ops : DenseZModOps p) (k : ZMod p) (a : DenseLinExpr p) :
+    DenseLinExpr p :=
+  ⟨ops.mul k a.const, denseScaleTermsWith ops k a.terms⟩
+
+def DenseLinExpr.scaleFast (k : ZMod p) (a : DenseLinExpr p) : DenseLinExpr p :=
+  DenseLinExpr.scaleWith denseZModOps k a
+
+theorem DenseLinExpr.scaleWith_eq (ops : DenseZModOps p) (k : ZMod p) (a : DenseLinExpr p) :
+    a.scaleWith ops k = a.scale k := by
+  simp only [DenseLinExpr.scaleWith, DenseLinExpr.scale, ops.mul_eq, denseScaleTermsWith_eq]
+
+@[csimp] theorem DenseLinExpr.scale_eq_fast : @DenseLinExpr.scale = @DenseLinExpr.scaleFast := by
+  funext p k a
+  exact (DenseLinExpr.scaleWith_eq denseZModOps k a).symm
+
 /-- Try to view a dense expression as a linear form (`none` on a variable×variable product). -/
 def denseLinearize : DenseExpr p → Option (DenseLinExpr p)
   | .const n => some ⟨n, []⟩
@@ -120,6 +164,78 @@ def denseLinearizeFast (e : DenseExpr p) : Option (DenseLinExpr p) :=
   simp only [denseLinearizeFast, denseLinearizeAcc_eq, Option.map_map, List.append_nil]
   cases denseLinearize e <;> rfl
 
+/-- Boxed twin of `denseScaleAppend`; see the `…With` note above. -/
+def denseScaleAppendWith (ops : DenseZModOps p) (k : ZMod p) :
+    List (VarId × ZMod p) → List (VarId × ZMod p) → List (VarId × ZMod p)
+  | [], acc => acc
+  | t :: ts, acc => (t.1, ops.mul k t.2) :: denseScaleAppendWith ops k ts acc
+
+theorem denseScaleAppendWith_eq (ops : DenseZModOps p) (k : ZMod p)
+    (l acc : List (VarId × ZMod p)) :
+    denseScaleAppendWith ops k l acc = denseScaleAppend k l acc := by
+  induction l generalizing acc with
+  | nil => rfl
+  | cons t ts ih => simp only [denseScaleAppendWith, denseScaleAppend, ops.mul_eq, ih]
+
+def denseScaleAppendFast (k : ZMod p) (l acc : List (VarId × ZMod p)) :
+    List (VarId × ZMod p) :=
+  denseScaleAppendWith denseZModOps k l acc
+
+@[csimp] theorem denseScaleAppend_eq_fast : @denseScaleAppend = @denseScaleAppendFast := by
+  funext p k l acc
+  exact (denseScaleAppendWith_eq denseZModOps k l acc).symm
+
+/-- Boxed twin of `denseLinearizeAcc`: the `var` leaf alone needs `0` and `1`, i.e. two instance
+    chains per variable occurrence in every expression the optimizer linearizes. -/
+def denseLinearizeAccWith (ops : DenseZModOps p) : DenseExpr p → List (VarId × ZMod p) →
+    Option (ZMod p × List (VarId × ZMod p))
+  | .const n, acc => some (n, acc)
+  | .var i, acc => some (ops.zero, (i, ops.one) :: acc)
+  | .add a b, acc =>
+      match denseLinearizeAccWith ops b acc with
+      | none => none
+      | some (cb, acc') =>
+        match denseLinearizeAccWith ops a acc' with
+        | none => none
+        | some (ca, acc'') => some (ops.add ca cb, acc'')
+  | .mul a b, acc =>
+      match denseLinearizeAccWith ops a [], denseLinearizeAccWith ops b [] with
+      | some (ca, ta), some (cb, tb) =>
+          if ta.isEmpty then some (ops.mul ca cb, denseScaleAppendWith ops ca tb acc)
+          else if tb.isEmpty then some (ops.mul cb ca, denseScaleAppendWith ops cb ta acc)
+          else none
+      | _, _ => none
+
+theorem denseLinearizeAccWith_eq (ops : DenseZModOps p) (e : DenseExpr p) :
+    ∀ acc, denseLinearizeAccWith ops e acc = denseLinearizeAcc e acc := by
+  induction e with
+  | const n => intro acc; rfl
+  | var i => intro acc; simp only [denseLinearizeAccWith, denseLinearizeAcc, ops.zero_eq, ops.one_eq]
+  | add a b iha ihb =>
+      intro acc
+      simp only [denseLinearizeAccWith, denseLinearizeAcc, ihb acc]
+      cases denseLinearizeAcc b acc with
+      | none => rfl
+      | some rb => simp only [iha rb.2]; cases denseLinearizeAcc a rb.2 <;> simp [ops.add_eq]
+  | mul a b iha ihb =>
+      intro acc
+      simp only [denseLinearizeAccWith, denseLinearizeAcc, iha [], ihb []]
+      cases denseLinearizeAcc a [] with
+      | none => rfl
+      | some ra =>
+        cases denseLinearizeAcc b [] with
+        | none => rfl
+        | some rb =>
+          simp only [ops.mul_eq, denseScaleAppendWith_eq]
+
+def denseLinearizeAccFast (e : DenseExpr p) (acc : List (VarId × ZMod p)) :
+    Option (ZMod p × List (VarId × ZMod p)) :=
+  denseLinearizeAccWith denseZModOps e acc
+
+@[csimp] theorem denseLinearizeAcc_eq_fast : @denseLinearizeAcc = @denseLinearizeAccFast := by
+  funext p e acc
+  exact (denseLinearizeAccWith_eq denseZModOps e acc).symm
+
 /-- Turn a dense linear form back into a dense expression. -/
 def DenseLinExpr.toExpr (l : DenseLinExpr p) : DenseExpr p :=
   l.terms.foldl (fun acc t => .add acc (.mul (.const t.2) (.var t.1))) (.const l.const)
@@ -185,6 +301,31 @@ theorem denseLinearize_mem_vars (e : DenseExpr p) (l : DenseLinExpr p)
 /-- Total coefficient of `x` in a dense linear form. -/
 def DenseLinExpr.coeff (l : DenseLinExpr p) (x : VarId) : ZMod p :=
   ((l.terms.filter (fun t => t.1 = x)).map Prod.snd).sum
+
+/-- Boxed twin of `coeff`: one pass, no `filter`/`map` intermediates, one instance chain per call
+    instead of one per term (`List.sum` needs `+` and `0`). -/
+def denseCoeffSumWith (ops : DenseZModOps p) (x : VarId) : List (VarId × ZMod p) → ZMod p
+  | [] => ops.zero
+  | t :: ts =>
+      if t.1 = x then ops.add t.2 (denseCoeffSumWith ops x ts) else denseCoeffSumWith ops x ts
+
+theorem denseCoeffSumWith_eq (ops : DenseZModOps p) (x : VarId) (ts : List (VarId × ZMod p)) :
+    denseCoeffSumWith ops x ts = ((ts.filter (fun t => t.1 = x)).map Prod.snd).sum := by
+  induction ts with
+  | nil => simp [denseCoeffSumWith, ops.zero_eq]
+  | cons t rest ih =>
+      by_cases hx : t.1 = x
+      · rw [List.filter_cons_of_pos (by simpa using hx)]
+        simp only [denseCoeffSumWith, if_pos hx, ih, List.map_cons, List.sum_cons, ops.add_eq]
+      · rw [List.filter_cons_of_neg (by simpa using hx)]
+        simp only [denseCoeffSumWith, if_neg hx, ih]
+
+def DenseLinExpr.coeffFast (l : DenseLinExpr p) (x : VarId) : ZMod p :=
+  denseCoeffSumWith denseZModOps x l.terms
+
+@[csimp] theorem DenseLinExpr.coeff_eq_fast : @DenseLinExpr.coeff = @DenseLinExpr.coeffFast := by
+  funext p l x
+  exact (denseCoeffSumWith_eq denseZModOps x l.terms).symm
 
 /-- The dense linear form with all `x` terms removed. -/
 def DenseLinExpr.others (l : DenseLinExpr p) (x : VarId) : DenseLinExpr p :=
