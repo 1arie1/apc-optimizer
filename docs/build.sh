@@ -19,8 +19,9 @@ build_once() {
   lake build docs
   rm -rf "$OUT"
   lake exe docs --output "$OUT"
-  # Ship the figure alongside the page (Verso references it relatively).
-  cp docs/assets/trust.svg "$HTML/"
+  # Ship image assets alongside the page (Verso references them relatively).
+  find docs/assets -type f \( -name '*.svg' -o -name '*.png' -o -name '*.jpg' \
+    -o -name '*.jpeg' -o -name '*.gif' -o -name '*.webp' \) -exec cp {} "$HTML/" \;
 }
 
 # First free port at or above ${PORT:-8017}, so a leftover server doesn't cause
