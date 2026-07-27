@@ -5075,11 +5075,16 @@ with circuit size.
 - `densePtrReductions` (addrDiseq) used `List.eraseDups` on a linear form's variable list, per
   compared message pair; routed through the existing proven `HashedDedup.hashedEraseDups`.
 
-**Numbers** (CI `Runtime Bench`, sha256, quiet 32-core runner, target vs baseline on the same
-runner): total **350.4 → 324.6 s (0.93×)**; gauss 30.2 → 22.0 (0.73×), normalize1 12.4 → 9.2
-(0.74×), normalize2 8.6 → 6.8 (0.79×), domainFold 0.91×, disconnected 0.90×, zeroRegister 0.90×,
-reencode 0.97×. Effectiveness-matrix runtime rows: wasm-eth −9 %, OpenVM keccak −7 %, openvm-eth
-−4 %, sp1/rsp −5 %.
+**Numbers** (CI `Runtime Bench`, sha256, quiet 32-core runner, both sides on the same runner).
+Against `main` after entry 146: total **253.2 → 240.3 s (0.95×)**; gauss 30.4 → 22.9 (0.75×),
+normalize1 12.1 → 9.3 (0.77×), normalize2 8.5 → 6.8 (0.80×), busPairCancelLate 0.83×,
+disconnected 0.91×, domainFold 0.92×, zeroRegister 0.93×, hintCollapse 0.93×, domainBatch 0.96×,
+reencode 1.02× (noise). Against `main` *before* entry 146 the same workflow measured
+350.4 → 324.6 s (0.93×) for an earlier head, so the two compose: 350.4 → 240.3 s.
+
+The effectiveness matrix's runtime row reported −17 % on sha256 for the same commit; that row is
+report-only and ran alongside five other sets. **Believe the serial `Runtime Bench` (0.95×), not
+the matrix row** — the same disagreement shows up on wasm-eth (−37 %) and sp1/rsp (−38 %).
 
 **Measurement lesson, worth more than the change.** The first local reading of this work was
 **0.86×**, and it was wrong: the `main` baseline profile had been taken with a gdb stack sampler
@@ -5094,9 +5099,14 @@ instrumentation, and treat any local sha256 total as unusable — dispatch `Runt
 74 % of samples against a profiler-measured 23 %. Sample with a ≥2 s gap and cross-check against
 `profile`.
 
-**Where sha256 stands after this** (same runner): reencode 112.5 s of 324.6 s (35 %), busPairCancel
-31.5, busUnify 29.9, gauss 22.0, domainBatch 19.3, bytePack 15.0. Reencode's `O(accepts × system)`
-per-accept rebuilds are the only remaining lever of that size, and PR #220 restructures exactly
-them; nothing here touches that code.
+**Where sha256 stands after this** (same runner, on top of entry 146): reencode 53.9 s of 240.3 s
+(22 %), busPairCancel 31.0, gauss 22.9, busUnify 19.9, domainBatch 18.9. The next lever of real
+size is `busPairCancel`'s address-disequality certificates: `denseAddrAffineNeq` /
+`denseAddrTwoRootNeq` / `denseAddrNonzeroNeq` recompute the whole *candidate* side (slot
+linearization, `densePtrReductions`, `denseDiffSumOver` over every address-field subset) once per
+compared message. Sampling puts ~42 % of the pass in that linear-form algebra. Hoisting a
+prepared-`S` record out of `denseLiveAllSeg`'s and `denseShieldScanSeg`'s inner loops makes it
+`O(candidates + messages)`; `denseShieldScanSeg` needs a closure-parameterized twin
+(`denseShieldScanSegW pre prov …`, one induction) so the caller can supply the prepared tests.
 
 **Worked: yes.**
