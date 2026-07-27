@@ -24,6 +24,30 @@ def denseTwoRootOfLins (l1 l2 : DenseLinExpr p) (x : VarId) :
   if k ≠ 0 ∧ l2.coeff x = k ∧ A2.terms = A.terms then some (k, A, A2.const - A.const)
   else none
 
+/-- One `DenseZModOps p` for the two coefficients, the two normal forms and the zero test. -/
+def denseTwoRootOfLinsWith (ops : DenseZModOps p) (l1 l2 : DenseLinExpr p) (x : VarId) :
+    Option (ZMod p × DenseLinExpr p × ZMod p) :=
+  let k := denseCoeffSumWith ops x l1.terms
+  let A := (l1.others x).normWith ops
+  let A2 := (l2.others x).normWith ops
+  if k ≠ ops.zero ∧ denseCoeffSumWith ops x l2.terms = k ∧ A2.terms = A.terms then
+    some (k, A, A2.const - A.const)
+  else none
+
+def denseTwoRootOfLinsFast (l1 l2 : DenseLinExpr p) (x : VarId) :
+    Option (ZMod p × DenseLinExpr p × ZMod p) :=
+  denseTwoRootOfLinsWith denseZModOps l1 l2 x
+
+theorem denseTwoRootOfLinsWith_eq (ops : DenseZModOps p) (l1 l2 : DenseLinExpr p) (x : VarId) :
+    denseTwoRootOfLinsWith ops l1 l2 x = denseTwoRootOfLins l1 l2 x := by
+  simp only [denseTwoRootOfLinsWith, denseTwoRootOfLins, DenseLinExpr.coeff,
+    denseCoeffSumWith_eq, DenseLinExpr.normWith_eq, ops.zero_eq]
+
+@[csimp] theorem denseTwoRootOfLins_eq_fast :
+    @denseTwoRootOfLins = @denseTwoRootOfLinsFast := by
+  funext p l1 l2 x
+  exact (denseTwoRootOfLinsWith_eq denseZModOps l1 l2 x).symm
+
 /-- The two-root decomposition of a dense constraint relative to `x`: `some (k, A, δ)` when the
     constraint is a product of two affine factors, both linear in `x` with the same nonzero
     coefficient `k`, whose `x`-free parts differ by the constant `δ`. -/
@@ -240,6 +264,32 @@ def denseAddrAffineNeq (shape : MemoryBusShape) (S bi : BusInteraction (DenseExp
        | some L, some L' => denseConstDiffNZ L L'
        | _, _ => false)
     | _, _ => false)
+
+/-- One `DenseZModOps p` above the slot scan: each slot otherwise derives three instance chains
+    (two linearizations and the constant-difference test). -/
+def denseAddrAffineNeqWith (ops : DenseZModOps p) (shape : MemoryBusShape)
+    (S bi : BusInteraction (DenseExpr p)) : Bool :=
+  shape.addressFields.any (fun slot =>
+    match S.payload[slot]?, bi.payload[slot]? with
+    | some e, some e' =>
+      (match denseLinearizeWith ops e, denseLinearizeWith ops e' with
+       | some L, some L' => denseConstDiffNZWith ops L L'
+       | _, _ => false)
+    | _, _ => false)
+
+def denseAddrAffineNeqFast (shape : MemoryBusShape) (S bi : BusInteraction (DenseExpr p)) : Bool :=
+  denseAddrAffineNeqWith denseZModOps shape S bi
+
+theorem denseAddrAffineNeqWith_eq (ops : DenseZModOps p) (shape : MemoryBusShape)
+    (S bi : BusInteraction (DenseExpr p)) :
+    denseAddrAffineNeqWith ops shape S bi = denseAddrAffineNeq shape S bi := by
+  simp only [denseAddrAffineNeqWith, denseAddrAffineNeq, denseLinearizeWith_eq,
+    denseConstDiffNZWith_eq]
+
+@[csimp] theorem denseAddrAffineNeq_eq_fast :
+    @denseAddrAffineNeq = @denseAddrAffineNeqFast := by
+  funext p shape S bi
+  exact (denseAddrAffineNeqWith_eq denseZModOps shape S bi).symm
 
 /-! ## The nonzero-witness (register-vs-RAM) address-disequality certificate -/
 

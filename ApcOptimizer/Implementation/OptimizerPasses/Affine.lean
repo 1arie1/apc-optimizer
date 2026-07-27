@@ -236,6 +236,18 @@ def denseLinearizeFast (e : DenseExpr p) : Option (DenseLinExpr p) :=
   simp only [denseLinearizeFast, denseLinearizeAcc_eq, Option.map_map, List.append_nil]
   cases denseLinearize e <;> rfl
 
+/-- `denseLinearize` on a caller-supplied `ops`. `denseLinearizeFast` builds its own, so a function
+    that linearizes and then normalizes/scales the result pays one instance chain per step; taking
+    `ops` once and calling this instead collapses them to one. -/
+def denseLinearizeWith (ops : DenseZModOps p) (e : DenseExpr p) : Option (DenseLinExpr p) :=
+  (denseLinearizeAccWith ops e []).map (fun r => ⟨r.1, r.2⟩)
+
+theorem denseLinearizeWith_eq (ops : DenseZModOps p) (e : DenseExpr p) :
+    denseLinearizeWith ops e = denseLinearize e := by
+  simp only [denseLinearizeWith, denseLinearizeAccWith_eq, denseLinearizeAcc_eq, Option.map_map,
+    List.append_nil]
+  cases denseLinearize e <;> rfl
+
 /-- Turn a dense linear form back into a dense expression. -/
 def DenseLinExpr.toExpr (l : DenseLinExpr p) : DenseExpr p :=
   l.terms.foldl (fun acc t => .add acc (.mul (.const t.2) (.var t.1))) (.const l.const)
