@@ -1,4 +1,5 @@
 import ApcOptimizer.Implementation.OptimizerPasses.Normalize
+import ApcOptimizer.Implementation.OptimizerPasses.HashedDedup
 import ApcOptimizer.MemoryBus
 
 set_option autoImplicit false
@@ -159,6 +160,28 @@ def densePtrReductions (T : DenseTwoRootMap p) (E : DenseExpr p) :
       match T.map[v]? with
       | some (k, A, δ) => some (densePtrBranchesOf k A δ (L.coeff v) (L.others v))
       | none => none)
+
+/-- Runtime `densePtrReductions`: the two-root variables are deduplicated through the hash-bucketed
+    twin. The list is a linear form's variable list, and the pass queries this per compared message
+    pair, so the `List.eraseDups` quadratic showed up directly in `busPairCancel`. -/
+def densePtrReductionsFast (T : DenseTwoRootMap p) (E : DenseExpr p) :
+    List (DenseLinExpr p × DenseLinExpr p) :=
+  match denseLinearize E with
+  | none => []
+  | some L =>
+    (HashedDedup.hashedEraseDups (hash ·) (L.terms.map Prod.fst)).filterMap (fun v =>
+      match T.map[v]? with
+      | some (k, A, δ) => some (densePtrBranchesOf k A δ (L.coeff v) (L.others v))
+      | none => none)
+
+@[csimp] theorem densePtrReductions_eq_fast :
+    @densePtrReductions = @densePtrReductionsFast := by
+  funext q T E
+  show densePtrReductions T E = _
+  unfold densePtrReductions densePtrReductionsFast
+  cases denseLinearize E with
+  | none => rfl
+  | some L => dsimp only; rw [HashedDedup.hashedEraseDups_eq]
 
 /-! ## Nonzero-constant differences -/
 
