@@ -50,6 +50,19 @@ prefix at every node — `O(terms²)`. `denseLinearizeAcc` builds the same list 
 (right subtree first), which costs one cons per term. Only `add` needs the accumulator; a `mul`
 that linearizes has a term-free side, so it scales rather than concatenates. -/
 
+/-- `l.map (fun t => (t.1, k * t.2)) ++ acc` in one pass, so the scaling `mul` branch below does
+    not build an intermediate list only to copy it onto the accumulator. -/
+def denseScaleAppend (k : ZMod p) :
+    List (VarId × ZMod p) → List (VarId × ZMod p) → List (VarId × ZMod p)
+  | [], acc => acc
+  | t :: ts, acc => (t.1, k * t.2) :: denseScaleAppend k ts acc
+
+theorem denseScaleAppend_eq (k : ZMod p) (l acc : List (VarId × ZMod p)) :
+    denseScaleAppend k l acc = l.map (fun t => (t.1, k * t.2)) ++ acc := by
+  induction l generalizing acc with
+  | nil => rfl
+  | cons t ts ih => simp [denseScaleAppend, ih]
+
 def denseLinearizeAcc : DenseExpr p → List (VarId × ZMod p) →
     Option (ZMod p × List (VarId × ZMod p))
   | .const n, acc => some (n, acc)
@@ -64,8 +77,8 @@ def denseLinearizeAcc : DenseExpr p → List (VarId × ZMod p) →
   | .mul a b, acc =>
       match denseLinearizeAcc a [], denseLinearizeAcc b [] with
       | some (ca, ta), some (cb, tb) =>
-          if ta.isEmpty then some (ca * cb, tb.map (fun t => (t.1, ca * t.2)) ++ acc)
-          else if tb.isEmpty then some (cb * ca, ta.map (fun t => (t.1, cb * t.2)) ++ acc)
+          if ta.isEmpty then some (ca * cb, denseScaleAppend ca tb acc)
+          else if tb.isEmpty then some (cb * ca, denseScaleAppend cb ta acc)
           else none
       | _, _ => none
 
@@ -93,9 +106,9 @@ theorem denseLinearizeAcc_eq (e : DenseExpr p) (acc : List (VarId × ZMod p)) :
         | some lb =>
           simp only [Option.map_some, List.append_nil]
           by_cases h1 : la.terms.isEmpty
-          · simp [denseLinearize, ha, hb, h1, DenseLinExpr.scale]
+          · simp [denseLinearize, ha, hb, h1, DenseLinExpr.scale, denseScaleAppend_eq]
           · by_cases h2 : lb.terms.isEmpty
-            · simp [denseLinearize, ha, hb, h1, h2, DenseLinExpr.scale]
+            · simp [denseLinearize, ha, hb, h1, h2, DenseLinExpr.scale, denseScaleAppend_eq]
             · simp [denseLinearize, ha, hb, h1, h2]
 
 def denseLinearizeFast (e : DenseExpr p) : Option (DenseLinExpr p) :=
