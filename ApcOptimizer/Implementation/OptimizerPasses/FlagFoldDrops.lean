@@ -98,7 +98,8 @@ def denseSlotEqCert (domIdx : Std.HashMap VarId (List (DenseExpr p))) (e e' : De
     | _, _ => false)
 
 /-- Full-message certificate: same bus, same constant multiplicity, pointwise-equal payloads. -/
-def denseMsgEqCert (domIdx : Std.HashMap VarId (List (DenseExpr p))) (bi bi' : BusInteraction (DenseExpr p)) : Bool :=
+def denseMsgEqCert (domIdx : Std.HashMap VarId (List (DenseExpr p)))
+    (bi bi' : BusInteraction (DenseExpr p)) : Bool :=
   bi.busId == bi'.busId &&
   (match bi.multiplicity.constValue?, bi'.multiplicity.constValue? with
    | some m, some m' => m == m'

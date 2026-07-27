@@ -1,6 +1,6 @@
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.BusPairCancelCheck
 import ApcOptimizer.Implementation.OptimizerPasses.BusPairCancelWits
-import ApcOptimizer.Implementation.OptimizerPasses.BusPairCancelKeyIdx
+import ApcOptimizer.Implementation.OptimizerPasses.Proofs.BusPairCancelKeyIdx
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.BusPairCancelIndex
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.AddrDiseq
 

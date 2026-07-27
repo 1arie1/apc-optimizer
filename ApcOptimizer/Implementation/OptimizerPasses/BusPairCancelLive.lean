@@ -197,31 +197,8 @@ theorem denseLiveArr_eq (arr : Array (BusInteraction (DenseExpr p))) (alive : Ar
     denseLiveArr arr alive halive lo n hb = denseLiveSeg arr alive lo n := by
   rw [denseLiveArr, denseLiveArrGo_eq]; simp
 
-/-! `denseLiveAllSeg` is `all` over the live projection computed directly on the array segment —
-the per-candidate region checks would otherwise materialize an O(segment) list each time. -/
-
-/-- `(denseLiveSeg arr alive lo n).all P` without the intermediate list. -/
-def denseLiveAllSeg (arr : Array (BusInteraction (DenseExpr p))) (alive : Array Bool)
-    (P : BusInteraction (DenseExpr p) → Bool) : (lo n : Nat) → Bool
-  | _, 0 => true
-  | lo, n + 1 =>
-    (if alive[lo]?.getD false then (arr[lo]?).elim true P else true)
-      && denseLiveAllSeg arr alive P (lo + 1) n
-
-theorem denseLiveAllSeg_eq (arr : Array (BusInteraction (DenseExpr p))) (alive : Array Bool)
-    (P : BusInteraction (DenseExpr p) → Bool) :
-    ∀ (lo n : Nat), denseLiveAllSeg arr alive P lo n = (denseLiveSeg arr alive lo n).all P := by
-  intro lo n
-  induction n generalizing lo with
-  | zero => rfl
-  | succ n ih =>
-      rw [denseLiveAllSeg, denseLiveSeg, ih (lo + 1), List.all_append]
-      cases halive : alive[lo]?.getD false
-      · simp
-      · cases harr : arr[lo]? <;> simp [Option.elim]
-
-/-- `denseLiveAllSeg` over a derived per-position array (e.g. prepared certificate records), so a
-    per-element preparation is computed once per position instead of once per query. -/
+/-- `(denseLiveSeg ..).all` over a derived per-position array (e.g. prepared certificate
+    records), with neither the segment list nor the per-position derivation materialized. -/
 def denseLiveAllSegP {α : Type} (preArr : Array α) (alive : Array Bool)
     (P : α → Bool) : (lo n : Nat) → Bool
   | _, 0 => true
@@ -233,13 +210,15 @@ theorem denseLiveAllSegP_eq {α : Type} (f : BusInteraction (DenseExpr p) → α
     (arr : Array (BusInteraction (DenseExpr p))) (alive : Array Bool) (P : α → Bool) :
     ∀ (lo n : Nat),
       denseLiveAllSegP (arr.map f) alive P lo n
-        = denseLiveAllSeg arr alive (fun m => P (f m)) lo n := by
+        = (denseLiveSeg arr alive lo n).all (fun m => P (f m)) := by
   intro lo n
   induction n generalizing lo with
   | zero => rfl
   | succ n ih =>
-      rw [denseLiveAllSegP, denseLiveAllSeg, ih (lo + 1), Array.getElem?_map]
-      cases arr[lo]? <;> rfl
+      rw [denseLiveAllSegP, denseLiveSeg, ih (lo + 1), List.all_append, Array.getElem?_map]
+      cases halive : alive[lo]?.getD false
+      · simp
+      · cases harr : arr[lo]? <;> simp [Option.elim]
 
 /-- The logical constraint system at a point in the loop: the original system with its interactions
     replaced by the live projection followed by the checks emitted so far. -/
