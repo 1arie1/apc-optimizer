@@ -629,46 +629,15 @@ def denseRegisterBits (reg : VarRegistry) (freshBase : String) (k : Nat) :
     (reg, [])
 
 /-- Construct the bits and the substitution map for a candidate group (proof-free — the checked
-    certificate re-verifies everything). Registers fresh bits only on the single accepting path. -/
-def denseBuildReencode (reg : VarRegistry) (useIdx : Bool) (csIdx : DenseCovIndex)
-    (arrCs : Array (DenseExpr p)) (xs : List VarId) (freshBase : String) :
-    VarRegistry × Option (List VarId × Std.HashMap VarId (DenseExpr p)) :=
-  let es := if useIdx then denseCoveredIdx csIdx arrCs (denseCoveredBy xs) xs
-    else arrCs.foldr (fun c acc => if denseCoveredBy xs c then c :: acc else acc) []
-  match denseGroupDoms es xs with
-  | none => (reg, none)
-  | some doms =>
-    let boxSize := (doms.map (fun yd => yd.2.length)).prod
-    if boxSize ≤ 256 then
-      if es.length == xs.length && es.all (fun c => c.vars.eraseDups.length == 1)
-          && xs.length ≤ Nat.clog 2 boxSize then
-        -- single-var-only covered set (one per variable): survivors = box; unencodable
-        (reg, none)
-      else
-      match denseGroupSurvivorsECap es doms (2 ^ (xs.length - 1)) with
-      | none => (reg, none)
-      | some survs =>
-      if 2 ≤ survs.length then
-        let k := Nat.clog 2 survs.length
-        if k < xs.length then
-          let (reg1, bits) := denseRegisterBits reg freshBase k
-          let patts := denseAssignments (denseBitBox bits)
-          let survsP := survs ++ List.replicate (patts.length - survs.length) (survs.headD [])
-          let pz := patts.zip survsP
-          (reg1, some (bits, Std.HashMap.ofList (xs.map (fun x => (x, (denseInterpPoly pz x).fold)))))
-        else (reg, none)
-      else (reg, none)
-    else (reg, none)
-
-/-- Construct a candidate using the retained per-constraint root cache. -/
-def denseBuildReencodeCached (reg : VarRegistry) (useIdx : Bool) (csIdx : DenseCovIndex)
+    certificate re-verifies everything). Registers fresh bits only on the single accepting path.
+    Positions come from the bucket index, and the per-constraint root plans from the retained
+    cache. -/
+def denseBuildReencodeCached (reg : VarRegistry) (csIdx : DenseCovIndex)
     (arrCs : Array (DenseExpr p)) (cache : DenseReencodeRootCache p)
     (xs : List VarId) (freshBase : String) :
     VarRegistry × Option (List VarId × Std.HashMap VarId (DenseExpr p)) ×
       DenseReencodeRootCache p :=
-  let planned := if useIdx then denseCoveredIdxPos csIdx arrCs xs
-    else arrCs.toList.zipIdx.foldr
-      (fun c acc => if denseCoveredBy xs c.1 then (c.2, c.1) :: acc else acc) []
+  let planned := denseCoveredIdxPos csIdx arrCs xs
   let es := planned.map Prod.snd
   let (doms?, cache) := denseGroupDomsCached planned xs cache
   match doms? with
@@ -696,18 +665,6 @@ def denseBuildReencodeCached (reg : VarRegistry) (useIdx : Bool) (csIdx : DenseC
         else (reg, none, cache)
       else (reg, none, cache)
     else (reg, none, cache)
-
-/-- Whole-system posting index for the degree pre-gate, thunked so only runs that construct a
-    candidate pay for it. Positions are `d`'s list order, so they index `arrCs` and `arrBis`. -/
-structure DenseReencodeUseIdx (p : ℕ) where
-  csIdx : DenseCovIndex
-  biIdx : DenseCovIndex
-  arrBis : Array (BusInteraction (DenseExpr p))
-
-def denseBuildUseIdx (d : DenseConstraintSystem p) : DenseReencodeUseIdx p :=
-  ⟨denseCovBuild DenseExpr.vars d.algebraicConstraints,
-   denseCovBuild denseBIVars d.busInteractions,
-   d.busInteractions.toArray⟩
 
 /-- The index's candidate positions for `xs`, each once (an item is bucketed per variable
     occurrence, and the gate below rewrites every position it visits). -/
@@ -740,52 +697,6 @@ def denseDegPreRejectIdx (b : DegreeBound) (csIdxUse biIdxUse : DenseCovIndex)
         e.sharesVarIn xs &&
           decide (b.busInteractions < (denseGroupRewrite xs bits σ patts e).degree))
     | none => false)
-
-def denseDegPreReject (b : DegreeBound) (use : Thunk (DenseReencodeUseIdx p))
-    (arrCs : Array (DenseExpr p)) (xs bits : List VarId)
-    (hm : Std.HashMap VarId (DenseExpr p)) : Bool :=
-  denseDegPreRejectIdx b use.get.csIdx use.get.biIdx use.get.arrBis arrCs xs bits hm
-
-/-- One checked re-encoding step (identity if construction or the certificate fails). Applies the
-    gates in order, minting fresh bits and rewriting `d` only on full acceptance. -/
-def denseReencodeStep (b : DegreeBound) (useIdx : Bool)
-    (reg : VarRegistry) (d : DenseConstraintSystem p) (csIdx : DenseCovIndex)
-    (arrCs : Array (DenseExpr p)) (varSet : Std.HashSet VarId)
-    (use : Thunk (DenseReencodeUseIdx p)) (xs : List VarId)
-    (freshBase : String) :
-    VarRegistry × DenseConstraintSystem p × DenseDerivations p × DenseCovIndex ×
-      Array (DenseExpr p) × Std.HashSet VarId :=
-  if xs.all (fun x => reg.isInput x) then
-  if (match reg.idOf? ({ name := freshBase ++ "_0" } : Variable) with
-      | some i => varSet.contains i
-      | none => false) then
-    -- fresh-name collision: `denseCheckReencode` would reject after the full freshness scan anyway
-    (reg, d, [], csIdx, arrCs, varSet)
-  else
-  match denseBuildReencode reg useIdx csIdx arrCs xs freshBase with
-  | (reg1, none) => (reg1, d, [], csIdx, arrCs, varSet)
-  | (reg1, some (bits, hm)) =>
-    -- Degree pre-gate: reject early what the final `withinDegreeB` gate would reject anyway.
-    if denseDegPreReject b use arrCs xs bits hm then (reg1, d, [], csIdx, arrCs, varSet)
-    else
-    if xs.all (fun x => varSet.contains x) then
-    if xs.all (fun x => decide (x ∉ bits)) then
-    if bits.all (fun b => decide ((reg1.resolve b).powdrId? = none)) then
-    if denseCheckReencode d xs bits hm then
-      let ro := denseReencodeOut d xs bits hm
-      if ro.withinDegreeB b then
-        -- `d` changed: rebuild the index and variable set for `ro`.
-        (reg1, ro,
-         bits.map (fun b => (b, denseBitCM (denseAssignments (denseBitBox bits)) xs hm b)),
-         (if useIdx then denseBuildPruned DenseExpr.vars 8 ro.algebraicConstraints else ⟨∅, []⟩),
-         ro.algebraicConstraints.toArray,
-         Std.HashSet.ofList ro.occ)
-      else (reg1, d, [], csIdx, arrCs, varSet)
-    else (reg1, d, [], csIdx, arrCs, varSet)
-    else (reg1, d, [], csIdx, arrCs, varSet)
-    else (reg1, d, [], csIdx, arrCs, varSet)
-    else (reg1, d, [], csIdx, arrCs, varSet)
-  else (reg, d, [], csIdx, arrCs, varSet)
 
 /-- The cached loop's candidate-state, kept on stable positions across accepts: dropped
     constraints become `.const 0` tombstones (variable-free, so every index query skips them),
@@ -853,7 +764,10 @@ def denseReencodeStateUpdate (state : DenseReencodeCacheState p) (xs bits : List
     else st) st
   { st with varSet := bits.foldl (·.insert ·) st.varSet }
 
-def denseReencodeStepCached (b : DegreeBound) (useIdx : Bool)
+/-- One checked re-encoding step (identity if construction or the certificate fails). Applies the
+    gates in order, minting fresh bits and rewriting `d` only on full acceptance; the threaded
+    candidate state is updated in place rather than rebuilt. -/
+def denseReencodeStepCached (b : DegreeBound)
     (reg : VarRegistry) (d : DenseConstraintSystem p) (state : DenseReencodeCacheState p)
     (xs : List VarId) (freshBase : String) :
     VarRegistry × DenseConstraintSystem p × DenseDerivations p × DenseReencodeCacheState p :=
@@ -863,7 +777,7 @@ def denseReencodeStepCached (b : DegreeBound) (useIdx : Bool)
       | none => false) then
     (reg, d, [], state)
   else
-  match denseBuildReencodeCached reg useIdx state.csIdx state.arrCs state.rootCache xs freshBase with
+  match denseBuildReencodeCached reg state.csIdx state.arrCs state.rootCache xs freshBase with
   | (reg1, none, rootCache) => (reg1, d, [], { state with rootCache })
   | (reg1, some (bits, hm), rootCache) =>
     let state := { state with rootCache }
@@ -893,39 +807,19 @@ def denseReencodeNameCounts (derivs : DenseDerivations p) (d : DenseConstraintSy
   if derivs.isEmpty then (nc, nb)
   else (d.algebraicConstraints.length, d.busInteractions.length)
 
-/-- The pre-gate index for the next step: kept while the steps leave `d` alone (see
-    `denseReencodeNameCounts` for the accept marker), rebuilt for a rewritten system. -/
-def denseReencodeUseNext (derivs : DenseDerivations p) (d : DenseConstraintSystem p)
-    (use : Thunk (DenseReencodeUseIdx p)) : Thunk (DenseReencodeUseIdx p) :=
-  if derivs.isEmpty then use else Thunk.mk (fun _ => denseBuildUseIdx d)
-
-/-- Process the candidate groups sequentially, threading the registry, indexes, variable set, and
+/-- Process the candidate groups sequentially, threading the registry, the candidate state and
     `d`'s item counts (`nc`/`nb`, the fresh-name prefix). -/
-def denseReencodeLoop (b : DegreeBound) (useIdx : Bool) :
-    List (List VarId) → Nat → VarRegistry → DenseConstraintSystem p → DenseCovIndex →
-      Array (DenseExpr p) → Std.HashSet VarId → Thunk (DenseReencodeUseIdx p) → Nat → Nat →
-      VarRegistry × DenseConstraintSystem p × DenseDerivations p
-  | [], _, reg, d, _, _, _, _, _, _ => (reg, d, [])
-  | xs :: rest, idx, reg, d, csIdx, arrCs, varSet, use, nc, nb =>
-    let (reg1, d1, derivs1, csIdx1, arrCs1, varSet1) :=
-      denseReencodeStep b useIdx reg d csIdx arrCs varSet use xs s!"rnc{nc}_{nb}_{idx}"
-    let (nc1, nb1) := denseReencodeNameCounts derivs1 d1 nc nb
-    let (reg2, d2, derivs2) :=
-      denseReencodeLoop b useIdx rest (idx + 1) reg1 d1 csIdx1 arrCs1 varSet1
-        (denseReencodeUseNext derivs1 d1 use) nc1 nb1
-    (reg2, d2, derivs1 ++ derivs2)
-
-def denseReencodeLoopCached (b : DegreeBound) (useIdx : Bool) :
+def denseReencodeLoopCached (b : DegreeBound) :
     List (List VarId) → Nat → VarRegistry → DenseConstraintSystem p →
       DenseReencodeCacheState p → Nat → Nat →
       VarRegistry × DenseConstraintSystem p × DenseDerivations p
   | [], _, reg, d, _, _, _ => (reg, d, [])
   | xs :: rest, idx, reg, d, state, nc, nb =>
     let (reg1, d1, derivs1, state1) :=
-      denseReencodeStepCached b useIdx reg d state xs s!"rnc{nc}_{nb}_{idx}"
+      denseReencodeStepCached b reg d state xs s!"rnc{nc}_{nb}_{idx}"
     let (nc1, nb1) := denseReencodeNameCounts derivs1 d1 nc nb
     let (reg2, d2, derivs2) :=
-      denseReencodeLoopCached b useIdx rest (idx + 1) reg1 d1 state1 nc1 nb1
+      denseReencodeLoopCached b rest (idx + 1) reg1 d1 state1 nc1 nb1
     (reg2, d2, derivs1 ++ derivs2)
 
 /-- Witness re-encoding. When a group of variables `xs` is so constrained that only a few value
@@ -946,35 +840,21 @@ def denseReencodeF (pw : PrimeWitness p) (b : DegreeBound) (reg : VarRegistry)
       | _ => s
     let targets := dedupHash (csVs.filterMap (fun vs =>
       if 2 ≤ vs.length && vs.length ≤ 8 && vs.all (svSet.contains ·) then
-        -- Sort by the resolved `Variable`'s order: `denseReencodeLoop` below is a greedy,
+        -- Sort by the resolved `Variable`'s order: `denseReencodeLoopCached` below is a greedy,
         -- order-sensitive accept/reject sequence, so the group order determines the outcome.
         some (vs.mergeSort (fun a b => compare (reg.resolve a) (reg.resolve b) != .gt))
       else none))
-    let targetSlots := (targets.map List.length).sum
-    let targetVars := targets.foldl
-      (fun vars xs => xs.foldl (fun vars x => vars.insert x) vars)
-      (∅ : Std.HashSet VarId)
-    let useRootCache := 64 ≤ targetSlots - targetVars.size
-    let useIdx := 8192 ≤ d.algebraicConstraints.length
-    if useIdx ∧ useRootCache then
-      denseReencodeLoopCached b useIdx targets 0 reg d
-        { csIdx := denseBuildPruned DenseExpr.vars 8 d.algebraicConstraints
-          arrCs := d.algebraicConstraints.toArray
-          rootCache := ∅
-          varSet := Std.HashSet.ofList d.occ
-          useCs := denseCovBuild DenseExpr.vars d.algebraicConstraints
-          useBis := denseCovBuild denseBIVars d.busInteractions
-          arrBis := d.busInteractions.toArray
-          foldCs := d.algebraicConstraints.zipIdx.foldl
-            (fun s ci => if ci.1.hasConstFoldableNode then s.insert ci.2 else s) ∅ }
-        d.algebraicConstraints.length d.busInteractions.length
-    else
-      denseReencodeLoop b useIdx targets 0 reg d
-        (if useIdx then denseBuildPruned DenseExpr.vars 8 d.algebraicConstraints else ⟨∅, []⟩)
-        d.algebraicConstraints.toArray
-        (Std.HashSet.ofList d.occ)
-        (Thunk.mk (fun _ => denseBuildUseIdx d))
-        d.algebraicConstraints.length d.busInteractions.length
+    denseReencodeLoopCached b targets 0 reg d
+      { csIdx := denseBuildPruned DenseExpr.vars 8 d.algebraicConstraints
+        arrCs := d.algebraicConstraints.toArray
+        rootCache := ∅
+        varSet := Std.HashSet.ofList d.occ
+        useCs := denseCovBuild DenseExpr.vars d.algebraicConstraints
+        useBis := denseCovBuild denseBIVars d.busInteractions
+        arrBis := d.busInteractions.toArray
+        foldCs := d.algebraicConstraints.zipIdx.foldl
+          (fun s ci => if ci.1.hasConstFoldableNode then s.insert ci.2 else s) ∅ }
+      d.algebraicConstraints.length d.busInteractions.length
   else (reg, d, [])
 
 end ApcOptimizer.Dense
