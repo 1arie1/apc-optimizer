@@ -43,6 +43,83 @@ def denseLinearize : DenseExpr p → Option (DenseLinExpr p)
           else none
       | _, _ => none
 
+/-! ## Accumulator twin of `denseLinearize` (runtime `@[csimp]`)
+
+`DenseLinExpr.add` appends the left form's terms, so a left-associated affine chain recopies its
+prefix at every node — `O(terms²)`. `denseLinearizeAcc` builds the same list onto a suffix
+(right subtree first), which costs one cons per term. Only `add` needs the accumulator; a `mul`
+that linearizes has a term-free side, so it scales rather than concatenates. -/
+
+/-- `l.map (fun t => (t.1, k * t.2)) ++ acc` in one pass, so the scaling `mul` branch below does
+    not build an intermediate list only to copy it onto the accumulator. -/
+def denseScaleAppend (k : ZMod p) :
+    List (VarId × ZMod p) → List (VarId × ZMod p) → List (VarId × ZMod p)
+  | [], acc => acc
+  | t :: ts, acc => (t.1, k * t.2) :: denseScaleAppend k ts acc
+
+theorem denseScaleAppend_eq (k : ZMod p) (l acc : List (VarId × ZMod p)) :
+    denseScaleAppend k l acc = l.map (fun t => (t.1, k * t.2)) ++ acc := by
+  induction l generalizing acc with
+  | nil => rfl
+  | cons t ts ih => simp [denseScaleAppend, ih]
+
+def denseLinearizeAcc : DenseExpr p → List (VarId × ZMod p) →
+    Option (ZMod p × List (VarId × ZMod p))
+  | .const n, acc => some (n, acc)
+  | .var i, acc => some (0, (i, 1) :: acc)
+  | .add a b, acc =>
+      match denseLinearizeAcc b acc with
+      | none => none
+      | some (cb, acc') =>
+        match denseLinearizeAcc a acc' with
+        | none => none
+        | some (ca, acc'') => some (ca + cb, acc'')
+  | .mul a b, acc =>
+      match denseLinearizeAcc a [], denseLinearizeAcc b [] with
+      | some (ca, ta), some (cb, tb) =>
+          if ta.isEmpty then some (ca * cb, denseScaleAppend ca tb acc)
+          else if tb.isEmpty then some (cb * ca, denseScaleAppend cb ta acc)
+          else none
+      | _, _ => none
+
+theorem denseLinearizeAcc_eq (e : DenseExpr p) (acc : List (VarId × ZMod p)) :
+    denseLinearizeAcc e acc = (denseLinearize e).map (fun l => (l.const, l.terms ++ acc)) := by
+  induction e generalizing acc with
+  | const n => simp [denseLinearizeAcc, denseLinearize]
+  | var i => simp [denseLinearizeAcc, denseLinearize]
+  | add a b iha ihb =>
+      simp only [denseLinearizeAcc, ihb acc]
+      cases hb : denseLinearize b with
+      | none => simp [denseLinearize, hb]
+      | some lb =>
+        simp only [Option.map_some, iha (lb.terms ++ acc)]
+        cases ha : denseLinearize a with
+        | none => simp [denseLinearize, ha, hb]
+        | some la => simp [denseLinearize, ha, hb, DenseLinExpr.add, List.append_assoc]
+  | mul a b iha ihb =>
+      simp only [denseLinearizeAcc, iha [], ihb []]
+      cases ha : denseLinearize a with
+      | none => simp [denseLinearize, ha]
+      | some la =>
+        cases hb : denseLinearize b with
+        | none => simp [denseLinearize, ha, hb]
+        | some lb =>
+          simp only [Option.map_some, List.append_nil]
+          by_cases h1 : la.terms.isEmpty
+          · simp [denseLinearize, ha, hb, h1, DenseLinExpr.scale, denseScaleAppend_eq]
+          · by_cases h2 : lb.terms.isEmpty
+            · simp [denseLinearize, ha, hb, h1, h2, DenseLinExpr.scale, denseScaleAppend_eq]
+            · simp [denseLinearize, ha, hb, h1, h2]
+
+def denseLinearizeFast (e : DenseExpr p) : Option (DenseLinExpr p) :=
+  (denseLinearizeAcc e []).map (fun r => ⟨r.1, r.2⟩)
+
+@[csimp] theorem denseLinearize_eq_fast : @denseLinearize = @denseLinearizeFast := by
+  funext p e
+  show denseLinearize e = _
+  simp only [denseLinearizeFast, denseLinearizeAcc_eq, Option.map_map, List.append_nil]
+  cases denseLinearize e <;> rfl
+
 /-- Turn a dense linear form back into a dense expression. -/
 def DenseLinExpr.toExpr (l : DenseLinExpr p) : DenseExpr p :=
   l.terms.foldl (fun acc t => .add acc (.mul (.const t.2) (.var t.1))) (.const l.const)

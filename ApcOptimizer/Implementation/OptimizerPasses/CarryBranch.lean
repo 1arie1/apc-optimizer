@@ -48,6 +48,25 @@ def denseNeverZeroB (B : Std.HashMap VarId Nat) (e : DenseExpr p) : Bool :=
     (1 :: n.const⁻¹ :: n.terms.map (fun t => t.2⁻¹)).any (fun k =>
       denseIntervalCert B ((n.scale k).norm))
 
+/-- Runtime `denseNeverZeroB`: the candidate list is built before `any` runs, so every term's
+    modular inverse is computed even when the first rescaling already certifies. Folding the map
+    into the `any` makes the inverses as lazy as the search. -/
+def denseNeverZeroBFast (B : Std.HashMap VarId Nat) (e : DenseExpr p) : Bool :=
+  match denseLinearize e with
+  | none => false
+  | some l =>
+    let n := l.norm
+    let test := fun k => denseIntervalCert B ((n.scale k).norm)
+    test 1 || test n.const⁻¹ || n.terms.any (fun t => test t.2⁻¹)
+
+@[csimp] theorem denseNeverZeroB_eq_fast : @denseNeverZeroB = @denseNeverZeroBFast := by
+  funext p B e
+  show denseNeverZeroB B e = _
+  unfold denseNeverZeroB denseNeverZeroBFast
+  cases denseLinearize e with
+  | none => rfl
+  | some l => simp [List.any_map, Function.comp_def, Bool.or_assoc]
+
 /-! ## Dense product-constraint resolution -/
 
 /-- Collapse a product `f·g` in a constraint to the surviving factor when the other factor is

@@ -295,6 +295,101 @@ def denseSparseSubstF (σ : VarId → Option (DenseLinExpr p)) : DenseExpr p →
           let rb := denseSparseSubstF σ b
           denseReducedMul ra rb
 
+/-! ## Fused substitution walk (runtime `@[csimp]` replacement for `denseSparseSubstF`)
+
+`denseSparseSubstF` re-runs `denseLinearize` over the whole node at every node of the nonlinear
+spine, and substitutes into every affine node whose parent then re-substitutes the merged row —
+both quadratic in the size of a constraint. The fused walk carries each node's linear form up
+(`lin?`, provably `denseLinearize`) and leaves the substitution undeveloped (`lin`) while a parent
+can still absorb it. -/
+
+inductive DenseSubstRes (p : ℕ) where
+  | pre (r : DenseGaussReduced p) (l : DenseLinExpr p)
+  | lin (l : DenseLinExpr p)
+  | opq (r : DenseGaussReduced p)
+
+def DenseSubstRes.reduced (σ : VarId → Option (DenseLinExpr p)) :
+    DenseSubstRes p → DenseGaussReduced p
+  | .pre r _ => r
+  | .lin l => .affine (denseLinSubstF l σ)
+  | .opq r => r
+
+def DenseSubstRes.lin? : DenseSubstRes p → Option (DenseLinExpr p)
+  | .pre _ l => some l
+  | .lin l => some l
+  | .opq _ => none
+
+def denseSparseSubstFused (σ : VarId → Option (DenseLinExpr p)) :
+    DenseExpr p → DenseSubstRes p
+  | .const n => .pre (.affine ⟨n, []⟩) ⟨n, []⟩
+  | .var x =>
+      .pre (match σ x with | some row => .affine row | none => .affine ⟨0, [(x, 1)]⟩)
+        ⟨0, [(x, 1)]⟩
+  | .add a b =>
+      let ra := denseSparseSubstFused σ a
+      let rb := denseSparseSubstFused σ b
+      match ra.lin?, rb.lin? with
+      | some la, some lb => .lin (la.add lb)
+      | _, _ => .opq (denseReducedAdd (ra.reduced σ) (rb.reduced σ))
+  | .mul a b =>
+      let ra := denseSparseSubstFused σ a
+      let rb := denseSparseSubstFused σ b
+      match ra.lin?, rb.lin? with
+      | some la, some lb =>
+          if la.terms.isEmpty then .lin (lb.scale la.const)
+          else if lb.terms.isEmpty then .lin (la.scale lb.const)
+          else .opq (denseReducedMul (ra.reduced σ) (rb.reduced σ))
+      | _, _ => .opq (denseReducedMul (ra.reduced σ) (rb.reduced σ))
+
+def denseSparseSubstFFast (σ : VarId → Option (DenseLinExpr p)) (e : DenseExpr p) :
+    DenseGaussReduced p :=
+  (denseSparseSubstFused σ e).reduced σ
+
+theorem denseSparseSubstFused_lin (σ : VarId → Option (DenseLinExpr p)) (e : DenseExpr p) :
+    (denseSparseSubstFused σ e).lin? = denseLinearize e := by
+  induction e with
+  | const n => rfl
+  | var x => rfl
+  | add a b iha ihb =>
+      rw [denseSparseSubstFused, denseLinearize]
+      rw [show (denseSparseSubstFused σ a).lin? = denseLinearize a from iha] at *
+      cases denseLinearize a <;> cases hb : (denseSparseSubstFused σ b).lin? <;>
+        rw [hb] at ihb <;> simp [DenseSubstRes.lin?, ← ihb]
+  | mul a b iha ihb =>
+      rw [denseSparseSubstFused, denseLinearize]
+      rw [show (denseSparseSubstFused σ a).lin? = denseLinearize a from iha] at *
+      cases denseLinearize a <;> cases hb : (denseSparseSubstFused σ b).lin? <;>
+        rw [hb] at ihb <;>
+        simp only [← ihb] <;> first | rfl | (split_ifs <;> rfl)
+
+theorem denseSparseSubstFused_reduced (σ : VarId → Option (DenseLinExpr p)) (e : DenseExpr p) :
+    (denseSparseSubstFused σ e).reduced σ = denseSparseSubstF σ e := by
+  induction e with
+  | const n => rfl
+  | var x => rfl
+  | add a b iha ihb =>
+      rw [denseSparseSubstFused, denseSparseSubstF, denseLinearize,
+        denseSparseSubstFused_lin σ a, denseSparseSubstFused_lin σ b]
+      simp only [DenseSubstRes.reduced] at iha ihb ⊢
+      cases denseLinearize a <;> cases denseLinearize b <;>
+        first | rfl | rw [iha, ihb]
+  | mul a b iha ihb =>
+      rw [denseSparseSubstFused, denseSparseSubstF, denseLinearize,
+        denseSparseSubstFused_lin σ a, denseSparseSubstFused_lin σ b]
+      simp only [DenseSubstRes.reduced] at iha ihb ⊢
+      cases hla : denseLinearize a with
+      | none => rw [iha, ihb]
+      | some la =>
+        cases hlb : denseLinearize b with
+        | none => rw [iha, ihb]
+        | some lb =>
+          dsimp only
+          split_ifs <;> first | rfl | rw [iha, ihb]
+
+@[csimp] theorem denseSparseSubstF_eq_fast : @denseSparseSubstF = @denseSparseSubstFFast := by
+  funext p σ e
+  exact (denseSparseSubstFused_reduced σ e).symm
+
 def denseReducedSubst (r : DenseGaussReduced p) (x : VarId)
     (t : DenseLinExpr p) : DenseGaussReduced p :=
   match r with

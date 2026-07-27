@@ -5039,3 +5039,74 @@ unchanged after every commit. Remaining top passes: busPairCancel 67 s, gauss 51
 37 s.
 
 **Worked locally: yes (identical outputs; PR #220 for the CI matrix).**
+### 147. Runtime: de-quadratify the shared expression walks (sha256 0.93×)
+
+Five `@[csimp]` twins, each proven equal to the definition it replaces, so the output is
+byte-identical by theorem — the CI effectiveness matrix reports `+0.000×` on all three axes across
+all six benchmark sets.
+
+**Where the time is.** Stack-sampling a `run` of the 168k-variable sha256 case put ~47 % of the
+whole run in the allocator and `lean_dec_ref_cold`, with `DenseExpr.vars` at 9.7 % of innermost
+frames and `List.append` (`reverseAux`) at 6.9 % right behind it — the budget is memory traffic from
+list concatenation in walks that every pass shares, which is also the reason the gap to powdr grows
+with circuit size.
+
+- `DenseExpr.vars` appended its children's lists, so every enclosing node recopied the left subtree:
+  quadratic in the depth of the left-associated chains affine reconstruction produces, recomputed
+  per item per pass. Accumulator twin (`varsAcc`), same left-to-right order. Also proposed in
+  PR #173/#216.
+- `denseLinearize` had the same shape through `DenseLinExpr.add`. `denseLinearizeAcc` builds onto a
+  suffix; `denseScaleAppend` fuses the map and the append in the scaling `mul` branch. **That fusion
+  is load-bearing**: the first version wrote `l.map f ++ acc`, which is *worse* than the original
+  single map on the `c * x` shapes address slots have, and it showed up as a regression in
+  `busPairCancel`/`subsumedRange`/`rootPairUnify` — the passes that linearize address slots per
+  compared message pair.
+- `denseNormalizeFused` rebuilt `l.norm.toExpr` at every affine node although an affine parent
+  discards it and re-merges: `k` merges and `k` tree builds over `1..k` terms. `DenseNormRes` keeps
+  the linear form undeveloped and materializes only where a parent cannot absorb it. `.var` needs
+  its own constructor — the walk returns a bare variable unchanged, not its normal form.
+  `DenseExpr.normalize` is routed through the same walk.
+- `denseSparseSubstF` (Gauss) had both problems at once: `denseLinearize` over the whole node at
+  every node of the nonlinear spine, and a substitution into every affine node whose parent
+  re-substitutes the merged row. `denseSparseSubstFused` carries the linear form up and defers the
+  substitution. **gauss 0.73×**, the largest single win here.
+- `denseNeverZeroB` (carryBranch) built its rescaling-candidate list before `any` ran, computing
+  every term's extended-gcd inverse even when the first candidate certified.
+- `densePtrReductions` (addrDiseq) used `List.eraseDups` on a linear form's variable list, per
+  compared message pair; routed through the existing proven `HashedDedup.hashedEraseDups`.
+
+**Numbers** (CI `Runtime Bench`, sha256, quiet 32-core runner, both sides on the same runner).
+Against `main` after entry 146: total **253.2 → 240.3 s (0.95×)**; gauss 30.4 → 22.9 (0.75×),
+normalize1 12.1 → 9.3 (0.77×), normalize2 8.5 → 6.8 (0.80×), busPairCancelLate 0.83×,
+disconnected 0.91×, domainFold 0.92×, zeroRegister 0.93×, hintCollapse 0.93×, domainBatch 0.96×,
+reencode 1.02× (noise). Against `main` *before* entry 146 the same workflow measured
+350.4 → 324.6 s (0.93×) for an earlier head, so the two compose: 350.4 → 240.3 s.
+
+The effectiveness matrix's runtime row reported −17 % on sha256 for the same commit; that row is
+report-only and ran alongside five other sets. **Believe the serial `Runtime Bench` (0.95×), not
+the matrix row** — the same disagreement shows up on wasm-eth (−37 %) and sp1/rsp (−38 %).
+
+**Measurement lesson, worth more than the change.** The first local reading of this work was
+**0.86×**, and it was wrong: the `main` baseline profile had been taken with a gdb stack sampler
+attached for most of its run, inflating it. Re-measuring `main` alone two hours later gave 649 s and
+then 815 s for the *same binary* — this container drifts ±25 % over hours, which is larger than the
+effect being measured. Two rules follow: never compare against a baseline captured under different
+instrumentation, and treat any local sha256 total as unusable — dispatch `Runtime Bench` with
+`-f benchmark=sha256`, which benches both sides on one runner, and read that.
+
+**Also learned:** a gdb sampler with no sleep between attaches does not merely slow the run, it
+*biases* it — allocation-heavy passes are perturbed far more than the rest, and reencode came out at
+74 % of samples against a profiler-measured 23 %. Sample with a ≥2 s gap and cross-check against
+`profile`.
+
+**Where sha256 stands after this** (same runner, on top of entry 146): reencode 53.9 s of 240.3 s
+(22 %), busPairCancel 31.0, gauss 22.9, busUnify 19.9, domainBatch 18.9. The next lever of real
+size is `busPairCancel`'s address-disequality certificates: `denseAddrAffineNeq` /
+`denseAddrTwoRootNeq` / `denseAddrNonzeroNeq` recompute the whole *candidate* side (slot
+linearization, `densePtrReductions`, `denseDiffSumOver` over every address-field subset) once per
+compared message. Sampling puts ~42 % of the pass in that linear-form algebra. Hoisting a
+prepared-`S` record out of `denseLiveAllSeg`'s and `denseShieldScanSeg`'s inner loops makes it
+`O(candidates + messages)`; `denseShieldScanSeg` needs a closure-parameterized twin
+(`denseShieldScanSegW pre prov …`, one induction) so the caller can supply the prepared tests.
+
+**Worked: yes.**
