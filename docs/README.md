@@ -18,10 +18,22 @@ docs/build.sh --serve
 ```
 
 This renders the figure, builds the doc, writes the site to `docs/_out/html-single`, and serves it
-at <http://127.0.0.1:8017>. Open that URL in a browser.
+at <http://127.0.0.1:8017> (or the next free port; override with `PORT=NNNN`). Open that URL in a
+browser.
 
 Serving over HTTP is **required** — opening `index.html` as a `file://` URL breaks the hover
 tooltips and search, which fetch JSON at runtime.
+
+## Live reload while editing
+
+```bash
+docs/build.sh --watch
+```
+
+Same as `--serve`, but it also watches the doc sources (and the audited files whose docstrings are
+spliced in) and rebuilds on save, reloading the open browser tab automatically. A rebuild takes a
+few seconds (the Verso document recompiles), so the refresh is not instant. If a build fails, the
+error is printed and the server keeps running — fix it and save again.
 
 To build without serving, run `docs/build.sh` and point any static file server at
 `docs/_out/html-single` (e.g. `python3 -m http.server -d docs/_out/html-single`).
