@@ -200,6 +200,127 @@ def DenseExpr.sharesVarIn (xs : List VarId) : DenseExpr p → Bool
   | .add a b => a.sharesVarIn xs || b.sharesVarIn xs
   | .mul a b => a.sharesVarIn xs || b.sharesVarIn xs
 
+/-! ### Compiled twin of the system rewrite
+
+`denseGroupRewrite` is the identity on an item that shares no variable with the group and has no
+variable-free composite node (`denseGroupRewrite_eq_self`), so the compiled `denseReencodeOut`
+guards every item with a read-only gate and rebuilds only the few that can change — the plain
+definition rebuilds every expression of the system per accepted group. Installed with `@[csimp]`
+below, so callers compile to the gated form while the proofs keep the plain `denseReencodeOut`. -/
+
+theorem DenseExpr.varsInF_eq_false {xs : List VarId} {e : DenseExpr p}
+    (hv : e.hasVar = true) (hs : e.sharesVarIn xs = false) : e.varsInF xs = false := by
+  induction e with
+  | const n => simp [DenseExpr.hasVar] at hv
+  | var y =>
+      simp only [DenseExpr.sharesVarIn] at hs
+      simp [DenseExpr.varsInF, hs]
+  | add a b iha ihb =>
+      simp only [DenseExpr.hasVar, Bool.or_eq_true] at hv
+      simp only [DenseExpr.sharesVarIn, Bool.or_eq_false_iff] at hs
+      rcases hv with hv | hv
+      · simp [DenseExpr.varsInF, iha hv hs.1]
+      · simp [DenseExpr.varsInF, ihb hv hs.2]
+  | mul a b iha ihb =>
+      simp only [DenseExpr.hasVar, Bool.or_eq_true] at hv
+      simp only [DenseExpr.sharesVarIn, Bool.or_eq_false_iff] at hs
+      rcases hv with hv | hv
+      · simp [DenseExpr.varsInF, iha hv hs.1]
+      · simp [DenseExpr.varsInF, ihb hv hs.2]
+
+theorem denseGroupRewrite_eq_self {xs bits : List VarId} {σfn : VarId → Option (DenseExpr p)}
+    {patts : List (List (VarId × ZMod p))} {e : DenseExpr p}
+    (hs : e.sharesVarIn xs = false) (hf : e.hasConstFoldableNode = false) :
+    denseGroupRewrite xs bits σfn patts e = e := by
+  induction e with
+  | const n => rfl
+  | var y =>
+      simp only [DenseExpr.sharesVarIn] at hs
+      simp [denseGroupRewrite, hs]
+  | add a b iha ihb =>
+      simp only [DenseExpr.hasConstFoldableNode, Bool.or_eq_false_iff, Bool.not_eq_false'] at hf
+      obtain ⟨⟨hv, hfa⟩, hfb⟩ := hf
+      simp only [DenseExpr.sharesVarIn, Bool.or_eq_false_iff] at hs
+      rw [denseGroupRewrite, if_neg (by
+        rw [DenseExpr.varsInF_eq_false hv
+          (by simp [DenseExpr.sharesVarIn, hs.1, hs.2])]; simp)]
+      rw [iha hs.1 hfa, ihb hs.2 hfb]
+  | mul a b iha ihb =>
+      simp only [DenseExpr.hasConstFoldableNode, Bool.or_eq_false_iff, Bool.not_eq_false'] at hf
+      obtain ⟨⟨hv, hfa⟩, hfb⟩ := hf
+      simp only [DenseExpr.sharesVarIn, Bool.or_eq_false_iff] at hs
+      rw [denseGroupRewrite, if_neg (by
+        rw [DenseExpr.varsInF_eq_false hv
+          (by simp [DenseExpr.sharesVarIn, hs.1, hs.2])]; simp)]
+      rw [iha hs.1 hfa, ihb hs.2 hfb]
+
+/-- `denseGroupRewrite` behind the read-only gate. -/
+def denseGroupRewriteGate (xs bits : List VarId) (σfn : VarId → Option (DenseExpr p))
+    (patts : List (List (VarId × ZMod p))) (e : DenseExpr p) : DenseExpr p :=
+  if e.sharesVarIn xs || e.hasConstFoldableNode then denseGroupRewrite xs bits σfn patts e else e
+
+theorem denseGroupRewriteGate_eq (xs bits : List VarId) (σfn : VarId → Option (DenseExpr p))
+    (patts : List (List (VarId × ZMod p))) :
+    denseGroupRewriteGate xs bits σfn patts = denseGroupRewrite xs bits σfn patts := by
+  funext e
+  unfold denseGroupRewriteGate
+  split
+  · rfl
+  · next h =>
+      rw [Bool.or_eq_true, not_or, Bool.not_eq_true, Bool.not_eq_true] at h
+      exact (denseGroupRewrite_eq_self h.1 h.2).symm
+
+/-- Per-interaction gate: an interaction none of whose expressions can change is kept as-is. -/
+def denseBIRewriteGate (xs bits : List VarId) (σfn : VarId → Option (DenseExpr p))
+    (patts : List (List (VarId × ZMod p))) (bi : BusInteraction (DenseExpr p)) :
+    BusInteraction (DenseExpr p) :=
+  if bi.multiplicity.sharesVarIn xs || bi.multiplicity.hasConstFoldableNode
+      || bi.payload.any (fun e => e.sharesVarIn xs || e.hasConstFoldableNode) then
+    { bi with multiplicity := denseGroupRewriteGate xs bits σfn patts bi.multiplicity,
+              payload := bi.payload.map (denseGroupRewriteGate xs bits σfn patts) }
+  else bi
+
+theorem denseBIRewriteGate_eq (xs bits : List VarId) (σfn : VarId → Option (DenseExpr p))
+    (patts : List (List (VarId × ZMod p))) :
+    denseBIRewriteGate xs bits σfn patts
+      = fun bi => { bi with
+          multiplicity := denseGroupRewrite xs bits σfn patts bi.multiplicity,
+          payload := bi.payload.map (denseGroupRewrite xs bits σfn patts) } := by
+  funext bi
+  unfold denseBIRewriteGate
+  split
+  · rw [denseGroupRewriteGate_eq]
+  · next h =>
+      rw [Bool.or_eq_true, not_or, Bool.or_eq_true, not_or,
+        Bool.not_eq_true, Bool.not_eq_true, List.any_eq_true] at h
+      obtain ⟨⟨hm, hf⟩, hp⟩ := h
+      have hpl : bi.payload.map (denseGroupRewrite xs bits σfn patts) = bi.payload := by
+        have hcg : bi.payload.map (denseGroupRewrite xs bits σfn patts) = bi.payload.map id :=
+          List.map_congr_left (fun e he => by
+            have he' : ¬(e.sharesVarIn xs = true ∨ e.hasConstFoldableNode = true) := fun hor =>
+              hp ⟨e, he, by rw [Bool.or_eq_true]; exact hor⟩
+            rw [not_or, Bool.not_eq_true, Bool.not_eq_true] at he'
+            exact denseGroupRewrite_eq_self he'.1 he'.2)
+        rw [hcg, List.map_id]
+      rw [denseGroupRewrite_eq_self hm hf, hpl]
+
+/-- The gated twin of `denseReencodeOut`, with the substitution and pattern list hoisted out of the
+    per-interaction closures. -/
+def denseReencodeOutFast (d : DenseConstraintSystem p) (xs bits : List VarId)
+    (hm : Std.HashMap VarId (DenseExpr p)) : DenseConstraintSystem p :=
+  let σfn := denseGroupSubst xs hm
+  let patts := denseAssignments (denseBitBox bits)
+  { algebraicConstraints :=
+      ((d.algebraicConstraints.filter (fun c => !denseCoveredBy xs c)).map
+        (denseGroupRewriteGate xs bits σfn patts)) ++ bits.map denseBoolConstraint,
+    busInteractions := d.busInteractions.map (denseBIRewriteGate xs bits σfn patts) }
+
+@[csimp]
+theorem denseReencodeOut_eq_fast : @denseReencodeOut = @denseReencodeOutFast := by
+  funext p d xs bits hm
+  simp only [denseReencodeOut, denseReencodeOutFast, denseBIRewriteGate_eq,
+    denseGroupRewriteGate_eq]
+
 /-! ## The build/step/loop/pass layer -/
 
 inductive DenseReencodeRootPlan (p : ℕ)
