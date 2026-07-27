@@ -61,6 +61,21 @@ def denseMemEqConstraints (shape : MemoryBusShape) (S Rt : BusInteraction (Dense
   ((List.range S.payload.length).filter (fun i => decide (i ∉ shape.addressFields))).map
     (fun i => denseEqExpr ((Rt.payload[i]?).getD (.const 0)) ((S.payload[i]?).getD (.const 0)))
 
+/-- Boxed twin: the `-1` of `denseEqExpr` and the `0` padding are `ZMod p` literals, so inside the
+    slot `map` each one rebuilds the whole `CommRing (ZMod p)` chain per payload slot. -/
+def denseMemEqConstraintsW (negOne pad : DenseExpr p) (shape : MemoryBusShape)
+    (S Rt : BusInteraction (DenseExpr p)) : List (DenseExpr p) :=
+  ((List.range S.payload.length).filter (fun i => decide (i ∉ shape.addressFields))).map
+    (fun i => .add ((Rt.payload[i]?).getD pad) (.mul negOne ((S.payload[i]?).getD pad)))
+
+def denseMemEqConstraintsFast (shape : MemoryBusShape) (S Rt : BusInteraction (DenseExpr p)) :
+    List (DenseExpr p) :=
+  denseMemEqConstraintsW (.const (-1)) (.const 0) shape S Rt
+
+@[csimp] theorem denseMemEqConstraints_eq_fast :
+    @denseMemEqConstraints = @denseMemEqConstraintsFast := by
+  funext p shape S Rt; rfl
+
 /-! ## Address inequality -/
 
 /-- Some address slot carries provably-different constants: the two interactions provably have

@@ -45,6 +45,22 @@ def denseGroupSubst (xs : List VarId) (hm : Std.HashMap VarId (DenseExpr p)) :
 def denseBitBox (bits : List VarId) : List (VarId × List (ZMod p)) :=
   bits.map (fun b => (b, ([0, 1] : List (ZMod p))))
 
+/-! ### Boxed runtime twins
+
+Each `ZMod p` literal Lean compiles inline rebuilds the whole `CommRing (ZMod p)` chain, and here
+the literals sit inside `map`/`foldl`/`all` bodies, so they are rebuilt per element. A `let` does
+not help — it is zeta-expanded back into the loop body — so the literal has to become a *parameter*
+of the traversal, which is what the `…W` twins below do. -/
+
+def denseBitBoxW (box : List (ZMod p)) (bits : List VarId) : List (VarId × List (ZMod p)) :=
+  bits.map (fun b => (b, box))
+
+def denseBitBoxFast (bits : List VarId) : List (VarId × List (ZMod p)) :=
+  denseBitBoxW [0, 1] bits
+
+@[csimp] theorem denseBitBox_eq_fast : @denseBitBox = @denseBitBoxFast := by
+  funext p bits; rfl
+
 /-! ## Degree-aware group rewriting -/
 
 /-- `Π_j (bit_j or its complement)`: `1` exactly at the given pattern. -/
@@ -52,6 +68,18 @@ def denseIndicatorExpr (aβ : List (VarId × ZMod p)) : DenseExpr p :=
   aβ.foldl (fun acc bv =>
     .mul acc (if bv.2 = 1 then .var bv.1
               else .add (.const 1) (.mul (.const (-1)) (.var bv.1)))) (.const 1)
+
+def denseIndicatorExprW (one negOne : ZMod p) (aβ : List (VarId × ZMod p)) : DenseExpr p :=
+  aβ.foldl (fun acc bv =>
+    .mul acc (if bv.2 = one then .var bv.1
+              else .add (.const one) (.mul (.const negOne) (.var bv.1)))) (.const one)
+
+def denseIndicatorExprFast (aβ : List (VarId × ZMod p)) : DenseExpr p :=
+  denseIndicatorExprW 1 (-1) aβ
+
+@[csimp] theorem denseIndicatorExpr_eq_fast :
+    @denseIndicatorExpr = @denseIndicatorExprFast := by
+  funext p aβ; rfl
 
 /-- Interpolate a subexpression over the bit patterns from its precomputed per-pattern values. -/
 def denseInterpOfV (patts : List (List (VarId × ZMod p))) (vals : List (ZMod p)) : DenseExpr p :=
@@ -116,6 +144,19 @@ def denseSurvZeroCW (add mul : ZMod p → ZMod p → ZMod p) (ces : List (IExpr 
     (a : List (VarId × ZMod p)) : Bool :=
   ces.all (fun ie => decide (denseIExprEvalWith add mul a ie = 0))
 
+/-- Boxed twin of `denseSurvZeroCW`: this runs once per enumerated assignment, so the `0` would
+    otherwise be rebuilt per constraint per point of the group's domain box. -/
+def denseSurvZeroCWZ (add mul : ZMod p → ZMod p → ZMod p) (zero : ZMod p)
+    (ces : List (IExpr p)) (a : List (VarId × ZMod p)) : Bool :=
+  ces.all (fun ie => decide (denseIExprEvalWith add mul a ie = zero))
+
+def denseSurvZeroCWFast (add mul : ZMod p → ZMod p → ZMod p) (ces : List (IExpr p))
+    (a : List (VarId × ZMod p)) : Bool :=
+  denseSurvZeroCWZ add mul 0 ces a
+
+@[csimp] theorem denseSurvZeroCW_eq_fast : @denseSurvZeroCW = @denseSurvZeroCWFast := by
+  funext p add mul ces a; rfl
+
 /-- The surviving group values: enumerate the group's domains, keep those satisfying the covered
     constraints. -/
 def denseGroupSurvivorsE (es : List (DenseExpr p)) (doms : List (VarId × List (ZMod p))) :
@@ -127,6 +168,27 @@ def denseGroupSurvivorsE (es : List (DenseExpr p)) (doms : List (VarId × List (
   | none =>
     (denseAssignments doms).filter
       (fun a => es.all (fun c => decide (c.evalFast (denseEnvOfFast a) = 0)))
+
+/-- Boxed twin. The `add`/`mul`/`zero` must be parameters of the function that *contains* the
+    enumeration loop: the specializer inlines the predicate into the `filter`, and anything derived
+    inside this function is then floated back into the loop body. -/
+def denseGroupSurvivorsEW (add mul : ZMod p → ZMod p → ZMod p) (zero : ZMod p)
+    (es : List (DenseExpr p)) (doms : List (VarId × List (ZMod p))) :
+    List (List (VarId × ZMod p)) :=
+  match denseCompileEs (doms.map Prod.fst) es with
+  | some ces => (denseAssignments doms).filter (denseSurvZeroCWZ add mul zero ces)
+  | none =>
+    (denseAssignments doms).filter
+      (fun a => es.all (fun c => decide (c.evalFast (denseEnvOfFast a) = zero)))
+
+def denseGroupSurvivorsEFast (es : List (DenseExpr p)) (doms : List (VarId × List (ZMod p))) :
+    List (List (VarId × ZMod p)) :=
+  denseGroupSurvivorsEW (inferInstance : Add (ZMod p)).add (inferInstance : Mul (ZMod p)).mul 0
+    es doms
+
+@[csimp] theorem denseGroupSurvivorsE_eq_fast :
+    @denseGroupSurvivorsE = @denseGroupSurvivorsEFast := by
+  funext p es doms; rfl
 
 /-- `filter P l` if it keeps at most `cap` elements, `none` as soon as a `cap + 1`-st hit shows
     up — the tail is not scanned. -/
@@ -155,6 +217,27 @@ def denseGroupSurvivorsECap (es : List (DenseExpr p)) (doms : List (VarId × Lis
   | none =>
     denseFilterCap (fun a => es.all (fun c => decide (c.evalFast (denseEnvOfFast a) = 0)))
       cap (denseAssignments doms)
+
+/-- Boxed twin of `denseGroupSurvivorsECap`; see `denseGroupSurvivorsEW`. -/
+def denseGroupSurvivorsECapW (add mul : ZMod p → ZMod p → ZMod p) (zero : ZMod p)
+    (es : List (DenseExpr p)) (doms : List (VarId × List (ZMod p))) (cap : Nat) :
+    Option (List (List (VarId × ZMod p))) :=
+  match denseCompileEs (doms.map Prod.fst) es with
+  | some ces =>
+    denseFilterCap (denseSurvZeroCWZ add mul zero ces) cap (denseAssignments doms)
+  | none =>
+    denseFilterCap (fun a => es.all (fun c => decide (c.evalFast (denseEnvOfFast a) = zero)))
+      cap (denseAssignments doms)
+
+def denseGroupSurvivorsECapFast (es : List (DenseExpr p))
+    (doms : List (VarId × List (ZMod p))) (cap : Nat) :
+    Option (List (List (VarId × ZMod p))) :=
+  denseGroupSurvivorsECapW (inferInstance : Add (ZMod p)).add (inferInstance : Mul (ZMod p)).mul 0
+    es doms cap
+
+@[csimp] theorem denseGroupSurvivorsECap_eq_fast :
+    @denseGroupSurvivorsECap = @denseGroupSurvivorsECapFast := by
+  funext p es doms cap; rfl
 
 /-! ## The checked re-encoding certificate -/
 
