@@ -91,11 +91,11 @@ def denseCheckPair (shape : MemoryBusShape) (T : DenseTwoRootMap p) (nw : DenseN
 
 /-! ## The pass -/
 
-/-- One `(pre, S, mid, R, post)` split candidate. -/
+/-- One `(S, mid, R)` split candidate; the surrounding `pre`/`post` context exists only in the
+    proofs (`denseSweepGo_split`), so the sweep never materializes it. -/
 abbrev DenseSplitCand (p : ℕ) :=
-  List (BusInteraction (DenseExpr p)) × BusInteraction (DenseExpr p)
-    × List (BusInteraction (DenseExpr p)) × BusInteraction (DenseExpr p)
-    × List (BusInteraction (DenseExpr p))
+  BusInteraction (DenseExpr p) × List (BusInteraction (DenseExpr p))
+    × BusInteraction (DenseExpr p)
 
 /-! ## The consumer sweep
 
@@ -147,32 +147,31 @@ def DenseAddrKey.allConst (k : DenseAddrKey p) : Bool :=
     | .const _ => true
     | _ => false
 
-/-- An open send window: the send `S`, its split context, and its position `i`. -/
+/-- An open send window: the send `S`, its stored suffix, and its position `i`. -/
 structure DenseOpenRec (p : ℕ) where
-  revPre : List (BusInteraction (DenseExpr p))
   S : BusInteraction (DenseExpr p)
   restAfter : List (BusInteraction (DenseExpr p))
   i : Nat
 
 /-- Assemble the split candidate for a consumed window, tagged with its send position; `mid` is
     recovered positionally from the send's stored suffix (`take (j−i−1)`). -/
-def denseEmitCand (w : DenseOpenRec p) (j : Nat) (R : BusInteraction (DenseExpr p))
-    (post : List (BusInteraction (DenseExpr p))) : Option (Nat × DenseSplitCand p) :=
+def denseEmitCand (w : DenseOpenRec p) (j : Nat) (R : BusInteraction (DenseExpr p)) :
+    Option (Nat × DenseSplitCand p) :=
   if w.i < j then
-    some (w.i, (w.revPre.reverse, w.S, w.restAfter.take (j - w.i - 1), R, post))
+    some (w.i, (w.S, w.restAfter.take (j - w.i - 1), R))
   else none
 
 /-- The sweep: one pass over the interaction list. `acc` collects `(sendPosition, candidate)` pairs,
     order restored by the caller's sort. -/
 def denseSweepGo (ops : DenseZModOps p) (shape : MemoryBusShape)
     (T : Thunk (DenseTwoRootMap p)) (nw : Thunk (DenseNonzeroWits p)) :
-    (revSeen rest : List (BusInteraction (DenseExpr p))) → (j : Nat) →
+    (rest : List (BusInteraction (DenseExpr p))) → (j : Nat) →
     (constOpen : Std.HashMap (DenseAddrKey p) (DenseOpenRec p)) →
     (symOpen : List (DenseOpenRec p)) →
     (acc : List (Nat × DenseSplitCand p)) →
     List (Nat × DenseSplitCand p)
-  | _, [], _, _, _, acc => acc
-  | revSeen, m :: rest', j, constOpen, symOpen, acc =>
+  | [], _, _, _, acc => acc
+  | m :: rest', j, constOpen, symOpen, acc =>
     let mKey? := denseAddrKey? shape m
     let mAllConst := match mKey? with
       | some k => k.allConst
@@ -188,7 +187,7 @@ def denseSweepGo (ops : DenseZModOps p) (shape : MemoryBusShape)
             match denseStepTest ops shape T nw w.S m with
             | .consumer =>
               (constOpen.erase k,
-               match denseEmitCand w j m rest' with
+               match denseEmitCand w j m with
                | some c => c :: acc
                | none => acc)
             | .excluded => (constOpen, acc)
@@ -201,7 +200,7 @@ def denseSweepGo (ops : DenseZModOps p) (shape : MemoryBusShape)
             match denseStepTest ops shape T nw kw.2.S m with
             | .consumer =>
               (kw.1 :: ds,
-               match denseEmitCand kw.2 j m rest' with
+               match denseEmitCand kw.2 j m with
                | some c => c :: a
                | none => a)
             | .excluded => (ds, a)
@@ -214,7 +213,7 @@ def denseSweepGo (ops : DenseZModOps p) (shape : MemoryBusShape)
         match denseStepTest ops shape T nw w.S m with
         | .consumer =>
           (so,
-           match denseEmitCand w j m rest' with
+           match denseEmitCand w j m with
            | some c => c :: a
            | none => a)
         | .excluded => (w :: so, a)
@@ -225,7 +224,7 @@ def denseSweepGo (ops : DenseZModOps p) (shape : MemoryBusShape)
       if decide (denseMultConst m = some (denseSetNewMult ops shape)) then
         match mKey? with
         | some k =>
-          let w : DenseOpenRec p := ⟨revSeen, m, rest', j⟩
+          let w : DenseOpenRec p := ⟨m, rest', j⟩
           if k.allConst then
             match constOpen[k]? with
             | some old => (constOpen.insert k w, old :: symOpen)
@@ -233,14 +232,14 @@ def denseSweepGo (ops : DenseZModOps p) (shape : MemoryBusShape)
           else (constOpen, w :: symOpen)
         | none => (constOpen, symOpen)
       else (constOpen, symOpen)
-    denseSweepGo ops shape T nw (m :: revSeen) rest' (j + 1) constOpen symOpen acc
+    denseSweepGo ops shape T nw rest' (j + 1) constOpen symOpen acc
 
 /-- All consumer candidates of one bus, in send-position order. -/
 def denseCandidateSplitsSweep (shape : MemoryBusShape) (T : Thunk (DenseTwoRootMap p))
     (nw : Thunk (DenseNonzeroWits p)) (L : List (BusInteraction (DenseExpr p))) :
     List (DenseSplitCand p) :=
   let ops : DenseZModOps p := denseZModOps
-  ((denseSweepGo ops shape T nw [] L 0 ∅ [] []).mergeSort
+  ((denseSweepGo ops shape T nw L 0 ∅ [] []).mergeSort
     (fun a b => decide (a.1 ≤ b.1))).map (·.2)
 
 /-- Collect the entailed equalities for one bus: for each candidate, `denseCheckPair` and, when it
@@ -249,7 +248,7 @@ def denseCollectForBus (shape : MemoryBusShape) (T : Thunk (DenseTwoRootMap p))
     (nw : Thunk (DenseNonzeroWits p)) :
     List (DenseSplitCand p) → List (DenseExpr p)
   | [] => []
-  | (_pre, S, mid, R, _post) :: rest =>
+  | (S, mid, R) :: rest =>
     let acc := denseCollectForBus shape T nw rest
     if denseCheckPair shape T.get nw.get S mid R = true then
       denseMemEqConstraints shape S R ++ acc
