@@ -136,6 +136,31 @@ def denseEnvOfFast : List (VarId × ZMod p) → VarId → ZMod p
   | [], _ => 0
   | (x, v) :: rest, y => if (y == x) = true then v else denseEnvOfFast rest y
 
+/-! ### Boxed runtime twins of the point lookups
+
+`p` is a runtime value, so the `0` in the miss case is a full `CommRing (ZMod p)` instance chain,
+and Lean builds it at the head of each recursive step — once per list cell walked, not once per
+lookup. Taking the zero as a parameter hoists it out of the walk. -/
+
+def denseEnvOfW (zero : ZMod p) : List (VarId × ZMod p) → VarId → ZMod p
+  | [], _ => zero
+  | (x, v) :: rest, y => if (y == x) = true then v else denseEnvOfW zero rest y
+
+theorem denseEnvOfW_eq (pt : List (VarId × ZMod p)) (y : VarId) :
+    denseEnvOfW 0 pt y = denseEnvOfFast pt y := by
+  induction pt with
+  | nil => rfl
+  | cons t rest ih =>
+      obtain ⟨x, v⟩ := t
+      simp only [denseEnvOfW, denseEnvOfFast, ih]
+
+def denseEnvOfFastFast (pt : List (VarId × ZMod p)) (y : VarId) : ZMod p :=
+  denseEnvOfW 0 pt y
+
+@[csimp] theorem denseEnvOfFast_eq_fast : @denseEnvOfFast = @denseEnvOfFastFast := by
+  funext p pt y
+  exact (denseEnvOfW_eq pt y).symm
+
 def denseContainsFast (xs : List VarId) (y : VarId) : Bool :=
   match xs with
   | [] => false
@@ -148,6 +173,25 @@ def denseLookupIx : List (VarId × ZMod p) → Nat → ZMod p
   | [], _ => 0
   | (_, v) :: _, 0 => v
   | _ :: rest, i + 1 => denseLookupIx rest i
+
+/-- Boxed twin of `denseLookupIx`; see the note on `denseEnvOfW` above. -/
+def denseLookupIxW (zero : ZMod p) : List (VarId × ZMod p) → Nat → ZMod p
+  | [], _ => zero
+  | (_, v) :: _, 0 => v
+  | _ :: rest, i + 1 => denseLookupIxW zero rest i
+
+theorem denseLookupIxW_eq (pt : List (VarId × ZMod p)) (i : Nat) :
+    denseLookupIxW 0 pt i = denseLookupIx pt i := by
+  induction pt generalizing i with
+  | nil => rfl
+  | cons t rest ih => cases i <;> simp only [denseLookupIxW, denseLookupIx, ih]
+
+def denseLookupIxFast (pt : List (VarId × ZMod p)) (i : Nat) : ZMod p :=
+  denseLookupIxW 0 pt i
+
+@[csimp] theorem denseLookupIx_eq_fast : @denseLookupIx = @denseLookupIxFast := by
+  funext p pt i
+  exact (denseLookupIxW_eq pt i).symm
 
 /-- Evaluate a compiled `IExpr` over a dense point; positional. -/
 def denseIExprEvalWith (add mul : ZMod p → ZMod p → ZMod p) (pt : List (VarId × ZMod p)) :

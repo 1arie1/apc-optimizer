@@ -155,15 +155,6 @@ theorem denseLinearizeAcc_eq (e : DenseExpr p) (acc : List (VarId × ZMod p)) :
             · simp [denseLinearize, ha, hb, h1, h2, DenseLinExpr.scale, denseScaleAppend_eq]
             · simp [denseLinearize, ha, hb, h1, h2]
 
-def denseLinearizeFast (e : DenseExpr p) : Option (DenseLinExpr p) :=
-  (denseLinearizeAcc e []).map (fun r => ⟨r.1, r.2⟩)
-
-@[csimp] theorem denseLinearize_eq_fast : @denseLinearize = @denseLinearizeFast := by
-  funext p e
-  show denseLinearize e = _
-  simp only [denseLinearizeFast, denseLinearizeAcc_eq, Option.map_map, List.append_nil]
-  cases denseLinearize e <;> rfl
-
 /-- Boxed twin of `denseScaleAppend`; see the `…With` note above. -/
 def denseScaleAppendWith (ops : DenseZModOps p) (k : ZMod p) :
     List (VarId × ZMod p) → List (VarId × ZMod p) → List (VarId × ZMod p)
@@ -235,6 +226,15 @@ def denseLinearizeAccFast (e : DenseExpr p) (acc : List (VarId × ZMod p)) :
 @[csimp] theorem denseLinearizeAcc_eq_fast : @denseLinearizeAcc = @denseLinearizeAccFast := by
   funext p e acc
   exact (denseLinearizeAccWith_eq denseZModOps e acc).symm
+
+def denseLinearizeFast (e : DenseExpr p) : Option (DenseLinExpr p) :=
+  (denseLinearizeAcc e []).map (fun r => ⟨r.1, r.2⟩)
+
+@[csimp] theorem denseLinearize_eq_fast : @denseLinearize = @denseLinearizeFast := by
+  funext p e
+  show denseLinearize e = _
+  simp only [denseLinearizeFast, denseLinearizeAcc_eq, Option.map_map, List.append_nil]
+  cases denseLinearize e <;> rfl
 
 /-- Turn a dense linear form back into a dense expression. -/
 def DenseLinExpr.toExpr (l : DenseLinExpr p) : DenseExpr p :=
