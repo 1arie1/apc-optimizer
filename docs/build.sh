@@ -70,16 +70,24 @@ inject_reload() {
   let v = null;
   for (;;) {
     try {
-      const t = await (await fetch("reload.txt", { cache: "no-store" })).text();
-      if (v !== null && t !== v) { location.reload(); return; }
-      v = t;
-    } catch (_) { /* server mid-rebuild; keep polling */ }
+      const r = await fetch("reload.txt", { cache: "no-store" });
+      // Only a 200 is a real token. Mid-rebuild the file is briefly missing;
+      // fetch does NOT throw on 404, so we must ignore non-OK responses rather
+      // than mistake the error body for a changed token and reload too early.
+      if (r.ok) {
+        const t = await r.text();
+        if (v !== null && t !== v) { location.reload(); return; }
+        v = t;
+      }
+    } catch (_) { /* network hiccup; keep polling */ }
     await new Promise((r) => setTimeout(r, 1000));
   }
 })();
 JS
-  python3 -c 'import time; print(time.time_ns())' > "$HTML/reload.txt"
+  # Inject the poller first; write the token LAST, so the token only changes once
+  # the fully regenerated page is in place.
   perl -0pi -e 's{</body>}{  <script src="__reload.js"></script>\n</body>}' "$HTML/index.html"
+  python3 -c 'import time; print(time.time_ns())' > "$HTML/reload.txt"
 }
 
 build_once
