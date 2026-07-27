@@ -313,18 +313,10 @@ theorem DenseExpr.mentionsAny_ofList_false_iff (bits : List VarId) (e : DenseExp
         rw [List.contains_eq_mem, decide_eq_false_iff_not]
         intro hy
         exact absurd (h y hy) (by simp)
-  | add a b iha ihb =>
+  | add a b iha ihb | mul a b iha ihb =>
       simp only [DenseExpr.mentionsAny, DenseExpr.mentions, Bool.or_eq_false_iff, iha, ihb]
-      constructor
-      · rintro ⟨ha, hb⟩ x hx
-        exact ⟨ha x hx, hb x hx⟩
-      · exact fun h => ⟨fun x hx => (h x hx).1, fun x hx => (h x hx).2⟩
-  | mul a b iha ihb =>
-      simp only [DenseExpr.mentionsAny, DenseExpr.mentions, Bool.or_eq_false_iff, iha, ihb]
-      constructor
-      · rintro ⟨ha, hb⟩ x hx
-        exact ⟨ha x hx, hb x hx⟩
-      · exact fun h => ⟨fun x hx => (h x hx).1, fun x hx => (h x hx).2⟩
+      exact ⟨fun ⟨ha, hb⟩ x hx => ⟨ha x hx, hb x hx⟩,
+        fun h => ⟨fun x hx => (h x hx).1, fun x hx => (h x hx).2⟩⟩
 
 theorem denseFreshFused_eq (d : DenseConstraintSystem p) (bits : List VarId) :
     (d.algebraicConstraints.all (fun c => !c.mentionsAny (Std.HashSet.ofList bits)) &&

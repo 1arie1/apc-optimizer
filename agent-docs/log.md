@@ -5175,3 +5175,33 @@ copies (the array is shared by the scan closures, so `Array.set` copies 71k entr
 `denseCheckCancel`, and `denseFirstMatchAt`.
 
 **Worked: yes (busPairCancel 0.56×, output identity verified locally; PR #223).**
+### 149. Structure: impl/proof split for the entry-148 modules, dead busUnify twin deleted
+
+Cleanup follow-up to PR #223 (user-requested), no behavior change.
+
+- **Split (the entry-148 modules mixed defs and proofs).** `BusPairCancelKeyIdx.lean` (777 lines,
+  ~600 of them proofs) is now an ~90-line impl (key, index, merge, sparse scans) with the
+  soundness lemmas and the proof-carrying `denseRegionTests` in
+  `Proofs/BusPairCancelKeyIdx.lean`; `AddrDiseqPre.lean` is impl-only with its `*_eq` equalities
+  in `Proofs/AddrDiseqPre.lean`; the prepared region tests (`denseMidRefutedP` etc.) moved from
+  `BusPairCancelCheck.lean` to `AddrDiseqPre.lean`, next to the record they read.
+- **`denseCheckPairFast` (busUnify's csimp twin) was dead on arrival — deleted.** A `@[csimp]`
+  lemma only affects call sites compiled after it is in the environment, and `denseCheckPair`'s
+  single call site (`denseCollectForBus`, BusUnify.lean) compiles *before* `AddrDiseqPre.lean` —
+  the twin never fired, consistent with busUnify measuring exactly flat in entry 148. Lesson:
+  **a csimp twin must live in (or before) the module holding the function's call sites; check the
+  import direction before writing one.**
+- **Dedup.** The four hand-written slot-list recursions collapsed into
+  `denseSlotsAny`/`denseSlotsAll` (`@[specialize]`, so the per-certificate lambdas still compile
+  closure-free) with one generic equality lemma each; `denseLiveAllSeg` deleted
+  (`denseLiveAllSegP_eq` targets `(denseLiveSeg …).all` directly); `denseLiveAllSparse_eq`'s
+  62-line induction replaced by deriving the all-scan as a shield scan with `Q ≡ false` (two
+  12-line bridges).
+
+Verification: keccak `run` counts identical (2021 / 186 / 1748); sha256 cycle-by-cycle sizes and
+final circuit identical (11906 / 12464 / 3194); per-pass dt flat — busPairCancel 32.1 s vs
+30.9–32.5 s across entry-148 runs on this box (the `@[specialize]` slot tests are the one
+codegen-relevant change), reencode/gauss/busUnify/flagFold within noise. Net **−22 lines of code**
+vs main (before this log entry). Proof integrity passes.
+
+**Worked: yes (structure-only; PR follows).**

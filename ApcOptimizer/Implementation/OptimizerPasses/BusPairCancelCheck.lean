@@ -1,6 +1,5 @@
 import ApcOptimizer.Implementation.OptimizerPasses.BusPairCancelIndex
 import ApcOptimizer.Implementation.OptimizerPasses.BusPairCancelLive
-import ApcOptimizer.Implementation.OptimizerPasses.AddrDiseqPre
 
 set_option autoImplicit false
 
@@ -129,51 +128,6 @@ theorem denseShieldScanSegP_eq {α : Type} (f : BusInteraction (DenseExpr p) →
           | none =>
               rw [denseLiveSeg, halive, harr, if_pos rfl]
               simp
-
-/-! ## The region tests on prepared records (`AddrDiseqPre.lean`) -/
-
-def denseMidRefutedP (ops : DenseZModOps p) (nw : DenseNonzeroWits p) (busId : Nat)
-    (a b : DenseAddrPre p) : Bool :=
-  decide (b.busId ≠ busId) || decide (b.mult.get = some ops.zero) || denseAddrConstsNeqP a b
-    || denseAddrAffineNeqP a b || denseAddrTwoRootNeqP a b || denseAddrNonzeroNeqP nw a b
-
-theorem denseMidRefutedP_eq (ops : DenseZModOps p) (shape : MemoryBusShape)
-    (T : Thunk (DenseAddrCerts p)) (busId : Nat) (S m : BusInteraction (DenseExpr p)) :
-    denseMidRefutedP ops T.get.nonzero busId (denseAddrPrep shape T.get.tworoot S)
-        (denseAddrPrep shape T.get.tworoot m)
-      = denseMidRefuted ops shape T busId S m := by
-  unfold denseMidRefutedP denseMidRefuted
-  rw [denseAddrConstsNeqP_eq, denseAddrAffineNeqP_eq, denseAddrTwoRootNeqP_eq,
-    denseAddrNonzeroNeqP_eq]
-  rfl
-
-def densePreRefutedP (ops : DenseZModOps p) (nw : DenseNonzeroWits p) (busId : Nat)
-    (setMult : ZMod p) (a b : DenseAddrPre p) : Bool :=
-  denseMidRefutedP ops nw busId a b ||
-    (match b.mult.get with
-     | some c => decide (c ≠ setMult)
-     | none => false)
-
-theorem densePreRefutedP_eq (ops : DenseZModOps p) (shape : MemoryBusShape)
-    (T : Thunk (DenseAddrCerts p)) (busId : Nat) (S m : BusInteraction (DenseExpr p)) :
-    densePreRefutedP ops T.get.nonzero busId (denseSetNewMult ops shape)
-        (denseAddrPrep shape T.get.tworoot S) (denseAddrPrep shape T.get.tworoot m)
-      = densePreRefuted ops shape T busId S m := by
-  unfold densePreRefutedP densePreRefuted
-  rw [denseMidRefutedP_eq]
-  rfl
-
-def denseProvRecvP (busId : Nat) (getPrevMult : ZMod p) (a b : DenseAddrPre p) : Bool :=
-  decide (b.busId = busId) && denseAddrConstsEqP a b && decide (b.mult.get = some getPrevMult)
-
-theorem denseProvRecvP_eq (ops : DenseZModOps p) (shape : MemoryBusShape)
-    (T : DenseTwoRootMap p) (busId : Nat) (S m : BusInteraction (DenseExpr p)) :
-    denseProvRecvP busId (denseGetPreviousMult ops shape) (denseAddrPrep shape T S)
-        (denseAddrPrep shape T m)
-      = denseProvRecv ops shape busId S m := by
-  unfold denseProvRecvP denseProvRecv
-  rw [denseAddrConstsEqP_eq]
-  rfl
 
 /-- Single-value byte check on `e`, emitted through `spec` (multiplicity `1`). -/
 def denseMkByteCheck (spec : ByteXorSpec p) (busId : Nat) (e : DenseExpr p) :
