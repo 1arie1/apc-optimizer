@@ -7,27 +7,39 @@ variable {p : ℕ} [Fact p.Prime]
 
 --------- Expressions ---------
 
-/-- A circuit variable: a display `name` plus an optional powdr witness-column ID. -/
+/-- A circuit variable. -/
 structure Variable where
+  /-- The _unique_ name name of the variable. -/
   name : String
+  /-- The optional powdr variable ID. All variables mentioned in the input
+      circuit are expected to have a powdr ID. The output circuit may contain
+      newly introduced variables whose values can be derived from a valid
+      assignment of the input circuit. -/
   powdrId? : Option Nat := none
   deriving DecidableEq, Repr
 
 instance : BEq Variable := ⟨fun a b => decide (a = b)⟩
 /-- An arithmetic expression over structured variables and field constants. -/
 inductive Expression (p : ℕ) where
+  /-- A constant field element. -/
   | const (n : ZMod p)
+  /-- A variable reference. -/
   | var (x : Variable)
+  /-- The sum of two expressions. -/
   | add (e1 e2 : Expression p)
+  /-- The product of two expressions. -/
   | mul (e1 e2 : Expression p)
 
 /-- Evaluate an expression under an assignment `env` of variables to field elements. -/
-def Expression.eval (e : Expression p) (env : Variable → ZMod p) : ZMod p :=
+-- ANCHOR: exprEval
+def Expression.eval
+  (e : Expression p) (assignment : Variable → ZMod p): ZMod p :=
   match e with
   | .const n => n
-  | .var x => env x
-  | .add e1 e2 => e1.eval env + e2.eval env
-  | .mul e1 e2 => e1.eval env * e2.eval env
+  | .var x => assignment x
+  | .add e1 e2 => e1.eval assignment + e2.eval assignment
+  | .mul e1 e2 => e1.eval assignment * e2.eval assignment
+-- ANCHOR_END: exprEval
 
 /-- The multiplicative degree of an expression. -/
 def Expression.degree : Expression p → Nat
@@ -76,11 +88,14 @@ abbrev Derivations (p : ℕ) := List (Variable × ComputationMethod p)
 --------- Bus Interactions ---------
 
 /-- A bus interaction. Typically, α is
-    - an expression (=> symbolic bus interaction), or
-    - a field element (=> bus interaction message). -/
+    - an expression (_symbolic bus interaction_), or
+    - a field element (_bus interaction message_). -/
 structure BusInteraction (α : Type) where
+  /-- The ID of the bus this interaction is for. Distinct buses cannot interact. -/
   busId : Nat
+  /-- The multiplicity with which the message is sent to the bus. -/
   multiplicity : α
+  /-- The payload of the bus interaction. -/
   payload : List α
 
 /-- Evaluate a bus interaction under an assignment `env`, turning a symbolic bus
@@ -115,6 +130,7 @@ structure BusSemantics (p : ℕ) where
       ``ApcOptimizer/MemoryBus.lean``. -/
   admissible (statefulBusMessages: List (BusInteraction (ZMod p))): Prop
 
+-- ANCHOR: busState
 /-- A concrete bus interaction message: which bus, and the tuple sent. -/
 abbrev BusMessage (p : ℕ) := Nat × List (ZMod p)
 
@@ -130,6 +146,7 @@ def multiplicitySum (message : BusMessage p) (state : BusState p) : ZMod p :=
 /-- Two bus states are equal when every message is sent with the same net multiplicity. -/
 instance : HasEquiv (BusState p) :=
   ⟨fun s t => ∀ message, multiplicitySum message s = multiplicitySum message t⟩
+-- ANCHOR_END: busState
 
 --------- Constraint System ---------
 
