@@ -19,6 +19,26 @@ def powdr : Article where
   number := inlines!""
   url := some "https://www.powdr.org/"
 
+def powdr_autoprecompiles : Article where
+  title := inlines!"Accelerating Ethereum with Autoprecompiles"
+  authors := #[inlines!"powdr"]
+  journal := inlines!"powdr labs blog"
+  year := 2025
+  month := none
+  volume := inlines!""
+  number := inlines!""
+  url := some "https://powdr.org/blog/accelerating-ethereum-with-autoprecompiles"
+
+def powdr_apc_compiler : Article where
+  title := inlines!"Formally Verified Autoprecompiles"
+  authors := #[inlines!"powdr"]
+  journal := inlines!"powdr labs blog"
+  year := 2026
+  month := none
+  volume := inlines!""
+  number := inlines!""
+  url := some "https://powdr.org/blog/formally-verified-autoprecompiles"
+
 def openVM : Article where
   title := inlines!"OpenVM Whitepaper"
   authors := #[inlines!"OpenVM"]
