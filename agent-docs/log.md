@@ -4991,3 +4991,51 @@ accept; and a *sequential* A/B of the two binaries showed a 2–6 % "win" that i
 entirely — run-ordering bias on this box is larger than the effect being measured. Always interleave.
 
 **Worked locally: yes** (byte-identical `opt-export` on 8 of 9 fixtures; `apc_020` size-identical).
+
+### 146. Runtime: sha256_big −28% — reencode stable-position state, busUnify ghost context, bytePack resume
+
+Targeted the runtime gap against powdr on the 168k-var sha256 case (timing comparison of
+2026-07-26: 511.9 s Lean vs 113.6 s Rust). A gdb stack-sampling harness over a live `profile` run
+(357 samples, shares matching the profiler's per-pass totals) pinned the superlinear costs; five
+output-preserving commits, in profile order:
+
+1. **busUnify: the sweep stops materializing `pre`/`post`.** `denseEmitCand` reversed the whole
+   seen-prefix per consumed window (~7 % of the run in samples) though `denseCollectForBus` only
+   reads `(S, mid, R)`. The context lists now exist only in the proofs — `OpenWF` and `SplitEqC`
+   quantify them existentially. busUnify **78.3 → 35.0 s (−55 %)**.
+2. **reencode: `@[csimp]` gated system rewrite.** `denseReencodeOut` rebuilt every expression per
+   accepted group; `denseGroupRewrite` is the identity on items sharing no group variable and
+   carrying no variable-free composite node (`denseGroupRewrite_eq_self`), so the compiled twin
+   rebuilds only items passing that read-only gate, and hoists the substitution closure and
+   pattern list out of the per-interaction lambdas (they re-enumerated `denseAssignments
+   (denseBitBox bits)` twice per interaction).
+3. **reencode: candidate state on stable positions.** The cached step rebuilt csIdx
+   (`denseBuildPruned`), the degree pre-gate indexes (two `denseCovBuild`s + `toArray`), the
+   variable set (`HashSet.ofList ro.occ` — every occurrence!), the root cache (cleared) and the
+   constraint array per accept — O(accepts × system) deep walks, the dominant reencode cost.
+   `DenseReencodeCacheState` now owns all of it on stable positions: `.const 0` tombstones for
+   dropped constraints (variable-free ⇒ inert to every index query), grow-only buckets, in-place
+   updates of exactly the touched positions (`denseReencodeStateUpdate`), tracked
+   variable-free-composite positions (`foldCs`) so the fold-in-passing behavior of the reference
+   map is mirrored. `varSet` only gains bits, so it over-approximates live variables — the
+   affected groups are instead rejected by the certificate (no covered constraint mentions an
+   eliminated variable), and the accept case's `xs ⊆ d.occ` is now derived from the certificate
+   (`denseCheckReencode_xsOcc`) rather than a threaded varSet invariant, which *simplified* the
+   loop proofs. Together with 2: reencode **152.0 → 62.1 s (−59 %)**.
+4. **bytePack: resume past the previous pack.** Each drain step re-ran `denseFindGo` from
+   position 0 (O(packs × interactions), a `denseSvCheck?` decode per visited item). The drain
+   state (was `Unit`) now carries the resume position — a position before the last pack can never
+   fire later, since shapes are fixed and packing only removes single-value checks. The step
+   theorems take the scan split `revPre.reverse ++ bis = d.busInteractions` instead of a scan
+   pinned at the head. bytePack **28.6 → 3.6 s**, bytePackLate **13.7 → 1.0 s**.
+5. **reencode: survivor enumeration capped at `2^(|xs|−1)`** — past that `Nat.clog 2` reaches the
+   group size and the `k < xs.length` gate rejects anyway, so barely-constrained groups stop
+   after a handful of box points. Small on sha (the enumeration share was ~2 %).
+
+sha256_big (`profile`, this 4-core box): **586.9 → 421.7 s (−28.2 %)**, cycle 0 256.8 → 144.2 s.
+Every cycle's `(vars, bus, constraints)` triple and the final circuit
+(11906 / 12464 / 3194) are identical to main, and keccak's `run` output (2021 / 186 / 1748) is
+unchanged after every commit. Remaining top passes: busPairCancel 67 s, gauss 51 s, domainBatch
+37 s.
+
+**Worked locally: yes (identical outputs; PR #220 for the CI matrix).**

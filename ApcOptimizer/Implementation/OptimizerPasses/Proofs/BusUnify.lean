@@ -168,51 +168,52 @@ theorem denseCheckPair_sound (d : DenseConstraintSystem p) (bs : BusSemantics p)
 threads them across `insert`/`erase`/`getElem?`/`toList`. -/
 
 private abbrev SplitEqC (L : List (BusInteraction (DenseExpr p))) (cand : DenseSplitCand p) : Prop :=
-  L = cand.1 ++ cand.2.1 :: cand.2.2.1 ++ cand.2.2.2.1 :: cand.2.2.2.2
+  ∃ pre post, L = pre ++ cand.1 :: cand.2.1 ++ cand.2.2 :: post
 
 private def OpenWF (L : List (BusInteraction (DenseExpr p))) (w : DenseOpenRec p) : Prop :=
-  w.revPre.length = w.i ∧ L = w.revPre.reverse ++ w.S :: w.restAfter
+  ∃ pre, pre.length = w.i ∧ L = pre ++ w.S :: w.restAfter
 
 theorem dense_split_of_positions
-    {L revPre restAfter revSeen post : List (BusInteraction (DenseExpr p))}
+    {L pre restAfter seen post : List (BusInteraction (DenseExpr p))}
     {S R : BusInteraction (DenseExpr p)} {i j : Nat}
-    (hi : revPre.length = i) (hsplit : L = revPre.reverse ++ S :: restAfter)
-    (hj : revSeen.length = j) (hnow : L = revSeen.reverse ++ R :: post) (hlt : i < j) :
-    L = revPre.reverse ++ S :: restAfter.take (j - i - 1) ++ R :: post := by
+    (hi : pre.length = i) (hsplit : L = pre ++ S :: restAfter)
+    (hj : seen.length = j) (hnow : L = seen ++ R :: post) (hlt : i < j) :
+    L = pre ++ S :: restAfter.take (j - i - 1) ++ R :: post := by
   have hRA : restAfter = L.drop (i + 1) := by
-    have h1 : L = (revPre.reverse ++ [S]) ++ restAfter := by rw [hsplit]; simp
+    have h1 : L = (pre ++ [S]) ++ restAfter := by rw [hsplit]; simp
     rw [h1, List.drop_left' (by simp [hi])]
   have hRp : R :: post = L.drop j := by rw [hnow, List.drop_left' (by simp [hj])]
   have hdrop : restAfter.drop (j - i - 1) = R :: post := by
     rw [hRA, List.drop_drop, hRp]; congr 1; omega
-  have hn : L = revPre.reverse ++ S :: (restAfter.take (j - i - 1) ++ R :: post) := by
+  have hn : L = pre ++ S :: (restAfter.take (j - i - 1) ++ R :: post) := by
     rw [← hdrop, List.take_append_drop]; exact hsplit
   simpa [List.append_assoc] using hn
 
 private theorem denseEmitCand_split {L : List (BusInteraction (DenseExpr p))} (w : DenseOpenRec p)
     (hwf : OpenWF L w)
-    {revSeen : List (BusInteraction (DenseExpr p))} (j : Nat) (hj : revSeen.length = j)
+    {seen : List (BusInteraction (DenseExpr p))} (j : Nat) (hj : seen.length = j)
     (R : BusInteraction (DenseExpr p)) (post : List (BusInteraction (DenseExpr p)))
-    (hnow : L = revSeen.reverse ++ R :: post)
-    {ic : Nat × DenseSplitCand p} (h : denseEmitCand w j R post = some ic) :
+    (hnow : L = seen ++ R :: post)
+    {ic : Nat × DenseSplitCand p} (h : denseEmitCand w j R = some ic) :
     SplitEqC L ic.2 := by
   unfold denseEmitCand at h
   by_cases hlt : w.i < j
   · rw [if_pos hlt] at h
     simp only [Option.some.injEq] at h
     subst h
-    exact dense_split_of_positions hwf.1 hwf.2 hj hnow hlt
+    obtain ⟨pre, hi, hsplit⟩ := hwf
+    exact ⟨pre, post, dense_split_of_positions hi hsplit hj hnow hlt⟩
   · rw [if_neg hlt] at h; exact absurd h (by simp)
 
 private theorem denseEmitCand_cons_split {L : List (BusInteraction (DenseExpr p))}
     (w : DenseOpenRec p) (hwf : OpenWF L w)
-    {revSeen : List (BusInteraction (DenseExpr p))} (j : Nat) (hj : revSeen.length = j)
+    {seen : List (BusInteraction (DenseExpr p))} (j : Nat) (hj : seen.length = j)
     (R : BusInteraction (DenseExpr p)) (post : List (BusInteraction (DenseExpr p)))
-    (hnow : L = revSeen.reverse ++ R :: post)
+    (hnow : L = seen ++ R :: post)
     (acc : List (Nat × DenseSplitCand p)) (hacc : ∀ ic ∈ acc, SplitEqC L ic.2) :
-    ∀ ic ∈ (match denseEmitCand w j R post with | some c => c :: acc | none => acc),
+    ∀ ic ∈ (match denseEmitCand w j R with | some c => c :: acc | none => acc),
       SplitEqC L ic.2 := by
-  cases hem : denseEmitCand w j R post with
+  cases hem : denseEmitCand w j R with
   | none => intro ic hic; exact hacc ic hic
   | some c =>
     intro ic hic
@@ -259,23 +260,24 @@ private theorem eraseFold_ow {L : List (BusInteraction (DenseExpr p))}
 theorem denseSweepGo_split {ops : DenseZModOps p} {shape : MemoryBusShape}
     {T : Thunk (DenseTwoRootMap p)}
     {nw : Thunk (DenseNonzeroWits p)} (L : List (BusInteraction (DenseExpr p)))
-    (revSeen rest : List (BusInteraction (DenseExpr p))) (j : Nat)
+    (rest : List (BusInteraction (DenseExpr p))) (j : Nat)
     (constOpen : Std.HashMap (DenseAddrKey p) (DenseOpenRec p))
     (symOpen : List (DenseOpenRec p)) (acc : List (Nat × DenseSplitCand p))
-    (hsplit : L = revSeen.reverse ++ rest) (hj : revSeen.length = j)
+    (hseen : ∃ seen : List (BusInteraction (DenseExpr p)), seen.length = j ∧ L = seen ++ rest)
     (hcO : ∀ (k : DenseAddrKey p) (w : DenseOpenRec p), constOpen[k]? = some w → OpenWF L w)
     (hsO : ∀ w ∈ symOpen, OpenWF L w)
     (hacc : ∀ ic ∈ acc, SplitEqC L ic.2) :
-    ∀ ic ∈ denseSweepGo ops shape T nw revSeen rest j constOpen symOpen acc, SplitEqC L ic.2 := by
-  revert hsplit hj hcO hsO hacc
-  fun_induction denseSweepGo ops shape T nw revSeen rest j constOpen symOpen acc with
-  | case1 revSeen j constOpen symOpen acc =>
-    intro hsplit hj hcO hsO hacc ic hic
+    ∀ ic ∈ denseSweepGo ops shape T nw rest j constOpen symOpen acc, SplitEqC L ic.2 := by
+  revert hseen hcO hsO hacc
+  fun_induction denseSweepGo ops shape T nw rest j constOpen symOpen acc with
+  | case1 j constOpen symOpen acc =>
+    intro hseen hcO hsO hacc ic hic
     exact hacc ic hic
-  | case2 revSeen m rest' j constOpen symOpen acc mKey mAllC constOpen_1 acc_1 hP1 so a hP2 constOpen_2 symOpen_1 hP3 ih =>
-    intro hsplit hj hcO hsO hacc
+  | case2 m rest' j constOpen symOpen acc mKey mAllC constOpen_1 acc_1 hP1 so a hP2 constOpen_2 symOpen_1 hP3 ih =>
+    intro hseen hcO hsO hacc
     clear_value mAllC mKey
-    have hnow : L = revSeen.reverse ++ m :: rest' := hsplit
+    obtain ⟨seen, hj, hsplit⟩ := hseen
+    have hnow : L = seen ++ m :: rest' := hsplit
     have hP1inv : (∀ (k : DenseAddrKey p) (w : DenseOpenRec p), constOpen_1[k]? = some w → OpenWF L w)
         ∧ (∀ ic ∈ acc_1, SplitEqC L ic.2) := by
       split at hP1
@@ -338,7 +340,7 @@ theorem denseSweepGo_split {ops : DenseZModOps p} {shape : MemoryBusShape}
           | blocker => exact ⟨hso2, ha2⟩
         exact ⟨hfr.1, hfr.2⟩
     obtain ⟨hso3, hacc2⟩ := hP2inv
-    have hwNew : OpenWF L (⟨revSeen, m, rest', j⟩ : DenseOpenRec p) := ⟨hj, hnow⟩
+    have hwNew : OpenWF L (⟨m, rest', j⟩ : DenseOpenRec p) := ⟨seen, hj, hnow⟩
     have hP3inv : (∀ (k : DenseAddrKey p) (w : DenseOpenRec p), constOpen_2[k]? = some w → OpenWF L w)
         ∧ (∀ w ∈ symOpen_1, OpenWF L w) := by
       split at hP3
@@ -359,22 +361,22 @@ theorem denseSweepGo_split {ops : DenseZModOps p} {shape : MemoryBusShape}
       · simp only [Prod.mk.injEq] at hP3; obtain ⟨rfl, rfl⟩ := hP3
         exact ⟨hcO1, hso3⟩
     intro ic hic
-    exact ih (by rw [List.reverse_cons, List.append_assoc]; exact hsplit)
-             (by rw [List.length_cons, hj])
+    exact ih ⟨seen ++ [m], by simp [hj], by simpa [List.append_assoc] using hsplit⟩
              hP3inv.1 hP3inv.2 hacc2 ic hic
 
 
-/-- Wrapper: every candidate the sweep enumerator returns recomposes the swept list. -/
+/-- Wrapper: every candidate the sweep enumerator returns recomposes the swept list (the `pre` and
+    `post` context lists exist only here — the sweep does not materialize them). -/
 theorem denseCandidateSplitsSweep_split {shape : MemoryBusShape} {T : Thunk (DenseTwoRootMap p)}
     {nw : Thunk (DenseNonzeroWits p)} (L : List (BusInteraction (DenseExpr p)))
     (cand : DenseSplitCand p) (hcand : cand ∈ denseCandidateSplitsSweep shape T nw L) :
-    L = cand.1 ++ cand.2.1 :: cand.2.2.1 ++ cand.2.2.2.1 :: cand.2.2.2.2 := by
+    ∃ pre post, L = pre ++ cand.1 :: cand.2.1 ++ cand.2.2 :: post := by
   unfold denseCandidateSplitsSweep at hcand
   rw [List.mem_map] at hcand
   obtain ⟨ic, hic, rfl⟩ := hcand
   rw [List.mem_mergeSort] at hic
-  exact denseSweepGo_split L [] L 0 ∅ [] []
-    (by simp) rfl
+  exact denseSweepGo_split L L 0 ∅ [] []
+    ⟨[], rfl, by simp⟩
     (by intro k w h; rw [Std.HashMap.getElem?_empty] at h; exact absurd h (by simp))
     (by intro w hw; simp at hw)
     (by intro ic hic; simp at hic) ic hic
@@ -398,19 +400,19 @@ theorem denseCollectForBus_vars (d : DenseConstraintSystem p)
     (T : Thunk (DenseTwoRootMap p)) (nw : Thunk (DenseNonzeroWits p)) (shape : MemoryBusShape)
     (busId : Nat) :
     ∀ (cands : List (DenseSplitCand p)),
-    (∀ cand ∈ cands, d.busInteractions.filter (fun bi => bi.busId = busId)
-        = cand.1 ++ cand.2.1 :: cand.2.2.1 ++ cand.2.2.2.1 :: cand.2.2.2.2) →
+    (∀ cand ∈ cands, ∃ pre post, d.busInteractions.filter (fun bi => bi.busId = busId)
+        = pre ++ cand.1 :: cand.2.1 ++ cand.2.2 :: post) →
     ∀ c ∈ denseCollectForBus shape T nw cands, ∀ z ∈ c.vars, z ∈ d.occ := by
   intro cands
   induction cands with
   | nil => intro _ c hc; simp [denseCollectForBus] at hc
   | cons cand rest ih =>
     intro hsplitc c hc z hz
-    obtain ⟨pre, S, mid, R, post⟩ := cand
-    have hsplit : d.busInteractions.filter (fun bi => bi.busId = busId)
-        = pre ++ S :: mid ++ R :: post := hsplitc (pre, S, mid, R, post) (List.mem_cons_self ..)
-    have hrest : ∀ cand ∈ rest, d.busInteractions.filter (fun bi => bi.busId = busId)
-        = cand.1 ++ cand.2.1 :: cand.2.2.1 ++ cand.2.2.2.1 :: cand.2.2.2.2 :=
+    obtain ⟨S, mid, R⟩ := cand
+    obtain ⟨pre, post, hsplit⟩ := hsplitc (S, mid, R) (List.mem_cons_self ..)
+    have hrest : ∀ cand ∈ rest, ∃ pre post,
+        d.busInteractions.filter (fun bi => bi.busId = busId)
+          = pre ++ cand.1 :: cand.2.1 ++ cand.2.2 :: post :=
       fun cand h => hsplitc cand (List.mem_cons_of_mem _ h)
     have hSmem : S ∈ d.busInteractions := by
       have h : S ∈ d.busInteractions.filter (fun bi => bi.busId = busId) := by
@@ -464,8 +466,8 @@ theorem denseCollectForBus_sound (d : DenseConstraintSystem p) (bs : BusSemantic
     (busId : Nat) (shape : MemoryBusShape) (hshape : facts.memShape busId = some shape)
     (denv : VarId → ZMod p) (hadm : d.admissible bs denv) (hsat : d.satisfies bs denv) :
     ∀ (cands : List (DenseSplitCand p)),
-    (∀ cand ∈ cands, d.busInteractions.filter (fun bi => bi.busId = busId)
-        = cand.1 ++ cand.2.1 :: cand.2.2.1 ++ cand.2.2.2.1 :: cand.2.2.2.2) →
+    (∀ cand ∈ cands, ∃ pre post, d.busInteractions.filter (fun bi => bi.busId = busId)
+        = pre ++ cand.1 :: cand.2.1 ++ cand.2.2 :: post) →
     ∀ c ∈ denseCollectForBus shape (Thunk.pure T)
         (Thunk.pure (DenseNonzeroWits.build d.algebraicConstraints)) cands,
       c.eval denv = 0 := by
@@ -474,11 +476,11 @@ theorem denseCollectForBus_sound (d : DenseConstraintSystem p) (bs : BusSemantic
   | nil => intro _ c hc; simp [denseCollectForBus] at hc
   | cons cand rest ih =>
     intro hsplitc c hc
-    obtain ⟨pre, S, mid, R, post⟩ := cand
-    have hsplit : d.busInteractions.filter (fun bi => bi.busId = busId)
-        = pre ++ S :: mid ++ R :: post := hsplitc (pre, S, mid, R, post) (List.mem_cons_self ..)
-    have hrest : ∀ cand ∈ rest, d.busInteractions.filter (fun bi => bi.busId = busId)
-        = cand.1 ++ cand.2.1 :: cand.2.2.1 ++ cand.2.2.2.1 :: cand.2.2.2.2 :=
+    obtain ⟨S, mid, R⟩ := cand
+    obtain ⟨pre, post, hsplit⟩ := hsplitc (S, mid, R) (List.mem_cons_self ..)
+    have hrest : ∀ cand ∈ rest, ∃ pre post,
+        d.busInteractions.filter (fun bi => bi.busId = busId)
+          = pre ++ cand.1 :: cand.2.1 ++ cand.2.2 :: post :=
       fun cand h => hsplitc cand (List.mem_cons_of_mem _ h)
     rw [denseCollectForBus] at hc
     split_ifs at hc with hchk

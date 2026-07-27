@@ -510,13 +510,15 @@ theorem denseBytePackStep_correct (isInput : VarId → Bool) (bs : BusSemantics 
     (busId : Nat) (spec : ByteXorSpec p) (pre : List (BusInteraction (DenseExpr p)))
     (eA : DenseExpr p) (mid : List (BusInteraction (DenseExpr p))) (eB : DenseExpr p)
     (post : List (BusInteraction (DenseExpr p)))
-    (hfg : denseFindGo bs facts [] d.busInteractions = some (busId, spec, pre, eA, mid, eB, post)) :
+    (revPre bis : List (BusInteraction (DenseExpr p)))
+    (hbis : revPre.reverse ++ bis = d.busInteractions)
+    (hfg : denseFindGo bs facts revPre bis = some (busId, spec, pre, eA, mid, eB, post)) :
     DensePassCorrect isInput d
       { d with busInteractions := pre ++ denseMkBytePair spec busId eA eB :: mid ++ post } [] bs := by
   obtain ⟨a, b, hsplit0, hsaEq, hsbEq, hab, hspec, hbound⟩ :=
-    denseFindGo_split bs facts [] d.busInteractions busId spec pre eA mid eB post hfg
+    denseFindGo_split bs facts revPre bis busId spec pre eA mid eB post hfg
   have hsplit : d.busInteractions = pre ++ a :: mid ++ b :: post := by
-    rw [← hsplit0, List.reverse_nil, List.nil_append]
+    rw [← hbis]; exact hsplit0
   have hsa := denseSvCheck?_sound bs facts a eA hsaEq
   have hsbd := denseSvCheck?_sound bs facts b eB hsbEq
   have hstC : bs.isStateful (denseMkBytePair spec busId eA eB).busId = false := by
@@ -548,13 +550,15 @@ theorem denseBytePackStep_covered (reg : VarRegistry) (bs : BusSemantics p) (fac
     (busId : Nat) (spec : ByteXorSpec p) (pre : List (BusInteraction (DenseExpr p)))
     (eA : DenseExpr p) (mid : List (BusInteraction (DenseExpr p))) (eB : DenseExpr p)
     (post : List (BusInteraction (DenseExpr p)))
-    (hfg : denseFindGo bs facts [] d.busInteractions = some (busId, spec, pre, eA, mid, eB, post)) :
+    (revPre bis : List (BusInteraction (DenseExpr p)))
+    (hbis : revPre.reverse ++ bis = d.busInteractions)
+    (hfg : denseFindGo bs facts revPre bis = some (busId, spec, pre, eA, mid, eB, post)) :
     ({ d with busInteractions := pre ++ denseMkBytePair spec busId eA eB :: mid ++ post } :
       DenseConstraintSystem p).CoveredBy reg := by
   obtain ⟨a, b, hsplit0, hsaEq, hsbEq, _hab, _hspec, _hbound⟩ :=
-    denseFindGo_split bs facts [] d.busInteractions busId spec pre eA mid eB post hfg
+    denseFindGo_split bs facts revPre bis busId spec pre eA mid eB post hfg
   have hsplit : d.busInteractions = pre ++ a :: mid ++ b :: post := by
-    rw [← hsplit0, List.reverse_nil, List.nil_append]
+    rw [← hbis]; exact hsplit0
   have hsa := denseSvCheck?_sound bs facts a eA hsaEq
   have hsbd := denseSvCheck?_sound bs facts b eB hsbEq
   obtain ⟨hcac, hcbi⟩ := hcov
@@ -579,23 +583,29 @@ theorem denseBytePackStep_covered (reg : VarRegistry) (bs : BusSemantics p) (fac
 /-! ## The dense `bytePack` pass: drain packs through `DenseNativeStep.drain` -/
 
 /-- One drain step: on a `denseFindGo` hit, a non-extending certified pack step; otherwise `none`.
-    Fuel = interaction-list length, a safe bound since each pack drops that count by one. -/
+    Fuel = interaction-list length, a safe bound since each pack drops that count by one.
+    The threaded `Nat` resumes the scan just past the previous pack: a position before it can
+    never fire later — an interaction's shape is fixed, a pack only removes single-value checks
+    (the inserted pair is not one), so a rejected first element stays rejected. -/
 def denseBytePackStep (bs : BusSemantics p) (facts : BusFacts p bs) (hp1 : (1 : ZMod p) ≠ 0) :
-    Unit → (reg : VarRegistry) → (d : DenseConstraintSystem p) → d.CoveredBy reg →
-      Option (Unit × DenseNativeStep p bs reg d) :=
-  fun _ reg d hcov =>
-    match hfg : denseFindGo bs facts [] d.busInteractions with
+    Nat → (reg : VarRegistry) → (d : DenseConstraintSystem p) → d.CoveredBy reg →
+      Option (Nat × DenseNativeStep p bs reg d) :=
+  fun k reg d hcov =>
+    match hfg : denseFindGo bs facts (d.busInteractions.take k).reverse
+        (d.busInteractions.drop k) with
     | none => none
     | some (busId, spec, pre, eA, mid, eB, post) =>
-      some ((), DenseNativeStep.ofSame bs
-        (denseBytePackStep_covered reg bs facts d hcov busId spec pre eA mid eB post hfg)
-        (denseBytePackStep_correct reg.isInput bs facts hp1 d busId spec pre eA mid eB post hfg))
+      some (pre.length + 1, DenseNativeStep.ofSame bs
+        (denseBytePackStep_covered reg bs facts d hcov busId spec pre eA mid eB post
+          (d.busInteractions.take k).reverse (d.busInteractions.drop k) (by simp) hfg)
+        (denseBytePackStep_correct reg.isInput bs facts hp1 d busId spec pre eA mid eB post
+          (d.busInteractions.take k).reverse (d.busInteractions.drop k) (by simp) hfg))
 
 /-- The dense single-value byte-check packing pass (see `denseFindGo`, `ByteCheckPack.lean`). -/
 def denseByteCheckPackPass : DenseVerifiedPassW p :=
   DenseVerifiedPassW.ofDenseStep (fun reg bs facts d hcov =>
     if hp1 : (1 : ZMod p) ≠ 0 then
-      (DenseNativeStep.drain bs (denseBytePackStep bs facts hp1) d.busInteractions.length ()
+      (DenseNativeStep.drain bs (denseBytePackStep bs facts hp1) d.busInteractions.length 0
         reg d hcov).2
     else DenseNativeStep.refl bs hcov)
 
