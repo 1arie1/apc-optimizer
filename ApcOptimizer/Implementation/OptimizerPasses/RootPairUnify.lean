@@ -158,6 +158,41 @@ def denseRpCandidates (c : DenseExpr p) :
      | _, _ => [])
   | _ => []
 
+/-- One `DenseZModOps p` above the candidate scan: each variable otherwise derives six instance
+    chains (two coefficients, two normal forms, the zero test and the `k⁻¹ · δ` product). -/
+def denseRpCandidatesWith (ops : DenseZModOps p) (c : DenseExpr p) :
+    List (VarId × (ZMod p × List (VarId × ZMod p) × ZMod p × ZMod p)) :=
+  match c with
+  | .mul f1 f2 =>
+    (match denseLinearizeWith ops f1, denseLinearizeWith ops f2 with
+     | some l1, some l2 =>
+       (HashedDedup.hashedEraseDups (hash ·) c.vars).filterMap (fun x =>
+         let k := denseCoeffSumWith ops x l1.terms
+         let A := (l1.others x).normWith ops
+         let A2 := (l2.others x).normWith ops
+         if k ≠ ops.zero ∧ denseCoeffSumWith ops x l2.terms = k ∧ A2.terms = A.terms then
+           let δ := A2.const - A.const
+           if 256 ≤ min (ops.mul k⁻¹ δ).val (p - (ops.mul k⁻¹ δ).val) then
+             some (x, (k, A.terms, A.const, δ))
+           else none
+         else none)
+     | _, _ => [])
+  | _ => []
+
+def denseRpCandidatesFast (c : DenseExpr p) :
+    List (VarId × (ZMod p × List (VarId × ZMod p) × ZMod p × ZMod p)) :=
+  denseRpCandidatesWith denseZModOps c
+
+theorem denseRpCandidatesWith_eq (ops : DenseZModOps p) (c : DenseExpr p) :
+    denseRpCandidatesWith ops c = denseRpCandidates c := by
+  simp only [denseRpCandidatesWith, denseRpCandidates, denseLinearizeWith_eq,
+    DenseLinExpr.coeff, denseCoeffSumWith_eq, DenseLinExpr.normWith_eq, ops.zero_eq, ops.mul_eq]
+
+@[csimp] theorem denseRpCandidates_eq_fast :
+    @denseRpCandidates = @denseRpCandidatesFast := by
+  funext p c
+  exact (denseRpCandidatesWith_eq denseZModOps c).symm
+
 /-- Hash of a candidate key, used to bucket the `seen` accumulator (bucketing never hides a twin;
     the exact `key == key'` check inside the scan separates any hash collision). -/
 def denseRpKeyHash (key : ZMod p × List (VarId × ZMod p) × ZMod p × ZMod p) : UInt64 :=

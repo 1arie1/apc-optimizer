@@ -90,9 +90,29 @@ def denseNeverZeroBFast (B : Std.HashMap VarId Nat) (e : DenseExpr p) : Bool :=
     let test := fun k => denseIntervalCert B ((n.scale k).norm)
     test 1 || test n.const⁻¹ || n.terms.any (fun t => test t.2⁻¹)
 
-@[csimp] theorem denseNeverZeroB_eq_fast : @denseNeverZeroB = @denseNeverZeroBFast := by
+/-- One `DenseZModOps p` for the whole certificate search: the linearization, the normal form and
+    every rescaling would otherwise derive their own instance chain, so a row of `k` terms pays
+    `2k + 4` of them. -/
+def denseNeverZeroBW (ops : DenseZModOps p) (B : Std.HashMap VarId Nat) (e : DenseExpr p) : Bool :=
+  match denseLinearizeWith ops e with
+  | none => false
+  | some l =>
+    let n := l.normWith ops
+    let test := fun k => denseIntervalCert B ((n.scaleWith ops k).normWith ops)
+    test ops.one || test n.const⁻¹ || n.terms.any (fun t => test t.2⁻¹)
+
+theorem denseNeverZeroBW_eq (ops : DenseZModOps p) (B : Std.HashMap VarId Nat) (e : DenseExpr p) :
+    denseNeverZeroBW ops B e = denseNeverZeroBFast B e := by
+  simp only [denseNeverZeroBW, denseNeverZeroBFast, denseLinearizeWith_eq,
+    DenseLinExpr.normWith_eq, DenseLinExpr.scaleWith_eq, ops.one_eq]
+
+def denseNeverZeroBOps (B : Std.HashMap VarId Nat) (e : DenseExpr p) : Bool :=
+  denseNeverZeroBW denseZModOps B e
+
+@[csimp] theorem denseNeverZeroB_eq_fast : @denseNeverZeroB = @denseNeverZeroBOps := by
   funext p B e
-  show denseNeverZeroB B e = _
+  show denseNeverZeroB B e = denseNeverZeroBW denseZModOps B e
+  rw [denseNeverZeroBW_eq]
   unfold denseNeverZeroB denseNeverZeroBFast
   cases denseLinearize e with
   | none => rfl
