@@ -222,29 +222,98 @@ theorem denseRecon (acc : List (VarId × ZMod p)) (order : Array VarId)
     funext (fun v => by rw [hm v])]
   exact denseReconAssoc acc hnod
 
-/-- The dense linear like-term merge. Proven `= denseMergeTerms` and installed via `@[csimp]`. -/
-def denseMergeTermsFast (ts : List (VarId × ZMod p)) : List (VarId × ZMod p) :=
-  if ts.length ≤ 32 then
-    ts.foldl (fun acc t => denseAddCoeff t.1 t.2 acc) []
-  else
-    let st := ts.foldl denseMtStep (#[], ∅)
-    st.1.toList.map (fun v => (v, (st.2[v]?).getD 0))
+/-- Boxed twins of the merge steps: `p` is a runtime value, so each inline `+`/`0` rebuilds the
+    whole `CommRing (ZMod p)` chain. Threading a `DenseZModOps p` costs one chain per merged list
+    instead of one per term. -/
+def denseAddCoeffWith (ops : DenseZModOps p) (v : VarId) (c : ZMod p) :
+    List (VarId × ZMod p) → List (VarId × ZMod p)
+  | [] => [(v, c)]
+  | (v', c') :: rest =>
+      if v' = v then (v', ops.add c' c) :: rest
+      else (v', c') :: denseAddCoeffWith ops v c rest
 
-@[csimp] theorem denseMergeTerms_eq_fast : @denseMergeTerms = @denseMergeTermsFast := by
-  funext p ts
-  show denseMergeTerms ts = denseMergeTermsFast ts
-  unfold denseMergeTermsFast
+theorem denseAddCoeffWith_eq (ops : DenseZModOps p) (v : VarId) (c : ZMod p)
+    (ts : List (VarId × ZMod p)) : denseAddCoeffWith ops v c ts = denseAddCoeff v c ts := by
+  induction ts with
+  | nil => rfl
+  | cons t rest ih =>
+      obtain ⟨v', c'⟩ := t
+      simp only [denseAddCoeffWith, denseAddCoeff, ops.add_eq, ih]
+
+def denseMtStepWith (ops : DenseZModOps p) (st : Array VarId × Std.HashMap VarId (ZMod p))
+    (t : VarId × ZMod p) : Array VarId × Std.HashMap VarId (ZMod p) :=
+  match st.2[t.1]? with
+  | some c0 => (st.1, st.2.insert t.1 (ops.add c0 t.2))
+  | none => (st.1.push t.1, st.2.insert t.1 t.2)
+
+theorem denseMtStepWith_eq (ops : DenseZModOps p) :
+    denseMtStepWith (p := p) ops = denseMtStep := by
+  funext st t
+  simp only [denseMtStepWith, denseMtStep, ops.add_eq]
+
+/-- The dense linear like-term merge. Proven `= denseMergeTerms`; `denseMergeTermsFast` below
+    installs it via `@[csimp]`. -/
+def denseMergeTermsWith (ops : DenseZModOps p) (ts : List (VarId × ZMod p)) :
+    List (VarId × ZMod p) :=
+  if ts.length ≤ 32 then
+    ts.foldl (fun acc t => denseAddCoeffWith ops t.1 t.2 acc) []
+  else
+    let st := ts.foldl (denseMtStepWith ops) (#[], ∅)
+    st.1.toList.map (fun v => (v, (st.2[v]?).getD ops.zero))
+
+def denseMergeTermsFast (ts : List (VarId × ZMod p)) : List (VarId × ZMod p) :=
+  denseMergeTermsWith denseZModOps ts
+
+theorem denseMergeTermsWith_eq (ops : DenseZModOps p) (ts : List (VarId × ZMod p)) :
+    denseMergeTermsWith ops ts = denseMergeTerms ts := by
+  simp only [denseMergeTermsWith, denseAddCoeffWith_eq, denseMtStepWith_eq, ops.zero_eq]
   split
   · rfl
   · have hbase : DenseMergeCorr ([] : List (VarId × ZMod p)) (#[] : Array VarId)
         (∅ : Std.HashMap VarId (ZMod p)) :=
       ⟨by simp, by simp, fun v => by simp [denseAssocCoeff]⟩
     have hcorr := denseMtFold_corr ts [] #[] ∅ hbase
-    exact (denseRecon _ _ _ hcorr).symm
+    exact denseRecon _ _ _ hcorr
+
+@[csimp] theorem denseMergeTerms_eq_fast : @denseMergeTerms = @denseMergeTermsFast := by
+  funext p ts
+  exact (denseMergeTermsWith_eq denseZModOps ts).symm
 
 /-- The fully-merged normal form of a dense linear form: combine like terms, drop zeros. -/
 def DenseLinExpr.norm (l : DenseLinExpr p) : DenseLinExpr p :=
   ⟨l.const, (denseMergeTerms l.terms).filter (fun t => t.2 ≠ 0)⟩
+
+/-- Boxed twin of the zero-drop: without it the `≠ 0` test rebuilds the instance chain per term. -/
+def denseDropZeroWith (ops : DenseZModOps p) :
+    List (VarId × ZMod p) → List (VarId × ZMod p)
+  | [] => []
+  | t :: ts => if t.2 = ops.zero then denseDropZeroWith ops ts else t :: denseDropZeroWith ops ts
+
+theorem denseDropZeroWith_eq (ops : DenseZModOps p) (ts : List (VarId × ZMod p)) :
+    denseDropZeroWith ops ts = ts.filter (fun t => t.2 ≠ 0) := by
+  induction ts with
+  | nil => rfl
+  | cons t rest ih =>
+      by_cases hz : t.2 = 0
+      · rw [List.filter_cons_of_neg (by simpa using hz)]
+        simp only [denseDropZeroWith, ops.zero_eq, if_pos hz, ih]
+      · rw [List.filter_cons_of_pos (by simpa using hz)]
+        simp only [denseDropZeroWith, ops.zero_eq, if_neg hz, ih]
+
+/-- One `DenseZModOps p` for the whole normal form: the merge and the zero-drop share it. -/
+def DenseLinExpr.normWith (ops : DenseZModOps p) (l : DenseLinExpr p) : DenseLinExpr p :=
+  ⟨l.const, denseDropZeroWith ops (denseMergeTermsWith ops l.terms)⟩
+
+def DenseLinExpr.normFast (l : DenseLinExpr p) : DenseLinExpr p :=
+  DenseLinExpr.normWith denseZModOps l
+
+theorem DenseLinExpr.normWith_eq (ops : DenseZModOps p) (l : DenseLinExpr p) :
+    l.normWith ops = l.norm := by
+  simp only [DenseLinExpr.normWith, DenseLinExpr.norm, denseMergeTermsWith_eq, denseDropZeroWith_eq]
+
+@[csimp] theorem DenseLinExpr.norm_eq_fast : @DenseLinExpr.norm = @DenseLinExpr.normFast := by
+  funext p l
+  exact (DenseLinExpr.normWith_eq denseZModOps l).symm
 
 /-! ## The dense normalization traversal -/
 
@@ -572,6 +641,56 @@ def denseNormalizeFusedFast : DenseExpr p → DenseNormRes p
           else if lb.terms.isEmpty then .lin (la.scale lb.const)
           else .opq (.mul ra.expr rb.expr)
       | _, _ => .opq (.mul ra.expr rb.expr)
+
+/-- Boxed twin of the deferred walk: `lin?` on a `var` builds `⟨0, [(x, 1)]⟩`, and a parent asks
+    both children for it, so every node otherwise pays two instance chains. -/
+def DenseNormRes.lin?With (ops : DenseZModOps p) : DenseNormRes p → Option (DenseLinExpr p)
+  | .var x => some ⟨ops.zero, [(x, ops.one)]⟩
+  | .lin l => some l
+  | .opq _ => none
+
+theorem DenseNormRes.lin?With_eq (ops : DenseZModOps p) (r : DenseNormRes p) :
+    r.lin?With ops = r.lin? := by
+  cases r <;> simp only [DenseNormRes.lin?With, DenseNormRes.lin?, ops.zero_eq, ops.one_eq]
+
+def denseNormalizeResWith (ops : DenseZModOps p) : DenseExpr p → DenseNormRes p
+  | .const n => .lin ⟨n, []⟩
+  | .var x => .var x
+  | .add a b =>
+      let ra := denseNormalizeResWith ops a
+      let rb := denseNormalizeResWith ops b
+      match ra.lin?With ops, rb.lin?With ops with
+      | some la, some lb => .lin (la.addWith ops lb)
+      | _, _ => .opq (.add ra.expr rb.expr)
+  | .mul a b =>
+      let ra := denseNormalizeResWith ops a
+      let rb := denseNormalizeResWith ops b
+      match ra.lin?With ops, rb.lin?With ops with
+      | some la, some lb =>
+          if la.terms.isEmpty then .lin (lb.scaleWith ops la.const)
+          else if lb.terms.isEmpty then .lin (la.scaleWith ops lb.const)
+          else .opq (.mul ra.expr rb.expr)
+      | _, _ => .opq (.mul ra.expr rb.expr)
+
+theorem denseNormalizeResWith_eq (ops : DenseZModOps p) (e : DenseExpr p) :
+    denseNormalizeResWith ops e = denseNormalizeFusedFast e := by
+  induction e with
+  | const n => rfl
+  | var x => rfl
+  | add a b iha ihb =>
+      simp only [denseNormalizeResWith, denseNormalizeFusedFast, iha, ihb,
+        DenseNormRes.lin?With_eq, DenseLinExpr.addWith_eq]
+  | mul a b iha ihb =>
+      simp only [denseNormalizeResWith, denseNormalizeFusedFast, iha, ihb,
+        DenseNormRes.lin?With_eq, DenseLinExpr.scaleWith_eq]
+
+def denseNormalizeResFast (e : DenseExpr p) : DenseNormRes p :=
+  denseNormalizeResWith denseZModOps e
+
+@[csimp] theorem denseNormalizeFusedFast_eq_res :
+    @denseNormalizeFusedFast = @denseNormalizeResFast := by
+  funext p e
+  exact (denseNormalizeResWith_eq denseZModOps e).symm
 
 def denseNormalizeFusedPair (e : DenseExpr p) : DenseExpr p × Option (DenseLinExpr p) :=
   let r := denseNormalizeFusedFast e
