@@ -1,0 +1,14 @@
+pr,merged_at,runtime_main_s,runtime_branch_s,delta,title
+202,2026-07-24T12:07:24Z,1132.8,1076.1,-5%,bench: add sha256 runtime stress case (own CI runner)
+198,2026-07-24T12:13:17Z,1101.6,1051.3,-5%,perf(redundantByteDrop): indexed byte-justification (~37x on the pass)
+203,2026-07-24T12:25:37Z,1068.8,1026.6,-4%,Apply #198 to main...
+199,2026-07-24T12:32:55Z,1017.7,966.1,-5%,perf(oneHotAnnihilate): index product constraints (O(constraints²) → O(constraints))
+204,2026-07-24T13:29:29Z,991.7,1035.9,+4%,"docs: rename docs/ to agent-docs/, flatten, add README"
+205,2026-07-24T14:16:56Z,1035.2,781.0,-25%,perf(registry): read byId.size before the push in register — encode 80.5s → 0.8s on 170k sha256
+210,2026-07-25T12:04:19Z,858.7,547.9,-36%,perf: 1.8x faster on large APCs — domainFold/flagFold/rootPairUnify/busPairCancel (989s → 550s on 170k sha256)
+211,2026-07-26T11:55:29Z,555.2,383.7,-31%,perf(reencode): stop rescanning the whole system per candidate group (184s -> 97s on 170k sha256)
+212,2026-07-26T12:45:04Z,380.8,354.4,-7%,perf(busPairCancel): per-variable domain index for byte justification (90s -> 50s on 170k sha256)
+215,2026-07-26T13:37:16Z,354.3,345.3,-3%,"perf(addrDiseq): scope the two-root build to address slots, linearize factors once (404s -> 378s on 170k sha256)"
+214,2026-07-26T13:40:12Z,349.7,351.7,+1%,"report: cleaner benchmark titles, drop the geomean"
+217,2026-07-26T21:28:38Z,336.6,332.2,-1%,perf(domainFold): gate the index on the candidate-group count (exponent 2.07 → 1.10)
+220,2026-07-27T12:56:24Z,333.6,255.5,-23%,"perf: sha256_big runtime −28% (reencode state on stable positions, busUnify sweep, bytePack resume)"
