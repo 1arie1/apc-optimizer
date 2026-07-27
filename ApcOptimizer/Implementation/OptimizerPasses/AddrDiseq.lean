@@ -320,13 +320,29 @@ def denseReciprocalWits? (c : DenseExpr p) : List (DenseLinExpr p) :=
            | _ => []
   | _ => []
 
-/-- Linear forms provably nonzero under a constraint list (data only). -/
+/-- Order-independent hash of a linear form's *value*: the merged normal form's constant mixed with
+    an order-insensitive (additive) combination of its `(variable, coefficient)` terms. Two forms
+    with equal value (`denseIsZeroLin` of their difference) share this hash regardless of term
+    order, so it keys the witness index below without ever missing a match. -/
+def denseLinHash (l : DenseLinExpr p) : UInt64 :=
+  let n := l.norm
+  n.terms.foldl (fun h t => h + mixHash (hash t.1) (hash t.2.val)) (hash n.const.val)
+
+/-- Bucket a witness list by `denseLinHash`, so a query needs only the two matching buckets rather
+    than a scan of every witness. Untrusted (re-checked at use); membership soundness is
+    `denseNZIndexOf_mem`. -/
+def denseNZIndexOf (wits : List (DenseLinExpr p)) : Std.HashMap UInt64 (List (DenseLinExpr p)) :=
+  wits.foldr (fun g m => m.insert (denseLinHash g) (g :: m.getD (denseLinHash g) [])) ∅
+
+/-- Linear forms provably nonzero under a constraint list, plus a `denseLinHash` index over them. -/
 structure DenseNonzeroWits (p : ℕ) where
   wits : List (DenseLinExpr p)
+  index : Std.HashMap UInt64 (List (DenseLinExpr p))
 
 /-- Collect every reciprocal-witness linear form from the constraint list. -/
 def DenseNonzeroWits.build (constraints : List (DenseExpr p)) : DenseNonzeroWits p where
   wits := constraints.flatMap denseReciprocalWits?
+  index := denseNZIndexOf (constraints.flatMap denseReciprocalWits?)
 
 /-- `Σ_{f ∈ fields} (m.payload[f] − S.payload[f])` as a dense linear form; `none` if any listed
     slot is absent from either payload or is nonlinear. -/
@@ -349,7 +365,9 @@ def denseAddrNonzeroNeq (shape : MemoryBusShape) (nw : DenseNonzeroWits p)
     (S m : BusInteraction (DenseExpr p)) : Bool :=
   shape.addressFields.sublists.any (fun T =>
     match denseDiffSumOver S m T with
-    | some D => nw.wits.any (fun g => denseIsZeroLin (D.add (g.scale (-1))) || denseIsZeroLin (D.add g))
+    | some D =>
+      (nw.index.getD (denseLinHash D) [] ++ nw.index.getD (denseLinHash (D.scale (-1))) []).any
+        (fun g => denseIsZeroLin (D.add (g.scale (-1))) || denseIsZeroLin (D.add g))
     | none => false)
 
 /-! ## Restricting the two-root map to the variables that can be queried -/

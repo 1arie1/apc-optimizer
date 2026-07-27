@@ -434,6 +434,26 @@ theorem denseDiffSumOver_eval_zero (S m : BusInteraction (DenseExpr p)) (fields 
               rw [DenseLinExpr.add_eval, DenseLinExpr.add_eval, DenseLinExpr.scale_eval]
               linear_combination -hlMe + hlSe - hval + haccz
 
+/-- Every item a `denseNZIndexOf` bucket returns was one of the indexed witnesses. -/
+theorem denseNZIndexOf_mem (wits : List (DenseLinExpr p)) :
+    ∀ (k : UInt64), ∀ g ∈ (denseNZIndexOf wits).getD k [], g ∈ wits := by
+  unfold denseNZIndexOf
+  induction wits with
+  | nil =>
+    intro k g hg
+    simp only [List.foldr_nil, Std.HashMap.getD_empty, List.not_mem_nil] at hg
+  | cons a rest ih =>
+    intro k g hg
+    rw [List.foldr_cons] at hg
+    by_cases hk : denseLinHash a = k
+    · subst hk
+      rw [Std.HashMap.getD_insert_self] at hg
+      rcases List.mem_cons.1 hg with h | h
+      · exact h ▸ List.mem_cons_self ..
+      · exact List.mem_cons_of_mem _ (ih (denseLinHash a) g h)
+    · rw [Std.HashMap.getD_insert, if_neg (by simpa using hk)] at hg
+      exact List.mem_cons_of_mem _ (ih k g hg)
+
 /-- Some address-field subset has limb-difference sum equal (up to sign) to a nonzero witness `g`;
     equal addresses would make that sum vanish, contradicting `g ≠ 0`. -/
 theorem denseAddrNonzeroNeq_sound (reg : VarRegistry) (shape : MemoryBusShape)
@@ -453,13 +473,15 @@ theorem denseAddrNonzeroNeq_sound (reg : VarRegistry) (shape : MemoryBusShape)
     rw [hD] at hcond
     rw [List.any_eq_true] at hcond
     obtain ⟨g, hg, hzero⟩ := hcond
+    have hgw : g ∈ dcs.flatMap denseReciprocalWits? := by
+      rcases List.mem_append.mp hg with hg' | hg' <;>
+        exact denseNZIndexOf_mem (dcs.flatMap denseReciprocalWits?) _ g hg'
     have hDzero : D.eval denv = 0 :=
       denseDiffSumOver_eval_zero S m T D hD denv (fun f hf =>
         denseAddr_eq_slot shape S m denv heq f (hTsub.subset hf))
     have hgne : g.eval denv ≠ 0 := by
-      have hgm : g ∈ dcs.flatMap denseReciprocalWits? := hg
-      rw [List.mem_flatMap] at hgm
-      obtain ⟨c, hc, hgc⟩ := hgm
+      rw [List.mem_flatMap] at hgw
+      obtain ⟨c, hc, hgc⟩ := hgw
       exact denseReciprocalWits?_sound c g hgc denv (hcon c hc)
     rcases (Bool.or_eq_true _ _).mp hzero with hz | hz
     · have hzz := denseIsZeroLin_sound _ hz denv
