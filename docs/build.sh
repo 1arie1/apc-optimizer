@@ -40,22 +40,26 @@ else:
 PY
 }
 
-# md5 over the mtimes of the sources a rebuild depends on: the doc sources, plus the
-# audited files (directly under ApcOptimizer/) whose docstrings the page splices.
+# md5 over the *contents* of the sources a rebuild depends on: the doc sources and image
+# assets, plus the audited files (directly under ApcOptimizer/) whose docstrings the page
+# splices. Hashing contents (not mtimes) means swapping an image is noticed, while regenerating
+# an identical trust.svg each build does not trigger a rebuild loop.
 watch_sig() {
   python3 - <<'PY'
 import os, hashlib
 h = hashlib.md5()
+exts = (".lean", ".dot", ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp")
 paths = []
 for dp, _, fs in os.walk("docs"):
     if os.sep + "_out" in dp + os.sep:
         continue
-    paths += [os.path.join(dp, f) for f in fs if f.endswith((".lean", ".dot"))]
+    paths += [os.path.join(dp, f) for f in fs if f.endswith(exts)]
 paths += [os.path.join("ApcOptimizer", f)
           for f in os.listdir("ApcOptimizer") if f.endswith(".lean")]
 for p in sorted(paths):
     try:
-        h.update(p.encode()); h.update(str(os.path.getmtime(p)).encode())
+        with open(p, "rb") as fh:
+            h.update(p.encode()); h.update(fh.read())
     except OSError:
         pass
 print(h.hexdigest())
