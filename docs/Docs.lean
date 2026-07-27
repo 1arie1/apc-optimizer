@@ -7,6 +7,7 @@ import ApcOptimizer.Sp1Semantics
 import ApcOptimizer.Optimizer
 
 import Docs.Bibliography
+import Docs.Cite
 
 open Verso.Genre Manual
 open Verso.Genre.Manual.InlineLean
@@ -19,37 +20,37 @@ set_option pp.rawOnError true
 -- signature *is* the statement we want to show, and we do not add prose to the audited source.
 set_option verso.docstring.allowMissing true
 
-#doc (Manual) "apc-optimizer: A Verified Constraint-System Optimizer" =>
+#doc (Manual) "`apc-optimizer`: A Verified Constraint-System Optimizer" =>
 %%%
-authors := ["The apc-optimizer authors"]
 shortTitle := "apc-optimizer"
 %%%
 
-This document is a guided reading of the *audited surface* of `apc-optimizer`. Every formal
-statement below is spliced directly from the compiled Lean source, so what you read is, by
-construction, the artifact that is machine-checked, not a transcription of it. Hover any name for
-its type; follow any link to its definition.
+This document describes `apc-optimizer`{citeNum powdr_apc_compiler}[], a formally verified zkVM circuit optimizer. `apc-optimizer` is a core component in the powdr autoprecompiles{citeNum powdr_autoprecompiles}[] pipeline.
 
-`apc-optimizer` is a formally verified optimizer for the constraint systems (circuits) that
-{citet powdr}[]'s autoprecompiles pipeline emits for zero-knowledge virtual machines. It is a
-drop-in replacement for powdr's `optimize`, and it ships with a machine-checked proof that it
-preserves a precise notion of circuit equivalence. It targets two zkVMs, {citet openVM}[] and
-{citet sp1}[], but the core theorem is proven against an abstract bus semantics, so a new VM is
-just a new instance.
+# Background: zkVMs and autoprecompiles
 
-The purpose of an *audited surface* is to make the trust story small and legible: the definitions
-and theorems shown here are all one needs to review to believe the optimizer is correct; the
-several thousand lines of optimization passes that implement it need no audit, because each pass
-carries its own correctness proof and the master theorem composes them.
+zkVMs such as OpenVM{citeNum openVM}[], SP1{citeNum sp1}[], or powdr WASM{citeNum powdr_wasm}[] are virtual machines that output a cryptographic proof that a program executed correctly. They differ in which instruction set they emulate, but use the same underlying primitives: They are a collection of _circuits_ communicating via shared _buses_.
+
+Each circuit is responsible for one or more instructions in the instruction set. They are defined by a set of _constraints_ over a _prime field_. Buses serve two purposes:
+- They implement _lookups_ into precomputed tables. For example, a byte range check might me implemented by proving that a circuit variable is in a size-256 table of all bytes.
+- They implement _stateful communication_ between circuits. For example, a _memory_ is implemented via bus interactions.
+
+_Autoprecompiles_ prove correct execution of an entire _basic block_, which is a sequence of assembly instructions that can only be entered at the first instruction and exited at the last. The initial circuit is compiled from the instruction circuits of the zkVM and the concrete assembly program by instantiating whatever circuits would have been used by the vanilla zkVM within one monolithic circuit:
+
+![Autoprecompiles](autoprecompiles.svg)
+
+Having all instructions within the same circuits enables various optimizations, typically shrinking the circuit size by a factor of 3-4. Examples of these optimizations include:
+- *Inlining of constants*. For example, immediate values can be inlined directly, as they are known at compile time. In combination with constant propagation, this specialized the circuit to the concrete basic block being proven.
+- *Memory optimizations*. When proving instruction-by-instruction, even temporary values are written to memory and read back. Within a monolithic circuit, these values can be accessed directly, avoiding the overhead of the memory argument. One consequence of this is that each register is only accessed once, independent of how many instructions read or write it.
+- *Gadget optimizations*. Circuits often contain repeated sub-circuits, that can be optimized for how exactly they are used. An example is RISC-V's `SEQZ` pseudo-instruction, which sets the output register to 1 if the input is zero, and 0 otherwise. It expands to the `SLTIU` instruction (a less-than comparison) with immediate value 1. But there exists a more efficient circuit for this specific comparison than the general-purpose `SLTIU` circuit.
 
 # Circuits
 
 A circuit is the constraint system of a single {deftech}_chip_: one component of a zkVM, such as an
 instruction executor, a memory argument, or a range-check table. It is a list of algebraic
 constraints together with a list of bus interactions, both over arithmetic expressions in a finite
-field. The algebraic constraints are the AIR-style identities of STARK arithmetization
-{citep stark}[]; the bus interactions are the multiplicity-weighted messages of a
-logarithmic-derivative lookup argument {citep logup}[], the mechanism modern zkVMs use for range
+field. The algebraic constraints are the AIR-style identities of STARK arithmetization; the bus interactions are the multiplicity-weighted messages of a
+logarithmic-derivative lookup argument, the mechanism modern zkVMs use for range
 checks, table lookups, memory, and communication between chips.
 
 An {deftech}_expression_ is a constant, a variable, or a sum or product of expressions:
@@ -95,7 +96,7 @@ Two fields deserve emphasis. `violatesConstraint` is the opaque handle on the lo
 *other* chips; sending a message that a table would reject is forbidden. `admissible` is where the
 "this is a real trace" assumption lives: it is a predicate on the active stateful messages, and it
 is the hinge of the asymmetry described next. For memory buses it encodes the memory discipline of
-{citet blum}[] (see [the memory discipline](#the-memory-discipline)).
+{citeNum blum}[] (see [the memory discipline](#the-memory-discipline)).
 
 # The correctness relation
 
@@ -166,8 +167,8 @@ its output is both a sound and a complete replacement, and it respects the bound
 # The memory discipline
 
 Memory and the execution bridge are stateful buses. Their `admissible` predicate is the offline
-memory-checking discipline of {citet blum}[], reused in essentially every zkVM and, in its modern
-multiplicity-based form, by arguments like Twist-and-Shout {citep twistShout}[]. `apc-optimizer`
+memory-checking discipline of {citeNum blum}[], reused in essentially every zkVM and, in its modern
+multiplicity-based form, by arguments like Twist-and-Shout {citeNum twistShout}[]. `apc-optimizer`
 does not prove this discipline; it takes it as an assumption about real (admissible) traces, and the
 `busUnify` pass relies on it to cancel and chain memory accesses. The utility that states it is
 small and shared across VMs.
@@ -190,7 +191,7 @@ order*: the exporter must therefore list memory interactions in chronological or
 
 ## OpenVM
 
-{citet openVM}[] runs over the BabyBear field. Its bus map assigns each bus id a type. The stateful
+{citeNum openVM}[] runs over the BabyBear field. Its bus map assigns each bus id a type. The stateful
 ones are the execution bridge and memory; the stateless ones are the range-checker, bitwise/XOR,
 and PC-lookup tables:
 
@@ -211,7 +212,7 @@ convention:
 
 ## SP1
 
-{citet sp1}[] (whose Hypercube proof system is described in {citet sp1Jagged}[]) runs over the
+{citeNum sp1}[] (whose Hypercube proof system is described in {citeNum sp1Jagged}[]) runs over the
 KoalaBear field. It uses a single byte-lookup bus multiplexing AND/OR/XOR/range/comparison
 operations, 16-bit memory limbs, and, unlike OpenVM, sends the *previous* memory record and
 receives the new one, so its memory shape carries the reversed direction.

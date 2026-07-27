@@ -9,19 +9,9 @@ open Verso.Genre.Manual
 
 namespace Docs
 
-def powdr : Article where
-  title := inlines!"powdr: a modular stack for zkVMs and proof systems"
-  authors := #[inlines!"powdr"]
-  journal := inlines!"Software, https://github.com/powdr-labs/powdr"
-  year := 2024
-  month := none
-  volume := inlines!""
-  number := inlines!""
-  url := some "https://www.powdr.org/"
-
 def powdr_autoprecompiles : Article where
   title := inlines!"Accelerating Ethereum with Autoprecompiles"
-  authors := #[inlines!"powdr"]
+  authors := #[inlines!"powdr labs"]
   journal := inlines!"powdr labs blog"
   year := 2025
   month := none
@@ -31,13 +21,23 @@ def powdr_autoprecompiles : Article where
 
 def powdr_apc_compiler : Article where
   title := inlines!"Formally Verified Autoprecompiles"
-  authors := #[inlines!"powdr"]
+  authors := #[inlines!"powdr labs"]
   journal := inlines!"powdr labs blog"
   year := 2026
   month := none
   volume := inlines!""
   number := inlines!""
   url := some "https://powdr.org/blog/formally-verified-autoprecompiles"
+
+def powdr_wasm : Article where
+  title := inlines!"powdr-wasm: an optimized zkVM for WebAssembly"
+  authors := #[inlines!"powdr labs"]
+  journal := inlines!"powdr labs blog"
+  year := 2026
+  month := none
+  volume := inlines!""
+  number := inlines!""
+  url := some "https://powdr.org/blog/powdr-wasm"
 
 def openVM : Article where
   title := inlines!"OpenVM Whitepaper"
