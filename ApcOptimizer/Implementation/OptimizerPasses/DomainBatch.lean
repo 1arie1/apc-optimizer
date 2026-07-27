@@ -201,6 +201,35 @@ def denseIExprEvalWith (add mul : ZMod p → ZMod p → ZMod p) (pt : List (VarI
   | .add a b => add (denseIExprEvalWith add mul pt a) (denseIExprEvalWith add mul pt b)
   | .mul a b => mul (denseIExprEvalWith add mul pt a) (denseIExprEvalWith add mul pt b)
 
+/-- Boxed twin: takes the lookup zero too, so an evaluation costs one instance chain rather than
+    one per `.ix` node. -/
+def denseIExprEvalWithZ (add mul : ZMod p → ZMod p → ZMod p) (zero : ZMod p)
+    (pt : List (VarId × ZMod p)) : IExpr p → ZMod p
+  | .const n => n
+  | .ix i => denseLookupIxW zero pt i
+  | .add a b =>
+      add (denseIExprEvalWithZ add mul zero pt a) (denseIExprEvalWithZ add mul zero pt b)
+  | .mul a b =>
+      mul (denseIExprEvalWithZ add mul zero pt a) (denseIExprEvalWithZ add mul zero pt b)
+
+theorem denseIExprEvalWithZ_eq (add mul : ZMod p → ZMod p → ZMod p)
+    (pt : List (VarId × ZMod p)) (ie : IExpr p) :
+    denseIExprEvalWithZ add mul 0 pt ie = denseIExprEvalWith add mul pt ie := by
+  induction ie with
+  | const n => rfl
+  | ix i => exact denseLookupIxW_eq pt i
+  | add a b iha ihb => simp only [denseIExprEvalWithZ, denseIExprEvalWith, iha, ihb]
+  | mul a b iha ihb => simp only [denseIExprEvalWithZ, denseIExprEvalWith, iha, ihb]
+
+def denseIExprEvalWithFast (add mul : ZMod p → ZMod p → ZMod p) (pt : List (VarId × ZMod p))
+    (ie : IExpr p) : ZMod p :=
+  denseIExprEvalWithZ add mul 0 pt ie
+
+@[csimp] theorem denseIExprEvalWith_eq_fast :
+    @denseIExprEvalWith = @denseIExprEvalWithFast := by
+  funext p add mul pt ie
+  exact (denseIExprEvalWithZ_eq add mul pt ie).symm
+
 /-! ### Compiling dense items to `IExpr`/`CBi` -/
 
 /-- First position of `y` in dense `keys`. -/

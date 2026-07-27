@@ -190,6 +190,25 @@ def denseConstDiffNZ (a b : DenseLinExpr p) : Bool :=
   let d := (a.add (b.scale (-1))).norm
   d.terms.isEmpty && decide (d.const ≠ 0)
 
+/-- Boxed twin: called from the nested `any`/`any` over branch pairs, and the `-1`, the `add`, the
+    `scale`, the `norm` and the `≠ 0` each derive their own instance chain. One shared
+    `DenseZModOps p` covers all five. -/
+def denseConstDiffNZWith (ops : DenseZModOps p) (a b : DenseLinExpr p) : Bool :=
+  let d := (a.addWith ops (b.scaleWith ops ops.negOne)).normWith ops
+  d.terms.isEmpty && decide (d.const ≠ ops.zero)
+
+def denseConstDiffNZFast (a b : DenseLinExpr p) : Bool :=
+  denseConstDiffNZWith denseZModOps a b
+
+theorem denseConstDiffNZWith_eq (ops : DenseZModOps p) (a b : DenseLinExpr p) :
+    denseConstDiffNZWith ops a b = denseConstDiffNZ a b := by
+  simp only [denseConstDiffNZWith, denseConstDiffNZ, DenseLinExpr.addWith_eq,
+    DenseLinExpr.scaleWith_eq, DenseLinExpr.normWith_eq, ops.negOne_eq, ops.zero_eq]
+
+@[csimp] theorem denseConstDiffNZ_eq_fast : @denseConstDiffNZ = @denseConstDiffNZFast := by
+  funext p a b
+  exact (denseConstDiffNZWith_eq denseZModOps a b).symm
+
 /-! ## The expression- and address-level certificates -/
 
 /-- Two dense expressions provably evaluate differently: some two-root reduction of each yields
