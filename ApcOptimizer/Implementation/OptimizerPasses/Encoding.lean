@@ -88,6 +88,33 @@ def DenseExpr.vars : DenseExpr p → List VarId
   | .add a b => a.vars ++ b.vars
   | .mul a b => a.vars ++ b.vars
 
+/-! `vars` appends its children's lists, so every enclosing node recopies the left subtree's
+result — quadratic in the depth of the left-associated chains affine reconstruction produces, and
+one of the biggest allocation sources in the whole optimizer (`vars` is recomputed per item per
+pass). The accumulator twin below walks the right subtree into the suffix, allocating one cons per
+occurrence and preserving the left-to-right order exactly. -/
+
+def DenseExpr.varsAcc : DenseExpr p → List VarId → List VarId
+  | .const _, acc => acc
+  | .var i, acc => i :: acc
+  | .add a b, acc => a.varsAcc (b.varsAcc acc)
+  | .mul a b, acc => a.varsAcc (b.varsAcc acc)
+
+theorem DenseExpr.varsAcc_eq (e : DenseExpr p) (acc : List VarId) :
+    e.varsAcc acc = e.vars ++ acc := by
+  induction e generalizing acc with
+  | const n => rfl
+  | var i => rfl
+  | add a b iha ihb => simp [DenseExpr.varsAcc, DenseExpr.vars, iha, ihb]
+  | mul a b iha ihb => simp [DenseExpr.varsAcc, DenseExpr.vars, iha, ihb]
+
+def DenseExpr.varsFast (e : DenseExpr p) : List VarId := e.varsAcc []
+
+@[csimp] theorem DenseExpr.vars_eq_fast : @DenseExpr.vars = @DenseExpr.varsFast := by
+  funext p e
+  show e.vars = e.varsAcc []
+  rw [DenseExpr.varsAcc_eq, List.append_nil]
+
 /-- All `VarId`s of a dense bus interaction (multiplicity then payload). -/
 def denseBIVars (bi : BusInteraction (DenseExpr p)) : List VarId :=
   bi.multiplicity.vars ++ bi.payload.flatMap DenseExpr.vars

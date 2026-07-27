@@ -528,6 +528,80 @@ theorem denseNormalizeFused_eq (e : DenseExpr p) :
 theorem denseNormalizeFused_fst (e : DenseExpr p) : (denseNormalizeFused e).1 = e.normalize := by
   rw [denseNormalizeFused_eq]
 
+/-! ## Deferred materialization (runtime `@[csimp]` replacement for `denseNormalizeFused`)
+
+`denseNormalizeFused` rebuilds `l.norm.toExpr` at *every* affine node, but a parent that is itself
+affine discards it and re-merges the linear form — so a `k`-term affine chain pays `k` merges and
+`k` tree builds over `1..k` terms, i.e. `O(k²)`. `denseNormalizeFusedFast` returns the linear form
+undeveloped (`DenseNormRes.lin`) and materializes only where a parent cannot absorb it. -/
+
+/-- A fused-walk result with the expression left undeveloped while it is still absorbable.
+    `var` is its own case because the walk returns a bare variable unchanged, not its normal form. -/
+inductive DenseNormRes (p : ℕ) where
+  | var (x : VarId)
+  | lin (l : DenseLinExpr p)
+  | opq (e : DenseExpr p)
+
+/-- The normalized expression of a deferred result — the `.1` of `denseNormalizeFused`. -/
+def DenseNormRes.expr : DenseNormRes p → DenseExpr p
+  | .var x => .var x
+  | .lin l => l.norm.toExpr
+  | .opq e => e
+
+/-- The linear form of a deferred result — the `.2` of `denseNormalizeFused`. -/
+def DenseNormRes.lin? : DenseNormRes p → Option (DenseLinExpr p)
+  | .var x => some ⟨0, [(x, 1)]⟩
+  | .lin l => some l
+  | .opq _ => none
+
+def denseNormalizeFusedFast : DenseExpr p → DenseNormRes p
+  | .const n => .lin ⟨n, []⟩
+  | .var x => .var x
+  | .add a b =>
+      let ra := denseNormalizeFusedFast a
+      let rb := denseNormalizeFusedFast b
+      match ra.lin?, rb.lin? with
+      | some la, some lb => .lin (la.add lb)
+      | _, _ => .opq (.add ra.expr rb.expr)
+  | .mul a b =>
+      let ra := denseNormalizeFusedFast a
+      let rb := denseNormalizeFusedFast b
+      match ra.lin?, rb.lin? with
+      | some la, some lb =>
+          if la.terms.isEmpty then .lin (lb.scale la.const)
+          else if lb.terms.isEmpty then .lin (la.scale lb.const)
+          else .opq (.mul ra.expr rb.expr)
+      | _, _ => .opq (.mul ra.expr rb.expr)
+
+def denseNormalizeFusedPair (e : DenseExpr p) : DenseExpr p × Option (DenseLinExpr p) :=
+  let r := denseNormalizeFusedFast e
+  (r.expr, r.lin?)
+
+/-- Runtime `DenseExpr.normalize`: the spec re-runs `denseLinearize` over the whole node at every
+    node it visits, which is quadratic; the fused walk visits each node once. -/
+def denseNormalizeFast (e : DenseExpr p) : DenseExpr p := (denseNormalizeFusedFast e).expr
+
+@[csimp] theorem denseNormalizeFused_eq_fast :
+    @denseNormalizeFused = @denseNormalizeFusedPair := by
+  funext p e
+  show denseNormalizeFused e = _
+  induction e with
+  | const n => rfl
+  | var x => rfl
+  | add a b iha ihb =>
+      simp only [denseNormalizeFused, denseNormalizeFusedPair, denseNormalizeFusedFast, iha, ihb]
+      cases denseNormalizeFusedFast a <;> cases denseNormalizeFusedFast b <;> rfl
+  | mul a b iha ihb =>
+      simp only [denseNormalizeFused, denseNormalizeFusedPair, denseNormalizeFusedFast, iha, ihb]
+      cases denseNormalizeFusedFast a <;> cases denseNormalizeFusedFast b <;>
+        simp only [DenseNormRes.lin?] <;> first | rfl | (split_ifs <;> rfl)
+
+@[csimp] theorem DenseExpr_normalize_eq_fast : @DenseExpr.normalize = @denseNormalizeFast := by
+  funext p e
+  show DenseExpr.normalize e = _
+  rw [← denseNormalizeFused_fst, denseNormalizeFused_eq_fast]
+  rfl
+
 /-- The fused walk is eval-preserving (transported from `DenseExpr.normalize_eval`). -/
 theorem denseNormalizeFused_fst_eval (e : DenseExpr p) (denv : VarId → ZMod p) :
     ((denseNormalizeFused e).1).eval denv = e.eval denv := by
