@@ -28,6 +28,37 @@ def denseSplitSumMax (B : Std.HashMap VarId Nat) :
       else none
     | _, _ => none
 
+/-- Boxed twin: `-a` derives the `Neg (ZMod p)` instance chain per term otherwise. -/
+def denseSplitSumMaxW (neg : ZMod p → ZMod p) (B : Std.HashMap VarId Nat) :
+    List (VarId × ZMod p) → Option (Nat × Nat)
+  | [] => some (0, 0)
+  | (v, a) :: rest =>
+    match B[v]?, denseSplitSumMaxW neg B rest with
+    | some bound, some acc =>
+      if 1 ≤ bound then
+        if a.val * (bound - 1) ≤ (neg a).val * (bound - 1) then
+          some (a.val * (bound - 1) + acc.1, acc.2)
+        else
+          some (acc.1, (neg a).val * (bound - 1) + acc.2)
+      else none
+    | _, _ => none
+
+theorem denseSplitSumMaxW_eq (B : Std.HashMap VarId Nat) (l : List (VarId × ZMod p)) :
+    denseSplitSumMaxW (fun a => -a) B l = denseSplitSumMax B l := by
+  induction l with
+  | nil => rfl
+  | cons t rest ih =>
+      obtain ⟨v, a⟩ := t
+      simp only [denseSplitSumMaxW, denseSplitSumMax, ih]
+
+def denseSplitSumMaxFast (B : Std.HashMap VarId Nat) (l : List (VarId × ZMod p)) :
+    Option (Nat × Nat) :=
+  denseSplitSumMaxW (Neg.neg) B l
+
+@[csimp] theorem denseSplitSumMax_eq_fast : @denseSplitSumMax = @denseSplitSumMaxFast := by
+  funext p B l
+  exact (denseSplitSumMaxW_eq B l).symm
+
 /-- Certifies `l`'s value stays strictly within an interval of length `< p` that never wraps
     around `0` (hence nonzero). -/
 def denseIntervalCert (B : Std.HashMap VarId Nat) (l : DenseLinExpr p) : Bool :=

@@ -148,14 +148,20 @@ def denseSurvZeroCW (add mul : ZMod p → ZMod p → ZMod p) (ces : List (IExpr 
     otherwise be rebuilt per constraint per point of the group's domain box. -/
 def denseSurvZeroCWZ (add mul : ZMod p → ZMod p → ZMod p) (zero : ZMod p)
     (ces : List (IExpr p)) (a : List (VarId × ZMod p)) : Bool :=
-  ces.all (fun ie => decide (denseIExprEvalWith add mul a ie = zero))
+  ces.all (fun ie => decide (denseIExprEvalWithZ add mul zero a ie = zero))
+
+theorem denseSurvZeroCWZ_eq (add mul : ZMod p → ZMod p → ZMod p) (ces : List (IExpr p)) :
+    denseSurvZeroCWZ add mul 0 ces = denseSurvZeroCW add mul ces := by
+  funext a
+  simp only [denseSurvZeroCWZ, denseSurvZeroCW, denseIExprEvalWithZ_eq]
 
 def denseSurvZeroCWFast (add mul : ZMod p → ZMod p → ZMod p) (ces : List (IExpr p))
     (a : List (VarId × ZMod p)) : Bool :=
   denseSurvZeroCWZ add mul 0 ces a
 
 @[csimp] theorem denseSurvZeroCW_eq_fast : @denseSurvZeroCW = @denseSurvZeroCWFast := by
-  funext p add mul ces a; rfl
+  funext p add mul ces a
+  exact (congrFun (denseSurvZeroCWZ_eq add mul ces) a).symm
 
 /-- The surviving group values: enumerate the group's domains, keep those satisfying the covered
     constraints. -/
@@ -188,7 +194,12 @@ def denseGroupSurvivorsEFast (es : List (DenseExpr p)) (doms : List (VarId × Li
 
 @[csimp] theorem denseGroupSurvivorsE_eq_fast :
     @denseGroupSurvivorsE = @denseGroupSurvivorsEFast := by
-  funext p es doms; rfl
+  funext p es doms
+  show denseGroupSurvivorsE es doms = denseGroupSurvivorsEW _ _ 0 es doms
+  unfold denseGroupSurvivorsE denseGroupSurvivorsEW
+  split
+  · rw [denseSurvZeroCWZ_eq]
+  · rfl
 
 /-- `filter P l` if it keeps at most `cap` elements, `none` as soon as a `cap + 1`-st hit shows
     up — the tail is not scanned. -/
@@ -237,7 +248,12 @@ def denseGroupSurvivorsECapFast (es : List (DenseExpr p))
 
 @[csimp] theorem denseGroupSurvivorsECap_eq_fast :
     @denseGroupSurvivorsECap = @denseGroupSurvivorsECapFast := by
-  funext p es doms cap; rfl
+  funext p es doms cap
+  show denseGroupSurvivorsECap es doms cap = denseGroupSurvivorsECapW _ _ 0 es doms cap
+  unfold denseGroupSurvivorsECap denseGroupSurvivorsECapW
+  split
+  · rw [denseSurvZeroCWZ_eq]
+  · rfl
 
 /-! ## The checked re-encoding certificate -/
 
