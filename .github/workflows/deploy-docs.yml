@@ -1,20 +1,22 @@
 name: Docs
 
+# Publishes the docs site to GitHub Pages. Spec/docs drift is caught on PRs by the `build` job in
+# lean_action_ci.yml (which runs `lake build docs`), so this workflow only builds to *deploy* — from
+# main or a manual dispatch, never on PRs (a second `build`-named job on PRs would collide with the
+# required `build` check).
 on:
   push:
     branches: [main]
-    paths: &docs-paths
+    paths:
       - 'docs/**'
       - 'ApcOptimizer/**'
       - 'lakefile.toml'
       - 'lake-manifest.json'
       - 'lean-toolchain'
       - '.github/workflows/deploy-docs.yml'
-  pull_request:
-    paths: *docs-paths
   workflow_dispatch:
 
-# Supersede older runs of the same branch/PR; the Pages deploy has its own group below.
+# Supersede older runs; the Pages deploy has its own group below.
 concurrency:
   group: docs-${{ github.ref }}
   cancel-in-progress: true
@@ -25,10 +27,7 @@ permissions:
   id-token: write
 
 jobs:
-  # Runs on every relevant PR and on main. The docs splice the audited spec live (via
-  # `{docstring}` and `anchor` regions of ApcOptimizer/), so a successful build is a
-  # spec/docs drift check: renaming a definition or a `-- ANCHOR:` comment fails here.
-  build:
+  docs-build:
     runs-on: warp-ubuntu-2404-x64-32x
     steps:
       - uses: actions/checkout@v4
@@ -42,10 +41,8 @@ jobs:
         with:
           path: docs/_out/html-single
 
-  # Publish only from main (and manual dispatch); PRs build but never deploy.
   deploy:
-    if: github.event_name != 'pull_request'
-    needs: build
+    needs: docs-build
     runs-on: ubuntu-latest
     concurrency:
       group: pages
