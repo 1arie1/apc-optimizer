@@ -50,11 +50,11 @@ theorem DensePassCorrect.denseFilterConstraintsEntailed (d : DenseConstraintSyst
     fun _ => rfl
   refine DensePassCorrect.ofEnvEq ?_ ?_ (d.filterConstraints_occ_subset keep) ?_
   · intro denv hsat
-    exact ⟨denv, (hiff denv).1 hsat, by rw [hside denv]; exact BusState.equiv_refl _⟩
+    exact ⟨denv, (hiff denv).1 hsat, by rw [hside denv]⟩
   · intro hinv denv hsat bi hbi
     exact hinv denv ((hiff denv).1 hsat) bi hbi
   · intro denv hadmd hsat
-    exact ⟨(hiff denv).2 hsat, hadmd, by rw [hside denv]; exact BusState.equiv_refl _⟩
+    exact ⟨(hiff denv).2 hsat, hadmd, by rw [hside denv]⟩
 
 /-- The const-zero test is sound (only `const 0` passes it), so a passing dense expression
     evaluates to `0` under every assignment. -/
@@ -80,7 +80,7 @@ def denseTrivialConstraintDropPass : DenseVerifiedPassW p :=
 /-! ## Zero-multiplicity bus removal -/
 
 /-- Dropping bus interactions whose evaluated multiplicity is `0` leaves net multiplicity unchanged
-    (each contributes `0`), so the two bus states are `≈`-equal. -/
+    (each contributes `0`), so the two bus states are `=`-equal. -/
 theorem denseMultiplicitySum_filterBus (bs : BusSemantics p) (denv : VarId → ZMod p)
     (keep : BusInteraction (DenseExpr p) → Bool) (message : BusMessage p)
     (bis : List (BusInteraction (DenseExpr p)))
@@ -172,14 +172,15 @@ theorem DensePassCorrect.denseFilterBusZeroMult (d : DenseConstraintSystem p) (b
       · intro hne; exact absurd (h bi hbimem (by simpa using hk) denv) hne
     · rintro ⟨hc, hb⟩
       exact ⟨hc, fun bi hbimem => hb bi (List.mem_filter.1 hbimem).1⟩
-  have hside : ∀ denv, d.sideEffects bs denv ≈ (d.filterBus keep).sideEffects bs denv := by
-    intro denv message
+  have hside : ∀ denv, d.sideEffects bs denv = (d.filterBus keep).sideEffects bs denv := by
+    intro denv
+    refine funext (fun message => ?_)
     simp only [DenseConstraintSystem.sideEffects, DenseConstraintSystem.filterBus]
     exact denseMultiplicitySum_filterBus bs denv keep message d.busInteractions
       (fun bi hbi hkf => h bi hbi hkf denv)
   refine DensePassCorrect.ofEnvEq ?_ ?_ (d.filterBus_occ_subset keep) ?_
   · intro denv hsat
-    exact ⟨denv, (hiff denv).1 hsat, BusState.equiv_symm (hside denv)⟩
+    exact ⟨denv, (hiff denv).1 hsat, (hside denv).symm⟩
   · intro hinv denv hsat bi hbi
     have hbimem : bi ∈ d.busInteractions :=
       List.mem_of_mem_filter (show bi ∈ d.busInteractions.filter keep from hbi)

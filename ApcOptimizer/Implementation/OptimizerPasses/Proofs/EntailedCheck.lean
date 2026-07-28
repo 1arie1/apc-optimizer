@@ -46,7 +46,7 @@ theorem DensePassCorrect.denseAddConstraints {isInput : VarId → Bool} (d : Den
   refine ⟨?_, ?_, ?_, ?_⟩
   · -- soundness
     intro denv hsat
-    exact ⟨denv, hfwd denv hsat, BusState.equiv_refl _⟩
+    exact ⟨denv, hfwd denv hsat, rfl⟩
   · -- invariant preservation
     intro hgi denv hsat bi hbi
     exact hgi denv (hfwd denv hsat) bi hbi
@@ -59,7 +59,7 @@ theorem DensePassCorrect.denseAddConstraints {isInput : VarId → Bool} (d : Den
       rcases List.mem_append.1 hcm with h | h
       · exact hsat.1 c h
       · exact H denv hadm hsat c h
-    refine ⟨denv, hout_sat, hadm, BusState.equiv_refl _, fun _ _ => rfl, ?_⟩
+    refine ⟨denv, hout_sat, hadm, rfl, fun _ _ => rfl, ?_⟩
     intro inputVarIds _ i hi _
     show i ∈ d.occ ∧ denv i = denv i
     exact ⟨hoccsub i hi, rfl⟩
@@ -121,7 +121,8 @@ theorem DensePassCorrect.denseFilterBusEntailed (d : DenseConstraintSystem p) (b
               List.filter_cons_of_neg (by simp [hst]), hrest]
   have hside : ∀ denv, (d.filterBus keep).sideEffects bs denv = d.sideEffects bs denv := by
     intro denv
-    simp only [DenseConstraintSystem.sideEffects, DenseConstraintSystem.filterBus]
+    simp only [DenseConstraintSystem.filterBus]
+    refine funext (fun message => congrArg (multiplicitySum message) ?_)
     rw [hfilter d.busInteractions hstateless]
   have hadmfilter : ∀ (denv : VarId → ZMod p) (bis : List (BusInteraction (DenseExpr p))),
       (∀ bi ∈ bis, keep bi = false → bs.isStateful bi.busId = false) →
@@ -154,13 +155,13 @@ theorem DensePassCorrect.denseFilterBusEntailed (d : DenseConstraintSystem p) (b
     rw [hadmfilter denv d.busInteractions hstateless]
   refine DensePassCorrect.ofEnvEq ?_ ?_ (d.filterBus_occ_subset keep) ?_
   · intro denv hsat
-    exact ⟨denv, (hiff denv).1 hsat, by rw [hside denv]; exact BusState.equiv_refl _⟩
+    exact ⟨denv, (hiff denv).1 hsat, by rw [hside denv]⟩
   · intro hinv denv hsat bi hbi
     have hbimem : bi ∈ d.busInteractions :=
       List.mem_of_mem_filter (show bi ∈ d.busInteractions.filter keep from hbi)
     exact hinv denv ((hiff denv).1 hsat) bi hbimem
   · intro denv hadmd hsat
-    exact ⟨(hiff denv).2 hsat, (hadm denv).2 hadmd, by rw [hside denv]; exact BusState.equiv_refl _⟩
+    exact ⟨(hiff denv).2 hsat, (hadm denv).2 hadmd, by rw [hside denv]⟩
 
 /-! ## The append-only pass builder -/
 

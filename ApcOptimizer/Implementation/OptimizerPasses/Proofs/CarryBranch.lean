@@ -166,7 +166,7 @@ theorem denseCarryBranchF_correct (pw : PrimeWitness p) (reg : VarRegistry) (bs 
     · -- soundness: the same assignment satisfies the input
       intro denv hsatout
       have hB := hBof denv hsatout.2
-      exact ⟨denv, (hsat_iff denv hB).mpr hsatout, BusState.equiv_refl _⟩
+      exact ⟨denv, (hsat_iff denv hB).mpr hsatout, rfl⟩
     · -- invariant preservation (bus interactions are untouched)
       intro hgi denv hsatout
       have hB := hBof denv hsatout.2
@@ -188,7 +188,7 @@ theorem denseCarryBranchF_correct (pw : PrimeWitness p) (reg : VarRegistry) (bs 
     · -- completeness: same assignment, same side effects, `admissible` untouched
       intro denv hadm hsat
       have hB := hBof denv hsat.2
-      exact ⟨(hsat_iff denv hB).mp hsat, hadm, BusState.equiv_refl _⟩
+      exact ⟨(hsat_iff denv hB).mp hsat, hadm, rfl⟩
   · rw [show denseCarryBranchF pw bs facts d = d from by unfold denseCarryBranchF; rw [if_neg hpB]]
     exact DensePassCorrect.refl reg.isInput d bs
 

@@ -360,7 +360,8 @@ theorem denseMergeStateless2_correct (isInput : VarId → Bool) (d : DenseConstr
     simp only [List.filter_append, List.filter_cons, hst1, hst2, hstC, Bool.false_eq_true, if_false]
   have hside : ∀ denv, d.sideEffects bs denv = out.sideEffects bs denv := by
     intro denv
-    simp only [DenseConstraintSystem.sideEffects, hfilt]
+    refine funext (fun message => congrArg (multiplicitySum message) ?_)
+    simp only [hfilt]
   have hstE1 : ∀ denv, bs.isStateful (denseBIEval D₁ denv).busId = false := fun _ => hst1
   have hstE2 : ∀ denv, bs.isStateful (denseBIEval D₂ denv).busId = false := fun _ => hst2
   have hstEC : ∀ denv, bs.isStateful (denseBIEval C denv).busId = false := fun _ => hstC
@@ -398,11 +399,11 @@ theorem denseMergeStateless2_correct (isInput : VarId → Bool) (d : DenseConstr
       · exact Or.inr ⟨bi, hmem bi (Or.inr (Or.inr h)), hibi⟩
   refine DensePassCorrect.ofEnvEq
     (fun denv hsat => ⟨denv, (hsatiff denv).mpr hsat,
-      by rw [← hside denv]; exact BusState.equiv_refl _⟩)
+      by rw [← hside denv]⟩)
     (fun hgi denv hsat bi hbi => ?_)
     hsub
     (fun denv hadmE hsat => ⟨(hsatiff denv).mp hsat, (hadm denv).mp hadmE,
-      by rw [hside denv]; exact BusState.equiv_refl _⟩)
+      by rw [hside denv]⟩)
   -- invariant preservation: `bi` is in `pre`/`mid`/`post` (defer to `d`) or is `C` (`hbrk`).
   rw [houtb] at hbi
   simp only [List.mem_append, List.mem_cons] at hbi

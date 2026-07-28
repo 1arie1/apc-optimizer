@@ -170,9 +170,9 @@ theorem mem_core_of_ne {α : Type _} {l A B C : List α} {S R x : α}
   simp only [List.mem_append, List.mem_cons] at hx ⊢
   tauto
 
-/-- Net multiplicity (over the representation-independent `BusState p`) is additive over
-    concatenation of bus states. -/
-theorem multiplicitySum_append {p : ℕ} (msg : BusMessage p) (s t : BusState p) :
+/-- Net multiplicity is additive over concatenation of contribution lists. -/
+theorem multiplicitySum_append {p : ℕ} (msg : BusMessage p)
+    (s t : List (BusMessage p × ZMod p)) :
     multiplicitySum msg (s ++ t) = multiplicitySum msg s + multiplicitySum msg t := by
   induction s with
   | nil => simp [multiplicitySum]

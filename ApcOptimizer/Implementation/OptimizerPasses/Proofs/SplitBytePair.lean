@@ -223,7 +223,8 @@ private theorem denseSplitBytePair_correct_aux (isInput : VarId → Bool) (bs : 
       exact ⟨hc, (forall_denseP_flatMap bs facts hp1 d.busInteractions denv).1 hb⟩
   have hside : ∀ denv, d.sideEffects bs denv = out.sideEffects bs denv := by
     intro denv
-    simp only [DenseConstraintSystem.sideEffects, hbus]
+    refine funext (fun message => congrArg (multiplicitySum message) ?_)
+    simp only [hbus]
     rw [filter_stateful_flatMap bs facts d.busInteractions]
   have hadm : ∀ denv, d.admissible bs denv ↔ out.admissible bs denv := by
     intro denv
@@ -242,7 +243,7 @@ private theorem denseSplitBytePair_correct_aux (isInput : VarId → Bool) (bs : 
       exact Or.inr (List.mem_flatMap.2 ⟨orig, horig, denseSplitOne_vars bs facts orig bi hbimem hib⟩)
   refine DensePassCorrect.ofEnvEq ?_ ?_ hsub ?_
   · intro denv hsat
-    exact ⟨denv, (hsatiff denv).2 hsat, by rw [hside denv]; exact BusState.equiv_refl _⟩
+    exact ⟨denv, (hsatiff denv).2 hsat, by rw [hside denv]⟩
   · intro hgi denv hsat bi hbi
     rw [hbus, List.mem_flatMap] at hbi
     obtain ⟨orig, horig, hbimem⟩ := hbi
@@ -252,7 +253,7 @@ private theorem denseSplitBytePair_correct_aux (isInput : VarId → Bool) (bs : 
     · rw [heq]; exact hgi denv ((hsatiff denv).2 hsat) orig horig (heq ▸ hne)
     · exact hbrk
   · intro denv hadmE hsat
-    exact ⟨(hsatiff denv).1 hsat, (hadm denv).1 hadmE, by rw [hside denv]; exact BusState.equiv_refl _⟩
+    exact ⟨(hsatiff denv).1 hsat, (hadm denv).1 hadmE, by rw [hside denv]⟩
 
 /-- Coverage is preserved by the split. -/
 theorem denseSplitBytePairF_covered (reg : VarRegistry) (bs : BusSemantics p) (facts : BusFacts p bs)

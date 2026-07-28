@@ -163,6 +163,7 @@ theorem DenseConstraintSystem.mapExpr_sideEffects (hg : ∀ (e : DenseExpr p) (d
     (g e).eval denv = e.eval denv) (d : DenseConstraintSystem p) (bs : BusSemantics p)
     (denv : VarId → ZMod p) : (d.mapExpr g).sideEffects bs denv = d.sideEffects bs denv := by
   unfold DenseConstraintSystem.sideEffects
+  refine funext (fun message => congrArg (multiplicitySum message) ?_)
   rw [DenseConstraintSystem.mapExpr_busInteractions,
     filter_map_busId_comm d.busInteractions
       (fun bi => { bi with multiplicity := g bi.multiplicity, payload := bi.payload.map g }) bs
@@ -213,7 +214,6 @@ def denseConstantFoldPass : DenseVerifiedPassW p :=
         intro denv hsat
         refine ⟨denv, (DenseConstraintSystem.mapExpr_satisfies hfe d bs denv).mp hsat, ?_⟩
         rw [DenseConstraintSystem.mapExpr_sideEffects hfe]
-        exact BusState.equiv_refl _
       · -- invariants
         exact fun h => DenseConstraintSystem.mapExpr_guaranteesInvariants hfe h
       · -- no new powdr column
@@ -223,7 +223,6 @@ def denseConstantFoldPass : DenseVerifiedPassW p :=
         refine ⟨denv, (DenseConstraintSystem.mapExpr_satisfies hfe d bs denv).mpr hsat,
           (DenseConstraintSystem.mapExpr_admissible hfe d bs denv).mpr hadm, ?_, fun _ _ => rfl, ?_⟩
         · rw [DenseConstraintSystem.mapExpr_sideEffects hfe]
-          exact BusState.equiv_refl _
         · intro _ _ i hi _
           exact ⟨DenseConstraintSystem.mapExpr_occ_subset DenseExpr.fold_vars d i hi, rfl⟩)
 

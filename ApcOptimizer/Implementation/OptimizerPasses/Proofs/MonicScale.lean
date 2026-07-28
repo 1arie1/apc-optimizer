@@ -138,11 +138,11 @@ theorem denseMonicScaleF_correct (bs : BusSemantics p) (isInput : VarId → Bool
     · exact Or.inr hbus
   refine DensePassCorrect.ofEnvEq ?_ ?_ hsub ?_
   · intro denv hsatout
-    exact ⟨denv, (hsatiff denv).1 hsatout, BusState.equiv_refl _⟩
+    exact ⟨denv, (hsatiff denv).1 hsatout, rfl⟩
   · intro hinv denv hsatout bi hbi
     exact hinv denv ((hsatiff denv).1 hsatout) bi hbi
   · intro denv hadm hsat
-    exact ⟨(hsatiff denv).2 hsat, hadm, BusState.equiv_refl _⟩
+    exact ⟨(hsatiff denv).2 hsat, hadm, rfl⟩
 
 /-- The dense monic-scaling pass. -/
 def denseMonicScalePass : DenseVerifiedPassW p :=

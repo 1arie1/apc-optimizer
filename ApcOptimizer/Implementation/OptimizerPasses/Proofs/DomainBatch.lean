@@ -82,6 +82,7 @@ theorem DenseConstraintSystem.sideEffects_substF (d : DenseConstraintSystem p)
     (df : VarId → Option (DenseExpr p)) (bs : BusSemantics p) (denv : VarId → ZMod p) :
     (d.substF df).sideEffects bs denv = d.sideEffects bs (denseEnvF df denv) := by
   unfold DenseConstraintSystem.sideEffects DenseConstraintSystem.substF
+  refine funext (fun message => congrArg (multiplicitySum message) ?_)
   rw [show (fun bi : BusInteraction (DenseExpr p) => bs.isStateful bi.busId) =
         (fun bi => bs.isStateful bi.busId) from rfl]
   rw [filter_map_busId_comm d.busInteractions (fun bi => denseBIsubstF bi df) bs (fun _ => rfl),
@@ -130,7 +131,6 @@ theorem DenseConstraintSystem.substF_denseCorrect (d : DenseConstraintSystem p)
     intro denv hsat
     refine ⟨denseEnvF df denv, (d.satisfies_substF df bs denv).1 hsat, ?_⟩
     rw [d.sideEffects_substF df bs denv]
-    exact BusState.equiv_refl _
   · -- invariant preservation
     intro hinv denv hsat bi hbi
     have hsatd : d.satisfies bs (denseEnvF df denv) := (d.satisfies_substF df bs denv).1 hsat
@@ -149,7 +149,7 @@ theorem DenseConstraintSystem.substF_denseCorrect (d : DenseConstraintSystem p)
     refine ⟨denv, ?_, ?_, ?_, fun _ _ => rfl, ?_⟩
     · rw [d.satisfies_substF df bs denv, henv]; exact hsat
     · rw [d.admissible_substF df bs denv, henv]; exact hadm
-    · rw [d.sideEffects_substF df bs denv, henv]; exact BusState.equiv_refl _
+    · rw [d.sideEffects_substF df bs denv, henv]
     · -- reconstruction: no derivations, and out.occ ⊆ d.occ, denv' = denv
       intro inputVarIds _
       unfold DenseOutReconstructs
@@ -2027,11 +2027,11 @@ theorem denseCollectForcedV_entailed (bs : BusSemantics p) (facts : BusFacts p b
 theorem DensePassCorrect_refl (isInput : VarId → Bool) (d : DenseConstraintSystem p)
     (bs : BusSemantics p) : DensePassCorrect isInput d d [] bs := by
   refine ⟨?_, ?_, ?_, ?_⟩
-  · intro denv hsat; exact ⟨denv, hsat, BusState.equiv_refl _⟩
+  · intro denv hsat; exact ⟨denv, hsat, rfl⟩
   · intro hinv; exact hinv
   · intro i hi _; exact hi
   · intro denv hadm hsat
-    refine ⟨denv, hsat, hadm, BusState.equiv_refl _, fun _ _ => rfl, ?_⟩
+    refine ⟨denv, hsat, hadm, rfl, fun _ _ => rfl, ?_⟩
     intro inputVarIds _
     unfold DenseOutReconstructs
     intro i hi _

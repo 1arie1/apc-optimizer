@@ -223,9 +223,11 @@ theorem Circuit.admissible_congr {cs : Circuit p} {bs : BusSemantics p}
 theorem Circuit.sideEffects_congr {cs : Circuit p} {bs : BusSemantics p}
     {f g : Variable → ZMod p} (h : ∀ x ∈ cs.vars, f x = g x) :
     cs.sideEffects bs f = cs.sideEffects bs g := by
+  have hmap : cs.busInteractions.map (fun bi => bi.eval f)
+      = cs.busInteractions.map (fun bi => bi.eval g) :=
+    List.map_congr_left (fun bi hbi => Circuit.busEval_congr h hbi)
   unfold Circuit.sideEffects
-  refine List.map_congr_left (fun bi hbi => ?_)
-  simp only [Circuit.busEval_congr h (List.mem_of_mem_filter hbi)]
+  rw [hmap]
 
 theorem Derivations.methodFor_map_same (vs : List Variable)
     (f : Variable → ComputationMethod p) (v : Variable) :
@@ -329,7 +331,7 @@ theorem optimizerWithBusFacts_correct {bs : BusSemantics p} (b : DegreeBound) (f
   refine ⟨(Circuit.satisfies_congr hagree).mpr hsat',
     (Circuit.admissible_congr hagree).mpr hadm', ?_⟩
   · have hse' : cs.sideEffects bs env
-          ≈ (pipeline b cs bs facts).out.sideEffects bs (Derivations.witgen
+          = (pipeline b cs bs facts).out.sideEffects bs (Derivations.witgen
               ((pipeline b cs bs facts).derivs.forOutput cs.vars
                 (pipeline b cs bs facts).out.vars) env) := by
         rw [Circuit.sideEffects_congr hagree]

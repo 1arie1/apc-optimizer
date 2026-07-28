@@ -65,7 +65,8 @@ theorem DenseConstraintSystem.dedup_denseCorrect {isInput : VarId → Bool}
   -- Stateful side effects are unchanged (the stateful sublist is untouched).
   have hside : ∀ denv, (d.dedup bs).sideEffects bs denv = d.sideEffects bs denv := by
     intro denv
-    simp only [DenseConstraintSystem.sideEffects, DenseConstraintSystem.dedup]
+    simp only [DenseConstraintSystem.dedup]
+    refine funext (fun message => congrArg (multiplicitySum message) ?_)
     rw [denseDedupStateless_statefulFilter bs [] d.busInteractions]
   -- Admissibility is unchanged (the evaluated active∧stateful message list is untouched).
   have hadm : ∀ denv, (d.dedup bs).admissible bs denv ↔ d.admissible bs denv := by
@@ -84,7 +85,7 @@ theorem DenseConstraintSystem.dedup_denseCorrect {isInput : VarId → Bool}
   refine DensePassCorrect.ofEnvEq ?_ ?_ hsub ?_
   · -- soundness (`out.implies d`): same env, side effects equal
     intro denv hsat
-    exact ⟨denv, (hiff denv).1 hsat, by rw [hside]; exact BusState.equiv_refl _⟩
+    exact ⟨denv, (hiff denv).1 hsat, by rw [hside]⟩
   · -- invariant preservation: kept interactions are a subset of the originals
     intro hgi denv hsat bi hbi
     refine hgi denv ((hiff denv).1 hsat) bi ?_
@@ -92,7 +93,7 @@ theorem DenseConstraintSystem.dedup_denseCorrect {isInput : VarId → Bool}
     exact denseDedupStateless_subset bs [] d.busInteractions bi hbi
   · -- completeness (same env; admissibility/side effects unchanged)
     intro denv hadm' hsat
-    exact ⟨(hiff denv).2 hsat, (hadm denv).2 hadm', by rw [hside]; exact BusState.equiv_refl _⟩
+    exact ⟨(hiff denv).2 hsat, (hadm denv).2 hadm', by rw [hside]⟩
 
 /-- The dense duplicate-removal pass (runs the hash-bucketed `dedupN`). -/
 def denseDedupPass : DenseVerifiedPassW p :=

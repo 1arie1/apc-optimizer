@@ -8,17 +8,52 @@ variable {p : ℕ}
 /-! # Optimizer scaffolding
 
 The reusable framework for building the optimizer out of small, individually-proven passes: the
-relation glue (`≈`, `Circuit.implies`/`.reconstructs`), `PassCorrect`, and `VerifiedPass`
+relation glue (`Circuit.implies`/`.reconstructs`), `PassCorrect`, and `VerifiedPass`
 bundling a pass with its own `PassCorrect` proof. -/
 
-theorem BusState.equiv_refl (s : BusState p) : s ≈ s :=
-  fun _ => rfl
+/-! ## Net multiplicity over contribution lists
 
-theorem BusState.equiv_symm {s t : BusState p} (h : s ≈ t) : t ≈ s :=
-  fun message => (h message).symm
+`BusState` is a function (`ApcOptimizer/Spec.lean`), but the pass proofs reason by induction over
+the *list* of per-interaction contributions. `multiplicitySum` is that list view and
+`Circuit.sideEffects_eq` relates it to the spec's definition. -/
 
-theorem BusState.equiv_trans {s t u : BusState p} (h1 : s ≈ t) (h2 : t ≈ u) : s ≈ u :=
-  fun message => (h1 message).trans (h2 message)
+/-- The net multiplicity with which `message` is sent by a list of per-interaction contributions. -/
+def multiplicitySum (message : BusMessage p) (state : List (BusMessage p × ZMod p)) : ZMod p :=
+  match state with
+  | [] => 0
+  | (msg, mult) :: tl =>
+      (if msg = message then mult else 0) + multiplicitySum message tl
+
+/-- The contribution list of a circuit's stateful interactions under `env`. -/
+def Circuit.contributions (circuit : Circuit p) (bs : BusSemantics p)
+    (env : Variable → ZMod p) : List (BusMessage p × ZMod p) :=
+  (circuit.busInteractions.filter (fun bi => bs.isStateful bi.busId)).map
+    (fun bi => let m := bi.eval env; ((m.busId, m.payload), m.multiplicity))
+
+theorem multiplicitySum_map_filter (bs : BusSemantics p) (env : Variable → ZMod p)
+    (message : BusMessage p) (bis : List (BusInteraction (Expression p))) :
+    (((bis.map (fun bi => bi.eval env)).filter
+        (fun m => bs.isStateful m.busId && decide ((m.busId, m.payload) = message))).map
+      (fun m => m.multiplicity)).sum
+      = multiplicitySum message
+          ((bis.filter (fun bi => bs.isStateful bi.busId)).map
+            (fun bi => let m := bi.eval env; ((m.busId, m.payload), m.multiplicity))) := by
+  induction bis with
+  | nil => rfl
+  | cons bi rest ih =>
+      -- `BusInteraction.eval` keeps `busId`, so the two spellings of the statefulness test agree.
+      have hb : bs.isStateful (bi.eval env).busId = bs.isStateful bi.busId := rfl
+      by_cases hstate : bs.isStateful bi.busId = true
+      · by_cases hmsg : ((bi.eval env).busId, (bi.eval env).payload) = message
+        · simp [hb, hstate, hmsg, multiplicitySum, ih]
+        · simp [hb, hstate, hmsg, multiplicitySum, ih]
+      · simp [hb, hstate, ih]
+
+/-- The spec's `sideEffects` is the net multiplicity of the contribution list. -/
+theorem Circuit.sideEffects_eq (cs : Circuit p) (bs : BusSemantics p) (env : Variable → ZMod p)
+    (message : BusMessage p) :
+    cs.sideEffects bs env message = multiplicitySum message (cs.contributions bs env) :=
+  multiplicitySum_map_filter bs env message cs.busInteractions
 
 /-- Soundness half of a replacement: every satisfying assignment of `self` maps to one of `other`
     with the same stateful side effects. The spec's `isSoundReplacementOf` is this plus invariant
@@ -27,7 +62,7 @@ def Circuit.implies (self other : Circuit p) (busSemantics : BusSemantics p) :
     Prop :=
   ∀ env, self.satisfies busSemantics env →
     ∃ env', other.satisfies busSemantics env' ∧
-      self.sideEffects busSemantics env ≈ other.sideEffects busSemantics env'
+      self.sideEffects busSemantics env = other.sideEffects busSemantics env'
 
 /-- Every no-powdr-ID variable of `cs` is computed by `ds`'s method for it, reading only powdr-ID
     variables from `inputVars`. Threaded through passes; the pipeline top uses it to match the
@@ -42,14 +77,14 @@ def Circuit.reconstructs (inputVars : List Variable) (cs : Circuit p)
 
 theorem Circuit.implies_refl (cs : Circuit p) (busSemantics : BusSemantics p) :
     cs.implies cs busSemantics :=
-  fun env hsat => ⟨env, hsat, BusState.equiv_refl _⟩
+  fun env hsat => ⟨env, hsat, rfl⟩
 
 theorem Circuit.implies_trans {a b c : Circuit p} {busSemantics : BusSemantics p}
     (h1 : a.implies b busSemantics) (h2 : b.implies c busSemantics) : a.implies c busSemantics :=
   fun env hsat =>
     let ⟨env', hb, hab⟩ := h1 env hsat
     let ⟨env'', hc, hbc⟩ := h2 env' hb
-    ⟨env'', hc, BusState.equiv_trans hab hbc⟩
+    ⟨env'', hc, (hab.trans hbc)⟩
 
 /-! ## Precomputed primality witness
 
@@ -83,7 +118,7 @@ def PassCorrect (cs out : Circuit p) (dsLocal : Derivations p) (bs : BusSemantic
   (∀ v ∈ out.vars, v.powdrId?.isSome → v ∈ cs.vars) ∧
   (∀ env, cs.admissible bs env → cs.satisfies bs env →
     ∃ env', out.satisfies bs env' ∧ out.admissible bs env' ∧
-      cs.sideEffects bs env ≈ out.sideEffects bs env' ∧
+      cs.sideEffects bs env = out.sideEffects bs env' ∧
       (∀ v, v.powdrId?.isSome → env' v = env v) ∧
       (∀ inputVars, (∀ v ∈ cs.vars, v.powdrId?.isSome → v ∈ inputVars) →
         ∀ dsIn, cs.reconstructs inputVars dsIn env →
@@ -93,7 +128,7 @@ theorem PassCorrect.refl (cs : Circuit p) (bs : BusSemantics p) :
     PassCorrect cs cs [] bs :=
   ⟨cs.implies_refl bs, _root_.id, fun _ hv _ => hv,
    fun env hadm hsat =>
-     ⟨env, hsat, hadm, BusState.equiv_refl _,
+     ⟨env, hsat, hadm, rfl,
        ⟨fun _ _ => rfl, fun _ _ dsIn hrec => by rwa [List.append_nil]⟩⟩⟩
 
 /-- Sequential composition: derivations concatenate, soundness/invariants compose, reconstruction
@@ -107,7 +142,7 @@ theorem PassCorrect.andThen {cs mid out : Circuit p} {bs : BusSemantics p}
     fun v hv hpw => hf3 v (hg3 v hv hpw) hpw, fun env hadm hsat => ?_⟩
   obtain ⟨env1, hs1, ha1, he1, hpw1, hr1⟩ := hf4 env hadm hsat
   obtain ⟨env2, hs2, ha2, he2, hpw2, hr2⟩ := hg4 env1 ha1 hs1
-  refine ⟨env2, hs2, ha2, BusState.equiv_trans he1 he2,
+  refine ⟨env2, hs2, ha2, (he1.trans he2),
     ⟨fun v hpw => by rw [hpw2 v hpw, hpw1 v hpw],
       fun inputVars hpowIn dsIn hrec => ?_⟩⟩
   have hmidIn : ∀ v ∈ mid.vars, v.powdrId?.isSome → v ∈ inputVars :=
