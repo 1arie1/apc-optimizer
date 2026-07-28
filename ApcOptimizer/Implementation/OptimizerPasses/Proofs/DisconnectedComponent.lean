@@ -167,10 +167,11 @@ theorem DensePassCorrect.denseDropComponent (d : DenseConstraintSystem p) (bs : 
     have hse : ({ algebraicConstraints := d.algebraicConstraints.filter keepCon,
                   busInteractions := d.busInteractions.filter keepBi } :
                   DenseConstraintSystem p).sideEffects bs env = d.sideEffects bs (m env) :=
-      denseSideEffects_drop_eq bs keepBi env (m env) d.busInteractions
-        (fun bi hbi hkf => hBstateless bi hbi hkf)
-        (fun bi hbi hstate => hmeB env bi (hBkeep bi hbi (hstKeep bi hbi hstate)))
-    rw [hse]; exact BusState.equiv_refl _
+      funext (fun message => congrArg (multiplicitySum message)
+        (denseSideEffects_drop_eq bs keepBi env (m env) d.busInteractions
+          (fun bi hbi hkf => hBstateless bi hbi hkf)
+          (fun bi hbi hstate => hmeB env bi (hBkeep bi hbi (hstKeep bi hbi hstate)))))
+    rw [hse]
   · -- invariant preservation
     intro hgi env hsat bi hbi
     show (denseBIEval bi env).multiplicity ≠ 0 → bs.maintainsInvariants (denseBIEval bi env)
@@ -202,9 +203,10 @@ theorem DensePassCorrect.denseDropComponent (d : DenseConstraintSystem p) (bs : 
       have hse : ({ algebraicConstraints := d.algebraicConstraints.filter keepCon,
                     busInteractions := d.busInteractions.filter keepBi } :
                     DenseConstraintSystem p).sideEffects bs env = d.sideEffects bs env :=
-        denseSideEffects_drop_eq bs keepBi env env d.busInteractions
-          (fun bi hbi hkf => hBstateless bi hbi hkf) (fun _ _ _ => rfl)
-      rw [hse]; exact BusState.equiv_refl _
+        funext (fun message => congrArg (multiplicitySum message)
+          (denseSideEffects_drop_eq bs keepBi env env d.busInteractions
+            (fun bi hbi hkf => hBstateless bi hbi hkf) (fun _ _ _ => rfl)))
+      rw [hse]
 
 /-! ## The guarded drop -/
 

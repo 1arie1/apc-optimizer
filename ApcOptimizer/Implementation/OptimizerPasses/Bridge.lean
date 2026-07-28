@@ -42,13 +42,15 @@ def denseBIEval (bi : BusInteraction (DenseExpr p)) (denv : VarId → ZMod p) :
     multiplicity := bi.multiplicity.eval denv,
     payload := bi.payload.map (fun e => e.eval denv) }
 
-/-- Dense side effects: the stateful-bus messages sent. -/
+/-- Dense side effects: the net multiplicity each message is sent with by the stateful
+    interactions. -/
 def DenseConstraintSystem.sideEffects (d : DenseConstraintSystem p) (bs : BusSemantics p)
     (denv : VarId → ZMod p) : BusState p :=
-  d.busInteractions.filter (fun bi => bs.isStateful bi.busId)
-    |>.map (fun bi =>
-      let m := denseBIEval bi denv
-      ((m.busId, m.payload), m.multiplicity))
+  fun message => multiplicitySum message
+    (d.busInteractions.filter (fun bi => bs.isStateful bi.busId)
+      |>.map (fun bi =>
+        let m := denseBIEval bi denv
+        ((m.busId, m.payload), m.multiplicity)))
 
 /-- Dense satisfaction: all constraints vanish and every fired bus message is unconstrained. -/
 def DenseConstraintSystem.satisfies (d : DenseConstraintSystem p) (bs : BusSemantics p)
@@ -76,7 +78,7 @@ def DenseConstraintSystem.implies (self other : DenseConstraintSystem p) (bs : B
     Prop :=
   ∀ denv, self.satisfies bs denv →
     ∃ denv', other.satisfies bs denv' ∧
-      self.sideEffects bs denv ≈ other.sideEffects bs denv'
+      self.sideEffects bs denv = other.sideEffects bs denv'
 
 /-! ## `occ` membership helpers -/
 
@@ -149,6 +151,7 @@ theorem DenseConstraintSystem.sideEffects_congr {d : DenseConstraintSystem p} {b
     {denv1 denv2 : VarId → ZMod p} (h : ∀ i ∈ d.occ, denv1 i = denv2 i) :
     d.sideEffects bs denv1 = d.sideEffects bs denv2 := by
   unfold DenseConstraintSystem.sideEffects
+  refine funext (fun message => congrArg (multiplicitySum message) ?_)
   refine List.map_congr_left (fun bi hbi => ?_)
   rw [denseBIEval_congr bi denv1 denv2
     (fun i hi => h i (DenseConstraintSystem.mem_occ_of_bi (List.mem_of_mem_filter hbi) hi))]
@@ -265,7 +268,10 @@ theorem VarRegistry.decodeBI_filter_comm (reg : VarRegistry) (d : DenseConstrain
 theorem VarRegistry.decodeCS_sideEffects (reg : VarRegistry) (d : DenseConstraintSystem p)
     (bs : BusSemantics p) (E : Variable → ZMod p) :
     (reg.decodeCS d).sideEffects bs E = d.sideEffects bs (fun i => E (reg.resolve i)) := by
-  simp only [Circuit.sideEffects, DenseConstraintSystem.sideEffects, VarRegistry.decodeCS]
+  funext message
+  rw [Circuit.sideEffects_eq]
+  simp only [Circuit.contributions, DenseConstraintSystem.sideEffects, VarRegistry.decodeCS]
+  refine congrArg (multiplicitySum message) ?_
   rw [reg.decodeBI_filter_comm d bs, List.map_map]
   refine List.map_congr_left (fun bi _ => ?_)
   simp only [Function.comp_apply, reg.decodeBI_eval]
@@ -381,7 +387,7 @@ def DensePassCorrect (isInput : VarId → Bool) (d out : DenseConstraintSystem p
   (∀ i ∈ out.occ, isInput i = true → i ∈ d.occ) ∧
   (∀ denv, d.admissible bs denv → d.satisfies bs denv →
     ∃ denv', out.satisfies bs denv' ∧ out.admissible bs denv' ∧
-      d.sideEffects bs denv ≈ out.sideEffects bs denv' ∧
+      d.sideEffects bs denv = out.sideEffects bs denv' ∧
       (∀ i, isInput i = true → denv' i = denv i) ∧
       (∀ inputVarIds, (∀ i ∈ d.occ, isInput i = true → i ∈ inputVarIds) →
         DenseOutReconstructs isInput inputVarIds d out dd denv denv'))
@@ -477,9 +483,9 @@ theorem DenseDerivations.methodFor_append (a b : DenseDerivations p) (v : VarId)
 /-- Reflexivity: the identity transform (same system, no new derivations) is correct. -/
 theorem DensePassCorrect.refl (isInput : VarId → Bool) (d : DenseConstraintSystem p)
     (bs : BusSemantics p) : DensePassCorrect isInput d d [] bs := by
-  refine ⟨fun denv hsat => ⟨denv, hsat, BusState.equiv_refl _⟩, _root_.id, fun i hi _ => hi, ?_⟩
+  refine ⟨fun denv hsat => ⟨denv, hsat, rfl⟩, _root_.id, fun i hi _ => hi, ?_⟩
   intro denv hadm hsat
-  refine ⟨denv, hsat, hadm, BusState.equiv_refl _, fun _ _ => rfl, ?_⟩
+  refine ⟨denv, hsat, hadm, rfl, fun _ _ => rfl, ?_⟩
   intro inputVarIds _ i hi _
   exact ⟨hi, rfl⟩
 
@@ -497,7 +503,7 @@ theorem DensePassCorrect.andThen {isInput : VarId → Bool} {d mid out : DenseCo
     intro denv hsat3
     obtain ⟨e1, hsat2, hse23⟩ := hs23 denv hsat3
     obtain ⟨e0, hsat1, hse12⟩ := hs12 e1 hsat2
-    exact ⟨e0, hsat1, BusState.equiv_trans hse23 hse12⟩
+    exact ⟨e0, hsat1, (hse23.trans hse12)⟩
   · -- Invariant preservation.
     intro h; exact hi23 (hi12 h)
   · -- No new powdr-ID column.
@@ -506,7 +512,7 @@ theorem DensePassCorrect.andThen {isInput : VarId → Bool} {d mid out : DenseCo
     intro denv hadm1 hsat1
     obtain ⟨e1, hsat2, hadm2, hse12, hii12, hrec12⟩ := hc12 denv hadm1 hsat1
     obtain ⟨e2, hsat3, hadm3, hse23, hii23, hrec23⟩ := hc23 e1 hadm2 hsat2
-    refine ⟨e2, hsat3, hadm3, BusState.equiv_trans hse12 hse23, ?_, ?_⟩
+    refine ⟨e2, hsat3, hadm3, (hse12.trans hse23), ?_, ?_⟩
     · intro i hii; rw [hii23 i hii, hii12 i hii]
     · -- Reconstruction over `dd1 ++ dd2`.
       intro inputVarIds hcov1
@@ -568,7 +574,7 @@ theorem DensePassCorrect.ofEnvEq {isInput : VarId → Bool} {d out : DenseConstr
     (hsub : ∀ i ∈ out.occ, i ∈ d.occ)
     (hcomp : ∀ denv, d.admissible bs denv → d.satisfies bs denv →
       out.satisfies bs denv ∧ out.admissible bs denv ∧
-        d.sideEffects bs denv ≈ out.sideEffects bs denv) :
+        d.sideEffects bs denv = out.sideEffects bs denv) :
     DensePassCorrect isInput d out [] bs := by
   refine ⟨hsound, hinv, fun i hi _ => hsub i hi, ?_⟩
   intro denv hadm hsat
@@ -627,6 +633,7 @@ theorem DensePassCorrect.ofEvalAgree {isInput : VarId → Bool} {d out : DenseCo
   have hside : ∀ denv, A denv → out.sideEffects bs denv = d.sideEffects bs denv := by
     intro denv hA
     unfold DenseConstraintSystem.sideEffects
+    refine funext (fun message => congrArg (multiplicitySum message) ?_)
     rw [houtB, filter_map_busId_comm d.busInteractions
       (fun bi => { bi with multiplicity := gb bi.multiplicity, payload := bi.payload.map gb })
       bs (fun _ => rfl), List.map_map]
@@ -662,7 +669,7 @@ theorem DensePassCorrect.ofEvalAgree {isInput : VarId → Bool} {d out : DenseCo
   · intro denv hsatout
     have hA := hAout denv hsatout
     exact ⟨denv, (hsatIff denv hA).1 hsatout,
-      by rw [hside denv hA]; exact BusState.equiv_refl _⟩
+      by rw [hside denv hA]⟩
   · intro hgi denv hsatout bi' hbi'
     have hA := hAout denv hsatout
     have hsatd := (hsatIff denv hA).1 hsatout
@@ -673,7 +680,7 @@ theorem DensePassCorrect.ofEvalAgree {isInput : VarId → Bool} {d out : DenseCo
   · intro denv hadmd hsatd
     have hA := hAd denv hsatd
     exact ⟨(hsatIff denv hA).2 hsatd, (hadm denv hA).2 hadmd,
-      by rw [hside denv hA]; exact BusState.equiv_refl _⟩
+      by rw [hside denv hA]⟩
 
 /-- `DensePassCorrect` composes (derivations empty on both sides); `PassCorrect.andThen`
     specialised to no derivations. -/
@@ -686,13 +693,13 @@ theorem DensePassCorrect.trans {isInput : VarId → Bool} {d1 d2 d3 : DenseConst
   · intro denv hsat3
     obtain ⟨e1, hsat2, hse23⟩ := hs23 denv hsat3
     obtain ⟨e0, hsat1, hse12⟩ := hs12 e1 hsat2
-    exact ⟨e0, hsat1, BusState.equiv_trans hse23 hse12⟩
+    exact ⟨e0, hsat1, (hse23.trans hse12)⟩
   · intro h; exact hi23 (hi12 h)
   · intro i hi3 hii; exact hv12 i (hv23 i hi3 hii) hii
   · intro denv hadm1 hsat1
     obtain ⟨e1, hsat2, hadm2, hse12, hii12, hrec12⟩ := hc12 denv hadm1 hsat1
     obtain ⟨e2, hsat3, hadm3, hse23, hii23, hrec23⟩ := hc23 e1 hadm2 hsat2
-    refine ⟨e2, hsat3, hadm3, BusState.equiv_trans hse12 hse23, ?_, ?_⟩
+    refine ⟨e2, hsat3, hadm3, (hse12.trans hse23), ?_, ?_⟩
     · intro i hii; rw [hii23 i hii, hii12 i hii]
     · intro inputVarIds hcov1 i hi3 hisF
       have H23 := hrec23 d2.occ (fun j hj _ => hj) i hi3 hisF

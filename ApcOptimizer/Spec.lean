@@ -153,21 +153,9 @@ structure BusSemantics (p : ℕ) where
 /-- A concrete bus interaction message: which bus, and the tuple sent. -/
 abbrev BusMessage (p : ℕ) := Nat × List (ZMod p)
 
-/-- The effect on the stateful buses: the messages sent, each with a
-    multiplicity. -/
-abbrev BusState (p : ℕ) := List (BusMessage p × ZMod p)
-
-/-- The net multiplicity with which `message` is sent in `state`. -/
-def multiplicitySum (message : BusMessage p) (state : BusState p) : ZMod p :=
-  match state with
-  | [] => 0
-  | (msg, mult) :: tl =>
-      (if msg = message then mult else 0) + multiplicitySum message tl
-
-/-- Two bus states are equal when every message is sent with the same net
-    multiplicity. -/
-instance : HasEquiv (BusState p) :=
-  ⟨fun s t => ∀ message, multiplicitySum message s = multiplicitySum message t⟩
+/-- The effect on the stateful buses: the *net* multiplicity each message is
+    sent with. -/
+abbrev BusState (p : ℕ) := BusMessage p → ZMod p
 -- ANCHOR_END: busState
 
 --------- Circuit ---------
@@ -188,14 +176,15 @@ def Circuit.vars (circuit : Circuit p) : List Variable :=
       (fun bi => bi.multiplicity.vars ++ bi.payload.flatMap Expression.vars)
 
 -- ANCHOR: sideEffects
-/-- The side effects of a circuit under a given assignment and bus semantics.
-    The side effects are the tuples sent to the *stateful* buses. -/
+/-- The side effects of a circuit under a given assignment and bus semantics:
+    the net multiplicity with which each tuple is sent to a *stateful* bus. -/
 def Circuit.sideEffects (circuit : Circuit p) (busSemantics : BusSemantics p)
     (assignment : Variable → ZMod p) : BusState p :=
-  circuit.busInteractions.filter (fun bi => busSemantics.isStateful bi.busId)
-    |>.map (fun bi =>
-      let m := bi.eval assignment
-      ((m.busId, m.payload), m.multiplicity))
+  fun message =>
+    ((circuit.busInteractions.map (fun bi => bi.eval assignment)).filter
+      (fun m => busSemantics.isStateful m.busId &&
+        decide ((m.busId, m.payload) = message))).map
+      (fun m => m.multiplicity) |>.sum
 -- ANCHOR_END: sideEffects
 
 --------- Derived variables ---------
@@ -282,13 +271,13 @@ def Circuit.guaranteesInvariants (circuit : Circuit p)
 /-- Whether an optimized circuit is a sound replacement for an original
     circuit. Informally, for any satisfying assignment of the optimized
     circuit, there exists a corresponding satisfying assignment of the original
-    circuit *with equivalent side effects*. Also, the optimized circuit must
+    circuit *with equal side effects*. Also, the optimized circuit must
     maintain all invariants guaranteed by the original circuit. -/
 def Circuit.isSoundReplacementOf (optimizedCircuit originalCircuit : Circuit p)
     (busSemantics : BusSemantics p) : Prop :=
   (∀ assignment, optimizedCircuit.satisfies busSemantics assignment →
     ∃ assignment', originalCircuit.satisfies busSemantics assignment' ∧
-      optimizedCircuit.sideEffects busSemantics assignment ≈
+      optimizedCircuit.sideEffects busSemantics assignment =
         originalCircuit.sideEffects busSemantics assignment') ∧
   (originalCircuit.guaranteesInvariants busSemantics →
     optimizedCircuit.guaranteesInvariants busSemantics)
@@ -307,7 +296,7 @@ def Circuit.isCompleteReplacementOf
   -- variables, and the return derivations.
   ds.cover originalCircuit.vars optimizedCircuit.vars ∧
   -- For any admissible satisfying assignment of the original circuit, the
-  -- optimized circuit is also satisfied and admissible, with equivalent side
+  -- optimized circuit is also satisfied and admissible, with equal side
   -- effects, under the assignment produced by witness generation.
   ∀ assignment,
     originalCircuit.admissible busSemantics assignment →
@@ -315,7 +304,7 @@ def Circuit.isCompleteReplacementOf
     let assignment' := Derivations.witgen ds assignment
     optimizedCircuit.satisfies busSemantics assignment' ∧
       optimizedCircuit.admissible busSemantics assignment' ∧
-      originalCircuit.sideEffects busSemantics assignment ≈
+      originalCircuit.sideEffects busSemantics assignment =
         optimizedCircuit.sideEffects busSemantics assignment'
 -- ANCHOR_END: isCompleteReplacementOf
 

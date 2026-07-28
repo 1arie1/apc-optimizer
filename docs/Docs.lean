@@ -84,28 +84,16 @@ A {deftech}_bus interaction_ sends a _payload_ tuple to a bus, weighted by a _mu
 
 A circuit (defined below) contains a list of _symbolic bus interactions_ (i.e., `BusInteraction Expression`). For a concrete run of the zkVM, the circuit might be instantiated several times with different variable assignments. Evaluating the symbolic bus interactions under an assignment yields a list of _bus messages_ (i.e., `BusInteraction (ZMod p)`).
 
-## Bus state and equivalent states
+## Bus state
 
-The {deftech}_bus state_ of a circuit instance is the _net_ effect it has on the buses. That is, two bus states are considered equivalent if all messages are sent with the same net multiplicity:
+The {deftech}_bus state_ of a circuit instance is the _net_ effect it has on the buses: the net multiplicity each message is sent with. Two circuit instances therefore have the same effect on the buses exactly when their bus states are _equal_ — no separate equivalence relation is needed:
 ```anchor busState
 /-- A concrete bus interaction message: which bus, and the tuple sent. -/
 abbrev BusMessage (p : ℕ) := Nat × List (ZMod p)
 
-/-- The effect on the stateful buses: the messages sent, each with a
-    multiplicity. -/
-abbrev BusState (p : ℕ) := List (BusMessage p × ZMod p)
-
-/-- The net multiplicity with which `message` is sent in `state`. -/
-def multiplicitySum (message : BusMessage p) (state : BusState p) : ZMod p :=
-  match state with
-  | [] => 0
-  | (msg, mult) :: tl =>
-      (if msg = message then mult else 0) + multiplicitySum message tl
-
-/-- Two bus states are equal when every message is sent with the same net
-    multiplicity. -/
-instance : HasEquiv (BusState p) :=
-  ⟨fun s t => ∀ message, multiplicitySum message s = multiplicitySum message t⟩
+/-- The effect on the stateful buses: the *net* multiplicity each message is
+    sent with. -/
+abbrev BusState (p : ℕ) := BusMessage p → ZMod p
 ```
 
 Buses must _balance globally_: summed over all circuit instances in the entire zkVM execution, the net multiplicity of each message must be zero. This is enforced by the zkVM's proving backend, typically employing a protocol such as logup {citeNum logup}[] {citeNum logupGKR}[].
@@ -160,14 +148,15 @@ Bus semantics capture the _zkVM-specific_ semantics of the buses.
 First, we define the side effects of a circuit under an assignment as the net effect it has on the stateful buses.
 
 ```anchor sideEffects
-/-- The side effects of a circuit under a given assignment and bus semantics.
-    The side effects are the tuples sent to the *stateful* buses. -/
+/-- The side effects of a circuit under a given assignment and bus semantics:
+    the net multiplicity with which each tuple is sent to a *stateful* bus. -/
 def Circuit.sideEffects (circuit : Circuit p) (busSemantics : BusSemantics p)
     (assignment : Variable → ZMod p) : BusState p :=
-  circuit.busInteractions.filter (fun bi => busSemantics.isStateful bi.busId)
-    |>.map (fun bi =>
-      let m := bi.eval assignment
-      ((m.busId, m.payload), m.multiplicity))
+  fun message =>
+    ((circuit.busInteractions.map (fun bi => bi.eval assignment)).filter
+      (fun m => busSemantics.isStateful m.busId &&
+        decide ((m.busId, m.payload) = message))).map
+      (fun m => m.multiplicity) |>.sum
 ```
 
 Second, we define that a circuit _guarantees invariants_ if, under any satisfying assignment, every bus interaction maintains the invariants of the bus semantics.
@@ -189,13 +178,13 @@ Finally, we formalize what it means for an optimized circuit to be a sound repla
 /-- Whether an optimized circuit is a sound replacement for an original
     circuit. Informally, for any satisfying assignment of the optimized
     circuit, there exists a corresponding satisfying assignment of the original
-    circuit *with equivalent side effects*. Also, the optimized circuit must
+    circuit *with equal side effects*. Also, the optimized circuit must
     maintain all invariants guaranteed by the original circuit. -/
 def Circuit.isSoundReplacementOf (optimizedCircuit originalCircuit : Circuit p)
     (busSemantics : BusSemantics p) : Prop :=
   (∀ assignment, optimizedCircuit.satisfies busSemantics assignment →
     ∃ assignment', originalCircuit.satisfies busSemantics assignment' ∧
-      optimizedCircuit.sideEffects busSemantics assignment ≈
+      optimizedCircuit.sideEffects busSemantics assignment =
         originalCircuit.sideEffects busSemantics assignment') ∧
   (originalCircuit.guaranteesInvariants busSemantics →
     optimizedCircuit.guaranteesInvariants busSemantics)
@@ -270,7 +259,7 @@ def Derivations.witgen (ds : Derivations p)
 
 ## The full completeness property
 
-Putting the pieces together, we define what it means for an optimized circuit to be a _complete_ replacement for an original circuit. Structurally, the returned derivations must contain no unused entries and must cover every output variable from the input variables. Semantically, every admissible satisfying input assignment must produce a satisfying and admissible output assignment with equivalent side effects.
+Putting the pieces together, we define what it means for an optimized circuit to be a _complete_ replacement for an original circuit. Structurally, the returned derivations must contain no unused entries and must cover every output variable from the input variables. Semantically, every admissible satisfying input assignment must produce a satisfying and admissible output assignment with equal side effects.
 
 ```anchor isCompleteReplacementOf
 /-- Whether an optimized circuit is a complete replacement for an original one. -/
@@ -285,7 +274,7 @@ def Circuit.isCompleteReplacementOf
   -- variables, and the return derivations.
   ds.cover originalCircuit.vars optimizedCircuit.vars ∧
   -- For any admissible satisfying assignment of the original circuit, the
-  -- optimized circuit is also satisfied and admissible, with equivalent side
+  -- optimized circuit is also satisfied and admissible, with equal side
   -- effects, under the assignment produced by witness generation.
   ∀ assignment,
     originalCircuit.admissible busSemantics assignment →
@@ -293,7 +282,7 @@ def Circuit.isCompleteReplacementOf
     let assignment' := Derivations.witgen ds assignment
     optimizedCircuit.satisfies busSemantics assignment' ∧
       optimizedCircuit.admissible busSemantics assignment' ∧
-      originalCircuit.sideEffects busSemantics assignment ≈
+      originalCircuit.sideEffects busSemantics assignment =
         optimizedCircuit.sideEffects busSemantics assignment'
 ```
 

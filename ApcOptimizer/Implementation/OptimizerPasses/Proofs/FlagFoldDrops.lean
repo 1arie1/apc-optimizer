@@ -119,7 +119,7 @@ theorem DenseConstraintSystem.boxTautoReplace_denseCorrect [Fact p.Prime]
   refine DensePassCorrect.ofEnvEq ?_ ?_ ?_ ?_
   ·
     intro denv hsat
-    exact ⟨denv, (hiff denv).1 hsat, BusState.equiv_refl _⟩
+    exact ⟨denv, (hiff denv).1 hsat, rfl⟩
   ·
     intro hgi denv hsat bi hbi
     exact hgi denv ((hiff denv).1 hsat) bi hbi
@@ -135,7 +135,7 @@ theorem DenseConstraintSystem.boxTautoReplace_denseCorrect [Fact p.Prime]
     · exact DenseConstraintSystem.mem_occ_of_bi hbi hib
   ·
     intro denv hadm hsat
-    exact ⟨(hiff denv).2 hsat, hadm, BusState.equiv_refl _⟩
+    exact ⟨(hiff denv).2 hsat, hadm, rfl⟩
 
 /-- Coverage is preserved: replaced constraints are `const 0` (no variables) or original (covered);
     bus interactions unchanged. -/

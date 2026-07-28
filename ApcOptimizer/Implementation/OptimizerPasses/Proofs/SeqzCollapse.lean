@@ -303,7 +303,8 @@ theorem dense_seqzCollapse_correct [Fact p.Prime] (isInput : VarId → Bool)
       denseSeqzEM1, denseSeqzE0, DenseExpr.eval]
   have hside : ∀ (denv : VarId → ZMod p), out.sideEffects bs denv = d.sideEffects bs denv := by
     intro denv
-    simp only [houtdef, denseSeqzCollapsedSystem, DenseConstraintSystem.sideEffects, ← hbusEdef]
+    refine funext (fun message => congrArg (multiplicitySum message) ?_)
+    simp only [houtdef, denseSeqzCollapsedSystem, ← hbusEdef]
     rw [filter_filter_drop (fun bi => decide (bi ≠ busE)) (fun bi => bs.isStateful bi.busId)
       d.busInteractions (fun bi _ hkf => by
         have hbe : bi = busE := by simpa using hkf
@@ -404,7 +405,7 @@ theorem dense_seqzCollapse_correct [Fact p.Prime] (isInput : VarId → Bool)
           rw [hgframeBus bi hbi hbe]
           exact hsatOut.2 bi hbout
     have hseSound : d.sideEffects bs g = d.sideEffects bs env := by
-      simp only [DenseConstraintSystem.sideEffects]
+      refine funext (fun message => congrArg (multiplicitySum message) ?_)
       apply List.map_congr_left
       intro bi hbi
       have hbimem : bi ∈ d.busInteractions := List.mem_of_mem_filter hbi
@@ -450,7 +451,6 @@ theorem dense_seqzCollapse_correct [Fact p.Prime] (isInput : VarId → Bool)
     obtain ⟨g, hgcs, _, hse⟩ := hReconstruct env hsatOut
     refine ⟨g, hgcs, ?_⟩
     rw [hse, ← hside env]
-    exact BusState.equiv_refl _
   · -- invariant preservation
     intro hdInv env hsatOut bi hbiOut
     show (denseBIEval bi env).multiplicity ≠ 0 → bs.maintainsInvariants (denseBIEval bi env)
@@ -558,9 +558,9 @@ theorem dense_seqzCollapse_correct [Fact p.Prime] (isInput : VarId → Bool)
     · -- side effects match
       have hseC : out.sideEffects bs envC = d.sideEffects bs env := by
         rw [hside envC]
-        simp only [DenseConstraintSystem.sideEffects]
+        refine funext (fun message => congrArg (multiplicitySum message) ?_)
         exact List.map_congr_left (fun bi hbi => by rw [hbeC bi (List.mem_of_mem_filter hbi)])
-      rw [hseC]; exact BusState.equiv_refl _
+      rw [hseC]
     · -- input columns keep their values
       intro i hisT
       exact Function.update_of_ne (fun h => by rw [h, hinv_id] at hisT; exact absurd hisT (by simp))

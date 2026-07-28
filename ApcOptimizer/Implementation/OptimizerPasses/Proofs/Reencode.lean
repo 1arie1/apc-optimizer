@@ -689,6 +689,7 @@ theorem DenseConstraintSystem.reencode_correct_D (d out : DenseConstraintSystem 
             { bi with multiplicity := grw bi.multiplicity, payload := bi.payload.map grw }) }
         bs denv' = d.sideEffects bs denv := by
     intro denv denv' hB
+    refine funext (fun message => congrArg (multiplicitySum message) ?_)
     show ((d.busInteractions.map (fun bi =>
         { bi with multiplicity := grw bi.multiplicity, payload := bi.payload.map grw })).filter
         (fun bi => bs.isStateful bi.busId)).map _ = _
@@ -747,7 +748,7 @@ theorem DenseConstraintSystem.reencode_correct_D (d out : DenseConstraintSystem 
     intro denv' hsat'
     obtain ⟨denv, hA, hB, hdrop⟩ := hbwd denv' hsat'
     refine ⟨denv, hsatd denv denv' hA hB hdrop hsat', ?_⟩
-    rw [hside denv denv' hB]; exact BusState.equiv_refl _
+    rw [hside denv denv' hB]
   · -- Invariant preservation.
     intro hinv denv' hsat' bi' hbi'
     obtain ⟨denv, hA, hB, hdrop⟩ := hbwd denv' hsat'
@@ -771,7 +772,7 @@ theorem DenseConstraintSystem.reencode_correct_D (d out : DenseConstraintSystem 
         bs.accepts (denseBIEval { bi0 with multiplicity := grw bi0.multiplicity, payload := bi0.payload.map grw } denv')
       rw [hB bi0 hbi0]
       exact hsat.2 bi0 hbi0
-    · rw [hside denv denv' hB]; exact BusState.equiv_refl _
+    · rw [hside denv denv' hB]
 
 /-- The method list built for the fresh bits supplies `g w` for a bit `w`, nothing otherwise. -/
 theorem DenseDerivations.methodFor_map (bits : List VarId) (g : VarId → DenseComputationMethod p)

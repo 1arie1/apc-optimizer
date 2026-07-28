@@ -557,10 +557,11 @@ theorem dense_collapse_correct [Fact p.Prime] (isInput : VarId → Bool)
     refine ⟨reasg denv (denv invId), hcssat denv hsat, ?_⟩
     have hse : out.sideEffects bs denv = d.sideEffects bs (reasg denv (denv invId)) := by
       unfold DenseConstraintSystem.sideEffects
+      refine funext (fun message => congrArg (multiplicitySum message) ?_)
       rw [hob]
       refine List.map_congr_left (fun bi hbi => ?_)
       rw [hbe denv bi (List.mem_of_mem_filter hbi)]
-    rw [hse]; exact BusState.equiv_refl _
+    rw [hse]
   have hout_occ : ∀ i ∈ out.occ, i = invId ∨ i ∈ d.occ := by
     intro i hi
     rw [hcMemOcc] at hi
@@ -634,10 +635,11 @@ theorem dense_collapse_correct [Fact p.Prime] (isInput : VarId → Bool)
     · -- side effects equivalent
       have hse : d.sideEffects bs denv = out.sideEffects bs envC := by
         unfold DenseConstraintSystem.sideEffects
+        refine funext (fun message => congrArg (multiplicitySum message) ?_)
         rw [hob]
         refine List.map_congr_left (fun bi hbi => ?_)
         rw [hbeC bi (List.mem_of_mem_filter hbi)]
-      rw [hse]; exact BusState.equiv_refl _
+      rw [hse]
     · -- input columns preserved
       intro i hisT
       have hne : i ≠ invId := by intro heq; rw [heq, hinv_id] at hisT; exact absurd hisT (by simp)

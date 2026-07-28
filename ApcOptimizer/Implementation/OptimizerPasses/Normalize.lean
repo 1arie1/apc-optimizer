@@ -750,7 +750,6 @@ def denseNormalizePass : DenseVerifiedPassW p :=
         intro denv hsat
         refine ⟨denv, (DenseConstraintSystem.mapExpr_satisfies hfe d bs denv).mp hsat, ?_⟩
         rw [DenseConstraintSystem.mapExpr_sideEffects hfe]
-        exact BusState.equiv_refl _
       · -- invariants
         exact fun h => DenseConstraintSystem.mapExpr_guaranteesInvariants hfe h
       · -- no new powdr column
@@ -761,7 +760,6 @@ def denseNormalizePass : DenseVerifiedPassW p :=
         refine ⟨denv, (DenseConstraintSystem.mapExpr_satisfies hfe d bs denv).mpr hsat,
           (DenseConstraintSystem.mapExpr_admissible hfe d bs denv).mpr hadm, ?_, fun _ _ => rfl, ?_⟩
         · rw [DenseConstraintSystem.mapExpr_sideEffects hfe]
-          exact BusState.equiv_refl _
         · intro _ _ i hi _
           exact ⟨DenseConstraintSystem.mapExpr_occ_subset denseNormalizeFused_fst_vars d i hi, rfl⟩)
 

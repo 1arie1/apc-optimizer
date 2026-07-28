@@ -252,6 +252,7 @@ theorem DenseConstraintSystem.boxRewrite_denseCorrect [Fact p.Prime]
       (d.boxRewrite b).sideEffects bs denv = d.sideEffects bs denv := by
     intro denv hdom
     unfold DenseConstraintSystem.sideEffects
+    refine funext (fun message => congrArg (multiplicitySum message) ?_)
     rw [show (d.boxRewrite b).busInteractions
           = d.busInteractions.map (denseBrBi (denseSingleVarCs d.algebraicConstraints) b) from rfl,
         filter_map_busId_comm d.busInteractions
@@ -278,7 +279,6 @@ theorem DenseConstraintSystem.boxRewrite_denseCorrect [Fact p.Prime]
     intro denv hsat
     refine ⟨denv, (hiff denv).1 hsat, ?_⟩
     rw [hside denv (hdomOut denv hsat)]
-    exact BusState.equiv_refl _
   · -- invariant preservation
     intro hgi denv hsat bi hbi
     obtain ⟨bi0, hbi0, rfl⟩ := List.mem_map.1 hbi
@@ -299,7 +299,6 @@ theorem DenseConstraintSystem.boxRewrite_denseCorrect [Fact p.Prime]
     have hdom := hdomIn denv hsat
     refine ⟨(hiff denv).2 hsat, (hadmEq denv hdom).2 hadm, ?_⟩
     rw [hside denv hdom]
-    exact BusState.equiv_refl _
 
 /-! ## The dense box-rewrite pass -/
 

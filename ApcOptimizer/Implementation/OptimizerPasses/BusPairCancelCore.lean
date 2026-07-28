@@ -15,7 +15,7 @@ variable {p : ℕ}
 /-- The stateful side-effect state of a raw dense interaction list under `denv` (what dense
     `sideEffects` computes). -/
 def denseToBusState (bs : BusSemantics p) (denv : VarId → ZMod p)
-    (L : List (BusInteraction (DenseExpr p))) : BusState p :=
+    (L : List (BusInteraction (DenseExpr p))) : List (BusMessage p × ZMod p) :=
   (L.filter (fun bi => bs.isStateful bi.busId)).map
     (fun bi => let m := denseBIEval bi denv; ((m.busId, m.payload), m.multiplicity))
 
@@ -52,7 +52,8 @@ theorem denseSideEffects_dropPair_equiv (bs : BusSemantics p) (denv : VarId → 
     (hRm : (denseBIEval R denv).multiplicity = -(denseBIEval S denv).multiplicity)
     (hbusEq : (denseBIEval S denv).busId = (denseBIEval R denv).busId)
     (hpay : (denseBIEval S denv).payload = (denseBIEval R denv).payload) :
-    denseToBusState bs denv (A ++ S :: B ++ R :: C) ≈ denseToBusState bs denv (A ++ B ++ C) := by
+    ∀ msg, multiplicitySum msg (denseToBusState bs denv (A ++ S :: B ++ R :: C))
+      = multiplicitySum msg (denseToBusState bs denv (A ++ B ++ C)) := by
   intro msg
   have hstructFull : A ++ S :: B ++ R :: C = (A ++ S :: B) ++ (R :: C) := by
     simp only [List.append_assoc, List.cons_append]
@@ -211,21 +212,23 @@ theorem denseDropPair_correct (isInput : VarId → Bool)
     refine (facts.recvByteSlots_sound busId shape hshape pattern slots bound hslots (denseBIEval R denv)
       (show (denseBIEval R denv).busId = busId from hRbus)).2 (hRmEv denv) (hRmatch denv) hbyteEnv
   have hSE : ∀ denv, (∀ c ∈ d.algebraicConstraints, c.eval denv = 0) →
-      d.sideEffects bs denv ≈ out.sideEffects bs denv := by
+      d.sideEffects bs denv = out.sideEffects bs denv := by
     intro denv hcon
-    have e1 : d.sideEffects bs denv = denseToBusState bs denv (A ++ S :: B ++ R :: C) := by
-      show denseToBusState bs denv d.busInteractions = denseToBusState bs denv (A ++ S :: B ++ R :: C)
-      rw [hsplit]
-    have e2 : out.sideEffects bs denv = denseToBusState bs denv (A ++ B ++ C) := by
-      show denseToBusState bs denv (A ++ B ++ C ++ checks) = denseToBusState bs denv (A ++ B ++ C)
+    have e1 : denseToBusState bs denv d.busInteractions
+        = denseToBusState bs denv (A ++ S :: B ++ R :: C) := by rw [hsplit]
+    have e2 : denseToBusState bs denv (A ++ B ++ C ++ checks)
+        = denseToBusState bs denv (A ++ B ++ C) := by
       rw [denseToBusState_append, denseToBusState_stateless bs denv checks hchecksStateless,
         List.append_nil]
+    refine funext (fun msg => ?_)
+    show multiplicitySum msg (denseToBusState bs denv d.busInteractions)
+      = multiplicitySum msg (denseToBusState bs denv (A ++ B ++ C ++ checks))
     rw [e1, e2]
     exact denseSideEffects_dropPair_equiv bs denv A B C S R hSstate hRstate
       (by rw [hRmEv denv, hSmEv denv])
       (by rw [show (denseBIEval S denv).busId = busId from hSbus,
               show (denseBIEval R denv).busId = busId from hRbus])
-      (hpayEval denv hcon)
+      (hpayEval denv hcon) msg
   have hsat_cs_out : ∀ denv, d.satisfies bs denv → out.satisfies bs denv := by
     intro denv hsat
     refine ⟨hsat.1, ?_⟩
@@ -315,7 +318,7 @@ theorem denseDropPair_correct (isInput : VarId → Bool)
       · exact DenseConstraintSystem.mem_occ_of_bi (hmem_core bi hbi') hibi
       · exact DenseConstraintSystem.mem_occ_of_bi hRmem ((hchecks bi hbi').2.2.2 i hibi)
   exact DensePassCorrect.ofEnvEq
-    (fun denv hsat => ⟨denv, hsat_out_cs denv hsat, BusState.equiv_symm (hSE denv hsat.1)⟩)
+    (fun denv hsat => ⟨denv, hsat_out_cs denv hsat, (hSE denv hsat.1).symm⟩)
     (fun hinv denv hsat bi hbi => by
       rcases List.mem_append.1 (by rw [houtb] at hbi; exact hbi) with hbi' | hbi'
       · exact hinv denv (hsat_out_cs denv hsat) bi (hmem_core bi hbi')
