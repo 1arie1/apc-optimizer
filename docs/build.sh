@@ -12,16 +12,11 @@ OUT=docs/_out
 HTML="$OUT/html-single"
 
 build_once() {
-  # Render the trust-map figure from its Graphviz source (skips if `dot` is absent).
-  if command -v dot >/dev/null 2>&1; then
-    dot -Tsvg docs/assets/trust.dot -o docs/assets/trust.svg
-  fi
   lake build docs
   rm -rf "$OUT"
   lake exe docs --output "$OUT"
-  # Ship image assets alongside the page (Verso references them relatively).
-  find docs/assets -type f \( -name '*.svg' -o -name '*.png' -o -name '*.jpg' \
-    -o -name '*.jpeg' -o -name '*.gif' -o -name '*.webp' \) -exec cp {} "$HTML/" \;
+  # Ship the image assets alongside the page (Verso references them relatively).
+  find docs/assets -type f -exec cp {} "$HTML/" \;
 }
 
 # First free port at or above ${PORT:-8017}, so a leftover server doesn't cause
@@ -42,13 +37,12 @@ PY
 
 # md5 over the *contents* of the sources a rebuild depends on: the doc sources and image
 # assets, plus the audited files (directly under ApcOptimizer/) whose docstrings the page
-# splices. Hashing contents (not mtimes) means swapping an image is noticed, while regenerating
-# an identical trust.svg each build does not trigger a rebuild loop.
+# splices. Hashing contents (not mtimes) means swapping an image is noticed.
 watch_sig() {
   python3 - <<'PY'
 import os, hashlib
 h = hashlib.md5()
-exts = (".lean", ".dot", ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp")
+exts = (".lean", ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp")
 paths = []
 for dp, _, fs in os.walk("docs"):
     if os.sep + "_out" in dp + os.sep:
