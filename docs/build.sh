@@ -46,11 +46,18 @@ build_pdf() {
   mono+='ItalicFont=DejaVuSansMono-Oblique.ttf,BoldItalicFont=DejaVuSansMono-BoldOblique.ttf]'
   MONO="$mono" perl -0pi -e 's{\\setmonofont\{DejaVu Sans Mono\}}{$ENV{MONO}}e' "$TEX/main.tex"
 
-  # Make the short document read as a continuous whole instead of many half-empty pages: chapters
-  # run on within the text rather than each starting a new page (memoir's default), and
-  # `\cleardoublepage` becomes a plain `\clearpage` so the title/ToC/mainmatter breaks don't insert
-  # blank verso pages.
-  perl -0pi -e 's{\\documentclass\{memoir\}}{"\\documentclass{memoir}\n\\renewcommand*{\\clearforchapter}{}\n\\let\\cleardoublepage\\clearpage"}e' "$TEX/main.tex"
+  # Use a screen-friendly one-sided layout with a larger title and a compact text block. Chapters
+  # run on within the text rather than each starting a new page (memoir's default).
+  perl -0pi -e 's{\\documentclass\{memoir\}}{
+    "\\documentclass[oneside]{memoir}\n" .
+    "\\setlrmarginsandblock{28mm}{28mm}{*}\n" .
+    "\\setulmarginsandblock{24mm}{24mm}{*}\n" .
+    "\\checkandfixthelayout\n" .
+    "\\pretitle{\\begin{center}\\sffamily\\bfseries\\fontsize{30pt}{36pt}\\selectfont}\n" .
+    "\\posttitle{\\par\\end{center}\\vskip 1em}\n" .
+    "\\renewcommand*{\\clearforchapter}{}\n" .
+    "\\let\\cleardoublepage\\clearpage"
+  }e' "$TEX/main.tex"
 
   # Stamp the title page with the build date and source commit.
   stamp="Built $(date -u '+%Y-%m-%d %H:%M UTC') · commit $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
