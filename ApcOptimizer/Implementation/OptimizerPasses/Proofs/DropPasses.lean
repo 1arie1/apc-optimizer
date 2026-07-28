@@ -266,19 +266,19 @@ theorem denseConstMessage?_sound (bi : BusInteraction (DenseExpr p))
 /-- Drops tautological lookups (`denseIsTautoLookup`). -/
 def denseTautoBusDropPass : DenseVerifiedPassW p :=
   DenseVerifiedPassW.of
-    (fun bs _ d => d.filterBus (fun bi => !denseIsTautoLookup bs bi))
+    (fun bs facts d => d.filterBus (fun bi => !denseIsTautoLookup bs facts bi))
     (fun _ _ _ => [])
     (fun _ _ _ _ hcov => DenseConstraintSystem.filterBus_covered hcov)
     (fun _ _ _ _ _ => by intro x hx; simp at hx)
-    (fun reg bs _ d _ => by
+    (fun reg bs facts d _ => by
       refine DensePassCorrect.denseFilterBusEntailed d bs reg.isInput
-        (fun bi => !denseIsTautoLookup bs bi) ?_ ?_
+        (fun bi => !denseIsTautoLookup bs facts bi) ?_ ?_
       · intro bi _ hkf
-        have htauto : denseIsTautoLookup bs bi = true := by simpa using hkf
+        have htauto : denseIsTautoLookup bs facts bi = true := by simpa using hkf
         simp only [denseIsTautoLookup, Bool.and_eq_true] at htauto
         simpa using htauto.1
       · intro bi _ hkf denv _ _
-        have htauto : denseIsTautoLookup bs bi = true := by simpa using hkf
+        have htauto : denseIsTautoLookup bs facts bi = true := by simpa using hkf
         simp only [denseIsTautoLookup, Bool.and_eq_true] at htauto
         have hmsg := htauto.2
         cases hcm : denseConstMessage? bi with
@@ -286,6 +286,6 @@ def denseTautoBusDropPass : DenseVerifiedPassW p :=
         | some msg =>
           rw [hcm] at hmsg
           rw [denseConstMessage?_sound bi msg hcm denv]
-          simpa using hmsg)
+          exact (facts.acceptsDec_iff msg).mp (by simpa using hmsg))
 
 end ApcOptimizer.Dense

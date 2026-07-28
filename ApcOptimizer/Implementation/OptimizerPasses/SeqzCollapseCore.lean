@@ -300,8 +300,7 @@ theorem seqz_reconstruct [Fact p.Prime] (hp : 1024 ≤ p)
 theorem bus_accepts_byte_zero {bs : BusSemantics p} (facts : BusFacts p bs) (busId : Nat)
     (spec : ByteXorSpec p) (hspec : facts.byteXorSpec busId = some spec) (hbound : spec.bound = 256)
     (x mult : ZMod p) (hx : x.val < 256) :
-    bs.violatesConstraint
-      { busId := busId, multiplicity := mult, payload := spec.encode spec.pairOp x 0 0 } = false := by
+    bs.accepts { busId := busId, multiplicity := mult, payload := spec.encode spec.pairOp x 0 0 } := by
   obtain ⟨_, _, hsound⟩ := facts.byteXorSpec_sound busId spec hspec
   have hdec : spec.decode (spec.encode spec.pairOp x 0 0) = some (spec.pairOp, x, 0, 0) :=
     spec.decode_encode _ _ _ _
@@ -312,8 +311,7 @@ theorem bus_accepts_byte_zero {bs : BusSemantics p} (facts : BusFacts p bs) (bus
 theorem bus_byte_of_accepts {bs : BusSemantics p} (facts : BusFacts p bs) (busId : Nat)
     (spec : ByteXorSpec p) (hspec : facts.byteXorSpec busId = some spec) (hbound : spec.bound = 256)
     (x mult : ZMod p)
-    (h : bs.violatesConstraint
-      { busId := busId, multiplicity := mult, payload := spec.encode spec.pairOp x 0 0 } = false) :
+    (h : bs.accepts { busId := busId, multiplicity := mult, payload := spec.encode spec.pairOp x 0 0 }) :
     x.val < 256 := by
   obtain ⟨_, _, hsound⟩ := facts.byteXorSpec_sound busId spec hspec
   have hdec : spec.decode (spec.encode spec.pairOp x 0 0) = some (spec.pairOp, x, 0, 0) :=

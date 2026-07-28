@@ -59,7 +59,7 @@ def OpenVmBusType.isStateful : OpenVmBusType → Bool
   | .tupleRangeChecker _ _ => false
 
 /-- Whether a field element is a byte (`0 ≤ x < 256`). -/
-def isByte (x : ZMod p) : Bool := decide (x.val < 256)
+def isByte (x : ZMod p) : Prop := x.val < 256
 
 /-- The named fields of an OpenVM memory payload,
     `(address_space, pointer, data… (4 limbs), timestamp)`. -/
@@ -79,11 +79,11 @@ def memoryPayload? : List (ZMod p) → Option (MemoryPayload p)
 
 /-- Whether the address space is one whose words OpenVM byte-range-checks: registers (`1`) or main
     memory (`2`). -/
-def MemoryPayload.isByteChecked (f : MemoryPayload p) : Bool :=
-  f.addressSpace.val == 1 || f.addressSpace.val == 2
+def MemoryPayload.isByteChecked (f : MemoryPayload p) : Prop :=
+  f.addressSpace.val = 1 ∨ f.addressSpace.val = 2
 
-/-- Whether a message conflicts with the lookup table of the bus it is sent on. -/
-def violates (busMap : BusMap) (msg : BusInteraction (ZMod p)) : Bool :=
+/-- For lookups, whether the message is in the lookup table. -/
+def accepts (busMap : BusMap) (msg : BusInteraction (ZMod p)) : Prop :=
   match busMap msg.busId, msg.payload with
   -- ISSUE:
   -- The PC lookup is a bit special: We would have to know the program to
@@ -97,67 +97,65 @@ def violates (busMap : BusMap) (msg : BusInteraction (ZMod p)) : Bool :=
   -- optimized circuit does not contain any PC lookups (they can always
   -- be removed in practice).
   -- [1] https://github.com/powdr-labs/powdr/blob/f94a24f19249af67efbea92ff9c3db6e3e50e7fd/autoprecompiles/src/symbolic_machine_generator.rs#L185-L192
-  | some .pcLookup, args => !decide (args.length = 9)
+  | some .pcLookup, args => args.length = 9
 
   | some .bitwiseLookup, [x, y, z, op] =>
     match op.val with
-    -- Op 0: range check x and y to be bytes, z must be 0.
-    | 0 => !(isByte x && isByte y && decide (z.val = 0))
-    -- Op 1: range check x and y to be bytes, z must be x ^ y.
-    | 1 => !(isByte x && isByte y && decide (z.val = Nat.xor x.val y.val))
-    -- Other ops are invalid.
-    | _ => true
+    -- Op 0 range-checks `x` and `y` to be bytes and forces `z = 0`.
+    | 0 => isByte x ∧ isByte y ∧ z.val = 0
+    -- Op 1 also fixes `z = x ^ y`.
+    | 1 => isByte x ∧ isByte y ∧ z.val = Nat.xor x.val y.val
+    -- No other op is in the table.
+    | _ => False
 
   | some .variableRangeChecker, [x, bits] =>
-    -- Check that x < 2^bits, and that the number of bits requested is one the checker
-    -- supports: OpenVM's variable range checker rejects any lookup of more than 17 bits.
+    -- `x < 2^bits`, at a width the checker supports: OpenVM's variable range checker rejects any
+    -- lookup of more than 17 bits.
     -- TODO: The maximum number of bits is configurable, but the default is 17 and the
     -- OpenVM chips assume that it is at least 17, so we're being conservative here.
-    !(decide (bits.val ≤ 17) && decide (x.val < 2 ^ bits.val))
+    bits.val ≤ 17 ∧ x.val < 2 ^ bits.val
 
-  | some (.tupleRangeChecker s1 s2), [x, y] =>
-    -- Range check that x < s1 and y < s2.
-    !(decide (x.val < s1) && decide (y.val < s2))
+  | some (.tupleRangeChecker s1 s2), [x, y] => x.val < s1 ∧ y.val < s2
 
-  -- For lookups, reject if the number of arguments is not as expected.
-  | some .bitwiseLookup, _ => true
-  | some .variableRangeChecker, _ => true
-  | some (.tupleRangeChecker _ _), _ => true
+  -- For lookups, an unexpected number of arguments is in no table.
+  | some .bitwiseLookup, _ => False
+  | some .variableRangeChecker, _ => False
+  | some (.tupleRangeChecker _ _), _ => False
 
-  -- Stateful buses.
-  | some .executionBridge, _ => false
+  -- Stateful buses have no table to contradict.
+  | some .executionBridge, _ => True
 
   -- In OpenVM, the invariant is that only range-checked values are sent to
   -- the register & memory address spaces.
   | some .memory, payload =>
     match memoryPayload? payload with
-    | some f => decide (msg.multiplicity = -1) && f.isByteChecked && !(f.data.all isByte)
-    | none => false
+    | some f => msg.multiplicity = -1 → f.isByteChecked → ∀ d ∈ f.data, isByte d
+    | none => True
 
   -- Invalid bus ID. Won't have a matching receive.
-  | none, _ => true
+  | none, _ => False
 
-/-- Whether a message breaks an invariant on which soundness depends. Only meaningful for an
-    *active* message — the multiplicity tests below reject `0`, and callers guard on it. -/
-def breaksInvariant (busMap : BusMap) (msg : BusInteraction (ZMod p)) : Bool :=
+/-- Whether a message maintains the invariants on which soundness depends. Only called
+   for messages with nonzero multiplicity. -/
+def maintainsInvariants (busMap : BusMap) (msg : BusInteraction (ZMod p)) : Prop :=
   match busMap msg.busId with
   -- Lookups are only ever sent (multiplicity 1).
   | some .pcLookup | some .variableRangeChecker | some .bitwiseLookup
   | some (.tupleRangeChecker _ _) =>
-    !decide (msg.multiplicity = 1)
+    msg.multiplicity = 1
   -- The execution bridge is stateful: it is sent (1) or received (-1).
   | some .executionBridge =>
-    !decide (msg.multiplicity = 1 ∨ msg.multiplicity = -1)
+    msg.multiplicity = 1 ∨ msg.multiplicity = -1
   -- Memory is stateful (multiplicity 1 or -1), and additionally maintains the invariant
   -- that data limbs written to the register / main-memory address spaces (1 and 2) are
   -- byte-range.
   | some .memory =>
-    !decide (msg.multiplicity = 1 ∨ msg.multiplicity = -1) ||
-    (match memoryPayload? msg.payload with
-      | some f => bif f.isByteChecked then !(f.data.all isByte) else false
-      | none => false)
+    (msg.multiplicity = 1 ∨ msg.multiplicity = -1) ∧
+      (match memoryPayload? msg.payload with
+        | some f => f.isByteChecked → ∀ d ∈ f.data, isByte d
+        | none => True)
   -- Circuits should not send messages to an unknown bus.
-  | none => true
+  | none => False
 
 /-- Assume that x0 always returns 0. This should be enforced globally by all OpenVM chips. -/
 def x0ReturnsZero (busMap : BusMap) (msgs : List (BusInteraction (ZMod p))) : Prop :=
@@ -186,8 +184,8 @@ def openVmBusSemantics (p : ℕ) (busMap : BusMap := defaultBusMap) :
     match busMap busId with
     | some t => t.isStateful
     | none => false
-  violatesConstraint := violates busMap
-  breaksInvariant := breaksInvariant busMap
+  accepts := accepts busMap
+  maintainsInvariants := maintainsInvariants busMap
   admissible msgs :=
     (∀ (busId : Nat) (shape : MemoryBusShape), memShapeOf busMap busId = some shape →
       admissibleMemoryBus shape (msgs.filter (fun m => m.busId = busId)))

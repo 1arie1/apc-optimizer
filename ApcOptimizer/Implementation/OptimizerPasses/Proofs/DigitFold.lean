@@ -56,7 +56,7 @@ theorem denseProbedSlotBoundAt_sound (bs : BusSemantics p) (facts : BusFacts p b
     (bi : BusInteraction (DenseExpr p)) (i : VarId) (j : Nat) (bound : Nat)
     (h : denseProbedSlotBoundAt bs facts bi i j = some bound) (denv : VarId → ZMod p)
     (hob : (denseBIEval bi denv).multiplicity ≠ 0 →
-      bs.violatesConstraint (denseBIEval bi denv) = false) :
+      bs.accepts (denseBIEval bi denv)) :
     (denv i).val < bound := by
   unfold denseProbedSlotBoundAt at h
   split_ifs at h with hp0
@@ -95,7 +95,7 @@ theorem denseProbedSlotBoundAt_sound (bs : BusSemantics p) (facts : BusFacts p b
   -- the obligation is active
   have hmeval : (denseBIEval bi denv).multiplicity = mval :=
     bi.multiplicity.constValue?_sound mval hm denv
-  have hviol : bs.violatesConstraint (denseBIEval bi denv) = false := by
+  have hviol : bs.accepts (denseBIEval bi denv) := by
     apply hob; rw [hmeval]; exact hmz
   have hpat : Matches (denseBIEval bi denv).payload
       (bi.payload.map DenseExpr.constValue?) :=
@@ -177,7 +177,7 @@ theorem denseInsertEntry_soundAt {denv : VarId → ZMod p} {T : Std.HashMap VarI
 theorem denseGoCands_soundAt (bs : BusSemantics p) (facts : BusFacts p bs)
     (bi : BusInteraction (DenseExpr p)) (i : VarId) (denv : VarId → ZMod p)
     (hob : (denseBIEval bi denv).multiplicity ≠ 0 →
-      bs.violatesConstraint (denseBIEval bi denv) = false) :
+      bs.accepts (denseBIEval bi denv)) :
     ∀ (cl : List (VarId × Nat)) (T : Std.HashMap VarId Nat),
       DenseBMSoundAt denv T → DenseBMSoundAt denv (denseGoCands bs facts bi i cl T) := by
   intro cl
@@ -200,7 +200,7 @@ theorem denseGoCands_soundAt (bs : BusSemantics p) (facts : BusFacts p bs)
 theorem denseAddVars_soundAt (bs : BusSemantics p) (facts : BusFacts p bs)
     (bi : BusInteraction (DenseExpr p)) (denv : VarId → ZMod p)
     (hob : (denseBIEval bi denv).multiplicity ≠ 0 →
-      bs.violatesConstraint (denseBIEval bi denv) = false) (cands : List (VarId × Nat)) :
+      bs.accepts (denseBIEval bi denv)) (cands : List (VarId × Nat)) :
     ∀ (xs : List VarId) (T : Std.HashMap VarId Nat),
       DenseBMSoundAt denv T → DenseBMSoundAt denv (denseAddVars bs facts bi cands xs T) := by
   intro xs
@@ -221,7 +221,7 @@ theorem denseAddVars_soundAt (bs : BusSemantics p) (facts : BusFacts p bs)
 theorem denseAddAll_soundAt (bs : BusSemantics p) (facts : BusFacts p bs) (denv : VarId → ZMod p) :
     ∀ (dbis : List (BusInteraction (DenseExpr p))),
       (∀ bi ∈ dbis, (denseBIEval bi denv).multiplicity ≠ 0 →
-        bs.violatesConstraint (denseBIEval bi denv) = false) →
+        bs.accepts (denseBIEval bi denv)) →
       ∀ (T : Std.HashMap VarId Nat), DenseBMSoundAt denv T →
         DenseBMSoundAt denv (denseAddAll bs facts dbis T) := by
   intro dbis
@@ -230,9 +230,9 @@ theorem denseAddAll_soundAt (bs : BusSemantics p) (facts : BusFacts p bs) (denv 
   | cons bi rest ih =>
       intro hob T hT
       have hbi : (denseBIEval bi denv).multiplicity ≠ 0 →
-          bs.violatesConstraint (denseBIEval bi denv) = false := hob bi (List.mem_cons_self ..)
+          bs.accepts (denseBIEval bi denv) := hob bi (List.mem_cons_self ..)
       have hrest : ∀ b ∈ rest, (denseBIEval b denv).multiplicity ≠ 0 →
-          bs.violatesConstraint (denseBIEval b denv) = false :=
+          bs.accepts (denseBIEval b denv) :=
         fun b hb => hob b (List.mem_cons_of_mem _ hb)
       unfold denseAddAll
       exact ih hrest _ (denseAddVars_soundAt bs facts bi denv hbi (denseProbeCandidatesOf bi)
@@ -246,7 +246,7 @@ theorem denseBuild_sound (bs : BusSemantics p) (facts : BusFacts p bs)
     (bis : List (BusInteraction (DenseExpr p))) (i : VarId) (b : Nat)
     (hlk : (denseBuild bs facts bis)[i]? = some b) (denv : VarId → ZMod p)
     (hbus : ∀ bi ∈ bis, (denseBIEval bi denv).multiplicity ≠ 0 →
-      bs.violatesConstraint (denseBIEval bi denv) = false) : (denv i).val < b := by
+      bs.accepts (denseBIEval bi denv)) : (denv i).val < b := by
   unfold denseBuild at hlk
   exact denseAddAll_soundAt bs facts denv bis hbus ∅ (DenseBMSoundAt.empty denv) i b hlk
 
@@ -262,7 +262,7 @@ theorem densePairByteOps?_bytes (bs : BusSemantics p) (facts : BusFacts p bs)
     (h : densePairByteOps? bs facts bi = some (x, y))
     (h1 : (1 : ZMod p) ≠ 0) (denv : VarId → ZMod p)
     (hacc : (denseBIEval bi denv).multiplicity ≠ 0 →
-      bs.violatesConstraint (denseBIEval bi denv) = false) :
+      bs.accepts (denseBIEval bi denv)) :
     (x.eval denv).val < 256 ∧ (y.eval denv).val < 256 := by
   unfold densePairByteOps? at h
   split at h
@@ -276,7 +276,7 @@ theorem densePairByteOps?_bytes (bs : BusSemantics p) (facts : BusFacts p bs)
       obtain ⟨rfl, rfl⟩ := h
       have hmv : (denseBIEval bi denv).multiplicity = 1 := by
         show bi.multiplicity.eval denv = 1; rw [hm]; rfl
-      have hviol : bs.violatesConstraint (denseBIEval bi denv) = false :=
+      have hviol : bs.accepts (denseBIEval bi denv) :=
         hacc (by rw [hmv]; simpa using h1)
       have hopEv : op.eval denv = spec.pairOp := by rw [hop]; rfl
       have hdecEv : spec.decode (denseBIEval bi denv).payload
@@ -480,7 +480,7 @@ theorem denseFindFold_sound [NeZero p] (hp : 256 < p) (bs : BusSemantics p) (fac
     (hB : ∀ w bnd, bounds[w]? = some bnd → (denv w).val < bnd) :
     ∀ (pending : List (BusInteraction (DenseExpr p))),
       (∀ bi ∈ pending, (denseBIEval bi denv).multiplicity ≠ 0 →
-        bs.violatesConstraint (denseBIEval bi denv) = false) →
+        bs.accepts (denseBIEval bi denv)) →
       ∀ i dd, denseFindFold bs facts bounds pending = some (i, dd) → denv i = (dd : ZMod p) := by
   intro pending
   induction pending with
@@ -489,7 +489,7 @@ theorem denseFindFold_sound [NeZero p] (hp : 256 < p) (bs : BusSemantics p) (fac
       intro hpend i dd h
       have hacc := hpend bi (List.mem_cons_self ..)
       have hrest : ∀ b ∈ rest, (denseBIEval b denv).multiplicity ≠ 0 →
-          bs.violatesConstraint (denseBIEval b denv) = false :=
+          bs.accepts (denseBIEval b denv) :=
         fun b hb => hpend b (List.mem_cons_of_mem _ hb)
       have h1 : (1 : ZMod p) ≠ 0 := by
         haveI : Fact (1 < p) := ⟨by omega⟩

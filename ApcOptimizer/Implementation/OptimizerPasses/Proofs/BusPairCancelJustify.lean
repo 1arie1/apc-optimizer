@@ -159,7 +159,7 @@ theorem denseDeepBoundOk_sound [Fact p.Prime] (domIdx : Std.HashMap VarId (List 
     (h : denseDeepBoundOk domIdx bs facts wits x c = true) (denv : VarId → ZMod p)
     (hdom : ∀ v, ∀ c' ∈ denseVarBucketLookup domIdx v, c'.eval denv = 0) (hc0 : c.eval denv = 0)
     (hbus : ∀ v, ∀ bi ∈ wits v, (denseBIEval bi denv).multiplicity ≠ 0 →
-      bs.violatesConstraint (denseBIEval bi denv) = false) :
+      bs.accepts (denseBIEval bi denv)) :
     (denv x).val < 256 := by
   unfold denseDeepBoundOk at h
   simp only [] at h
@@ -210,7 +210,7 @@ theorem denseDeepByteJustified_sound [Fact p.Prime] [NeZero p]
     (h : denseDeepByteJustified domIdx cands bs facts wits x = true) (denv : VarId → ZMod p)
     (hall : ∀ c' ∈ all, c'.eval denv = 0)
     (hbus : ∀ v, ∀ bi ∈ wits v, (denseBIEval bi denv).multiplicity ≠ 0 →
-      bs.violatesConstraint (denseBIEval bi denv) = false) :
+      bs.accepts (denseBIEval bi denv)) :
     (denv x).val < 256 := by
   obtain ⟨c, hc, hck⟩ := List.any_eq_true.1 h
   have hc' : c ∈ all := hcands c (List.mem_of_mem_take hc)
@@ -362,7 +362,7 @@ theorem denseFormBoundAt_sound {bs : BusSemantics p} (facts : BusFacts p bs)
     (bi : BusInteraction (DenseExpr p)) (i : Nat) (Lr : DenseLinExpr p) (Br : Nat)
     (h : denseFormBoundAt facts bi i = some (Lr, Br)) (denv : VarId → ZMod p)
     (hviol : (denseBIEval bi denv).multiplicity ≠ 0 →
-      bs.violatesConstraint (denseBIEval bi denv) = false) :
+      bs.accepts (denseBIEval bi denv)) :
     (Lr.eval denv).val < Br := by
   unfold denseFormBoundAt at h
   cases hmc : bi.multiplicity.constValue? with
@@ -384,7 +384,7 @@ theorem denseFormBoundAt_sound {bs : BusSemantics p} (facts : BusFacts p bs)
           obtain ⟨rfl, rfl⟩ := h
           have hmeval : (denseBIEval bi denv).multiplicity = mval :=
             bi.multiplicity.constValue?_sound mval hmc denv
-          have hv : bs.violatesConstraint (denseBIEval bi denv) = false := by
+          have hv : bs.accepts (denseBIEval bi denv) := by
             apply hviol
             rw [hmeval]
             exact hmz
@@ -410,7 +410,7 @@ theorem denseBasisReduceGo_sound (bound : Nat) (bnd : VarId → Option Nat) {bs 
     (denv : VarId → ZMod p)
     (hbnd : ∀ v b, bnd v = some b → (denv v).val < b)
     (hfw : ∀ v, ∀ bi ∈ fwits v, (denseBIEval bi denv).multiplicity ≠ 0 →
-      bs.violatesConstraint (denseBIEval bi denv) = false) :
+      bs.accepts (denseBIEval bi denv)) :
     ∀ (fuel used : Nat) (L : DenseLinExpr p),
       denseBasisReduceGo bound bnd facts fwits fuel used L = true →
       ∃ n : ℕ, L.eval denv = (n : ZMod p) ∧ n + used < bound ∧ n + used < p := by
@@ -486,7 +486,7 @@ theorem denseBasisJustified_sound (bound : Nat) (bnd : VarId → Option Nat) {bs
     (e : DenseExpr p) (denv : VarId → ZMod p)
     (hbnd : ∀ v b, bnd v = some b → (denv v).val < b)
     (hfw : ∀ v, ∀ bi ∈ fwits v, (denseBIEval bi denv).multiplicity ≠ 0 →
-      bs.violatesConstraint (denseBIEval bi denv) = false)
+      bs.accepts (denseBIEval bi denv))
     (h : denseBasisJustified bound bnd facts fwits e = true) : (e.eval denv).val < bound := by
   unfold denseBasisJustified at h
   cases hL : denseLinearize e with
@@ -523,10 +523,10 @@ theorem denseByteJustifiedW_sound (bound : Nat) (deep : Bool) (all : List (Dense
     (denv : VarId → ZMod p)
     (hall : ∀ c' ∈ all, c'.eval denv = 0)
     (hbus : ∀ bi ∈ rest, (denseBIEval bi denv).multiplicity ≠ 0 →
-      bs.violatesConstraint (denseBIEval bi denv) = false) :
+      bs.accepts (denseBIEval bi denv)) :
     (e.eval denv).val < bound := by
   have hbusW : ∀ v, ∀ bi ∈ wits v, (denseBIEval bi denv).multiplicity ≠ 0 →
-      bs.violatesConstraint (denseBIEval bi denv) = false :=
+      bs.accepts (denseBIEval bi denv) :=
     fun v bi hbi => hbus bi (hwits v bi hbi)
   unfold denseByteJustifiedW at h
   cases hc : e.constValue? with
@@ -596,7 +596,7 @@ theorem denseRecvSlotsJustified_sound (bound : Nat) (deep : Bool) (all : List (D
     (denv : VarId → ZMod p)
     (hall : ∀ c' ∈ all, c'.eval denv = 0)
     (hbus : ∀ bi ∈ rest, (denseBIEval bi denv).multiplicity ≠ 0 →
-      bs.violatesConstraint (denseBIEval bi denv) = false) :
+      bs.accepts (denseBIEval bi denv)) :
     ∀ slot ∈ slots, ∀ x : ZMod p, (denseBIEval R denv).payload[slot]? = some x → x.val < bound := by
   intro slot hslot x hget
   have hcheck := List.all_eq_true.mp h slot hslot

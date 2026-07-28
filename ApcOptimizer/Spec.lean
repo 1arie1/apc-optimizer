@@ -130,18 +130,18 @@ structure BusSemantics (p : ℕ) where
   /-- Whether the bus of the given ID changes the state of the VM.
       Stateless bus interactions are typically lookups. -/
   isStateful (busId : Nat) : Bool
-  /-- Whether sending this bus interaction message violates a constraint in
-      *another* chip.
-      An example of this is sending a message that conflicts with a lookup
-      table entry.
+  /-- Whether the receiving chip accepts this bus interaction message, i.e.
+      sending it violates no constraint in *another* chip.
+      A message that is *not* accepted is, for example, one contradicting a
+      lookup table entry.
       Only consulted for messages with nonzero multiplicity. -/
-  violatesConstraint (busInteractionMessage : BusInteraction (ZMod p)) : Bool
-  /-- Whether sending this bus interaction message breaks an invariant on which
-      soundness of the system depends.
+  accepts (busInteractionMessage : BusInteraction (ZMod p)) : Prop
+  /-- Whether sending this bus interaction message maintains the invariants on
+      which soundness of the system depends.
       For example, a memory bus might have the invariant that all sent values
       must be in a certain range.
       Only consulted for messages with nonzero multiplicity. -/
-  breaksInvariant (busInteractionMessage : BusInteraction (ZMod p)) : Bool
+  maintainsInvariants (busInteractionMessage : BusInteraction (ZMod p)) : Prop
   /-- A property on *stateful* bus messages with nonzero multiplicity.
       Completeness is only required for assignments whose stateful messages
       are `admissible`.
@@ -257,14 +257,14 @@ def Circuit.admissible (circuit : Circuit p) (busSemantics : BusSemantics p)
 
 -- ANCHOR: satisfies
 /-- Whether a circuit is satisfied under a given assignment and bus semantics,
-    i.e., whether it satisfies all algebraic constraints and does not violate
-    any bus constraints. -/
+    i.e., whether it satisfies all algebraic constraints and every active bus
+    interaction message is accepted. -/
 def Circuit.satisfies (circuit : Circuit p) (busSemantics : BusSemantics p)
     (assignment : Variable → ZMod p) : Prop :=
   (∀ c ∈ circuit.algebraicConstraints, c.eval assignment = 0) ∧
   (∀ bi ∈ circuit.busInteractions,
     let message := bi.eval assignment
-    message.multiplicity ≠ 0 → busSemantics.violatesConstraint message = false)
+    message.multiplicity ≠ 0 → busSemantics.accepts message)
 -- ANCHOR_END: satisfies
 
 -- ANCHOR: guaranteesInvariants
@@ -275,7 +275,7 @@ def Circuit.guaranteesInvariants (circuit : Circuit p)
   ∀ assignment, circuit.satisfies busSemantics assignment →
     ∀ bi ∈ circuit.busInteractions,
       let message := bi.eval assignment
-      message.multiplicity ≠ 0 → busSemantics.breaksInvariant message = false
+      message.multiplicity ≠ 0 → busSemantics.maintainsInvariants message
 -- ANCHOR_END: guaranteesInvariants
 
 -- ANCHOR: isSoundReplacementOf

@@ -75,7 +75,7 @@ theorem denseIdentityPairAt_spec {bs : BusSemantics p} (facts : BusFacts p bs)
 theorem denseIdentityPairAt_sound {bs : BusSemantics p} (facts : BusFacts p bs)
     (bi : BusInteraction (DenseExpr p)) (rv o1v : VarId)
     (h : denseIdentityPairAt facts bi = some (rv, o1v)) (denv : VarId → ZMod p)
-    (hviol : bs.violatesConstraint (denseBIEval bi denv) = false) : denv rv = denv o1v := by
+    (hviol : bs.accepts (denseBIEval bi denv)) : denv rv = denv o1v := by
   obtain ⟨spec, oop, o1, o2, hspec, _, hoop, hdec, hoo⟩ :=
     denseIdentityPairAt_spec facts bi rv o1v h
   have hdecEv : spec.decode (denseBIEval bi denv).payload
@@ -183,7 +183,7 @@ theorem denseIdentityMap_forced {bs : BusSemantics p} (facts : BusFacts p bs)
     ∀ a b, (denseIdentityMap facts d)[a]? = some b → denv a = denv b := by
   intro a b hab
   obtain ⟨bi, hbi, hpair⟩ := denseIdentityMap_mem facts d a b hab
-  have hviol : bs.violatesConstraint (denseBIEval bi denv) = false := by
+  have hviol : bs.accepts (denseBIEval bi denv) := by
     refine hsat.2 bi hbi ?_
     obtain ⟨_, _, _, _, _, hmc, _, _, _⟩ := denseIdentityPairAt_spec facts bi a b hpair
     show (bi.multiplicity.eval denv) ≠ 0

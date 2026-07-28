@@ -58,10 +58,10 @@ def Sp1BusType.isStateful : Sp1BusType → Bool
   | .pageProt => false
 
 /-- Whether a field element is a byte (`0 ≤ x < 256`). -/
-def isByte (x : ZMod p) : Bool := decide (x.val < 256)
+def isByte (x : ZMod p) : Prop := x.val < 256
 
 /-- Whether a field element is a 16-bit limb (`0 ≤ x < 2^16`). -/
-def is16Bit (x : ZMod p) : Bool := decide (x.val < 2 ^ 16)
+def is16Bit (x : ZMod p) : Prop := x.val < 2 ^ 16
 
 /-- The named fields of an SP1 memory payload,
     `(clk… (2 fields), address… (3 limbs), data… (4 × 16-bit limbs))`. -/
@@ -79,67 +79,67 @@ def memoryPayload? : List (ZMod p) → Option (MemoryPayload p)
       some { clk := #v[c0, c1], address := #v[a0, a1, a2], data := #v[d0, d1, d2, d3] }
   | _ => none
 
-/-- Whether a message conflicts with the lookup table of the bus it is sent on. -/
-def violates (busMap : BusMap) (msg : BusInteraction (ZMod p)) : Bool :=
+/-- For lookups, whether the message is in the lookup table. -/
+def accepts (busMap : BusMap) (msg : BusInteraction (ZMod p)) : Prop :=
   match busMap msg.busId, msg.payload with
   -- As for OpenVM's PC lookup, we only check the arity of these lookups: the input circuit has
   -- already fixed the looked-up fields to constants, so the optimizer cannot change them.
-  | some .pcLookup, args => !decide (args.length = 16)
-  | some .instructionFetch, args => !decide (args.length = 22)
-  | some .pageProt, args => !decide (args.length = 6)
+  | some .pcLookup, args => args.length = 16
+  | some .instructionFetch, args => args.length = 22
+  | some .pageProt, args => args.length = 6
 
   | some .byteLookup, [op, a, b, c] =>
     match op.val with
-    -- AND: range check b, c to be bytes; a must be b & c.
-    | 0 => !(isByte b && isByte c && decide (a.val = Nat.land b.val c.val))
-    -- OR: a must be b | c.
-    | 1 => !(isByte b && isByte c && decide (a.val = Nat.lor b.val c.val))
-    -- XOR: a must be b ^ c.
-    | 2 => !(isByte b && isByte c && decide (a.val = Nat.xor b.val c.val))
-    -- U8Range: range check b, c to be bytes; a must be 0.
-    | 3 => !(isByte b && isByte c && decide (a.val = 0))
-    -- LTU: a must be 1 if b < c, else 0.
-    | 4 => !(isByte b && isByte c && decide (a.val = if b.val < c.val then 1 else 0))
-    -- MSB: a must be the top bit of the byte b, and c must be 0.
-    | 5 => !(isByte b && decide (c.val = 0) && decide (a.val = b.val >>> 7))
-    -- Range: check that a < 2^b, that c = 0, and that b ≤ 16 (the largest width the table holds).
-    | 6 => !(decide (b.val ≤ 16) && decide (c.val = 0) && decide (a.val < 2 ^ b.val))
-    -- Other ops are invalid.
-    | _ => true
-  | some .byteLookup, _ => true
+    -- AND: `b`, `c` are bytes and `a = b & c`.
+    | 0 => isByte b ∧ isByte c ∧ a.val = Nat.land b.val c.val
+    -- OR: `a = b | c`.
+    | 1 => isByte b ∧ isByte c ∧ a.val = Nat.lor b.val c.val
+    -- XOR: `a = b ^ c`.
+    | 2 => isByte b ∧ isByte c ∧ a.val = Nat.xor b.val c.val
+    -- U8Range: `b`, `c` are bytes and `a = 0`.
+    | 3 => isByte b ∧ isByte c ∧ a.val = 0
+    -- LTU: `a` is 1 if `b < c`, else 0.
+    | 4 => isByte b ∧ isByte c ∧ a.val = if b.val < c.val then 1 else 0
+    -- MSB: `a` is the top bit of the byte `b`, and `c = 0`.
+    | 5 => isByte b ∧ c.val = 0 ∧ a.val = b.val >>> 7
+    -- Range: `a < 2^b` with `c = 0` and `b ≤ 16` (the largest width the table holds).
+    | 6 => b.val ≤ 16 ∧ c.val = 0 ∧ a.val < 2 ^ b.val
+    -- No other op is in the table.
+    | _ => False
+  | some .byteLookup, _ => False
 
-  -- Stateful buses.
-  | some .executionBridge, _ => false
+  -- Stateful buses have no table to contradict.
+  | some .executionBridge, _ => True
 
   -- In SP1, the invariant is that memory data limbs are 16-bit range-checked. A *send*
   -- (multiplicity 1) reads the previous record, so its data must be 16-bit.
   | some .memory, payload =>
     match memoryPayload? payload with
-    | some f => decide (msg.multiplicity = 1) && !(f.data.all is16Bit)
-    | none => false
+    | some f => msg.multiplicity = 1 → ∀ d ∈ f.data, is16Bit d
+    | none => True
 
   -- Invalid bus ID. Won't have a matching receive.
-  | none, _ => true
+  | none, _ => False
 
-/-- Whether a message breaks an invariant on which soundness depends. Only called for
-    message with nonzero multiplicity. -/
-def breaksInvariant (busMap : BusMap) (msg : BusInteraction (ZMod p)) : Bool :=
+/-- Whether a message maintains the invariants on which soundness depends. Only called
+    for messages with nonzero multiplicity. -/
+def maintainsInvariants (busMap : BusMap) (msg : BusInteraction (ZMod p)) : Prop :=
   match busMap msg.busId with
   -- Lookups are only ever sent (multiplicity 1).
   | some .pcLookup | some .byteLookup | some .instructionFetch | some .pageProt =>
-    !decide (msg.multiplicity = 1)
+    msg.multiplicity = 1
   -- The execution bridge is stateful: it is sent (1) or received (-1).
   | some .executionBridge =>
-    !decide (msg.multiplicity = 1 ∨ msg.multiplicity = -1)
+    msg.multiplicity = 1 ∨ msg.multiplicity = -1
   -- Memory is stateful (multiplicity 1 or -1), and additionally maintains the invariant that its
   -- data limbs are 16-bit range.
   | some .memory =>
-    !decide (msg.multiplicity = 1 ∨ msg.multiplicity = -1) ||
-    (match memoryPayload? msg.payload with
-      | some f => !(f.data.all is16Bit)
-      | none => false)
+    (msg.multiplicity = 1 ∨ msg.multiplicity = -1) ∧
+      (match memoryPayload? msg.payload with
+        | some f => ∀ d ∈ f.data, is16Bit d
+        | none => True)
   -- Circuits should not send messages to an unknown bus.
-  | none => true
+  | none => False
 
 /-- Assume that reading register `x0` (address `0`) always returns `0`. This should be enforced
     globally by all SP1 chips. -/
@@ -173,8 +173,8 @@ def sp1BusSemantics (p : ℕ) (busMap : BusMap := defaultBusMap) :
     match busMap busId with
     | some t => t.isStateful
     | none => false
-  violatesConstraint := violates busMap
-  breaksInvariant := breaksInvariant busMap
+  accepts := accepts busMap
+  maintainsInvariants := maintainsInvariants busMap
   -- The memory discipline, per declared bus. On SP1 *memory* the `setNew` multiplicity is `-1`
   -- (`direction := .sendThenReceive`); on the *execution bridge* it is `1` (`.receiveThenSend`, which
   -- sends the next CPU state). Either way `admissibleMemoryBus` pairs each `setNew` with the next

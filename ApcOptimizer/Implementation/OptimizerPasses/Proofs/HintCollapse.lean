@@ -577,7 +577,7 @@ theorem dense_collapse_correct [Fact p.Prime] (isInput : VarId → Bool)
   refine ⟨hsound, ?_, ?_, ?_⟩
   · -- Invariant preservation.
     intro hcsInv denv hsatOut bi hbiOut
-    show (denseBIEval bi denv).multiplicity ≠ 0 → bs.breaksInvariant (denseBIEval bi denv) = false
+    show (denseBIEval bi denv).multiplicity ≠ 0 → bs.maintainsInvariants (denseBIEval bi denv)
     rw [← hbe denv bi (hob ▸ hbiOut)]
     exact hcsInv (reasg denv (denv invId)) (hcssat denv hsatOut) bi (hob ▸ hbiOut)
   · -- No new powdr-ID (input) column.

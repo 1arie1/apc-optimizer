@@ -56,7 +56,7 @@ def DenseConstraintSystem.satisfies (d : DenseConstraintSystem p) (bs : BusSeman
   (∀ c ∈ d.algebraicConstraints, c.eval denv = 0) ∧
   (∀ bi ∈ d.busInteractions,
     let message := denseBIEval bi denv
-    message.multiplicity ≠ 0 → bs.violatesConstraint message = false)
+    message.multiplicity ≠ 0 → bs.accepts message)
 
 /-- Dense admissibility: the fired stateful-bus messages satisfy the bus admissibility predicate. -/
 def DenseConstraintSystem.admissible (d : DenseConstraintSystem p) (bs : BusSemantics p)
@@ -69,7 +69,7 @@ def DenseConstraintSystem.guaranteesInvariants (d : DenseConstraintSystem p) (bs
     Prop :=
   ∀ denv, d.satisfies bs denv → ∀ bi ∈ d.busInteractions,
     let message := denseBIEval bi denv
-    message.multiplicity ≠ 0 → bs.breaksInvariant message = false
+    message.multiplicity ≠ 0 → bs.maintainsInvariants message
 
 /-- Every satisfying assignment has a matching one for `other` with equivalent side effects. -/
 def DenseConstraintSystem.implies (self other : DenseConstraintSystem p) (bs : BusSemantics p) :
@@ -130,7 +130,7 @@ theorem DenseConstraintSystem.satisfies_congr {d : DenseConstraintSystem p} {bs 
       exact hsat.1 c hc
     · have hbe : denseBIEval bi e1 = denseBIEval bi e2 :=
         denseBIEval_congr bi e1 e2 (fun i hi => hh i (DenseConstraintSystem.mem_occ_of_bi hbi hi))
-      show (denseBIEval bi e2).multiplicity ≠ 0 → bs.violatesConstraint (denseBIEval bi e2) = false
+      show (denseBIEval bi e2).multiplicity ≠ 0 → bs.accepts (denseBIEval bi e2)
       rw [← hbe]
       exact hsat.2 bi hbi
   exact ⟨imp denv1 denv2 h, imp denv2 denv1 (fun i hi => (h i hi).symm)⟩
@@ -277,7 +277,7 @@ theorem VarRegistry.decodeCS_guaranteesInvariants (reg : VarRegistry) {d : Dense
   constructor
   · -- decode → dense (needs coverage, to transport a dense env to a spec one)
     intro hgi denv hsat bi hbi
-    show (denseBIEval bi denv).multiplicity ≠ 0 → bs.breaksInvariant (denseBIEval bi denv) = false
+    show (denseBIEval bi denv).multiplicity ≠ 0 → bs.maintainsInvariants (denseBIEval bi denv)
     intro hne
     have hsatE : (reg.decodeCS d).satisfies bs (reg.extendEnv denv (fun _ => 0)) := by
       rw [reg.decodeCS_satisfies]
@@ -298,7 +298,7 @@ theorem VarRegistry.decodeCS_guaranteesInvariants (reg : VarRegistry) {d : Dense
     simp only [VarRegistry.decodeCS, List.mem_map] at hbi'
     obtain ⟨bi, hbi, rfl⟩ := hbi'
     show ((reg.decodeBI bi).eval E).multiplicity ≠ 0
-      → bs.breaksInvariant ((reg.decodeBI bi).eval E) = false
+      → bs.maintainsInvariants ((reg.decodeBI bi).eval E)
     rw [reg.decodeBI_eval]
     rw [reg.decodeCS_satisfies] at hsat
     exact fun hne => hgi _ hsat bi hbi hne

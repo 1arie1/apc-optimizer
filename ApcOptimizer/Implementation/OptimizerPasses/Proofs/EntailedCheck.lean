@@ -83,7 +83,7 @@ theorem DensePassCorrect.denseFilterBusEntailed (d : DenseConstraintSystem p) (b
     (hok : ∀ bi ∈ d.busInteractions, keep bi = false → ∀ denv,
       (d.filterBus keep).satisfies bs denv →
       (denseBIEval bi denv).multiplicity ≠ 0 →
-      bs.violatesConstraint (denseBIEval bi denv) = false) :
+      bs.accepts (denseBIEval bi denv)) :
     DensePassCorrect isInput d (d.filterBus keep) [] bs := by
   have hiff : ∀ denv, (d.filterBus keep).satisfies bs denv ↔ d.satisfies bs denv := by
     intro denv
@@ -199,7 +199,7 @@ structure DenseCheckRule (p : ℕ) (bs : BusSemantics p) where
   stateless : ∀ bi e, recognize bi = some e → bs.isStateful bi.busId = false
   vars : ∀ bi e, recognize bi = some e → ∀ z ∈ e.vars, z ∈ denseBIVars bi
   violates_iff : ∀ bi e, recognize bi = some e → ∀ denv : VarId → ZMod p,
-    (bs.violatesConstraint (denseBIEval bi denv) = false ↔ e.eval denv = 0)
+    (bs.accepts (denseBIEval bi denv) ↔ e.eval denv = 0)
 
 /-- Every emitted constraint comes from some recognizer firing on some listed interaction. -/
 theorem denseGroupEmit_mem {recs : List (BusInteraction (DenseExpr p) → Option (DenseExpr p))}

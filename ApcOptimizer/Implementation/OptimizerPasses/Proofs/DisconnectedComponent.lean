@@ -111,7 +111,7 @@ theorem DensePassCorrect.denseDropComponent (d : DenseConstraintSystem p) (bs : 
     (hCkeep : ∀ c ∈ d.algebraicConstraints, keepCon c = true → ∀ x ∈ c.vars, remV x = false)
     (hBrem : ∀ bi ∈ d.busInteractions, keepBi bi = false → ∀ x ∈ denseBIVars bi, remV x = true)
     (hBsat : ∀ bi ∈ d.busInteractions, keepBi bi = false →
-        bs.violatesConstraint (denseBIEval bi w) = false)
+        bs.accepts (denseBIEval bi w))
     (hBstateless : ∀ bi ∈ d.busInteractions, keepBi bi = false → bs.isStateful bi.busId = false)
     (hBkeep : ∀ bi ∈ d.busInteractions, keepBi bi = true → ∀ x ∈ denseBIVars bi, remV x = false) :
     DensePassCorrect isInput d
@@ -146,7 +146,7 @@ theorem DensePassCorrect.denseDropComponent (d : DenseConstraintSystem p) (bs : 
   have keySat : ∀ env,
       (∀ c ∈ d.algebraicConstraints.filter keepCon, c.eval env = 0) →
       (∀ bi ∈ d.busInteractions.filter keepBi,
-        (denseBIEval bi env).multiplicity ≠ 0 → bs.violatesConstraint (denseBIEval bi env) = false) →
+        (denseBIEval bi env).multiplicity ≠ 0 → bs.accepts (denseBIEval bi env)) →
       d.satisfies bs (m env) := by
     intro env hsc hsb
     refine ⟨fun c hc => ?_, fun bi hbi hne => ?_⟩
@@ -173,7 +173,7 @@ theorem DensePassCorrect.denseDropComponent (d : DenseConstraintSystem p) (bs : 
     rw [hse]; exact BusState.equiv_refl _
   · -- invariant preservation
     intro hgi env hsat bi hbi
-    show (denseBIEval bi env).multiplicity ≠ 0 → bs.breaksInvariant (denseBIEval bi env) = false
+    show (denseBIEval bi env).multiplicity ≠ 0 → bs.maintainsInvariants (denseBIEval bi env)
     have hbimem : bi ∈ d.busInteractions := (List.mem_filter.1 hbi).1
     have hbikeep : keepBi bi = true := (List.mem_filter.1 hbi).2
     have hsatm : d.satisfies bs (m env) := keySat env hsat.1 hsat.2
@@ -210,9 +210,9 @@ theorem DensePassCorrect.denseDropComponent (d : DenseConstraintSystem p) (bs : 
 
 /-- The guarded drop preserves coverage: both lists are filtered (subsets); the identity branch is
     the input. -/
-theorem denseDropGuarded_covered {reg : VarRegistry} (bs : BusSemantics p)
+theorem denseDropGuarded_covered {reg : VarRegistry} (bs : BusSemantics p) (facts : BusFacts p bs)
     (d : DenseConstraintSystem p) (remV : VarId → Bool) (hc : d.CoveredBy reg) :
-    (denseDropGuarded bs d remV).CoveredBy reg := by
+    (denseDropGuarded bs facts d remV).CoveredBy reg := by
   unfold denseDropGuarded
   split_ifs with h
   · exact ⟨fun e he => hc.1 e (List.mem_of_mem_filter he),
@@ -221,9 +221,9 @@ theorem denseDropGuarded_covered {reg : VarRegistry} (bs : BusSemantics p)
 
 /-- The guarded drop is correct for any `remV`: the run-time re-check (`denseDropCheck`) supplies
     exactly the seven `denseDropComponent` hypotheses. -/
-theorem denseDropGuarded_correct (bs : BusSemantics p) (isInput : VarId → Bool)
-    (d : DenseConstraintSystem p) (remV : VarId → Bool) :
-    DensePassCorrect isInput d (denseDropGuarded bs d remV) [] bs := by
+theorem denseDropGuarded_correct (bs : BusSemantics p) (facts : BusFacts p bs)
+    (isInput : VarId → Bool) (d : DenseConstraintSystem p) (remV : VarId → Bool) :
+    DensePassCorrect isInput d (denseDropGuarded bs facts d remV) [] bs := by
   unfold denseDropGuarded
   split_ifs with hchk
   · unfold denseDropCheck at hchk
@@ -254,7 +254,7 @@ theorem denseDropGuarded_correct (bs : BusSemantics p) (isInput : VarId → Bool
       intro bi hbi hkf
       have h1 := (List.all_eq_true.1 hbz) bi hbi
       rw [hkf, Bool.false_or] at h1
-      simpa using h1
+      exact (facts.acceptsDec_iff _).mp (by simpa using h1)
     · -- hBstateless
       intro bi _ hkf
       simp only [denseKeepBiWith, Bool.or_eq_false_iff] at hkf
@@ -269,23 +269,23 @@ theorem denseDropGuarded_correct (bs : BusSemantics p) (isInput : VarId → Bool
 
 /-! ## The dense pass -/
 
-theorem denseDisconnectedF_covered {reg : VarRegistry} (bs : BusSemantics p)
+theorem denseDisconnectedF_covered {reg : VarRegistry} (bs : BusSemantics p) (facts : BusFacts p bs)
     (d : DenseConstraintSystem p) (hc : d.CoveredBy reg) :
-    (denseDisconnectedF bs d).CoveredBy reg := by
+    (denseDisconnectedF bs facts d).CoveredBy reg := by
   unfold denseDisconnectedF
-  exact denseDropGuarded_covered bs d _ hc
+  exact denseDropGuarded_covered bs facts d _ hc
 
-theorem denseDisconnectedF_correct (bs : BusSemantics p) (isInput : VarId → Bool)
-    (d : DenseConstraintSystem p) :
-    DensePassCorrect isInput d (denseDisconnectedF bs d) [] bs := by
+theorem denseDisconnectedF_correct (bs : BusSemantics p) (facts : BusFacts p bs)
+    (isInput : VarId → Bool) (d : DenseConstraintSystem p) :
+    DensePassCorrect isInput d (denseDisconnectedF bs facts d) [] bs := by
   unfold denseDisconnectedF
-  exact denseDropGuarded_correct bs isInput d _
+  exact denseDropGuarded_correct bs facts isInput d _
 
 /-- The dense disconnected-component pass (see `denseDisconnectedF`). -/
 def denseDisconnectedPass : DenseVerifiedPassW p :=
-  DenseVerifiedPassW.of (fun bs _ d => denseDisconnectedF bs d) (fun _ _ _ => [])
-    (fun reg bs _ d hcov => denseDisconnectedF_covered bs d hcov)
+  DenseVerifiedPassW.of (fun bs facts d => denseDisconnectedF bs facts d) (fun _ _ _ => [])
+    (fun reg bs facts d hcov => denseDisconnectedF_covered bs facts d hcov)
     (fun _ _ _ _ _ => by intro x hx; simp at hx)
-    (fun reg bs _ d _ => denseDisconnectedF_correct bs reg.isInput d)
+    (fun reg bs facts d _ => denseDisconnectedF_correct bs facts reg.isInput d)
 
 end ApcOptimizer.Dense

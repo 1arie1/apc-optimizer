@@ -163,7 +163,7 @@ def denseCompileCBiPredsV {bs : BusSemantics p} (facts : BusFacts p bs) (keys : 
     | _, _ => none
 
 def denseCBiPredEvalV (ops : DenseZModOps p) (isZero : ZMod p → Bool)
-    (bs : BusSemantics p) (pt : List (ZMod p)) : DenseCBiPred p → Bool
+    {bs : BusSemantics p} (facts : BusFacts p bs) (pt : List (ZMod p)) : DenseCBiPred p → Bool
   | .always => true
   | .varRange mult x width =>
     let multValue := denseIExprEvalWithV ops pt mult
@@ -197,7 +197,7 @@ def denseCBiPredEvalV (ops : DenseZModOps p) (isZero : ZMod p → Bool)
     let multValue := denseIExprEvalWithV ops pt cbi.mult
     if isZero multValue then true
     else
-      !bs.violatesConstraint
+      facts.acceptsDec
         { busId := cbi.busId,
           multiplicity := multValue,
           payload := cbi.payload.map (fun ie => denseIExprEvalWithV ops pt ie) }
@@ -205,10 +205,10 @@ def denseCBiPredEvalV (ops : DenseZModOps p) (isZero : ZMod p → Bool)
 /-- `survivesAllCW`, over a value-only point: compiled items' zero test plus interactions'
     obligation check. -/
 def denseSurvivesAllCWV (ops : DenseZModOps p) (isZero : ZMod p → Bool)
-    (bs : BusSemantics p) (ces : List (IExpr p)) (cbis : List (DenseCBiPred p))
-    (pt : List (ZMod p)) : Bool :=
+    {bs : BusSemantics p} (facts : BusFacts p bs) (ces : List (IExpr p))
+    (cbis : List (DenseCBiPred p)) (pt : List (ZMod p)) : Bool :=
   ces.all (fun ie => isZero (denseIExprEvalWithV ops pt ie)) &&
-    cbis.all (denseCBiPredEvalV ops isZero bs pt)
+    cbis.all (denseCBiPredEvalV ops isZero facts pt)
 
 /-! ### The uncompiled fallback
 
@@ -223,21 +223,21 @@ def denseEnvOfKeysV (keys : List VarId) (pt : List (ZMod p)) (y : VarId) : ZMod 
   | x :: ks, v :: vs => if y == x then v else denseEnvOfKeysV ks vs y
 
 /-- One source interaction's obligation over a value-only point. -/
-def denseBiObligationV (bs : BusSemantics p) (bi : BusInteraction (DenseExpr p))
-    (keys : List VarId) (pt : List (ZMod p)) : Bool :=
+def denseBiObligationV {bs : BusSemantics p} (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) (keys : List VarId) (pt : List (ZMod p)) : Bool :=
   let mult := bi.multiplicity.eval (denseEnvOfKeysV keys pt)
   if decide (mult = 0) then true
   else
-    !bs.violatesConstraint
+    facts.acceptsDec
       { busId := bi.busId,
         multiplicity := mult,
         payload := bi.payload.map (fun e => e.eval (denseEnvOfKeysV keys pt)) }
 
 /-- Fallback survivor predicate (see the fallback note above). -/
-def denseSurvivesAllMV (bs : BusSemantics p) (es : List (DenseExpr p))
+def denseSurvivesAllMV {bs : BusSemantics p} (facts : BusFacts p bs) (es : List (DenseExpr p))
     (bis : List (BusInteraction (DenseExpr p))) (keys : List VarId) (pt : List (ZMod p)) : Bool :=
   es.all (fun e => decide (e.eval (denseEnvOfKeysV keys pt) = 0)) &&
-    bis.all (fun bi => denseBiObligationV bs bi keys pt)
+    bis.all (fun bi => denseBiObligationV facts bi keys pt)
 
 /-- A per-target survivor predicate, boxed in a one-field structure so its setup (ring instances,
     compilation, `isZero` closure) runs once per target rather than being eta-expanded into the
@@ -257,8 +257,8 @@ def denseCompiledSurvV (bs : BusSemantics p) (facts : BusFacts p bs) (es : List 
     let ops : DenseZModOps p := denseZModOps
     let dec : DecidableEq (ZMod p) := inferInstance
     let isZero : ZMod p → Bool := fun v => @decide (v = ops.zero) (dec v ops.zero)
-    ⟨fun pt => denseSurvivesAllCWV ops isZero bs ces cbis pt⟩
-  | _, _ => ⟨denseSurvivesAllMV bs es bis keys⟩
+    ⟨fun pt => denseSurvivesAllCWV ops isZero facts ces cbis pt⟩
+  | _, _ => ⟨denseSurvivesAllMV facts es bis keys⟩
 
 /-! ## Value-only lazy box enumeration -/
 
@@ -381,7 +381,7 @@ def denseBytePairDomainRedundantV {bs : BusSemantics p} (facts : BusFacts p bs)
 def denseBiDomainRedundantV (bs : BusSemantics p) (facts : BusFacts p bs) (T : DenseDomainTable p)
     (bi : BusInteraction (DenseExpr p)) : Bool :=
   match denseConstBiV? bi with
-  | some value => value.multiplicity = 0 || !bs.violatesConstraint value
+  | some value => value.multiplicity = 0 || facts.acceptsDec value
   | none =>
     if facts.neverViolates bi.busId then true
     else

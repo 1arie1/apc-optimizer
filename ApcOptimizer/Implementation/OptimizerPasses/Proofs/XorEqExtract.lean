@@ -48,7 +48,7 @@ theorem denseXorEq?_eval (bs : BusSemantics p) (facts : BusFacts p bs) (d : Dens
     (h1ne : (1 : ZMod p) ≠ 0) (h : denseXorEq? bs facts bi = some c) (hbi : bi ∈ d.busInteractions)
     (hsat : d.satisfies bs denv) : c.eval denv = 0 := by
   obtain ⟨spec, o1, o2, r, hspec, hmult, hdec, hcase⟩ := denseXorEq?_spec bs facts bi c h
-  have hviol : bs.violatesConstraint (denseBIEval bi denv) = false := by
+  have hviol : bs.accepts (denseBIEval bi denv) := by
     refine hsat.2 bi hbi ?_
     show (bi.multiplicity.eval denv) ≠ 0
     rw [hmult]; simpa using h1ne
@@ -126,7 +126,7 @@ theorem denseBoolEq?_eval (bs : BusSemantics p) (facts : BusFacts p bs) (d : Den
     (h1ne : (1 : ZMod p) ≠ 0) (h : denseBoolEq? bs facts bi = some c) (hbi : bi ∈ d.busInteractions)
     (hsat : d.satisfies bs denv) : c.eval denv = 0 := by
   obtain ⟨spec, op, o1, o2, r, hspec, hmult, hdec, hcase⟩ := denseBoolEq?_spec bs facts bi c h
-  have hviol : bs.violatesConstraint (denseBIEval bi denv) = false := by
+  have hviol : bs.accepts (denseBIEval bi denv) := by
     refine hsat.2 bi hbi ?_
     show (bi.multiplicity.eval denv) ≠ 0
     rw [hmult]; simpa using h1ne

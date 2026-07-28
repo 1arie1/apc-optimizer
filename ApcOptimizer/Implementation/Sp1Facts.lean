@@ -10,13 +10,134 @@ set_option autoImplicit false
 The `BusFacts` instance for `sp1BusSemantics` (see `ApcOptimizer/Implementation/BusFacts.lean` for
 the design). The memory discipline is direction-parametric (`MemoryBusShape.direction`), so SP1's
 reverse memory convention (`setNewMult = -1`) and its execution bridge (`setNewMult = 1`) reuse the
-same machinery. Every claim is proven against the concrete `violates`, so none needs auditing.
+same machinery. Every claim is proven against the audited `accepts`/`maintainsInvariants`, so none needs auditing.
 Parameterized by the bus map (defaulting to `defaultBusMap`).
 -/
 
 namespace ApcOptimizer.SP1
 
 variable {p : ℕ}
+
+/-! ## Deciding the semantics
+
+The audited `accepts`/`maintainsInvariants` are `Prop`s, so a pass cannot evaluate them. `violates`
+and `breaksInvariant` below are the `Bool` decision procedures the pipeline actually runs, each
+proven equivalent to its audited counterpart; the `@[simp]` interface lemmas let the Bool-shaped
+helper proofs in this file stand as written. -/
+
+private def isByteB (x : ZMod p) : Bool := decide (x.val < 256)
+private def is16BitB (x : ZMod p) : Bool := decide (x.val < 2 ^ 16)
+
+private theorem isByteB_iff (x : ZMod p) : isByteB x = true ↔ isByte x := by
+  simp [isByteB, isByte]
+
+private theorem is16BitB_iff (x : ZMod p) : is16BitB x = true ↔ is16Bit x := by
+  simp [is16BitB, is16Bit]
+
+private theorem all_is16BitB_iff (v : Vector (ZMod p) 4) :
+    v.all is16BitB = true ↔ ∀ d ∈ v, is16Bit d := by
+  rw [Vector.all_eq_true_iff_forall_mem]
+  simp only [is16BitB_iff]
+
+private theorem forall_is16BitB_iff (v : Vector (ZMod p) 4) :
+    (∀ (i : Nat) (h : i < 4), is16BitB v[i] = true) ↔ ∀ d ∈ v, is16Bit d :=
+  Vector.all_eq_true.symm.trans (all_is16BitB_iff v)
+
+/-- Bool decision procedure for `accepts` (`violates_eq_false_iff`). -/
+private def violates (busMap : Nat → Option Sp1BusType) (msg : BusInteraction (ZMod p)) : Bool :=
+  match busMap msg.busId, msg.payload with
+  | some .pcLookup, args => !decide (args.length = 16)
+  | some .instructionFetch, args => !decide (args.length = 22)
+  | some .pageProt, args => !decide (args.length = 6)
+  | some .byteLookup, [op, a, b, c] =>
+    match op.val with
+    | 0 => !(isByteB b && isByteB c && decide (a.val = Nat.land b.val c.val))
+    | 1 => !(isByteB b && isByteB c && decide (a.val = Nat.lor b.val c.val))
+    | 2 => !(isByteB b && isByteB c && decide (a.val = Nat.xor b.val c.val))
+    | 3 => !(isByteB b && isByteB c && decide (a.val = 0))
+    | 4 => !(isByteB b && isByteB c && decide (a.val = if b.val < c.val then 1 else 0))
+    | 5 => !(isByteB b && decide (c.val = 0) && decide (a.val = b.val >>> 7))
+    | 6 => !(decide (b.val ≤ 16) && decide (c.val = 0) && decide (a.val < 2 ^ b.val))
+    | _ => true
+  | some .byteLookup, _ => true
+  | some .executionBridge, _ => false
+  | some .memory, payload =>
+    match memoryPayload? payload with
+    | some f => decide (msg.multiplicity = 1) && !(f.data.all is16BitB)
+    | none => false
+  | none, _ => true
+
+/-- Bool decision procedure for `maintainsInvariants` (`breaksInvariant_eq_false_iff`). -/
+private def breaksInvariant (busMap : Nat → Option Sp1BusType)
+    (msg : BusInteraction (ZMod p)) : Bool :=
+  match busMap msg.busId with
+  | some .pcLookup | some .byteLookup | some .instructionFetch | some .pageProt =>
+    !decide (msg.multiplicity = 1)
+  | some .executionBridge =>
+    !decide (msg.multiplicity = 1 ∨ msg.multiplicity = -1)
+  | some .memory =>
+    !decide (msg.multiplicity = 1 ∨ msg.multiplicity = -1) ||
+    (match memoryPayload? msg.payload with
+      | some f => !(f.data.all is16BitB)
+      | none => false)
+  | none => true
+
+private theorem violates_eq_false_iff (busMap : Nat → Option Sp1BusType)
+    (m : BusInteraction (ZMod p)) : violates busMap m = false ↔ accepts busMap m := by
+  obtain ⟨bid, mult, payload⟩ := m
+  unfold violates accepts
+  cases hb : busMap bid with
+  | none => simp
+  | some t =>
+    cases t with
+    | executionBridge => simp
+    | pcLookup => simp
+    | instructionFetch => simp
+    | pageProt => simp
+    | byteLookup =>
+        rcases payload with _ | ⟨op, _ | ⟨a, _ | ⟨b, _ | ⟨c, _ | ⟨w, rest⟩⟩⟩⟩⟩ <;> try simp
+        rcases op.val with _ | _ | _ | _ | _ | _ | _ | n <;>
+          simp [isByteB_iff, and_assoc]
+    | memory =>
+        cases hp : memoryPayload? payload with
+        | none => simp [hp]
+        | some f => simp [hp, forall_is16BitB_iff, imp_iff_not_or]
+
+private theorem breaksInvariant_eq_false_iff (busMap : Nat → Option Sp1BusType)
+    (m : BusInteraction (ZMod p)) :
+    breaksInvariant busMap m = false ↔ maintainsInvariants busMap m := by
+  obtain ⟨bid, mult, payload⟩ := m
+  unfold breaksInvariant maintainsInvariants
+  cases hb : busMap bid with
+  | none => simp
+  | some t =>
+    cases t with
+    | pcLookup => simp
+    | byteLookup => simp
+    | instructionFetch => simp
+    | pageProt => simp
+    | executionBridge => simp [or_iff_not_imp_left]
+    | memory =>
+        cases hp : memoryPayload? payload with
+        | none => simp [or_iff_not_imp_left]
+        | some f => simp [forall_is16BitB_iff, or_iff_not_imp_left]
+
+/-- `accepts` is decidable, via the Bool procedure above; `BusFacts.trivial` needs this. -/
+instance instDecidableSp1Accepts (busMap : Nat → Option Sp1BusType) :
+    DecidablePred (sp1BusSemantics p busMap).accepts := fun m =>
+  decidable_of_iff (violates busMap m = false) (violates_eq_false_iff busMap m)
+
+/-- The `BusFacts` interface speaks the audited `accepts`; the lemmas here speak `violates`. -/
+@[simp] private theorem sp1_accepts_iff (busMap : Nat → Option Sp1BusType)
+    (m : BusInteraction (ZMod p)) :
+    (sp1BusSemantics p busMap).accepts m ↔ violates busMap m = false :=
+  (violates_eq_false_iff busMap m).symm
+
+@[simp] private theorem sp1_maintains_iff (busMap : Nat → Option Sp1BusType)
+    (m : BusInteraction (ZMod p)) :
+    (sp1BusSemantics p busMap).maintainsInvariants m ↔ breaksInvariant busMap m = false :=
+  (breaksInvariant_eq_false_iff busMap m).symm
+
 
 private def neverViolatesImpl (busMap : Nat → Option Sp1BusType) (busId : Nat) : Bool :=
   match busMap busId with
@@ -98,7 +219,7 @@ private theorem byte_operands (busMap : Nat → Option Sp1BusType)
   · refine ⟨op, a, b, c, rfl, ?_, ?_⟩ <;>
       (split at hok <;>
         first
-          | (simp only [isByte, Bool.not_eq_false', Bool.and_eq_true, decide_eq_true_eq] at hok
+          | (simp only [isByteB, Bool.not_eq_false', Bool.and_eq_true, decide_eq_true_eq] at hok
              obtain ⟨⟨hb, hc⟩, _⟩ := hok
              omega)
           | simp_all)
@@ -136,27 +257,27 @@ private theorem byte_result_lt256 (busMap : Nat → Option Sp1BusType)
   rcases (show op.val = 0 ∨ op.val = 1 ∨ op.val = 2 ∨ op.val = 3 ∨ op.val = 4 ∨ op.val = 5 by omega)
     with h | h | h | h | h | h
   · rw [h] at hok
-    simp only [Bool.not_eq_false', Bool.and_eq_true, decide_eq_true_eq, isByte] at hok
+    simp only [Bool.not_eq_false', Bool.and_eq_true, decide_eq_true_eq, isByteB] at hok
     obtain ⟨⟨hb, _⟩, ha⟩ := hok
     rw [ha]; exact lt_of_le_of_lt Nat.and_le_left hb
   · rw [h] at hok
-    simp only [Bool.not_eq_false', Bool.and_eq_true, decide_eq_true_eq, isByte] at hok
+    simp only [Bool.not_eq_false', Bool.and_eq_true, decide_eq_true_eq, isByteB] at hok
     obtain ⟨⟨hb, hc⟩, ha⟩ := hok
     rw [ha]; exact Nat.or_lt_two_pow (n := 8) hb hc
   · rw [h] at hok
-    simp only [Bool.not_eq_false', Bool.and_eq_true, decide_eq_true_eq, isByte] at hok
+    simp only [Bool.not_eq_false', Bool.and_eq_true, decide_eq_true_eq, isByteB] at hok
     obtain ⟨⟨hb, hc⟩, ha⟩ := hok
     rw [ha]; exact Nat.xor_lt_two_pow (n := 8) hb hc
   · rw [h] at hok
-    simp only [Bool.not_eq_false', Bool.and_eq_true, decide_eq_true_eq, isByte] at hok
+    simp only [Bool.not_eq_false', Bool.and_eq_true, decide_eq_true_eq, isByteB] at hok
     obtain ⟨_, ha⟩ := hok
     rw [ha]; omega
   · rw [h] at hok
-    simp only [Bool.not_eq_false', Bool.and_eq_true, decide_eq_true_eq, isByte] at hok
+    simp only [Bool.not_eq_false', Bool.and_eq_true, decide_eq_true_eq, isByteB] at hok
     obtain ⟨_, ha⟩ := hok
     rw [ha]; split <;> omega
   · rw [h] at hok
-    simp only [Bool.not_eq_false', Bool.and_eq_true, decide_eq_true_eq, isByte] at hok
+    simp only [Bool.not_eq_false', Bool.and_eq_true, decide_eq_true_eq, isByteB] at hok
     obtain ⟨⟨hb, _⟩, ha⟩ := hok
     rw [ha, Nat.shiftRight_eq_div_pow]
     have h128 : (2 : ℕ) ^ 7 = 128 := rfl
@@ -248,7 +369,8 @@ theorem sp1ByteEncode_mem {α : Type} (op o1 o2 r x : α)
 /-- An execution-bridge message never violates. -/
 private theorem execBridge_ok (busMap : Nat → Option Sp1BusType)
     (m : BusInteraction (ZMod p)) (hbus : busMap m.busId = some .executionBridge) :
-    violates busMap m = false := by
+    (sp1BusSemantics p busMap).accepts m := by
+  rw [sp1_accepts_iff]
   unfold violates
   rw [hbus]
 
@@ -303,7 +425,8 @@ private theorem memShapeOf_memory_setNewMult {p : ℕ} (busMap : Nat → Option 
 /-- A memory message that is not a `getPrevious` (multiplicity ≠ 1) never violates. -/
 private theorem memory_nonGetPrev_ok (busMap : Nat → Option Sp1BusType)
     (m : BusInteraction (ZMod p)) (hbus : busMap m.busId = some .memory)
-    (hm : m.multiplicity ≠ 1) : violates busMap m = false := by
+    (hm : m.multiplicity ≠ 1) : (sp1BusSemantics p busMap).accepts m := by
+  rw [sp1_accepts_iff]
   obtain ⟨bid, mult, payload⟩ := m
   simp only at hbus hm
   unfold violates
@@ -316,7 +439,8 @@ private theorem memory_getPrev_ok (busMap : Nat → Option Sp1BusType)
     (m : BusInteraction (ZMod p)) (hbus : busMap m.busId = some .memory)
     (hm : m.multiplicity = 1)
     (hslots : ∀ slot ∈ [5, 6, 7, 8], ∀ x : ZMod p, m.payload[slot]? = some x → x.val < 2 ^ 16) :
-    violates busMap m = false := by
+    (sp1BusSemantics p busMap).accepts m := by
+  rw [sp1_accepts_iff]
   obtain ⟨bid, mult, payload⟩ := m
   simp only at hbus hm hslots
   unfold violates
@@ -327,7 +451,7 @@ private theorem memory_getPrev_ok (busMap : Nat → Option Sp1BusType)
   have h1 : d1.val < 65536 := hslots 6 (by simp) d1 rfl
   have h2 : d2.val < 65536 := hslots 7 (by simp) d2 rfl
   have h3 : d3.val < 65536 := hslots 8 (by simp) d3 rfl
-  simp [memoryPayload?, is16Bit, hm, h0, h1, h2, h3]
+  simp [memoryPayload?, is16BitB, hm, h0, h1, h2, h3]
 
 /-- The four data limbs (slots 5–8) of an accepted memory `getPrevious` (multiplicity `1`, ≥9-slot
     record) are 16-bit (converse of `memory_getPrev_ok`). -/
@@ -342,12 +466,13 @@ private theorem memory_read_data (busMap : Nat → Option Sp1BusType)
   rw [hbus, hm] at hok
   rcases hs with rfl | rfl | rfl | rfl <;>
     (rcases payload with _ | ⟨c0, _ | ⟨c1, _ | ⟨a0, _ | ⟨a1, _ | ⟨a2, _ | ⟨d0, _ | ⟨d1, _ | ⟨d2,
-      _ | ⟨d3, rest⟩⟩⟩⟩⟩⟩⟩⟩⟩ <;> simp_all [memoryPayload?, is16Bit, List.all_cons, List.all_nil])
+      _ | ⟨d3, rest⟩⟩⟩⟩⟩⟩⟩⟩⟩ <;> simp_all [memoryPayload?, is16BitB, List.all_cons, List.all_nil])
 
 /-- A memory `setNew` (multiplicity -1) never violates. -/
 private theorem memory_setNew_ok [NeZero p] (busMap : Nat → Option Sp1BusType)
     (m : BusInteraction (ZMod p)) (hbus : busMap m.busId = some .memory)
-    (hm : m.multiplicity = -1) : violates busMap m = false := by
+    (hm : m.multiplicity = -1) : (sp1BusSemantics p busMap).accepts m := by
+  rw [sp1_accepts_iff]
   by_cases hc : (1 : ZMod p) = -1
   · -- `p ∣ 2`: every value is `< 2 ≤ 2^16`, so the 16-bit test never fails.
     have hadd : (1 : ZMod p) + 1 = 0 := (congrArg (· + 1) hc).trans (neg_add_cancel 1)
@@ -362,18 +487,24 @@ private theorem memory_setNew_ok [NeZero p] (busMap : Nat → Option Sp1BusType)
     unfold violates
     rw [hbus]
     rcases payload with _ | ⟨c0, _ | ⟨c1, _ | ⟨a0, _ | ⟨a1, _ | ⟨a2, _ | ⟨d0, _ | ⟨d1, _ | ⟨d2,
-      _ | ⟨d3, rest⟩⟩⟩⟩⟩⟩⟩⟩⟩ <;> simp [memoryPayload?, is16Bit, h16]
-  · exact memory_nonGetPrev_ok busMap m hbus (by rw [hm]; exact fun h => hc h.symm)
+      _ | ⟨d3, rest⟩⟩⟩⟩⟩⟩⟩⟩⟩ <;> simp [memoryPayload?, is16BitB, h16]
+  · exact (sp1_accepts_iff busMap m).mp
+      (memory_nonGetPrev_ok busMap m hbus (by rw [hm]; exact fun h => hc h.symm))
 
 /-- The proven facts about `sp1BusSemantics`, for any bus map. -/
 def sp1Facts (p : ℕ) [NeZero p]
     (busMap : Nat → Option Sp1BusType := defaultBusMap) :
     BusFacts p (sp1BusSemantics p busMap) :=
   { BusFacts.trivial (sp1BusSemantics p busMap) with
+    acceptsDec := fun m => !violates busMap m
+    acceptsDec_iff := by
+      intro m
+      rw [Bool.not_eq_true']
+      exact violates_eq_false_iff busMap m
     slotBound := fun busId mult pattern slot => slotBoundImpl busMap busId mult pattern slot
     slotBound_sound := by
       intro m pattern slot bound x hfact hmatch hok hget
-      have hok' : violates busMap m = false := hok
+      have hok' : violates busMap m = false := (sp1_accepts_iff busMap m).mp hok
       unfold slotBoundImpl at hfact
       split at hfact
       · rename_i hbus
@@ -451,7 +582,7 @@ def sp1Facts (p : ℕ) [NeZero p]
     slotFun := slotFunImpl busMap
     slotFun_sound := by
       intro m pattern outSlot f z hfact hmatch hok hget
-      have hok' : violates busMap m = false := hok
+      have hok' : violates busMap m = false := (sp1_accepts_iff busMap m).mp hok
       unfold slotFunImpl at hfact
       split at hfact
       · rename_i op w1 w2 w3 hbus
@@ -486,9 +617,13 @@ def sp1Facts (p : ℕ) [NeZero p]
       intro m h
       unfold neverViolatesArityImpl at h
       split at h
-      · rename_i hbus; exact pcLookup_ok busMap m hbus (by simpa using h)
-      · rename_i hbus; exact instructionFetch_ok busMap m hbus (by simpa using h)
-      · rename_i hbus; exact pageProt_ok busMap m hbus (by simpa using h)
+      · rename_i hbus
+        exact (sp1_accepts_iff busMap m).mpr (pcLookup_ok busMap m hbus (by simpa using h))
+      · rename_i hbus
+        exact (sp1_accepts_iff busMap m).mpr
+          (instructionFetch_ok busMap m hbus (by simpa using h))
+      · rename_i hbus
+        exact (sp1_accepts_iff busMap m).mpr (pageProt_ok busMap m hbus (by simpa using h))
       · exact absurd h (by simp)
     zeroCell := zeroCellImpl busMap
     zeroCell_sound := by
@@ -645,6 +780,7 @@ def sp1Facts (p : ℕ) [NeZero p]
         · show (match busMap busId with | some t => t.isStateful | none => false) = false
           rw [hbus]; rfl
         · intro pl
+          rw [sp1_maintains_iff]
           show breaksInvariant busMap { busId := busId, multiplicity := 1, payload := pl } = false
           unfold breaksInvariant; rw [hbus]; simp
         · intro pl op o1 o2 r mult hdec
@@ -653,16 +789,18 @@ def sp1Facts (p : ℕ) [NeZero p]
           refine ⟨fun hxor => ?_, fun hpair => ?_⟩
           · have hop2 : op = 2 := hxor
             subst hop2
+            rw [sp1_accepts_iff]
             show violates busMap { busId := busId, multiplicity := mult, payload := [2, r, o1, o2] }
                 = false ↔ o1.val < 256 ∧ o2.val < 256 ∧ r.val = Nat.xor o1.val o2.val
             unfold violates; rw [hbus]
-            simp [hp2, isByte, and_assoc]
+            simp [hp2, isByteB, and_assoc]
           · have hop3 : op = 3 := hpair
             subst hop3
+            rw [sp1_accepts_iff]
             show violates busMap { busId := busId, multiplicity := mult, payload := [3, r, o1, o2] }
                 = false ↔ o1.val < 256 ∧ o2.val < 256 ∧ r = 0
             unfold violates; rw [hbus]
-            simp [hp3, isByte, ZMod.val_eq_zero, and_assoc]
+            simp [hp3, isByteB, ZMod.val_eq_zero, and_assoc]
       · rw [if_neg hp] at hspec; exact absurd hspec (by simp)
     -- SP1's byte bus also carries OR (op 1, `a = b | c`) and AND (op 0, `a = b & c`), declared as
     -- `orOp`/`andOp`.
@@ -685,16 +823,18 @@ def sp1Facts (p : ℕ) [NeZero p]
         refine ⟨fun oop hor hopeq => ?_, fun aop hand hopeq => ?_⟩
         · obtain rfl : oop = 1 := by simpa using hor.symm
           subst hopeq
+          rw [sp1_accepts_iff]
           show violates busMap { busId := busId, multiplicity := mult, payload := [1, r, o1, o2] }
               = false ↔ o1.val < 256 ∧ o2.val < 256 ∧ r.val = Nat.lor o1.val o2.val
           unfold violates; rw [hbus]
-          simp [hp1, isByte, and_assoc]
+          simp [hp1, isByteB, and_assoc]
         · obtain rfl : aop = 0 := by simpa using hand.symm
           subst hopeq
+          rw [sp1_accepts_iff]
           show violates busMap { busId := busId, multiplicity := mult, payload := [0, r, o1, o2] }
               = false ↔ o1.val < 256 ∧ o2.val < 256 ∧ r.val = Nat.land o1.val o2.val
           unfold violates; rw [hbus]
-          simp [hp0, isByte, and_assoc]
+          simp [hp0, isByteB, and_assoc]
       · rw [if_neg hp] at hspec; exact absurd hspec (by simp)
     -- SP1's op-6 (`Range`) byte-bus check `[6, a, w, 0]` (w ≤ 16) is a pure range check on `a`.
     rangeCheckAt := fun busId pattern => rangeCheckAtImpl busMap busId pattern
@@ -719,12 +859,13 @@ def sp1Facts (p : ℕ) [NeZero p]
           have hq3 : q3 = c := by
             have := hmatch.2 3 c (by simp); rw [hpe] at this; simpa using this
           rw [hq0, hq2, hq3] at hpe
-          have hbreak : breaksInvariant busMap m = false := by
+          have hbreak : (sp1BusSemantics p busMap).maintainsInvariants m := by
+            rw [sp1_maintains_iff]
             unfold breaksInvariant; simp [hmbus, hmult]
           refine ⟨hbreak, fun x hx => ?_⟩
           have hxq : q1 = x := by rw [hpe] at hx; simpa using hx
           rw [← hxq]
-          exact byte_op6_iff busMap m hmbus op q1 w c hpe hop hw hc
+          exact (sp1_accepts_iff busMap m).trans (byte_op6_iff busMap m hmbus op q1 w c hpe hop hw hc)
       · exact absurd hfact (by simp) }
 
 end ApcOptimizer.SP1

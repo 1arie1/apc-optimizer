@@ -206,7 +206,7 @@ theorem Circuit.satisfies_congr {cs : Circuit p} {bs : BusSemantics p}
         (fun x hx => hh x (Circuit.mem_vars_of_constraint hc hx))]
       exact hsat.1 c hc
     · have hbe : bi.eval e1 = bi.eval e2 := Circuit.busEval_congr hh hbi
-      show (bi.eval e2).multiplicity ≠ 0 → bs.violatesConstraint (bi.eval e2) = false
+      show (bi.eval e2).multiplicity ≠ 0 → bs.accepts (bi.eval e2)
       rw [← hbe]
       exact hsat.2 bi hbi
   exact ⟨imp f g h, imp g f (fun x hx => (h x hx).symm)⟩
