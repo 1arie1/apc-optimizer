@@ -41,7 +41,7 @@ def powdr_wasm : Article where
 
 def openVM : Article where
   title := inlines!"OpenVM Whitepaper"
-  authors := #[inlines!"OpenVM"]
+  authors := #[inlines!"OpenVM Contributors"]
   journal := inlines!"Whitepaper"
   year := 2026
   month := none
@@ -81,8 +81,8 @@ def logupGKR : Article where
 
 def blum : Article where
   title := inlines!"Checking the Correctness of Memories"
-  authors := #[inlines!"Manuel Blum", inlines!"William S. Evans", inlines!"Peter Gemmell",
-    inlines!"Sampath Kannan", inlines!"Moni Naor"]
+  authors := #[inlines!"M. Blum", inlines!"W. Evans", inlines!"P. Gemmell",
+    inlines!"S. Kannan", inlines!"M. Naor"]
   journal := inlines!"Algorithmica"
   year := 1994
   month := none

@@ -2,6 +2,8 @@
 
 apc-optimizer is a verified constraint system optimizer, designed to be a drop-in replacement for the [`powdr_autoprecompiles::optimizer::optimize`](https://github.com/powdr-labs/powdr/blob/5395a66442c82abc3c095d758f170773c4b5857d/autoprecompiles/src/optimizer.rs#L31-L41) function. It comes with a proof of correctness, meaning that the optimizer is *proven to maintain a notion of circuit equivalence*.
 
+📖 A rendered, cross-linked walkthrough of the audited surface is published at **<https://powdr-labs.github.io/apc-optimizer/>** (see [`docs/`](./docs)).
+
 ## Auditing Correctness
 
 apc-optimizer is designed to have a small auditing surface. The audited files live directly under
