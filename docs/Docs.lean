@@ -50,6 +50,8 @@ Having all instructions within the same circuits enables various optimizations, 
 - *Memory optimizations*. When proving instruction-by-instruction, even temporary values are written to memory and read back. Within a monolithic circuit, these values can be accessed directly, avoiding the overhead of the memory argument. One consequence of this is that each register is only accessed once, independent of how many instructions read or write it.
 - *Gadget optimizations*. Circuits often contain repeated sub-circuits that can be optimized for how exactly they are used. An example is RISC-V's `SEQZ` pseudo-instruction, which sets the output register to 1 if the input is zero, and 0 otherwise. It expands to the `SLTIU` instruction (a less-than comparison) with immediate value 1. But there exists a more efficient circuit for this specific comparison than the general-purpose `SLTIU` circuit.
 
+In the remainder of this document, we formalize the properties that an optimizer must satisfy to be considered _correct_.
+
 # Variables, expressions and assignments
 
 A {deftech}_variable_ is how the _runtime witness data_ is referenced in a circuit. Variables in the input circuit carry a _powdr ID_, while newly introduced variables do not.
