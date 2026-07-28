@@ -23,6 +23,16 @@ private def neverViolatesImpl (busMap : Nat → Option Sp1BusType) (busId : Nat)
   | some .executionBridge => true
   | _ => false
 
+/-- The instruction-table lookups are checked for arity only, so a message of the declared arity
+    never violates. -/
+private def neverViolatesArityImpl (busMap : Nat → Option Sp1BusType) (busId : Nat)
+    (arity : Nat) : Bool :=
+  match busMap busId with
+  | some .pcLookup => arity == 16
+  | some .instructionFetch => arity == 22
+  | some .pageProt => arity == 6
+  | _ => false
+
 private def slotFunImpl (busMap : Nat → Option Sp1BusType) (busId : Nat)
     (pattern : List (Option (ZMod p))) (outSlot : Nat) :
     Option (List (ZMod p) → ZMod p) :=
@@ -242,6 +252,33 @@ private theorem execBridge_ok (busMap : Nat → Option Sp1BusType)
   unfold violates
   rw [hbus]
 
+/-- A PC lookup with its sixteen fields never violates (`violates` checks its arity only). -/
+private theorem pcLookup_ok (busMap : Nat → Option Sp1BusType)
+    (m : BusInteraction (ZMod p)) (hbus : busMap m.busId = some .pcLookup)
+    (harity : m.payload.length = 16) :
+    violates busMap m = false := by
+  unfold violates
+  rw [hbus]
+  simp [harity]
+
+/-- An instruction fetch with its twenty-two fields never violates (arity-only check). -/
+private theorem instructionFetch_ok (busMap : Nat → Option Sp1BusType)
+    (m : BusInteraction (ZMod p)) (hbus : busMap m.busId = some .instructionFetch)
+    (harity : m.payload.length = 22) :
+    violates busMap m = false := by
+  unfold violates
+  rw [hbus]
+  simp [harity]
+
+/-- A page-protection lookup with its six fields never violates (arity-only check). -/
+private theorem pageProt_ok (busMap : Nat → Option Sp1BusType)
+    (m : BusInteraction (ZMod p)) (hbus : busMap m.busId = some .pageProt)
+    (harity : m.payload.length = 6) :
+    violates busMap m = false := by
+  unfold violates
+  rw [hbus]
+  simp [harity]
+
 /-- A bus with a declared last-write-wins shape (memory or execution bridge) is stateful. -/
 theorem sp1_isStateful_of_memShape {p : ℕ} (busMap : Nat → Option Sp1BusType)
     (busId : Nat) (shape : MemoryBusShape) (h : memShapeOf busMap busId = some shape) :
@@ -443,6 +480,15 @@ def sp1Facts (p : ℕ) [NeZero p]
       unfold neverViolatesImpl at h
       split at h
       · rename_i hbus; exact execBridge_ok busMap m hbus
+      · exact absurd h (by simp)
+    neverViolatesArity := neverViolatesArityImpl busMap
+    neverViolatesArity_sound := by
+      intro m h
+      unfold neverViolatesArityImpl at h
+      split at h
+      · rename_i hbus; exact pcLookup_ok busMap m hbus (by simpa using h)
+      · rename_i hbus; exact instructionFetch_ok busMap m hbus (by simpa using h)
+      · rename_i hbus; exact pageProt_ok busMap m hbus (by simpa using h)
       · exact absurd h (by simp)
     zeroCell := zeroCellImpl busMap
     zeroCell_sound := by

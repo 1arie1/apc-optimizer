@@ -1394,6 +1394,17 @@ private theorem denseCompilePayloadCBiPredV_eval (ops : DenseZModOps p)
       | cons third tail =>
         exact denseCompileOtherCBiPredV_eval ops isZero hz bs facts keys pt bi mult pred hm h
 
+/-- The two `.always` claims agree on evaluated messages: a bus that never violates, or one checked
+    for arity only at `bi`'s arity (`denseBIEval` maps the payload, so the arity is preserved). -/
+private theorem denseBiAlwaysOk_violates {bs : BusSemantics p} (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) (env : VarId → ZMod p)
+    (h : denseBiAlwaysOk facts bi = true) :
+    bs.violatesConstraint (denseBIEval bi env) = false := by
+  unfold denseBiAlwaysOk at h
+  rcases Bool.or_eq_true _ _ |>.mp h with hnever | harity
+  · exact facts.neverViolates_sound _ hnever
+  · exact facts.neverViolatesArity_sound _ (by simpa [denseBIEval] using harity)
+
 private theorem denseCompileCBiPredV_eval (ops : DenseZModOps p)
     (isZero : ZMod p → Bool) (hz : ∀ v, isZero v = decide (v = 0))
     (bs : BusSemantics p) (facts : BusFacts p bs) (keys : List VarId) (pt : List (ZMod p))
@@ -1401,16 +1412,16 @@ private theorem denseCompileCBiPredV_eval (ops : DenseZModOps p)
     (h : denseCompileCBiPredV facts keys bi = some pred) :
     denseCBiPredEvalV ops isZero bs pt pred = denseBiObligationV bs bi keys pt := by
   unfold denseCompileCBiPredV at h
-  by_cases hnever : facts.neverViolates bi.busId = true
+  by_cases hnever : denseBiAlwaysOk facts bi = true
   · simp only [hnever, if_true, Option.some.injEq] at h
     subst pred
-    have hnv := facts.neverViolates_sound (denseBIEval bi (denseEnvOfKeysV keys pt)) hnever
+    have hnv := denseBiAlwaysOk_violates facts bi (denseEnvOfKeysV keys pt) hnever
     unfold denseCBiPredEvalV denseBiObligationV
     change true = (if decide ((denseBIEval bi (denseEnvOfKeysV keys pt)).multiplicity = 0)
       then true else !bs.violatesConstraint (denseBIEval bi (denseEnvOfKeysV keys pt)))
     rw [hnv]
     simp
-  · have hneverFalse : facts.neverViolates bi.busId = false := Bool.eq_false_of_not_eq_true hnever
+  · have hneverFalse : denseBiAlwaysOk facts bi = false := Bool.eq_false_of_not_eq_true hnever
     simp only [hneverFalse, Bool.false_eq_true, if_false] at h
     cases hm : denseCompileE keys bi.multiplicity with
     | none => simp [hm] at h

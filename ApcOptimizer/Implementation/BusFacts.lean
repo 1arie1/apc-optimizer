@@ -94,6 +94,12 @@ structure BusFacts (p : ℕ) (bs : BusSemantics p) where
   neverViolates_sound :
     ∀ (m : BusInteraction (ZMod p)),
       neverViolates m.busId = true → bs.violatesConstraint m = false
+  /-- Buses whose only table obligation is the payload arity: a message of the declared arity never
+      violates, whatever its values (both VMs' instruction-table lookups are of this shape). -/
+  neverViolatesArity : (busId : Nat) → (arity : Nat) → Bool
+  neverViolatesArity_sound :
+    ∀ (m : BusInteraction (ZMod p)),
+      neverViolatesArity m.busId m.payload.length = true → bs.violatesConstraint m = false
   /-- Last-write-wins shape declared for a bus, or `none` (see `ApcOptimizer/MemoryBus.lean`). -/
   memShape : (busId : Nat) → Option MemoryBusShape
   /-- Table obligations of a memory-style stateful bus, for pair cancellation:
@@ -242,6 +248,8 @@ def BusFacts.trivial (bs : BusSemantics p) : BusFacts p bs where
   slotFun_sound := by intro _ _ _ _ _ h; exact absurd h (by simp)
   neverViolates _ := false
   neverViolates_sound := by intro _ h; exact absurd h (by simp)
+  neverViolatesArity _ _ := false
+  neverViolatesArity_sound := by intro _ h; exact absurd h (by simp)
   recvByteSlots _ _ := none
   recvByteSlots_sound := by intro _ _ h; exact absurd h (by simp)
   memShape _ := none

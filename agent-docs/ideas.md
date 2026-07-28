@@ -220,10 +220,13 @@ constant evaluation or exact `BusFacts` and extracts constant domains directly. 
 anchor buckets as arrays and summarizes inactive variable-free constraints once, so targets no
 longer materialize candidate lists or walk the same inactive tail. Entry 131 advances range domains
 in `ZMod` instead of recasting each element and compiles exact range/byte bus facts into scalar,
-allocation-free checks, with the opaque evaluator retained as fallback. Remaining:
-`constraintRedundant` full-box scans (they pay once to save per-target work), the list-shaped point
-and candidate-mask scanner, and hot-variable bucket capping (not byte-identical — the gates read
-`esFull`).
+allocation-free checks, with the opaque evaluator retained as fallback. Entry 152 compiles
+arity-only lookups (OpenVM `pcLookup`, SP1 `pcLookup`/`instructionFetch`/`pageProt`) to `.always`
+via a new `neverViolatesArity` fact, taking the opaque per-point `violatesConstraint` out of the
+scan. Remaining: `constraintRedundant` full-box scans (measured 2.5–5.6 % of the pass — they pay
+once to save per-target work), the list-shaped point and candidate-mask scanner (inside the 0.8–3.8 %
+box-loop phase on the big cases), and hot-variable bucket capping (not byte-identical — the gates
+read `esFull`). **The pass's remaining cost is not here — see R13.**
 
 **R3. domainFold/reencode: fuse the duplicate whole-system scans; retire the 8192 raw-count
 index gate**  ·  mostly **done (entries 105/107/109/145)**:
@@ -459,6 +462,63 @@ the per-variable bucket maps (`DenseCovIndex.buckets`, `denseVarBucket`, `denseT
 be `Array (List Nat)` / bitsets keyed directly — no hashing, no dispatch. Wide but mechanical;
 worth a prototype on one index first.
 
+**R13. domainBatch is per-target *setup*-bound, not enumeration-bound** (measured 2026-07-28, LBR
+profiles over five OpenVM cases + SP1 keccak; entry 152). Phase shares of in-pass samples:
+
+| phase | sha256 apc_001 | keccak | SP1 keccak | eth apc_071 | wasm apc_005 |
+|---|---:|---:|---:|---:|---:|
+| per-target bus classification (`denseCompileCBiPredsV`) | **56.1** | **40.5** | 34.4 | 2.3 | 0.3 |
+| opaque `.fallback` per point (`violatesConstraint`) | 14.0 | 18.0 | 17.9 | 1.7 | **63.2** |
+| bus-sourced table build (`denseInteractionBound`) | 15.1 | 19.5 | 16.4 | 11.7 | 7.9 |
+| byte-operand coset build (`denseByteOperandDomain`) | ~0 | 0.4 | **21.3** | ~0 | ~0 |
+| box-loop machinery (`rangeFoldFrom`, mask) | 3.8 | 3.0 | 1.3 | **20.8** | 2.2 |
+| gathers + preflight | 6.2 | 1.9 | 0.6 | 1.1 | 0.2 |
+
+Pass-only cost classes on sha256: 32.5 % closure-apply + 25 % refcount — `BusFacts` closure calls and
+the allocation traffic of their results. The `.fallback` row is **done (entry 152)**. Open, in order:
+
+   - **(a) Hoist the target-independent bus classification.** `denseCompiledSurvV` runs
+     `denseCompileCBiPredV facts keys bi` per gathered interaction *per target*, and everything it
+     does except `denseCompileE keys <slot>` depends on `bi` alone (`neverViolates`, `varRangeBus`,
+     `tupleRangeBus`, `byteXorSpec`, `spec.decode`, `rangeCheckAt` + its pattern, `constValue?`).
+     Inside that phase the keys-dependent `denseCompileEs` is only 11 %; the rest is
+     `lean_apply_1` (57 %) + `lean_dec_ref_cold` (27 %). Two tiers: a per-`busId` fact-answer cache
+     threaded as a *value* (entry 143's lesson — never a closure in a thunk payload), with a
+     `denseVarBucket_mem`-shaped membership lemma, ~60–100 lines and ≈ 45 % of the phase; or the
+     complete version, a keys-free `DenseBiPredShape` stored in `DenseBusPlan` (built once per
+     invocation) plus `denseCompileShape keys mult shape = denseCompileCBiPredV facts keys bi`, whose
+     hypothesis discharges through the existing `denseGatherBusesV_plan_mem`, ~200–350 lines.
+     Expect pass ≈ 0.55× on sha256/keccak.
+   - **(b) One constant pattern per interaction.** `denseInteractionBound` rebuilds
+     `bi.payload.map DenseExpr.constValue?` per *queried variable*, and `denseAddBusVars` /
+     `denseBiInformative` compute the same bound twice per variable. `denseInteractionBoundPat`
+     (`BusPairCancelWits.lean:26`) is the hoisted twin already. The same specialized map is 6 % of the
+     whole sha256 run, called from `denseFindVarBound` (intervalForce, 36.6 % of its calls),
+     `denseAddVars`, `denseBoolCheck?`, `denseFormBoundAt`, `denseInteractionSeeds` — so the general
+     fix is a per-invocation prepared-interaction record (pattern + constant multiplicity) shared
+     across passes, in the `DenseAddrPre` mould. Heed entry 148: prepare only what a profile shows
+     rebuilt.
+   - **(c) Fuse or lazify the byte-operand coset** — 21.3 % of the pass on SP1 keccak (entry 151's own
+     residual, now measured; the only live hit of the "dictionary rebuilt inside a loop" C sweep).
+     `((List.range bound).map cast).map (fun z => (z - b) * a⁻¹)` is two passes plus a 256-element
+     intermediate per affine byte operand; best form is a `FiniteDomain` arm carrying `(bound, a, b)`
+     so `foldElts` advances in the field and the coset is never materialized.
+   - **(d) Prefix-pruned / component-split enumeration**, the only lever left on the big-box OpenVM
+     cases (`apc_071`: 74.7 % of in-pass samples under `rangeFoldFrom`). Test each compiled item as
+     soon as its last variable is fixed (failing prefixes prune the suffix box), and split the
+     gathered items into connected components over `xs` so `∏ |domᵢ|` becomes `Σ` per component (the
+     unsat case must still force every key to 0). Both keep the survivor set, so the final mask is
+     unchanged — but keep the `maxEnumWork`/`boxSize` gates on the *full* product or effectiveness
+     moves. ~250–400 lines; **measure first** with a box-shape/point counter (entry 151 built one):
+     if the wide boxes are single-variable, neither pays.
+   - **(e) Cheap micros.** `BusMap` is an assoc-list lookup closure (`toBusMap`) queried per point and
+     per fact call — 1–2 % of the run, and substituting an array-backed lookup at the `Main.lean` /
+     `Ffi.lean` boundary needs **no proof** (every theorem is ∀ busMap). `DenseForcedScanV.work` (the
+     parallel chunk budget) models `boxSize × items` only, but per-target cost has a large
+     boxSize-independent term — adding it rebalances chunks with zero proof (order preserved).
+     Preflight's `T.doms xs` is 6.8 % on sha256, all `Std.HashMap VarId` probes: the R12 array-indexed
+     prototype belongs here first.
+
 ### Runtime dead ends (measured; do not re-propose without new evidence)
 
 - **Whole-system content-hash gating of passes across cycles**: catches ~0 % — the fixpoint only
@@ -533,9 +593,11 @@ worth a prototype on one index first.
   full-system gated rewrite (`denseReencodeOutFast` — the state's `useCs` buckets + `foldCs` cover
   exactly the positions the gate can fire on; needs a positions-driven twin with the state
   invariant threaded, ~200-400 lines).
-- **domainBatch cycle 0 (26–28 s for 2.6k vars)**: gathers are bucket-served already; the cost is
-  hot-variable buckets × many candidate groups. Maybe gate groups on a cheap upper bound of the
-  gather size, or dedupe overlapping groups before gathering.
+- ~~**domainBatch cycle 0 (26–28 s for 2.6k vars)**: the cost is hot-variable buckets × many
+  candidate groups; gate groups on a gather-size bound or dedupe overlapping groups~~ **wrong,
+  measured (entry 152)**: gathers are 4.6 % of the pass at sha scale and target dedup 0.4 %; the
+  per-target cost that follows them is the survivor *compile* (56 %), not the gather or the scan.
+  See R13.
 - **flagFold cycle 0 (24 s, zero effect)**: NOT the domain lookups (bucketing them changed
   nothing). Suspect `denseFuCandidates`' per-interaction `O.vars.eraseDups × splitAt` on large
   first-slot payloads, or the per-matched-pair box evaluation in `denseFuPairData?`. Sample the
@@ -549,10 +611,11 @@ remains for a next pass:
 - **Two-variable deep scans** (cycle 4 had ~108 of them, boxes up to 65536 = ~256×256): entry 151's
   coset shrink is single-var-operand; if BOTH operands of a byte/tuple interaction are affine in
   distinct vars, each var could still get a coset, shrinking the 2-D box. Verify how many 2-var deep
-  scans survive after entry 151 (re-run the point counter) before implementing.
-- **Fuse the coset build**: `denseByteOperandDomain` currently materializes `((range bound).map cast).map
-  (fun z => (z-b)/a)` — two passes + a 256-elt intermediate, per byte operand per interaction (~2292×)
-  per cycle. A single fused map (or a `.range`+affine `FiniteDomain` variant carrying `(a,b)` lazily)
-  avoids the intermediate. Low risk, modest constant.
-- **Skip byte-domain work when it can't shrink**: only build the coset when the operand's current table
-  domain exceeds `bound` (otherwise `insertEntry` discards it anyway). Cheap guard, saves allocations.
+  scans survive after entry 151 (re-run the point counter) before implementing — the same counter
+  R13(d) needs.
+- **Fuse the coset build** — now measured at **21.3 % of the pass on SP1 keccak** (entry 152), the top
+  SP1 item; see R13(c) for the preferred lazy-`FiniteDomain` form.
+- ~~**Skip byte-domain work when it can't shrink**~~ **done**: `denseAddByteVarDoms` builds the coset
+  only when `spec.bound < d0.size`.
+- Post-entry-151 the SP1 pass profile matches OpenVM's: box scans are 1.3 % and the cost has moved to
+  the per-target classification and the coset build (R13).

@@ -5255,3 +5255,52 @@ OpenVM eth. `lake build` clean (no warnings); `check-proof-integrity` passes (ax
 propext/Classical.choice/Quot.sound only). General: any byte/range-bounded finite-domain circuit
 benefits; the coset handles the affine-operand case OpenVM's bare-operand range domains miss.
 **Worked: yes (domainBatch ~4x, output byte-identical; committed).**
+
+### 152. Runtime: arity-only bus lookups compile to `.always` (domainBatch 7.1x on its worst-share APC)
+BISECTED FIRST (the #219/#151 lesson), and the ideas.md guess was again wrong: domainBatch is **no
+longer enumeration-bound**. LBR profiles (`perf --call-graph lbr` + the phase/cost-class/caller scripts)
+over five OpenVM cases and SP1 keccak put the pass's budget in *per-target and per-invocation setup*:
+per-target bus **classification** (`denseCompileCBiPredsV`, all of it target-independent) is 56.1 % of
+in-pass samples on sha256 apc_001, 40.5 % on keccak, 34.4 % on SP1 keccak; the opaque `.fallback` arm
+(`bs.violatesConstraint` per enumerated point) is 63.2 % on wasm-eth apc_005, 18 % keccak, 14 % sha256;
+`rangeFoldFrom` (the box loop entry 151 shrank) is 0.8 % on sha256 and 74.7 % only on openvm-eth
+apc_071. Pass-only cost classes on sha256: 32.5 % closure-apply + 25 % refcount — the budget is
+`BusFacts` closure calls and the allocation traffic of their results, not arithmetic.
+THIS ENTRY takes the cheapest of the resulting levers. Both VMs have buses whose table obligation is
+*only* the payload arity (`OpenVM.violates`: `some .pcLookup, args => !decide (args.length = 9)`; SP1
+`pcLookup` 16, `instructionFetch` 22, `pageProt` 6). None can be in `facts.neverViolates` (busId-only,
+and they *do* violate at the wrong arity), so each one compiled to `.fallback` and every point paid
+9–22 `IExpr` evals + a fresh payload list + a fresh message record + an assoc-list `busMap` lookup
+(`OpenVM_violates` was 49 % of the `ZMod.commRing` rebuilds and 45 % of `lean_dec_ref_cold` callers on
+apc_005). Fix: one new `BusFacts` field `neverViolatesArity : busId → arity → Bool` with soundness
+`∀ m, neverViolatesArity m.busId m.payload.length = true → violatesConstraint m = false`, instantiated
+per VM, and `denseBiAlwaysOk` = `neverViolates busId || neverViolatesArity busId payload.length`
+gating the existing `.always` arm of `denseCompileCBiPredV`. Proof: three arity lemmas mirroring
+`execBridge_ok` (`unfold violates; rw [hbus]; simp [harity]`) plus `denseBiAlwaysOk_violates`
+(`denseBIEval` maps the payload, so the arity survives); the 9-line `.always` `_eval` case is reused
+unchanged. All under `Implementation/` — audited surface untouched.
+OUTPUT IDENTITY: the fact is proven, so these interactions never rejected a point and the survivor
+sets (hence every forced constant) are unchanged. `denseBiInformative` / `denseBiDomainRedundantV` are
+deliberately **not** extended — recognizing these buses as uninformative or domain-redundant would
+skip whole scans, which is an effectiveness change, not a runtime one (left as a follow-up to argue
+separately).
+NUMBERS (this 20-core box, interleaved best-of-3 per case, `profile`; domainBatch ms, then case total):
+wasm-eth apc_005 **248 → 35 (0.14x)**, total 397 → 183 (0.46x); keccak apc_001 1428 → 1310 (0.92x),
+total 12967 → 12830; openvm-eth apc_071 573 → 550 (0.96x); wasm-eth apc_063 1593 → 1567 (0.98x);
+sha256 apc_001 (single shot, the pass runs parallel there) 19108 → 17964 (0.94x), total 176070 →
+175627; SP1 keccak 1136 → 1000 (0.88x), SP1 rsp apc_030 201 → 149 (0.74x), rsp apc_024 173 → 130
+(0.75x). No collateral movement in any other pass column. Note the sha256 win (0.94x) is smaller than
+its 14 % `violates` sample share predicts: the pass fans out at ≥ 8192 constraints, so its `perf`
+share is CPU and only ~1/3 of it is wall.
+VERIFIED: `opt-export` **byte-identical** on OpenVM keccak / wasm-eth apc_005 / openvm-eth apc_071 and
+SP1 keccak / rsp apc_001; keccak `run` counts identical (2021 / 186 / 1748); `lake build` clean, no
+warnings; `check-proof-integrity` passes (axioms propext/Classical.choice/Quot.sound only).
+NEXT LEVERS from the same attribution, in order: (a) hoist the target-independent bus classification
+into the per-invocation `DenseBusPlan` (56 % of the pass on sha256; a per-`busId` fact cache is the
+cheap half, a per-interaction shape the complete one); (b) compute each interaction's
+`payload.map constValue?` pattern once instead of per queried variable (15–19 % of the pass, and the
+same specialized map is 6 % of the whole sha256 run across intervalForce/rootPairUnify); (c) fuse or
+lazify `denseByteOperandDomain`'s coset build (21.3 % of the pass on SP1 keccak, ~0 on OpenVM);
+(d) prefix-pruned / component-split enumeration for the big-box OpenVM cases, gated on a box-shape
+counter first.
+**Worked: yes (domainBatch 0.14x on its worst-share APC, output byte-identical; draft PR).**
