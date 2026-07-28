@@ -3,6 +3,11 @@ version = "0.1.0"
 defaultTargets = ["ApcOptimizer", "apc-optimizer"]
 
 [[require]]
+name = "verso"
+git = "https://github.com/leanprover/verso"
+rev = "v4.30.0-rc1"
+
+[[require]]
 name = "mathlib"
 git = "https://github.com/leanprover-community/mathlib4"
 rev = "master"
@@ -13,3 +18,13 @@ name = "ApcOptimizer"
 [[lean_exe]]
 name = "apc-optimizer"
 root = "Main"
+
+[[lean_lib]]
+name = "Docs"
+srcDir = "docs"
+
+[[lean_exe]]
+name = "docs"
+srcDir = "docs"
+root = "DocsMain"
+supportInterpreter = true
