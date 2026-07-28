@@ -61,6 +61,13 @@ private def neverViolatesImpl (busMap : Nat → Option OpenVmBusType) (busId : N
   -- address spaces 1/2 (see `recvByteSlots`), and pcLookup rejects payloads of length ≠ 9.
   | _ => false
 
+/-- The PC lookup is checked for arity only, so a 9-field message never violates. -/
+private def neverViolatesArityImpl (busMap : Nat → Option OpenVmBusType) (busId : Nat)
+    (arity : Nat) : Bool :=
+  match busMap busId with
+  | some .pcLookup => arity == 9
+  | _ => false
+
 /-- Byte-slot obligation for a memory-style pair cancellation, conditioned on the receive's
     constant pattern (bound `256`, OpenVM limbs are bytes). A memory `getPrevious` whose
     address-space slot (slot 0) is a constant ∉ {1,2} carries no obligation (`some ([], 256)`),
@@ -150,6 +157,15 @@ private theorem execBridge_ok (busMap : Nat → Option OpenVmBusType)
     violates busMap m = false := by
   unfold violates
   rw [hbus]
+
+/-- A PC lookup with the expected nine fields never violates (`violates` checks its arity only). -/
+private theorem pcLookup_ok (busMap : Nat → Option OpenVmBusType)
+    (m : BusInteraction (ZMod p)) (hbus : busMap m.busId = some .pcLookup)
+    (harity : m.payload.length = 9) :
+    violates busMap m = false := by
+  unfold violates
+  rw [hbus]
+  simp [harity]
 
 /-- The data limbs of an accepted (non-violating) memory *receive* from address space 1 or 2
     are bytes. -/
@@ -462,6 +478,13 @@ def openVmFacts (p : ℕ) [NeZero p]
     unfold neverViolatesImpl at h
     split at h
     · rename_i hbus; exact execBridge_ok busMap m hbus
+    · exact absurd h (by simp)
+  neverViolatesArity := neverViolatesArityImpl busMap
+  neverViolatesArity_sound := by
+    intro m h
+    unfold neverViolatesArityImpl at h
+    split at h
+    · rename_i hbus; exact pcLookup_ok busMap m hbus (by simpa using h)
     · exact absurd h (by simp)
   recvByteSlots := recvByteSlotsImpl busMap
   recvByteSlots_sound := by

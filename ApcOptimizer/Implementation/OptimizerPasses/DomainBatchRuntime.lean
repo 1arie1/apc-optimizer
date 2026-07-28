@@ -138,9 +138,17 @@ def denseCompilePayloadCBiPredV {bs : BusSemantics p} (facts : BusFacts p bs)
   | [x, width] => denseCompilePairCBiPredV facts keys bi mult x width
   | _ => denseCompileOtherCBiPredV facts keys bi mult
 
+/-- An interaction whose obligation is discharged for every point: a bus that never violates, or one
+    checked for arity only (the VMs' instruction-table lookups) at its declared arity. Compiling
+    these to `.always` keeps the opaque `bs.violatesConstraint` — a payload list and a message record
+    per enumerated point — out of the scan. -/
+def denseBiAlwaysOk {bs : BusSemantics p} (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) : Bool :=
+  facts.neverViolates bi.busId || facts.neverViolatesArity bi.busId bi.payload.length
+
 def denseCompileCBiPredV {bs : BusSemantics p} (facts : BusFacts p bs) (keys : List VarId)
     (bi : BusInteraction (DenseExpr p)) : Option (DenseCBiPred p) :=
-  if facts.neverViolates bi.busId then some .always
+  if denseBiAlwaysOk facts bi then some .always
   else
     match denseCompileE keys bi.multiplicity with
     | none => none
