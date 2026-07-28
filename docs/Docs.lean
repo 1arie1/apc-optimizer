@@ -281,13 +281,17 @@ Putting the pieces together, we define what it means for an optimized circuit to
 def Circuit.isCompleteReplacementOf
     (optimizedCircuit originalCircuit : Circuit p)
     (busSemantics : BusSemantics p) (ds : Derivations p) : Prop :=
+
   -- ASSUMPTION: every variable in the original circuit has a powdr ID.
   (∀ v ∈ originalCircuit.vars, v.powdrId?.isSome) →
+
   -- `ds` does not contain unused derivations.
   (∀ derivation ∈ ds, derivation.1 ∈ optimizedCircuit.vars) ∧
+
   -- The optimized circuit variables can be derived from the original circuit
   -- variables, and the return derivations.
   ds.cover originalCircuit.vars optimizedCircuit.vars ∧
+
   -- For any admissible satisfying assignment of the original circuit, the
   -- optimized circuit is also satisfied and admissible, with equal side
   -- effects, under the assignment produced by witness generation.
@@ -303,11 +307,21 @@ def Circuit.isCompleteReplacementOf
 
 # Degree bound
 
+The {deftech}_multiplicative degree_ of an expression is the maximum number of multiplicative operations along any path in the expression tree:
+```anchor degree
+/-- The multiplicative degree of an expression. -/
+def Expression.degree : Expression p → Nat
+  | .const _ => 0
+  | .var _ => 1
+  | .add e1 e2 => max e1.degree e2.degree
+  | .mul e1 e2 => e1.degree + e2.degree
+```
+
 The {deftech}_degree bound_ of a circuit is the maximum multiplicative degree of any expression in the circuit. The proving backend enforces that all expressions are within the degree bound, so the optimizer must respect it: a within-bound input yields a within-bound output.
 
 {docstring DegreeBound}
 
-Given a zkVM-specific degree bound and an optimizer, we can state what it means for the optimizer to respect the bound: For any input circuit that is within the bound, the output circuit must also be within the bound.
+Given a zkVM-specific degree bound and an optimizer, we state what it means for the optimizer to respect the bound: For any input circuit that is within the bound, the output circuit must also be within the bound.
 
 ```anchor degreeBound
 /-- Whether a circuit stays within a degree bound. -/

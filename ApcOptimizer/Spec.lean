@@ -41,12 +41,14 @@ def Expression.eval (e : Expression p)
   | .mul e1 e2 => e1.eval assignment * e2.eval assignment
 -- ANCHOR_END: exprEval
 
+-- ANCHOR: degree
 /-- The multiplicative degree of an expression. -/
 def Expression.degree : Expression p → Nat
   | .const _ => 0
   | .var _ => 1
   | .add e1 e2 => max e1.degree e2.degree
   | .mul e1 e2 => e1.degree + e2.degree
+-- ANCHOR_END: degree
 
 /-- The variables occurring in an expression. -/
 def Expression.vars : Expression p → List Variable
@@ -284,13 +286,17 @@ def Circuit.isSoundReplacementOf (optimizedCircuit originalCircuit : Circuit p)
 def Circuit.isCompleteReplacementOf
     (optimizedCircuit originalCircuit : Circuit p)
     (busSemantics : BusSemantics p) (ds : Derivations p) : Prop :=
+
   -- ASSUMPTION: every variable in the original circuit has a powdr ID.
   (∀ v ∈ originalCircuit.vars, v.powdrId?.isSome) →
+
   -- `ds` does not contain unused derivations.
   (∀ derivation ∈ ds, derivation.1 ∈ optimizedCircuit.vars) ∧
+
   -- The optimized circuit variables can be derived from the original circuit
   -- variables, and the return derivations.
   ds.cover originalCircuit.vars optimizedCircuit.vars ∧
+
   -- For any admissible satisfying assignment of the original circuit, the
   -- optimized circuit is also satisfied and admissible, with equal side
   -- effects, under the assignment produced by witness generation.
