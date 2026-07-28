@@ -181,9 +181,8 @@ private theorem memory_recv_bytes (busMap : Nat → Option OpenVmBusType)
   have has' : (a0.val == 1 || a0.val == 2) = true := by
     rcases has with h | h <;> simp [h]
   simp only [memoryPayload?, MemoryPayload.isByteChecked, decide_true, has', Bool.true_and,
-    Bool.not_eq_false', List.all_eq_true, List.mem_cons, List.not_mem_nil, or_false,
-    forall_eq_or_imp, forall_eq, isByte, decide_eq_true_eq] at hok
-  exact ⟨hok.1, hok.2.1, hok.2.2.1, hok.2.2.2⟩
+    Bool.not_eq_false', Vector.all_eq_true, isByte, decide_eq_true_eq] at hok
+  exact ⟨hok 0 (by omega), hok 1 (by omega), hok 2 (by omega), hok 3 (by omega)⟩
 
 /-- A memory message that is not a receive (multiplicity ≠ -1) never violates. -/
 private theorem memory_nonRecv_ok (busMap : Nat → Option OpenVmBusType)
