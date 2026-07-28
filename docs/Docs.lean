@@ -145,6 +145,12 @@ Bus semantics capture the _zkVM-specific_ semantics of the buses.
 
 {docstring BusSemantics}
 
+Instances exist for OpenVM and SP1. For example, the OpenVM bus semantics defines the following:
+- `isStateful`: The "execution bridge" and "memory" buses are stateful, while all other buses are stateless.
+- `accepts`: For all lookups, this checks whether the given bus message is in the precomputed table. Also, since OpenVM's circuits maintain the invariant that only range-checked values are sent to the register and memory address spaces, a memory bus _receive_ checks that the received value is in the correct range.
+- `maintainsInvariants`: Checks whether all multiplicities are $`1` for stateless buses, and $`1` or $`-1` for stateful buses. Also, for memory bus interactions, it checks that the values are in the correct range. This also applies to _sent_ values, ensuring that the optimized circuit does not violate the invariant mentioned above.
+- `admissible`: All symbolic bus interactions to stateful buses are ordered by _time_. Also, we assume that register `x0` always returns `0`.
+
 # Soundness
 
 {deftech}_Soundness_ is arguably the most important property that must be guaranteed by the optimizer. Intuitively, it states that anything the optimized circuit accepts, the original would have accepted too, with the same effect on the rest of the system.
