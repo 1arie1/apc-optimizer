@@ -117,7 +117,7 @@ def BusInteraction.eval (bi : BusInteraction (Expression p))
     multiplicity := bi.multiplicity.eval assignment,
     payload := bi.payload.map (fun e => e.eval assignment) }
 
-/-- Bound on the multiplicative degree of a circuit's expressions. -/
+/-- Bounds on the multiplicative degree of a circuit's expressions. -/
 structure DegreeBound where
   /-- The maximum multiplicative degree of the algebraic constraints. -/
   identities : Nat
@@ -145,7 +145,7 @@ structure BusSemantics (p : ℕ) where
       Completeness is only required for assignments whose stateful messages
       are `admissible`.
       One useful way to use this is to describe the semantics of memory buses,
-      see ``ApcOptimizer/MemoryBus.lean``. -/
+      see `ApcOptimizer/MemoryBus.lean`. -/
   admissible (statefulBusMessages : List (BusInteraction (ZMod p))) : Prop
 
 -- ANCHOR: busState
@@ -190,8 +190,8 @@ def Circuit.sideEffects (circuit : Circuit p) (busSemantics : BusSemantics p)
 
 -- ANCHOR: witgen
 /-- The `ComputationMethod` witness generation uses for `v`. If `v` appears
-    multiple times, the last derivation is returned. `none` if `v` is not
-    derived. -/
+    multiple times, the last derivation is returned; `none` if `v` has no
+    derivation. -/
 def Derivations.methodFor :
     Derivations p → Variable → Option (ComputationMethod p)
   | [], _ => none
@@ -282,7 +282,7 @@ def Circuit.isSoundReplacementOf (optimizedCircuit originalCircuit : Circuit p)
 -- ANCHOR_END: isSoundReplacementOf
 
 -- ANCHOR: isCompleteReplacementOf
-/-- Whether an optimized circuit is a complete replacement for an original one. -/
+/-- Whether an optimized circuit is a complete replacement for an original circuit. -/
 def Circuit.isCompleteReplacementOf
     (optimizedCircuit originalCircuit : Circuit p)
     (busSemantics : BusSemantics p) (ds : Derivations p) : Prop :=

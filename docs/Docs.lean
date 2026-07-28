@@ -37,9 +37,9 @@ This document describes `apc-optimizer`{citeNum powdr_apc_compiler}[], a formall
 
 # Background: zkVMs and autoprecompiles
 
-zkVMs such as OpenVM{citeNum openVM}[], SP1{citeNum sp1}[], or powdr WASM{citeNum powdr_wasm}[] are virtual machines that output a cryptographic proof that a program executed correctly. They differ in which instruction set they emulate, but use the same underlying primitives: They are a collection of _circuits_ communicating via shared _buses_.
+zkVMs such as OpenVM{citeNum openVM}[], SP1{citeNum sp1}[], or powdr WASM{citeNum powdr_wasm}[] are virtual machines that output a cryptographic proof that a program executed correctly. They differ in the instruction sets they emulate but use the same underlying primitives: collections of _circuits_ communicating via shared _buses_.
 
-Each circuit is responsible for one or more instructions in the instruction set. They are defined by a set of _constraints_ over a _prime field_. Buses serve two purposes:
+Each circuit is responsible for one or more instructions in the instruction set and is defined by a set of _constraints_ over a _prime field_. Buses serve two purposes:
 - They implement _lookups_ into precomputed tables. For example, a byte range check might be implemented by proving that a circuit variable's value is in a size-256 table of all bytes.
 - They implement _stateful communication_ between circuits. For example, a _memory_ is implemented via bus interactions.
 
@@ -47,10 +47,10 @@ _Autoprecompiles_ prove correct execution of an entire _basic block_, which is a
 
 ![Autoprecompiles](autoprecompiles.svg)
 
-Having all instructions within the same circuits enables various optimizations, typically shrinking the circuit size by a factor of 3-4. Examples of these optimizations include:
-- *Inlining of constants*. For example, immediate values can be inlined directly, as they are known at compile time. In combination with constant propagation, this specializes the circuit to the concrete basic block being proven.
-- *Memory optimizations*. When proving instruction-by-instruction, even temporary values are written to memory and read back. Within a monolithic circuit, these values can be accessed directly, avoiding the overhead of the memory argument. One consequence of this is that each register is only accessed once, independent of how many instructions read or write it.
-- *Gadget optimizations*. Circuits often contain repeated sub-circuits that can be optimized for how exactly they are used. An example is RISC-V's `SEQZ` pseudo-instruction, which sets the output register to 1 if the input is zero, and 0 otherwise. It expands to the `SLTIU` instruction (a less-than comparison) with immediate value 1. But there exists a more efficient circuit for this specific comparison than the general-purpose `SLTIU` circuit.
+Having all instructions within the same circuit enables various optimizations, typically shrinking the circuit size by a factor of 3–4. Examples of these optimizations include:
+- *Inlining of constants*. For example, immediate values can be inlined directly, as they are known at compile time. In combination with constant propagation, this specializes the circuit to the concrete basic block being proved.
+- *Memory optimizations*. When proving instruction-by-instruction, even temporary values are written to memory and read back. Within a monolithic circuit, these values can be accessed directly, avoiding the overhead of the memory argument. One consequence is that each register is accessed only once, regardless of how many instructions read or write it.
+- *Gadget optimizations*. Circuits often contain repeated subcircuits that can be optimized for how they are used. An example is RISC-V's `SEQZ` pseudo-instruction, which sets the output register to 1 if the input is zero, and 0 otherwise. It expands to the `SLTIU` instruction (a less-than comparison) with immediate value 1. But there exists a more efficient circuit for this specific comparison than the general-purpose `SLTIU` circuit.
 
 In the remainder of this document, we formalize the properties that an optimizer must satisfy to be considered _correct_.
 
@@ -108,7 +108,7 @@ As we will see below, we require that the optimizer preserves the net effect on 
 
 ## Memory
 
-Most zkVMs implement a memory argument based on the _offline memory checking argument_ due to Blum et al. {citeNum blum}[]. They reduce memory consistency to a _multiset equality_ set, which is essentially implemented by the bus argument.
+Most zkVMs implement a memory argument based on the _offline memory checking argument_ due to Blum et al. {citeNum blum}[]. They reduce memory consistency to a _multiset equality_ check, which is essentially implemented by the bus argument.
 
 In short, each read or write memory access is implemented as a series of bus interactions:
 - An $`(address, value, timestamp)` pair is _received_ from the memory bus.
@@ -202,7 +202,7 @@ def Circuit.isSoundReplacementOf (optimizedCircuit originalCircuit : Circuit p)
 
 # Completeness
 
-The {deftech}_completeness_ property ensures that for any valid zkVM execution, the prover _can_ actually find a satisfying assignment for the optimized circuit.
+The {deftech}_completeness_ property ensures that for any valid zkVM execution, the prover _can_ construct a satisfying assignment for the optimized circuit.
 
 ## Admissible assignments
 
@@ -221,7 +221,7 @@ Completeness is only required for admissible assignments.
 
 ## Witness generation
 
-Second, we need to guarantee that the prover can also compute a satisfying assignment for the optimized circuit. To this end, the optimizer emits a list of _derivations_, specified in a custom witness generation IR:
+Second, we need to guarantee that the prover can also compute a satisfying assignment for the optimized circuit. To this end, the optimizer emits a list of _derivations_, specified in a custom witness-generation IR:
 
 {docstring ComputationMethod}
 
@@ -237,8 +237,8 @@ With the data structures in place, we can define a prescribed witness generation
 
 ```anchor witgen
 /-- The `ComputationMethod` witness generation uses for `v`. If `v` appears
-    multiple times, the last derivation is returned. `none` if `v` is not
-    derived. -/
+    multiple times, the last derivation is returned; `none` if `v` has no
+    derivation. -/
 def Derivations.methodFor :
     Derivations p → Variable → Option (ComputationMethod p)
   | [], _ => none
@@ -283,7 +283,7 @@ def Derivations.witgen (ds : Derivations p)
 Putting the pieces together, we define what it means for an optimized circuit to be a _complete_ replacement for an original circuit. Structurally, the returned derivations must contain no unused entries and must cover every output variable from the input variables. Semantically, every admissible satisfying input assignment must produce a satisfying and admissible output assignment with equal side effects.
 
 ```anchor isCompleteReplacementOf
-/-- Whether an optimized circuit is a complete replacement for an original one. -/
+/-- Whether an optimized circuit is a complete replacement for an original circuit. -/
 def Circuit.isCompleteReplacementOf
     (optimizedCircuit originalCircuit : Circuit p)
     (busSemantics : BusSemantics p) (ds : Derivations p) : Prop :=
@@ -313,7 +313,7 @@ def Circuit.isCompleteReplacementOf
 
 # Degree bound
 
-The {deftech}_multiplicative degree_ of an expression is the maximum number of multiplicative operations along any path in the expression tree:
+The {deftech}_multiplicative degree_ of an expression is defined structurally: constants have degree 0, variables have degree 1, addition takes the maximum, and multiplication adds the degrees.
 ```anchor degree
 /-- The multiplicative degree of an expression. -/
 def Expression.degree : Expression p → Nat
@@ -323,7 +323,7 @@ def Expression.degree : Expression p → Nat
   | .mul e1 e2 => e1.degree + e2.degree
 ```
 
-The {deftech}_degree bound_ of a circuit is the maximum multiplicative degree of any expression in the circuit. The proving backend enforces that all expressions are within the degree bound, so the optimizer must respect it: a within-bound input yields a within-bound output.
+A {deftech}_degree bound_ specifies the maximum multiplicative degrees allowed for algebraic constraints and bus interactions. The proving backend enforces these bounds, so the optimizer must respect them: a within-bound input yields a within-bound output.
 
 {docstring DegreeBound}
 
