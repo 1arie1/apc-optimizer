@@ -5205,3 +5205,20 @@ codegen-relevant change), reencode/gauss/busUnify/flagFold within noise. Net **�
 vs main (before this log entry). Proof integrity passes.
 
 **Worked: yes (structure-only; PR follows).**
+### 150. Runtime: hash-index the nonzero-witness disequality scan (denseAddrNonzeroNeq)
+`denseAddrNonzeroNeq` scanned all of `nw.wits` linearly on every call to find a witness `g` with
+`D = ±g` (some address-field-subset difference). On SP1 keccak this was 2.58M refutation evals — the
+true `busPairCancel` super-linearity (the per-bus receive-index buckets are already tiny, max 4; deep/
+domain/basis justification are negligible — bisected by stubbing each). SP1's Byte bus carries ~1105
+identical-key 16-bit range checks (16-bit memory limbs), and `nw.wits` grows with system size, so the
+per-call scan is O(interactions × wits). Fix: a hash index (`denseLinHash` — order-independent additive
+hash of each witness's normalized linear form, so value-equal forms collide deterministically) over the
+witnesses, built once in `DenseNonzeroWits.build`; the query looks up only the `hash(D.norm)` /
+`hash((-D).norm)` buckets and re-checks the exact original predicate → boolean result provably identical
+(new `denseNZIndexOf_mem` membership lemma, modeled on #212's `denseVarBucket_mem`; the algebraic core of
+`denseAddrNonzeroNeq_sound` is untouched; index is a new field on the already-threaded `DenseNonzeroWits`,
+so no shield/mid-refuted plumbing changed).
+SP1 keccak apc_001 (`profile sp1`): busPairCancel **44.3 → 1.05 s (~42×)**, busUnify 15.4 → 0.49 s
+(~32×, shares `denseAddrNonzeroNeq`), total 68.5 → 11.7 s. **Effectiveness IDENTICAL (2665/313/2067).**
+Output-identical also verified on OpenVM keccak (2021/186/1748) and SP1 rsp (112/69/65). `lake build`
+clean; `check-proof-integrity` passes (axioms: propext/Classical.choice/Quot.sound only).

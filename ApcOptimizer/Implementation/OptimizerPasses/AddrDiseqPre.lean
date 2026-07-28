@@ -100,8 +100,9 @@ def denseDiffSumP : List (Option (DenseSlotPre p) Ã— Option (DenseSlotPre p)) â†
 def denseAddrNonzeroNeqP (nw : DenseNonzeroWits p) (a b : DenseAddrPre p) : Bool :=
   (a.slots.zip b.slots).sublists.any (fun sub =>
     match denseDiffSumP sub with
-    | some D => nw.wits.any (fun g =>
-        denseIsZeroLin (D.add (g.scale (-1))) || denseIsZeroLin (D.add g))
+    | some D =>
+      (nw.index.getD (denseLinHash D) [] ++ nw.index.getD (denseLinHash (D.scale (-1))) []).any
+        (fun g => denseIsZeroLin (D.add (g.scale (-1))) || denseIsZeroLin (D.add g))
     | none => false)
 
 /-! ## The region tests on prepared records (originals in `BusPairCancelCheck.lean`) -/
