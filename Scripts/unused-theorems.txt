@@ -23,14 +23,3 @@ ApcOptimizer.SP1.sp1Optimizer_maintainsCorrectness
 # `Task.get` is opaque, so the `simp only` needs the lemma even though it rewrites by `rfl`.
 ApcOptimizer.Dense.get_spawn
 
-# The `dWithin` invariant behind `denseReencodeStepCached`'s fused degree gate (Reencode.lean).
-# `denseReencodeOutOk_snd` says the fused gate decides exactly what
-# `(denseReencodeOut …).withinDegreeB b` decides, given a within-bound input;
-# `denseReencodeStepCached_dWithin` says the flag tracking that side condition is preserved by every
-# step. They guarantee the pass's *output* is unchanged, which no correctness root can reach: the
-# degree bound is enforced outside the pass by `guardAll` (`Implementation/Optimizer.lean`), so the
-# internal gate chooses which candidates are accepted rather than establishing soundness. Deleting
-# them would leave that invariant unchecked.
-ApcOptimizer.Dense.denseReencodeStepCached_dWithin
-ApcOptimizer.Dense.denseReencodeOutOk_snd
-ApcOptimizer.Dense.List.all_congr_mem
