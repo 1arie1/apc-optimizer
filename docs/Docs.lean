@@ -268,22 +268,26 @@ def Derivations.witgen (ds : Derivations p)
 
 ## The full completeness property
 
-Putting the pieces together, we define what it means for an optimized circuit to be a _complete_ replacement for an original circuit: For any admissible satisfying assignment of the original circuit, there must exist a computable assignment of the optimized circuit that is itself satisfying and admissible, with equivalent side effects.
+Putting the pieces together, we define what it means for an optimized circuit to be a _complete_ replacement for an original circuit. Structurally, the returned derivations must contain no unused entries and must cover every output variable from the input variables. Semantically, every admissible satisfying input assignment must produce a satisfying and admissible output assignment with equivalent side effects.
 
 ```anchor isCompleteReplacementOf
-/-- Whether an optimized circuit is a complete replacement for an original one.
-    Assuming every input variable carries a powdr ID, then for any admissible
-    satisfying assignment of the original circuit, there is a computable
-    assignment of the optimized circuit that is itself satisfying and
-    admissible, with equivalent side effects. -/
+/-- Whether an optimized circuit is a complete replacement for an original one. -/
 def Circuit.isCompleteReplacementOf
     (optimizedCircuit originalCircuit : Circuit p)
     (busSemantics : BusSemantics p) (ds : Derivations p) : Prop :=
+  -- ASSUMPTION: every variable in the original circuit has a powdr ID.
   (∀ v ∈ originalCircuit.vars, v.powdrId?.isSome) →
-  ∀ assignment, originalCircuit.admissible busSemantics assignment →
+  -- `ds` does not contain unused derivations.
+  (∀ derivation ∈ ds, derivation.1 ∈ optimizedCircuit.vars) ∧
+  -- The optimized circuit variables can be derived from the original circuit
+  -- variables, and the return derivations.
+  ds.cover originalCircuit.vars optimizedCircuit.vars ∧
+  -- For any admissible satisfying assignment of the original circuit, the
+  -- optimized circuit is also satisfied and admissible, with equivalent side
+  -- effects, under the assignment produced by witness generation.
+  ∀ assignment,
+    originalCircuit.admissible busSemantics assignment →
     originalCircuit.satisfies busSemantics assignment →
-    ds.cover originalCircuit.vars optimizedCircuit.vars ∧
-    (∀ derivation ∈ ds, derivation.1 ∈ optimizedCircuit.vars) ∧
     let assignment' := Derivations.witgen ds assignment
     optimizedCircuit.satisfies busSemantics assignment' ∧
       optimizedCircuit.admissible busSemantics assignment' ∧
