@@ -9,7 +9,7 @@ variable {p : ℕ} [Fact p.Prime]
 
 /-- A circuit variable. -/
 structure Variable where
-  /-- The _unique_ name of the variable. -/
+  /-- The display name of the variable. -/
   name : String
   /-- The optional powdr variable ID. All variables mentioned in the input
       circuit are expected to have a powdr ID. The output circuit may contain
@@ -22,7 +22,7 @@ structure Variable where
 inductive Expression (p : ℕ) where
   /-- A constant field element. -/
   | const (n : ZMod p)
-  /-- A variable reference. -/
+  /-- A reference to a variable. -/
   | var (x : Variable)
   /-- The sum of two expressions. -/
   | add (e1 e2 : Expression p)
@@ -41,12 +41,14 @@ def Expression.eval (e : Expression p)
   | .mul e1 e2 => e1.eval assignment * e2.eval assignment
 -- ANCHOR_END: exprEval
 
+-- ANCHOR: degree
 /-- The multiplicative degree of an expression. -/
 def Expression.degree : Expression p → Nat
   | .const _ => 0
   | .var _ => 1
   | .add e1 e2 => max e1.degree e2.degree
   | .mul e1 e2 => e1.degree + e2.degree
+-- ANCHOR_END: degree
 
 /-- The variables occurring in an expression. -/
 def Expression.vars : Expression p → List Variable
@@ -59,10 +61,7 @@ def Expression.vars : Expression p → List Variable
 
 /-- A method for computing a *derived* variable's value from other variables,
     mirroring powdr's `ComputationMethod`. For newly introduced variables, this
-    is interpreted by powdr's witness generator.
-    `quotientOrZero num den` is `num / den` in the field, or `0` when
-    `den = 0`; `ifEqZero cond thenM elseM` picks `thenM` when `cond` evaluates
-    to `0`, else `elseM`. -/
+    is interpreted by powdr's witness generator. -/
 inductive ComputationMethod (p : ℕ) where
   /-- A constant value. -/
   | const (c : ZMod p)
@@ -91,8 +90,8 @@ def ComputationMethod.vars : ComputationMethod p → List Variable
   | .ifEqZero cond thenM elseM => cond.vars ++ thenM.vars ++ elseM.vars
 
 -- ANCHOR: derivations
-/-- A list of derived variables paired with how to compute each, in order — the
-    extra output of the optimizer, consumed by witness generation. -/
+/-- A list of derived variables paired with how to compute each, consumed by
+    witness generation. -/
 abbrev Derivations (p : ℕ) := List (Variable × ComputationMethod p)
 -- ANCHOR_END: derivations
 
@@ -118,7 +117,7 @@ def BusInteraction.eval (bi : BusInteraction (Expression p))
     multiplicity := bi.multiplicity.eval assignment,
     payload := bi.payload.map (fun e => e.eval assignment) }
 
-/-- Bound on the multiplicative degree of a circuit's expressions. -/
+/-- Bounds on the multiplicative degree of a circuit's expressions. -/
 structure DegreeBound where
   /-- The maximum multiplicative degree of the algebraic constraints. -/
   identities : Nat
@@ -146,7 +145,7 @@ structure BusSemantics (p : ℕ) where
       Completeness is only required for assignments whose stateful messages
       are `admissible`.
       One useful way to use this is to describe the semantics of memory buses,
-      see ``ApcOptimizer/MemoryBus.lean``. -/
+      see `ApcOptimizer/MemoryBus.lean`. -/
   admissible (statefulBusMessages : List (BusInteraction (ZMod p))) : Prop
 
 -- ANCHOR: busState
@@ -189,9 +188,10 @@ def Circuit.sideEffects (circuit : Circuit p) (busSemantics : BusSemantics p)
 
 --------- Derived variables ---------
 
-/-- The `ComputationMethod` witness generation uses for `v`: the **last** one
-    `ds` lists for it (later derivations override earlier ones), or `none` if
-    `v` is not derived. -/
+-- ANCHOR: witgen
+/-- The `ComputationMethod` witness generation uses for `v`. If `v` appears
+    multiple times, the last derivation is returned; `none` if `v` has no
+    derivation. -/
 def Derivations.methodFor :
     Derivations p → Variable → Option (ComputationMethod p)
   | [], _ => none
@@ -201,7 +201,6 @@ def Derivations.methodFor :
       | some later => some later
       | none => if u = v then some cm else none
 
--- ANCHOR: witgen
 /-- Whether `ds` lets witness generation produce every element of `outputVars`
     from `inputVars`: each output variable is either an input variable (reused)
     or a derived variable with a method that reads only input variables. -/
@@ -218,19 +217,18 @@ def Derivations.cover (ds : Derivations p)
     input variables. This is what powdr runs to fill the optimized circuit's
     variables from an input trace. -/
 def Derivations.witgen (ds : Derivations p)
-    (inputAssignment : Variable → ZMod p) : Variable → ZMod p :=
-  fun v =>
-    match v.powdrId? with
-    -- Note that by `Derivations.cover`, if `v` appears in the output circuit,
-    -- it must also exist in the input circuit, so this case is always
-    -- well-defined.
-    | some _ => inputAssignment v
-    | none =>
-      match Derivations.methodFor ds v with
-      | some cm => cm.eval inputAssignment
-      -- Note that by `Derivations.cover`, if `v` appears in the output
-      -- circuit, this case is impossible.
-      | none => inputAssignment v
+    (inputAssignment : Variable → ZMod p) (v: Variable) : ZMod p :=
+  match v.powdrId? with
+  -- Note that by `Derivations.cover`, if `v` appears in the output circuit,
+  -- it must also exist in the input circuit, so this case is always
+  -- well-defined.
+  | some _ => inputAssignment v
+  | none =>
+    match Derivations.methodFor ds v with
+    | some cm => cm.eval inputAssignment
+    -- Note that by `Derivations.cover`, if `v` appears in the output
+    -- circuit, this case is impossible.
+    | none => inputAssignment v
 -- ANCHOR_END: witgen
 
 --------- Circuit implications ---------
@@ -284,17 +282,21 @@ def Circuit.isSoundReplacementOf (optimizedCircuit originalCircuit : Circuit p)
 -- ANCHOR_END: isSoundReplacementOf
 
 -- ANCHOR: isCompleteReplacementOf
-/-- Whether an optimized circuit is a complete replacement for an original one. -/
+/-- Whether an optimized circuit is a complete replacement for an original circuit. -/
 def Circuit.isCompleteReplacementOf
     (optimizedCircuit originalCircuit : Circuit p)
     (busSemantics : BusSemantics p) (ds : Derivations p) : Prop :=
+
   -- ASSUMPTION: every variable in the original circuit has a powdr ID.
   (∀ v ∈ originalCircuit.vars, v.powdrId?.isSome) →
+
   -- `ds` does not contain unused derivations.
   (∀ derivation ∈ ds, derivation.1 ∈ optimizedCircuit.vars) ∧
+
   -- The optimized circuit variables can be derived from the original circuit
   -- variables, and the return derivations.
   ds.cover originalCircuit.vars optimizedCircuit.vars ∧
+
   -- For any admissible satisfying assignment of the original circuit, the
   -- optimized circuit is also satisfied and admissible, with equal side
   -- effects, under the assignment produced by witness generation.
