@@ -38,7 +38,7 @@ This document describes `apc-optimizer`{citeNum powdr_apc_compiler}[], a formall
 zkVMs such as OpenVM{citeNum openVM}[], SP1{citeNum sp1}[], or powdr WASM{citeNum powdr_wasm}[] are virtual machines that output a cryptographic proof that a program executed correctly. They differ in which instruction set they emulate, but use the same underlying primitives: They are a collection of _circuits_ communicating via shared _buses_.
 
 Each circuit is responsible for one or more instructions in the instruction set. They are defined by a set of _constraints_ over a _prime field_. Buses serve two purposes:
-- They implement _lookups_ into precomputed tables. For example, a byte range check might me implemented by proving that a circuit variable is in a size-256 table of all bytes.
+- They implement _lookups_ into precomputed tables. For example, a byte range check might be implemented by proving that a circuit variable is in a size-256 table of all bytes.
 - They implement _stateful communication_ between circuits. For example, a _memory_ is implemented via bus interactions.
 
 _Autoprecompiles_ prove correct execution of an entire _basic block_, which is a sequence of assembly instructions that can only be entered at the first instruction and exited at the last. The initial circuit is compiled from the instruction circuits of the zkVM and the concrete assembly program by instantiating whatever circuits would have been used by the vanilla zkVM within one monolithic circuit:
@@ -46,9 +46,9 @@ _Autoprecompiles_ prove correct execution of an entire _basic block_, which is a
 ![Autoprecompiles](autoprecompiles.svg)
 
 Having all instructions within the same circuits enables various optimizations, typically shrinking the circuit size by a factor of 3-4. Examples of these optimizations include:
-- *Inlining of constants*. For example, immediate values can be inlined directly, as they are known at compile time. In combination with constant propagation, this specialized the circuit to the concrete basic block being proven.
+- *Inlining of constants*. For example, immediate values can be inlined directly, as they are known at compile time. In combination with constant propagation, this specializes the circuit to the concrete basic block being proven.
 - *Memory optimizations*. When proving instruction-by-instruction, even temporary values are written to memory and read back. Within a monolithic circuit, these values can be accessed directly, avoiding the overhead of the memory argument. One consequence of this is that each register is only accessed once, independent of how many instructions read or write it.
-- *Gadget optimizations*. Circuits often contain repeated sub-circuits, that can be optimized for how exactly they are used. An example is RISC-V's `SEQZ` pseudo-instruction, which sets the output register to 1 if the input is zero, and 0 otherwise. It expands to the `SLTIU` instruction (a less-than comparison) with immediate value 1. But there exists a more efficient circuit for this specific comparison than the general-purpose `SLTIU` circuit.
+- *Gadget optimizations*. Circuits often contain repeated sub-circuits that can be optimized for how exactly they are used. An example is RISC-V's `SEQZ` pseudo-instruction, which sets the output register to 1 if the input is zero, and 0 otherwise. It expands to the `SLTIU` instruction (a less-than comparison) with immediate value 1. But there exists a more efficient circuit for this specific comparison than the general-purpose `SLTIU` circuit.
 
 # Variables, expressions and assignments
 
@@ -110,7 +110,7 @@ Buses must _balance globally_: summed over all circuit instances in the entire z
 
 In practice, buses fall into one of two categories:
 - A {deftech}_stateless bus_ or {deftech}_lookup_ is one where _most_ circuits are constrained to only send messages with multiplicity $`1` or $`0`. To balance it, a dedicated circuit _receives_ messages with an unconstrained multiplicity. In this chip, the payload is fixed. Therefore, this implements a lookup: By sending to this bus, the prover proves that the sent payload is in the precommitted table.
-- A {deftech}_stateful bus_ is one where the multiplicity can be $`1` or $`-1` in any circuit. This implements a stateful communication channel between circuits. An example of this the _execution bridge_: Each instruction chip might _receive_ the current $`(pc, timestamp)` pair, and _send_ the next $`(pc', timestamp')` pair.
+- A {deftech}_stateful bus_ is one where the multiplicity can be $`1` or $`-1` in any circuit. This implements a stateful communication channel between circuits. An example of this is the _execution bridge_: Each instruction chip might _receive_ the current $`(pc, timestamp)` pair, and _send_ the next $`(pc', timestamp')` pair.
 
 As we will see below, we require that the optimizer preserves the net effect on stateful buses.
 
@@ -119,7 +119,7 @@ As we will see below, we require that the optimizer preserves the net effect on 
 Most zkVMs implement a memory argument based on the _offline memory argument_ due to Blum et al. {citeNum blum}[]. In short, each read or write memory access is implemented as a series of bus interactions:
 - An $`(address, value, timestamp)` pair is _received_ from the memory bus.
 - $`timestamp` is asserted to be _smaller than the current timestamp_. This is usually implemented via a limb decomposition and range checks via lookups.
-- An updated $`(address, value', timestamp')` pair is _sent_ to the memory bus, with $`timestamp'` equal to the current timestamp. Also, in the case of a _read access_, $`value'` is asserted to be equal $`value`.
+- An updated $`(address, value', timestamp')` pair is _sent_ to the memory bus, with $`timestamp'` equal to the current timestamp. Also, in the case of a _read access_, $`value'` is asserted to be equal to $`value`.
 
 As we will see below, we will assume that all circuits _external to the circuit being optimized_ adhere to the memory discipline. If this was not the case, the original zkVM would not be sound.
 

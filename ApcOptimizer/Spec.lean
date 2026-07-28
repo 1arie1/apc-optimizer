@@ -9,7 +9,7 @@ variable {p : ℕ} [Fact p.Prime]
 
 /-- A circuit variable. -/
 structure Variable where
-  /-- The _unique_ name name of the variable. -/
+  /-- The _unique_ name of the variable. -/
   name : String
   /-- The optional powdr variable ID. All variables mentioned in the input
       circuit are expected to have a powdr ID. The output circuit may contain
