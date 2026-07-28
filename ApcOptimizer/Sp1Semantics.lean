@@ -64,20 +64,19 @@ def isByte (x : ZMod p) : Bool := decide (x.val < 256)
 def is16Bit (x : ZMod p) : Bool := decide (x.val < 2 ^ 16)
 
 /-- The named fields of an SP1 memory payload,
-    `(clk… (2 fields), address… (3 limbs), data… (4 × 16-bit limbs))`. `memShapeOf` and
-    `x0ReturnsZero` address the same layout by slot index. -/
+    `(clk… (2 fields), address… (3 limbs), data… (4 × 16-bit limbs))`. -/
 structure MemoryPayload (p : ℕ) where
   /-- The two clock fields. -/
-  clk : List (ZMod p)
+  clk : Vector (ZMod p) 2
   /-- The three address limbs. -/
-  address : List (ZMod p)
+  address : Vector (ZMod p) 3
   /-- The four limbs of the memory word. -/
-  data : List (ZMod p)
+  data : Vector (ZMod p) 4
 
-/-- Read a memory payload's named fields; `none` if it is too short to be one. -/
+/-- Read a memory payload's named fields; `none` if the number of entries is wrong. -/
 def memoryPayload? : List (ZMod p) → Option (MemoryPayload p)
   | c0 :: c1 :: a0 :: a1 :: a2 :: d0 :: d1 :: d2 :: d3 :: _ =>
-      some { clk := [c0, c1], address := [a0, a1, a2], data := [d0, d1, d2, d3] }
+      some { clk := #v[c0, c1], address := #v[a0, a1, a2], data := #v[d0, d1, d2, d3] }
   | _ => none
 
 /-- Whether a message conflicts with the lookup table of the bus it is sent on. -/
@@ -122,8 +121,8 @@ def violates (busMap : BusMap) (msg : BusInteraction (ZMod p)) : Bool :=
   -- Invalid bus ID. Won't have a matching receive.
   | none, _ => true
 
-/-- Whether a message breaks an invariant on which soundness depends. Only meaningful for an
-    *active* message — the multiplicity tests below reject `0`, and callers guard on it. -/
+/-- Whether a message breaks an invariant on which soundness depends. Only called for
+    message with nonzero multiplicity. -/
 def breaksInvariant (busMap : BusMap) (msg : BusInteraction (ZMod p)) : Bool :=
   match busMap msg.busId with
   -- Lookups are only ever sent (multiplicity 1).

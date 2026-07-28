@@ -62,20 +62,19 @@ def OpenVmBusType.isStateful : OpenVmBusType → Bool
 def isByte (x : ZMod p) : Bool := decide (x.val < 256)
 
 /-- The named fields of an OpenVM memory payload,
-    `(address_space, pointer, data… (4 limbs), timestamp)`. `memShapeOf` and `x0ReturnsZero` address
-    the same layout by slot index. -/
+    `(address_space, pointer, data… (4 limbs), timestamp)`. -/
 structure MemoryPayload (p : ℕ) where
-  /-- `1` = registers, `2` = main memory; other address spaces carry no byte invariant. -/
+  /-- `1` = registers, `2` = main memory. -/
   addressSpace : ZMod p
   /-- The cell's address within its address space. -/
   pointer : ZMod p
   /-- The four limbs of the memory word. -/
-  data : List (ZMod p)
+  data : Vector (ZMod p) 4
 
 /-- Read a memory payload's named fields; `none` if it is too short to be one. -/
 def memoryPayload? : List (ZMod p) → Option (MemoryPayload p)
   | addressSpace :: pointer :: d0 :: d1 :: d2 :: d3 :: _timestamp =>
-      some { addressSpace := addressSpace, pointer := pointer, data := [d0, d1, d2, d3] }
+      some { addressSpace := addressSpace, pointer := pointer, data := #v[d0, d1, d2, d3] }
   | _ => none
 
 /-- Whether the address space is one whose words OpenVM byte-range-checks: registers (`1`) or main
