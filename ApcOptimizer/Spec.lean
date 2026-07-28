@@ -9,7 +9,7 @@ variable {p : ℕ} [Fact p.Prime]
 
 /-- A circuit variable. -/
 structure Variable where
-  /-- The _unique_ name of the variable. -/
+  /-- The display name of the variable. -/
   name : String
   /-- The optional powdr variable ID. All variables mentioned in the input
       circuit are expected to have a powdr ID. The output circuit may contain
@@ -22,7 +22,7 @@ structure Variable where
 inductive Expression (p : ℕ) where
   /-- A constant field element. -/
   | const (n : ZMod p)
-  /-- A variable reference. -/
+  /-- A reference to a variable. -/
   | var (x : Variable)
   /-- The sum of two expressions. -/
   | add (e1 e2 : Expression p)
@@ -59,10 +59,7 @@ def Expression.vars : Expression p → List Variable
 
 /-- A method for computing a *derived* variable's value from other variables,
     mirroring powdr's `ComputationMethod`. For newly introduced variables, this
-    is interpreted by powdr's witness generator.
-    `quotientOrZero num den` is `num / den` in the field, or `0` when
-    `den = 0`; `ifEqZero cond thenM elseM` picks `thenM` when `cond` evaluates
-    to `0`, else `elseM`. -/
+    is interpreted by powdr's witness generator. -/
 inductive ComputationMethod (p : ℕ) where
   /-- A constant value. -/
   | const (c : ZMod p)
@@ -91,8 +88,8 @@ def ComputationMethod.vars : ComputationMethod p → List Variable
   | .ifEqZero cond thenM elseM => cond.vars ++ thenM.vars ++ elseM.vars
 
 -- ANCHOR: derivations
-/-- A list of derived variables paired with how to compute each, in order — the
-    extra output of the optimizer, consumed by witness generation. -/
+/-- A list of derived variables paired with how to compute each, consumed by
+    witness generation. -/
 abbrev Derivations (p : ℕ) := List (Variable × ComputationMethod p)
 -- ANCHOR_END: derivations
 
@@ -189,9 +186,10 @@ def Circuit.sideEffects (circuit : Circuit p) (busSemantics : BusSemantics p)
 
 --------- Derived variables ---------
 
-/-- The `ComputationMethod` witness generation uses for `v`: the **last** one
-    `ds` lists for it (later derivations override earlier ones), or `none` if
-    `v` is not derived. -/
+-- ANCHOR: witgen
+/-- The `ComputationMethod` witness generation uses for `v`. If `v` appears
+    multiple times, the last derivation is returned. `none` if `v` is not
+    derived. -/
 def Derivations.methodFor :
     Derivations p → Variable → Option (ComputationMethod p)
   | [], _ => none
@@ -201,7 +199,6 @@ def Derivations.methodFor :
       | some later => some later
       | none => if u = v then some cm else none
 
--- ANCHOR: witgen
 /-- Whether `ds` lets witness generation produce every element of `outputVars`
     from `inputVars`: each output variable is either an input variable (reused)
     or a derived variable with a method that reads only input variables. -/
@@ -218,19 +215,18 @@ def Derivations.cover (ds : Derivations p)
     input variables. This is what powdr runs to fill the optimized circuit's
     variables from an input trace. -/
 def Derivations.witgen (ds : Derivations p)
-    (inputAssignment : Variable → ZMod p) : Variable → ZMod p :=
-  fun v =>
-    match v.powdrId? with
-    -- Note that by `Derivations.cover`, if `v` appears in the output circuit,
-    -- it must also exist in the input circuit, so this case is always
-    -- well-defined.
-    | some _ => inputAssignment v
-    | none =>
-      match Derivations.methodFor ds v with
-      | some cm => cm.eval inputAssignment
-      -- Note that by `Derivations.cover`, if `v` appears in the output
-      -- circuit, this case is impossible.
-      | none => inputAssignment v
+    (inputAssignment : Variable → ZMod p) (v: Variable) : ZMod p :=
+  match v.powdrId? with
+  -- Note that by `Derivations.cover`, if `v` appears in the output circuit,
+  -- it must also exist in the input circuit, so this case is always
+  -- well-defined.
+  | some _ => inputAssignment v
+  | none =>
+    match Derivations.methodFor ds v with
+    | some cm => cm.eval inputAssignment
+    -- Note that by `Derivations.cover`, if `v` appears in the output
+    -- circuit, this case is impossible.
+    | none => inputAssignment v
 -- ANCHOR_END: witgen
 
 --------- Circuit implications ---------

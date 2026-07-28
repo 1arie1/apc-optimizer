@@ -40,7 +40,7 @@ This document describes `apc-optimizer`{citeNum powdr_apc_compiler}[], a formall
 zkVMs such as OpenVM{citeNum openVM}[], SP1{citeNum sp1}[], or powdr WASM{citeNum powdr_wasm}[] are virtual machines that output a cryptographic proof that a program executed correctly. They differ in which instruction set they emulate, but use the same underlying primitives: They are a collection of _circuits_ communicating via shared _buses_.
 
 Each circuit is responsible for one or more instructions in the instruction set. They are defined by a set of _constraints_ over a _prime field_. Buses serve two purposes:
-- They implement _lookups_ into precomputed tables. For example, a byte range check might be implemented by proving that a circuit variable is in a size-256 table of all bytes.
+- They implement _lookups_ into precomputed tables. For example, a byte range check might be implemented by proving that a circuit variable's value is in a size-256 table of all bytes.
 - They implement _stateful communication_ between circuits. For example, a _memory_ is implemented via bus interactions.
 
 _Autoprecompiles_ prove correct execution of an entire _basic block_, which is a sequence of assembly instructions that can only be entered at the first instruction and exited at the last. The initial circuit is compiled from the instruction circuits of the zkVM and the concrete assembly program by instantiating whatever circuits would have been used by the vanilla zkVM within one monolithic circuit:
@@ -82,11 +82,11 @@ A {deftech}_bus interaction_ sends a _payload_ tuple to a bus, weighted by a _mu
 
 {docstring BusInteraction}
 
-A circuit (defined below) contains a list of _symbolic bus interactions_ (i.e., `BusInteraction Expression`). For a concrete run of the zkVM, the circuit might be instantiated several times with different variable assignments. Evaluating the symbolic bus interactions under an assignment yields a list of _bus messages_ (i.e., `BusInteraction (ZMod p)`).
+A circuit (defined below) contains a list of _symbolic bus interactions_ (i.e., elements of type `BusInteraction Expression`). For a concrete run of the zkVM, the circuit might be instantiated several times with different variable assignments. Evaluating the symbolic bus interactions under an assignment yields a list of _bus messages_ (i.e., elements of type `BusInteraction (ZMod p)`).
 
 ## Bus state
 
-The {deftech}_bus state_ of a circuit instance is the _net_ effect it has on the buses: the net multiplicity each message is sent with. Two circuit instances therefore have the same effect on the buses exactly when their bus states are _equal_ — no separate equivalence relation is needed:
+The {deftech}_bus state_ of a circuit instance is the _net_ effect it has on the buses, i.e., the net multiplicity each message is sent with:
 ```anchor busState
 /-- A concrete bus interaction message: which bus, and the tuple sent. -/
 abbrev BusMessage (p : ℕ) := Nat × List (ZMod p)
@@ -108,12 +108,16 @@ As we will see below, we require that the optimizer preserves the net effect on 
 
 ## Memory
 
-Most zkVMs implement a memory argument based on the _offline memory argument_ due to Blum et al. {citeNum blum}[]. In short, each read or write memory access is implemented as a series of bus interactions:
+Most zkVMs implement a memory argument based on the _offline memory checking argument_ due to Blum et al. {citeNum blum}[]. They reduce memory consistency to a _multiset equality_ set, which is essentially implemented by the bus argument.
+
+In short, each read or write memory access is implemented as a series of bus interactions:
 - An $`(address, value, timestamp)` pair is _received_ from the memory bus.
 - $`timestamp` is asserted to be _smaller than the current timestamp_. This is usually implemented via a limb decomposition and range checks via lookups.
 - An updated $`(address, value', timestamp')` pair is _sent_ to the memory bus, with $`timestamp'` equal to the current timestamp. Also, in the case of a _read access_, $`value'` is asserted to be equal to $`value`.
 
-As we will see below, we will assume that all circuits _external to the circuit being optimized_ adhere to the memory discipline. If this was not the case, the original zkVM would not be sound.
+In addition, there are circuits responsible for memory initialization and finalization. All in all, memory consistency is reduced to checking that the bus is balanced. Note that the send and receive directions might also be inverted.
+
+As we will see below, we will assume that all circuits _including the circuit to be optimized_ adhere to the memory discipline. If this was not the case, the original zkVM would not be sound in the first place.
 
 # Circuits
 
@@ -216,16 +220,28 @@ Second, we need to guarantee that the prover can also compute a satisfying assig
 {docstring ComputationMethod}
 
 ```anchor derivations
-/-- A list of derived variables paired with how to compute each, in order — the
-    extra output of the optimizer, consumed by witness generation. -/
+/-- A list of derived variables paired with how to compute each, consumed by
+    witness generation. -/
 abbrev Derivations (p : ℕ) := List (Variable × ComputationMethod p)
 ```
 
-With the data structures in place, we can define a canonical witness generation algorithm that we expect the prover to implement. The algorithm derives a valid assignment for the optimized circuit from a valid assignment for the input circuit. In essence, for each variable in the output circuit:
+With the data structures in place, we can define a prescribed witness generation algorithm that we expect the prover to implement. The algorithm derives a valid assignment for the optimized circuit from a valid assignment for the input circuit. In essence, for each variable in the output circuit:
 - If it is a powdr-ID variable, it is reused from the input assignment.
 - If it is a derived variable, the optimizer must have emitted a computation method for it. The witness generation algorithm evaluates this method under the input assignment to compute the output variable's value.
 
 ```anchor witgen
+/-- The `ComputationMethod` witness generation uses for `v`. If `v` appears
+    multiple times, the last derivation is returned. `none` if `v` is not
+    derived. -/
+def Derivations.methodFor :
+    Derivations p → Variable → Option (ComputationMethod p)
+  | [], _ => none
+  | (u, cm) :: rest, v =>
+      match Derivations.methodFor rest v with
+      -- If `v` is derived later, that derivation overrides this one.
+      | some later => some later
+      | none => if u = v then some cm else none
+
 /-- Whether `ds` lets witness generation produce every element of `outputVars`
     from `inputVars`: each output variable is either an input variable (reused)
     or a derived variable with a method that reads only input variables. -/
@@ -242,19 +258,18 @@ def Derivations.cover (ds : Derivations p)
     input variables. This is what powdr runs to fill the optimized circuit's
     variables from an input trace. -/
 def Derivations.witgen (ds : Derivations p)
-    (inputAssignment : Variable → ZMod p) : Variable → ZMod p :=
-  fun v =>
-    match v.powdrId? with
-    -- Note that by `Derivations.cover`, if `v` appears in the output circuit,
-    -- it must also exist in the input circuit, so this case is always
-    -- well-defined.
-    | some _ => inputAssignment v
-    | none =>
-      match Derivations.methodFor ds v with
-      | some cm => cm.eval inputAssignment
-      -- Note that by `Derivations.cover`, if `v` appears in the output
-      -- circuit, this case is impossible.
-      | none => inputAssignment v
+    (inputAssignment : Variable → ZMod p) (v: Variable) : ZMod p :=
+  match v.powdrId? with
+  -- Note that by `Derivations.cover`, if `v` appears in the output circuit,
+  -- it must also exist in the input circuit, so this case is always
+  -- well-defined.
+  | some _ => inputAssignment v
+  | none =>
+    match Derivations.methodFor ds v with
+    | some cm => cm.eval inputAssignment
+    -- Note that by `Derivations.cover`, if `v` appears in the output
+    -- circuit, this case is impossible.
+    | none => inputAssignment v
 ```
 
 ## The full completeness property
