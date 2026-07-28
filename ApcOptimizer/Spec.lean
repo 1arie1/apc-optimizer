@@ -63,8 +63,11 @@ def Expression.vars : Expression p → List Variable
     `quotientOrZero num den` is `num / den` in the field, or `0` when
     `den = 0`; `ifEqZero cond thenM elseM` picks `thenM` when `cond` evaluates to `0`, else `elseM`. -/
 inductive ComputationMethod (p : ℕ) where
+  /-- A constant value. -/
   | const (c : ZMod p)
+  /-- The quotient of two expressions, or zero if the denominator is zero. -/
   | quotientOrZero (num den : Expression p)
+  /-- Conditional computation: if `cond` evaluates to zero, use `thenM`, else use `elseM`. -/
   | ifEqZero (cond : Expression p) (thenM elseM : ComputationMethod p)
 
 /-- Evaluate a computation method under an assignment (cf. powdr's `evaluate_computation_method`). -/
@@ -81,9 +84,11 @@ def ComputationMethod.vars : ComputationMethod p → List Variable
   | .quotientOrZero num den => num.vars ++ den.vars
   | .ifEqZero cond thenM elseM => cond.vars ++ thenM.vars ++ elseM.vars
 
+-- ANCHOR: derivations
 /-- A list of derived variables paired with how to compute each, in order — the extra output of
     the optimizer, consumed by witness generation. -/
 abbrev Derivations (p : ℕ) := List (Variable × ComputationMethod p)
+-- ANCHOR_END: derivations
 
 --------- Bus Interactions ---------
 
@@ -106,9 +111,11 @@ def BusInteraction.eval (bi : BusInteraction (Expression p)) (env : Variable →
     multiplicity := bi.multiplicity.eval env,
     payload := bi.payload.map (fun e => e.eval env) }
 
-/-- Per-zkVM bound on the multiplicative degree of a circuit's expressions. -/
+/-- Bound on the multiplicative degree of a circuit's expressions. -/
 structure DegreeBound where
+  /-- The maximum multiplicative degree of the algebraic constraints. -/
   identities : Nat
+  /-- The maximum multiplicative degree of the bus interactions. -/
   busInteractions : Nat
 
 /-- The bus semantics of the zkVM. -/
@@ -152,7 +159,11 @@ instance : HasEquiv (BusState p) :=
 
 /-- A constraint system representing a single zkVM chip. -/
 structure ConstraintSystem (p : ℕ) where
+  /-- The list of algebraic constraints. For an assignment to be valid, all
+      of them must evaluate to zero. -/
   algebraicConstraints : List (Expression p)
+  /-- The list of symbolic bus interactions. These include both the stateless
+      bus interactions (lookups) and the stateful bus interactions. -/
   busInteractions : List (BusInteraction (Expression p))
 
 /-- The variables occurring anywhere in a constraint system. -/
@@ -161,6 +172,7 @@ def ConstraintSystem.vars (cs : ConstraintSystem p) : List Variable :=
     cs.busInteractions.flatMap
       (fun bi => bi.multiplicity.vars ++ bi.payload.flatMap Expression.vars)
 
+--ANCHOR: sideEffects
 /-- The side effects of a constraint system under a given environment and bus semantics.
     The side effects are the tuples sent to the *stateful* buses.-/
 def ConstraintSystem.sideEffects (cs : ConstraintSystem p)
@@ -169,6 +181,7 @@ def ConstraintSystem.sideEffects (cs : ConstraintSystem p)
     |>.map (fun bi =>
       let m := bi.eval env
       ((m.busId, m.payload), m.multiplicity))
+-- ANCHOR_END: sideEffects
 
 --------- Derived variables ---------
 
@@ -179,6 +192,7 @@ def Derivations.methodFor : Derivations p → Variable → Option (ComputationMe
   | (u, cm) :: rest, v =>
       (Derivations.methodFor rest v).orElse (fun _ => if u = v then some cm else none)
 
+-- ANCHOR: witgen
 /-- Whether `ds` lets witness generation produce every element of `outputVars` from `inputVars`:
     each output variable is either an input variable (reused) or a derived variable with a method that
     reads only input variables. -/
@@ -204,30 +218,38 @@ def Derivations.witgen (ds : Derivations p) (inputEnv : Variable → ZMod p) : V
       -- Note that by `Derivations.cover`, if `v` appears in the output constraint system,
       -- this case is impossible.
       | none => inputEnv v
+-- ANCHOR_END: witgen
 
 --------- Constraint system implications ---------
 
+-- ANCHOR: admissible
 /-- Whether a given assignment is admissible under the bus semantics. -/
 def ConstraintSystem.admissible (s : ConstraintSystem p) (busSemantics : BusSemantics p)
     (env : Variable → ZMod p) : Prop :=
   busSemantics.admissible ((s.busInteractions.map (fun bi => bi.eval env)).filter
     (fun m => decide (m.multiplicity ≠ 0) && busSemantics.isStateful m.busId))
+-- ANCHOR_END: admissible
 
-/-- Whether a constraint system is satisfied under a given environment and bus semantics,
+-- ANCHOR: satisfies
+/-- Whether a constraint system is satisfied under a given assignment and bus semantics,
     i.e., whether it satisfies all algebraic constraints and does not violate any bus constraints. -/
 def ConstraintSystem.satisfies (s : ConstraintSystem p) (busSemantics : BusSemantics p)
-    (env : Variable → ZMod p) : Prop :=
-  (∀ c ∈ s.algebraicConstraints, c.eval env = 0) ∧
+    (assignment : Variable → ZMod p) : Prop :=
+  (∀ c ∈ s.algebraicConstraints, c.eval assignment = 0) ∧
   (∀ bi ∈ s.busInteractions,
-    let message := bi.eval env
+    let message := bi.eval assignment
     message.multiplicity ≠ 0 → busSemantics.violatesConstraint message = false)
+-- ANCHOR_END: satisfies
 
+-- ANCHOR: guaranteesInvariants
 /-- Whether a constraint system guarantees that all invariants are maintained under a given bus semantics. -/
 def ConstraintSystem.guaranteesInvariants (s : ConstraintSystem p) (busSemantics : BusSemantics p) : Prop :=
   ∀ env, s.satisfies busSemantics env → ∀ bi ∈ s.busInteractions,
     let message := bi.eval env
     message.multiplicity ≠ 0 → busSemantics.breaksInvariant message = false
+-- ANCHOR_END: guaranteesInvariants
 
+-- ANCHOR: isSoundReplacementOf
 /-- Whether an optimized constraint system is a sound replacement for an original constraint system.
     Informally, for any satisfying assignment of the optimized system, there exists a corresponding
     satisfying assignment of the original system *with equivalent side effects*. Also, the optimized
@@ -238,7 +260,9 @@ def ConstraintSystem.isSoundReplacementOf (optimizedCS originalCS : ConstraintSy
     ∃ env', originalCS.satisfies busSemantics env' ∧
       optimizedCS.sideEffects busSemantics env ≈ originalCS.sideEffects busSemantics env') ∧
   (originalCS.guaranteesInvariants busSemantics → optimizedCS.guaranteesInvariants busSemantics)
+-- ANCHOR_END: isSoundReplacementOf
 
+-- ANCHOR: isCompleteReplacementOf
 /-- Whether an optimized constraint system is a complete replacement for an original one. Assuming
     every input variable carries a powdr ID, then for any admissible satisfying assignment of the
     original constraint system, there is a computable assignment of the optimized system that is
@@ -252,9 +276,11 @@ def ConstraintSystem.isCompleteReplacementOf (optimizedCS originalCS : Constrain
     let env' := Derivations.witgen ds env
     optimizedCS.satisfies busSemantics env' ∧ optimizedCS.admissible busSemantics env' ∧
       originalCS.sideEffects busSemantics env ≈ optimizedCS.sideEffects busSemantics env'
+-- ANCHOR_END: isCompleteReplacementOf
 
 --------- Degree bound ---------
 
+-- ANCHOR: degreeBound
 /-- Whether a constraint system stays within a degree bound. -/
 def ConstraintSystem.withinDegree (s : ConstraintSystem p) (b : DegreeBound) : Prop :=
   (∀ c ∈ s.algebraicConstraints, c.degree ≤ b.identities) ∧
@@ -268,11 +294,15 @@ def optimizerRespectsDegreeBound (b : DegreeBound)
   ∀ constraintSystem : ConstraintSystem p,
     constraintSystem.withinDegree b →
     (optimizer constraintSystem).1.withinDegree b
+-- ANCHOR_END: degreeBound
 
 --------- Optimizer correctness ---------
 
+-- ANCHOR: optimizer
 abbrev Optimizer (p : ℕ) := ConstraintSystem p → ConstraintSystem p × Derivations p
+-- ANCHOR_END: optimizer
 
+-- ANCHOR: isCorrect
 /-- An optimizer is correct if, for every input constraint system, replacing it with the optimized
     system is both sound and complete, and the optimizer respects the degree bound `b`. -/
 def Optimizer.isCorrect (optimizer : Optimizer p) (busSemantics : BusSemantics p)
@@ -282,3 +312,4 @@ def Optimizer.isCorrect (optimizer : Optimizer p) (busSemantics : BusSemantics p
     (optimizedCS.isSoundReplacementOf originalCS busSemantics) ∧
     (optimizedCS.isCompleteReplacementOf originalCS busSemantics derivations))
   ∧ optimizerRespectsDegreeBound b optimizer
+-- ANCHOR_END: isCorrect

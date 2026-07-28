@@ -120,247 +120,197 @@ Most zkVMs implement a memory argument based on the _offline memory argument_ du
 
 As we will see below, we will assume that all circuits _external to the circuit being optimized_ adhere to the memory discipline. If this was not the case, the original zkVM would not be sound.
 
-# AI Slop
+# Circuits
 
-## Circuits
-
-A circuit is the constraint system of a single {deftech}_chip_: one component of a zkVM, such as an
-instruction executor, a memory argument, or a range-check table. It is a list of algebraic
-constraints together with a list of bus interactions, both over arithmetic expressions in a finite
-field. The algebraic constraints are the AIR-style identities of STARK arithmetization; the bus interactions are the multiplicity-weighted messages of a
-logarithmic-derivative lookup argument, the mechanism modern zkVMs use for range
-checks, table lookups, memory, and communication between chips.
-
-An {deftech}_expression_ is a constant, a variable, or a sum or product of expressions:
-
-{docstring Expression}
-
-Expressions are evaluated under an {deftech}_environment_ assigning a field element to every
-variable, and carry a multiplicative {deftech}_degree_, on which the proving backend imposes an
-upper bound (see [The degree bound](#the-degree-bound)).
-
-{docstring Expression.eval}
-
-{docstring Expression.degree}
-
-A {deftech}_bus interaction_ sends a payload tuple to a global bus with a multiplicity. Buses are
-how a chip communicates with the rest of the system. A *stateless* bus is a lookup: a chip looks a
-tuple up in a table, such as a range check or an XOR table, and globally every lookup must be
-matched by a table entry. A *stateful* bus (memory, the execution bridge) instead carries state
-such as a timestamp or program counter.
-
-{docstring BusInteraction}
-
-Putting the two together, a {deftech}_constraint system_ is one chip: its algebraic constraints
-together with its bus interactions:
+A {deftech}_circuit_ is simply a collection of algebraic constraints and symbolic bus interactions:
 
 {docstring ConstraintSystem}
 
-The {deftech}_side effects_ of a constraint system are the messages it places on the *stateful*
-buses. This is the externally observable behavior an optimization must preserve.
+A circuit is satisfied under an assignment when all algebraic constraints evaluate to zero and no bus interaction message violates the bus semantics:
 
-{docstring ConstraintSystem.sideEffects}
+```anchor satisfies
+/-- Whether a constraint system is satisfied under a given assignment and bus semantics,
+    i.e., whether it satisfies all algebraic constraints and does not violate any bus constraints. -/
+def ConstraintSystem.satisfies (s : ConstraintSystem p) (busSemantics : BusSemantics p)
+    (assignment : Variable → ZMod p) : Prop :=
+  (∀ c ∈ s.algebraicConstraints, c.eval assignment = 0) ∧
+  (∀ bi ∈ s.busInteractions,
+    let message := bi.eval assignment
+    message.multiplicity ≠ 0 → busSemantics.violatesConstraint message = false)
+```
 
-## Bus semantics
+# Bus Semantics
 
-The meaning of a bus is not baked into the circuit; it is supplied separately by the zkVM's
-{deftech}_bus semantics_. This is the interface an auditor reviews once per VM. It is deliberately
-abstract: the optimizer is proven correct against *any* semantics of this shape, and a particular
-VM is one instance.
+Bus semantics capture the _zkVM-specific_ semantics of the buses.
 
 {docstring BusSemantics}
 
-Two fields deserve emphasis. `violatesConstraint` is the opaque handle on the lookup tables of
-*other* chips; sending a message that a table would reject is forbidden. `admissible` is where the
-"this is a real trace" assumption lives: it is a predicate on the active stateful messages, and it
-is the hinge of the asymmetry described next. For memory buses it encodes the memory discipline of
-{citeNum blum}[] (see [the memory discipline](#the-memory-discipline)).
+# Soundness
 
-### The correctness relation
+{deftech}_Soundness_ is arguably the most important property that must be guaranteed by the optimizer. Intuitively, it states that anything the optimized circuit accepts, the original would have accepted too, with the same effect on the rest of the system.
 
-The heart of the specification is what it means for an optimized circuit to be a faithful
-replacement for its input. The relation is deliberately *asymmetric*, split into soundness and
-completeness, because a prover and an honest trace place opposite demands on it.
+First, we define the side effects of a circuit under an assignment as the net effect it has on the stateful buses.
 
-### What a circuit does
+```anchor sideEffects
+/-- The side effects of a constraint system under a given environment and bus semantics.
+    The side effects are the tuples sent to the *stateful* buses.-/
+def ConstraintSystem.sideEffects (cs : ConstraintSystem p)
+    (busSemantics : BusSemantics p) (env : Variable → ZMod p) : BusState p :=
+  cs.busInteractions.filter (fun bi => busSemantics.isStateful bi.busId)
+    |>.map (fun bi =>
+      let m := bi.eval env
+      ((m.busId, m.payload), m.multiplicity))
+```
 
-A circuit is {deftech}_satisfied_ under an environment when every algebraic constraint vanishes and
-no active bus interaction violates another chip's table:
+Second, we define that a circuit _guarantees invariants_ if, under any satisfying assignment, no bus interaction breaks an invariant of the bus semantics.
 
-{docstring ConstraintSystem.satisfies}
+```anchor guaranteesInvariants
+/-- Whether a constraint system guarantees that all invariants are maintained under a given bus semantics. -/
+def ConstraintSystem.guaranteesInvariants (s : ConstraintSystem p) (busSemantics : BusSemantics p) : Prop :=
+  ∀ env, s.satisfies busSemantics env → ∀ bi ∈ s.busInteractions,
+    let message := bi.eval env
+    message.multiplicity ≠ 0 → busSemantics.breaksInvariant message = false
+```
 
-An assignment is {deftech}_admissible_ when its active stateful messages satisfy the VM's
-`admissible` predicate. Completeness is required only for admissible assignments, so this is the
-condition that picks out the real traces the optimizer must preserve:
+Finally, we formalize what it means for an optimized circuit to be a sound replacement for an original circuit:
 
-{docstring ConstraintSystem.admissible}
+```anchor isSoundReplacementOf
+/-- Whether an optimized constraint system is a sound replacement for an original constraint system.
+    Informally, for any satisfying assignment of the optimized system, there exists a corresponding
+    satisfying assignment of the original system *with equivalent side effects*. Also, the optimized
+    system must maintain all invariants guaranteed by the original system. -/
+def ConstraintSystem.isSoundReplacementOf (optimizedCS originalCS : ConstraintSystem p) (busSemantics : BusSemantics p) :
+    Prop :=
+  (∀ env, optimizedCS.satisfies busSemantics env →
+    ∃ env', originalCS.satisfies busSemantics env' ∧
+      optimizedCS.sideEffects busSemantics env ≈ originalCS.sideEffects busSemantics env') ∧
+  (originalCS.guaranteesInvariants busSemantics → optimizedCS.guaranteesInvariants busSemantics)
+```
 
-Side effects are compared up to *net multiplicity* per message: an identical-payload send/receive
-pair cancels, so two circuits are equivalent when they leave the same net effect on every stateful
-bus.
+# Completeness
 
-### Soundness
+The {deftech}_completeness_ property ensures that for any valid zkVM execution, the prover _can_ actually find a satisfying assignment for the optimized circuit.
 
-Soundness protects against a cheating prover: *anything the optimized circuit accepts, the original
-would have accepted too, with the same effect on the rest of the system.* It is required for
-*every* assignment, because a malicious prover may choose any.
+## Admissible assignments
 
-{docstring ConstraintSystem.isSoundReplacementOf}
+First, we define what it means for an assignment to be _admissible_ under a bus semantics. An assignment is admissible if all active stateful messages satisfy the bus semantics' `admissible` predicate:
 
-### Completeness
+```anchor admissible
+/-- Whether a given assignment is admissible under the bus semantics. -/
+def ConstraintSystem.admissible (s : ConstraintSystem p) (busSemantics : BusSemantics p)
+    (env : Variable → ZMod p) : Prop :=
+  busSemantics.admissible ((s.busInteractions.map (fun bi => bi.eval env)).filter
+    (fun m => decide (m.multiplicity ≠ 0) && busSemantics.isStateful m.busId))
+```
 
-Completeness protects against a uselessly strict optimizer that accepts nothing: *every real
-(admissible) trace of the input is reproduced by the output.* It is required *only* for admissible
-assignments, and it is *constructive*. The optimizer emits, alongside the circuit, a list of
-{deftech}_derivations_: a computation method for each column it introduced.
+Completeness is only required for admissible assignments.
+
+## Witness generation
+
+Second, we need to guarantee that the prover can also compute a satisfying assignment for the optimized circuit. To this end, the optimizer emits a list of _derivations_, specified in a custom witness generation IR:
 
 {docstring ComputationMethod}
 
-{docstring Derivations}
+```anchor derivations
+/-- A list of derived variables paired with how to compute each, in order — the extra output of
+    the optimizer, consumed by witness generation. -/
+abbrev Derivations (p : ℕ) := List (Variable × ComputationMethod p)
+```
 
-Witness generation runs these methods on the input trace to fill the optimized circuit's columns.
-Completeness demands that the result is itself satisfying and admissible, with the same side
-effects. That is exactly what lets an input trace be extended to an output trace.
+With the data structures in place, we can define a canonical witness generation algorithm that we expect the prover to implement. The algorithm derives a valid assignment for the optimized circuit from a valid assignment for the input circuit. In essence, for each variable in the output circuit:
+- If it is a powdr-ID variable, it is reused from the input assignment.
+- If it is a derived variable, the optimizer must have emitted a computation method for it. The witness generation algorithm evaluates this method under the input assignment to compute the output variable's value.
 
-{docstring Derivations.witgen}
+```anchor witgen
+/-- Whether `ds` lets witness generation produce every element of `outputVars` from `inputVars`:
+    each output variable is either an input variable (reused) or a derived variable with a method that
+    reads only input variables. -/
+def Derivations.cover (ds : Derivations p) (inputVars outputVars : List Variable) : Prop :=
+  ∀ v ∈ outputVars,
+    match v.powdrId? with
+    | some _ => v ∈ inputVars
+    | none => ∃ cm, ds.methodFor v = some cm ∧ ∀ x ∈ cm.vars, x ∈ inputVars
 
-{docstring ConstraintSystem.isCompleteReplacementOf}
+/-- Witness generation: reconstruct an output assignment from an input assignment. Every powdr-ID
+    (input) variable passes through unchanged; every other variable is computed by the method `ds`
+    records for it, read from the input variables. This is what powdr runs to fill the optimized
+    circuit's variables from an input trace. -/
+def Derivations.witgen (ds : Derivations p) (inputEnv : Variable → ZMod p) : Variable → ZMod p :=
+  fun v =>
+    match v.powdrId? with
+    -- Note that by `Derivations.cover`, if `v` appears in the output constraint system,
+    -- it must also exist in the input constraint system, so this case is always well-defined.
+    | some _ => inputEnv v
+    | none =>
+      match Derivations.methodFor ds v with
+      | some cm => cm.eval inputEnv
+      -- Note that by `Derivations.cover`, if `v` appears in the output constraint system,
+      -- this case is impossible.
+      | none => inputEnv v
+```
 
-### The degree bound
+## The full completeness property
 
-The proving backend caps the multiplicative degree of every expression. The optimizer must respect
-that bound: a within-bound input yields a within-bound output.
+Putting the pieces together, we define what it means for an optimized circuit to be a _complete_ replacement for an original circuit: For any admissible satisfying assignment of the original circuit, there must exist a computable assignment of the optimized circuit that is itself satisfying and admissible, with equivalent side effects.
 
-{docstring ConstraintSystem.withinDegree}
+```anchor isCompleteReplacementOf
+/-- Whether an optimized constraint system is a complete replacement for an original one. Assuming
+    every input variable carries a powdr ID, then for any admissible satisfying assignment of the
+    original constraint system, there is a computable assignment of the optimized system that is
+    itself satisfying and admissible, with equivalent side effects. -/
+def ConstraintSystem.isCompleteReplacementOf (optimizedCS originalCS : ConstraintSystem p)
+    (busSemantics : BusSemantics p) (ds : Derivations p) : Prop :=
+  (∀ v ∈ originalCS.vars, v.powdrId?.isSome) →
+  ∀ env, originalCS.admissible busSemantics env → originalCS.satisfies busSemantics env →
+    ds.cover originalCS.vars optimizedCS.vars ∧
+    (∀ derivation ∈ ds, derivation.1 ∈ optimizedCS.vars) ∧
+    let env' := Derivations.witgen ds env
+    optimizedCS.satisfies busSemantics env' ∧ optimizedCS.admissible busSemantics env' ∧
+      originalCS.sideEffects busSemantics env ≈ optimizedCS.sideEffects busSemantics env'
+```
 
-{docstring optimizerRespectsDegreeBound}
+# Degree bound
 
-### Correctness
+The {deftech}_degree bound_ of a circuit is the maximum multiplicative degree of any expression in the circuit. The proving backend enforces that all expressions are within the degree bound, so the optimizer must respect it: a within-bound input yields a within-bound output.
 
-An optimizer is {deftech}_correct_ for a given bus semantics and degree bound when, on every input,
-its output is both a sound and a complete replacement, and it respects the bound:
+{docstring DegreeBound}
 
-{docstring Optimizer.isCorrect}
+Given a zkVM-specific degree bound and an optimizer, we can state what it means for the optimizer to respect the bound: For any input circuit that is within the bound, the output circuit must also be within the bound.
 
-## The memory discipline
+```anchor degreeBound
+/-- Whether a constraint system stays within a degree bound. -/
+def ConstraintSystem.withinDegree (s : ConstraintSystem p) (b : DegreeBound) : Prop :=
+  (∀ c ∈ s.algebraicConstraints, c.degree ≤ b.identities) ∧
+  (∀ bi ∈ s.busInteractions, bi.multiplicity.degree ≤ b.busInteractions ∧
+    ∀ e ∈ bi.payload, e.degree ≤ b.busInteractions)
 
-Memory and the execution bridge are stateful buses. Their `admissible` predicate is the offline
-memory-checking discipline of {citeNum blum}[], reused in essentially every zkVM and, in its modern
-multiplicity-based form, by arguments like Twist-and-Shout {citeNum twistShout}[]. `apc-optimizer`
-does not prove this discipline; it takes it as an assumption about real (admissible) traces, and the
-`busUnify` pass relies on it to cancel and chain memory accesses. The utility that states it is
-small and shared across VMs.
+/-- Whether an optimizer respects a degree bound: a within-bound input always yields a
+    within-bound output. -/
+def optimizerRespectsDegreeBound (b : DegreeBound)
+    (optimizer : ConstraintSystem p → ConstraintSystem p × Derivations p) : Prop :=
+  ∀ constraintSystem : ConstraintSystem p,
+    constraintSystem.withinDegree b →
+    (optimizer constraintSystem).1.withinDegree b
+```
 
-A memory access is a `getPrevious`/`setNew` pair carrying opposite multiplicities. Which one is the
-send depends on the VM's convention:
+# Optimizer
 
-{docstring MemoryBusDirection}
+Putting the pieces together, we define what it means for an optimizer to be _correct_. An {deftech}_optimizer_ is a function that maps a constraint system to a new constraint system and a list of derivations.
 
-{docstring MemoryBusShape}
+```anchor optimizer
+abbrev Optimizer (p : ℕ) := ConstraintSystem p → ConstraintSystem p × Derivations p
+```
 
-The discipline itself: after a `setNew` to an address, the next same-address `getPrevious`, with no
-active same-address message in between, observes the same payload. The crucial phrase is *in list
-order*: the exporter must therefore list memory interactions in chronological order (see
-[Assumptions](#assumptions)).
+An optimizer is correct if, for every input constraint system, replacing it with the optimized system is both sound and complete, and the optimizer respects the degree bound.
 
-{docstring admissibleMemoryBus}
-
-## VM instantiations
-
-### OpenVM
-
-{citeNum openVM}[] runs over the BabyBear field. Its bus map assigns each bus id a type. The stateful
-ones are the execution bridge and memory; the stateless ones are the range-checker, bitwise/XOR,
-and PC-lookup tables:
-
-{docstring ApcOptimizer.OpenVM.OpenVmBusType}
-
-The two opaque predicates of the semantics are given concretely. `violates` encodes each lookup
-table (byte and XOR checks, range widths, lookup arities); `breaksInvariant` encodes the soundness
-invariant that data written to the register / main-memory address spaces is byte-ranged.
-
-{docstring ApcOptimizer.OpenVM.violates}
-
-{docstring ApcOptimizer.OpenVM.breaksInvariant}
-
-These assemble into the audited OpenVM semantics, with memory using OpenVM's send-the-new-record
-convention:
-
-{docstring ApcOptimizer.OpenVM.openVmBusSemantics}
-
-### SP1
-
-{citeNum sp1}[] (whose Hypercube proof system is described in {citeNum sp1Jagged}[]) runs over the
-KoalaBear field. It uses a single byte-lookup bus multiplexing AND/OR/XOR/range/comparison
-operations, 16-bit memory limbs, and, unlike OpenVM, sends the *previous* memory record and
-receives the new one, so its memory shape carries the reversed direction.
-
-{docstring ApcOptimizer.SP1.Sp1BusType}
-
-{docstring ApcOptimizer.SP1.violates}
-
-{docstring ApcOptimizer.SP1.sp1BusSemantics}
-
-## The theorems
-
-The master theorem states that the optimizer is correct for *every* bus semantics and *every* choice
-of proven bus facts (the mechanism by which optimization passes learn sound properties of the
-tables, itself carrying zero audit surface):
-
-{docstring optimizerWithBusFacts_maintainsCorrectness}
-
-The optimizers actually shipped are one-line instances. The fact-free optimizer, usable with any VM:
-
-{docstring simpleOptimizer_maintainsCorrectness}
-
-The OpenVM optimizer the CLI runs:
-
-{docstring ApcOptimizer.OpenVM.openVmOptimizer_maintainsCorrectness}
-
-And the SP1 optimizer:
-
-{docstring ApcOptimizer.SP1.sp1Optimizer_maintainsCorrectness}
-
-##Trust boundary
-
-![Trust map: green nodes are machine-checked and discharged by the proofs; amber nodes are what the auditor must establish by hand: the VM semantics, the memory discipline, and the input-circuit assumptions.](trust.svg)
-
-Everything reachable from the four theorems above is machine-checked and rests only on Lean's three
-standard axioms (`propext`, `Classical.choice`, `Quot.sound`). What an auditor must still establish
-by hand is therefore exactly the following, and nothing more:
-
-1. *The audited definitions say what you think they say.* This document exists to make that check
-   tractable. The relation is `Optimizer.isCorrect`; read it, and the soundness/completeness
-   definitions it unfolds to.
-2. *The VM semantics faithfully model the real VM.* `openVmBusSemantics` / `sp1BusSemantics` are
-   claims about the deployed system's buses. They are audited files precisely because a wrong table
-   entry here would silently license a wrong optimization.
-3. *The input-circuit assumptions below hold.* The theorem is stated relative to them.
-
-Everything else is discharged by the proofs and needs no audit: that each of the ~dozen passes
-refines the circuit, that the fixpoint loop terminates, that degree guards fire.
-
-### Assumptions
-
-The guarantee is proven against the spec and semantics above. For it to carry over to a real
-deployment, the auditor must confirm these properties of the *input* circuits (stated for OpenVM;
-the SP1 analogues differ where noted):
-
-> *Memory and execution-bridge interactions are listed in chronological order.* The `admissible`
-> predicate pairs each `setNew` with the *next same-address* `getPrevious` in list order, so the
-> exporter must emit these interactions in time order. Otherwise completeness may fail.
-
-> *The input guarantees invariants and respects the degree bound.* The optimizer *preserves*
-> `guaranteesInvariants` and `withinDegree`, but only assuming the input has them (e.g. that written
-> memory limbs are byte-range-checked).
-
-> *Lookup-table messages are pinned.* The semantics checks only the *arity* of the PC lookup, not
-> the program table, so we assume constraints fixing the looked-up fields to constants have already
-> been added to the input. The same applies to SP1's instruction-fetch and page-protection lookups,
-> which `ApcOptimizer.SP1.violates` also accepts on arity alone.
-
-> *Every memory writer is range-checked.* The semantics treats a memory *receive* from the register
-> / main-memory address spaces with an out-of-range data limb as conflicting, so the optimizer may
-> assume received memory words are in range. This holds only if every chip sending into those
-> address spaces maintains the VM's memory-range discipline: byte range for OpenVM, 16-bit limbs for
-> SP1.
+```anchor isCorrect
+/-- An optimizer is correct if, for every input constraint system, replacing it with the optimized
+    system is both sound and complete, and the optimizer respects the degree bound `b`. -/
+def Optimizer.isCorrect (optimizer : Optimizer p) (busSemantics : BusSemantics p)
+    (b : DegreeBound) : Prop :=
+  (∀ originalCS : ConstraintSystem p,
+    let (optimizedCS, derivations) := optimizer originalCS
+    (optimizedCS.isSoundReplacementOf originalCS busSemantics) ∧
+    (optimizedCS.isCompleteReplacementOf originalCS busSemantics derivations))
+  ∧ optimizerRespectsDegreeBound b optimizer
+```
