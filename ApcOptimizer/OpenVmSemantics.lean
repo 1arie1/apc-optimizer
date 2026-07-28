@@ -82,8 +82,7 @@ def memoryPayload? : List (ZMod p) → Option (MemoryPayload p)
 def MemoryPayload.isByteChecked (f : MemoryPayload p) : Prop :=
   f.addressSpace.val = 1 ∨ f.addressSpace.val = 2
 
-/-- Whether the bus's receiving chip accepts this message: it contradicts no entry of the bus's
-    lookup table. -/
+/-- For lookups, whether the message is in the lookup table. -/
 def accepts (busMap : BusMap) (msg : BusInteraction (ZMod p)) : Prop :=
   match busMap msg.busId, msg.payload with
   -- ISSUE:
@@ -136,8 +135,8 @@ def accepts (busMap : BusMap) (msg : BusInteraction (ZMod p)) : Prop :=
   -- Invalid bus ID. Won't have a matching receive.
   | none, _ => False
 
-/-- Whether a message maintains the invariants on which soundness depends. Only meaningful for an
-    *active* message — no multiplicity condition below holds at `0`, and callers guard on it. -/
+/-- Whether a message maintains the invariants on which soundness depends. Only called
+   for messages with nonzero multiplicity. -/
 def maintainsInvariants (busMap : BusMap) (msg : BusInteraction (ZMod p)) : Prop :=
   match busMap msg.busId with
   -- Lookups are only ever sent (multiplicity 1).

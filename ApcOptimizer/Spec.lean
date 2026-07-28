@@ -134,16 +134,13 @@ structure BusSemantics (p : ℕ) where
       sending it violates no constraint in *another* chip.
       A message that is *not* accepted is, for example, one contradicting a
       lookup table entry.
-      Only consulted for *active* messages: `Circuit.satisfies` guards on
-      `multiplicity ≠ 0`, so the value at multiplicity `0` is never used. -/
+      Only consulted for messages with nonzero multiplicity. -/
   accepts (busInteractionMessage : BusInteraction (ZMod p)) : Prop
   /-- Whether sending this bus interaction message maintains the invariants on
       which soundness of the system depends.
       For example, a memory bus might have the invariant that all sent values
       must be in a certain range.
-      Only consulted for *active* messages: `Circuit.guaranteesInvariants`
-      guards on `multiplicity ≠ 0`, so the value at multiplicity `0` is never
-      used. -/
+      Only consulted for messages with nonzero multiplicity. -/
   maintainsInvariants (busInteractionMessage : BusInteraction (ZMod p)) : Prop
   /-- A property on *stateful* bus messages with nonzero multiplicity.
       Completeness is only required for assignments whose stateful messages
