@@ -8,7 +8,7 @@ variable {p : ℕ}
 /-! # Optimizer scaffolding
 
 The reusable framework for building the optimizer out of small, individually-proven passes: the
-relation glue (`≈`, `ConstraintSystem.implies`/`.reconstructs`), `PassCorrect`, and `VerifiedPass`
+relation glue (`≈`, `Circuit.implies`/`.reconstructs`), `PassCorrect`, and `VerifiedPass`
 bundling a pass with its own `PassCorrect` proof. -/
 
 theorem BusState.equiv_refl (s : BusState p) : s ≈ s :=
@@ -23,7 +23,7 @@ theorem BusState.equiv_trans {s t u : BusState p} (h1 : s ≈ t) (h2 : t ≈ u) 
 /-- Soundness half of a replacement: every satisfying assignment of `self` maps to one of `other`
     with the same stateful side effects. The spec's `isSoundReplacementOf` is this plus invariant
     preservation. -/
-def ConstraintSystem.implies (self other : ConstraintSystem p) (busSemantics : BusSemantics p) :
+def Circuit.implies (self other : Circuit p) (busSemantics : BusSemantics p) :
     Prop :=
   ∀ env, self.satisfies busSemantics env →
     ∃ env', other.satisfies busSemantics env' ∧
@@ -32,7 +32,7 @@ def ConstraintSystem.implies (self other : ConstraintSystem p) (busSemantics : B
 /-- Every no-powdr-ID variable of `cs` is computed by `ds`'s method for it, reading only powdr-ID
     variables from `inputVars`. Threaded through passes; the pipeline top uses it to match the
     spec's `witgen` output and `Derivations.cover`. -/
-def ConstraintSystem.reconstructs (inputVars : List Variable) (cs : ConstraintSystem p)
+def Circuit.reconstructs (inputVars : List Variable) (cs : Circuit p)
     (ds : Derivations p) (e : Variable → ZMod p) : Prop :=
   ∀ v ∈ cs.vars, v.powdrId? = none →
     ∃ cm, Derivations.methodFor ds v = some cm ∧
@@ -40,11 +40,11 @@ def ConstraintSystem.reconstructs (inputVars : List Variable) (cs : ConstraintSy
       (∀ x ∈ cm.vars, x ∈ inputVars) ∧
       cm.eval e = e v
 
-theorem ConstraintSystem.implies_refl (cs : ConstraintSystem p) (busSemantics : BusSemantics p) :
+theorem Circuit.implies_refl (cs : Circuit p) (busSemantics : BusSemantics p) :
     cs.implies cs busSemantics :=
   fun env hsat => ⟨env, hsat, BusState.equiv_refl _⟩
 
-theorem ConstraintSystem.implies_trans {a b c : ConstraintSystem p} {busSemantics : BusSemantics p}
+theorem Circuit.implies_trans {a b c : Circuit p} {busSemantics : BusSemantics p}
     (h1 : a.implies b busSemantics) (h2 : b.implies c busSemantics) : a.implies c busSemantics :=
   fun env hsat =>
     let ⟨env', hb, hab⟩ := h1 env hsat
@@ -76,7 +76,7 @@ pass cannot be written without discharging its obligations. Passes compose with 
     `cs` extends to one of `out` with equal side effects, preserving input-column values and
     reconstructing `out`'s derived variables. `dsLocal` are the derivations this step introduces,
     concatenated onto any incoming `dsIn` so passes compose. -/
-def PassCorrect (cs out : ConstraintSystem p) (dsLocal : Derivations p) (bs : BusSemantics p) :
+def PassCorrect (cs out : Circuit p) (dsLocal : Derivations p) (bs : BusSemantics p) :
     Prop :=
   out.implies cs bs ∧
   (cs.guaranteesInvariants bs → out.guaranteesInvariants bs) ∧
@@ -89,7 +89,7 @@ def PassCorrect (cs out : ConstraintSystem p) (dsLocal : Derivations p) (bs : Bu
         ∀ dsIn, cs.reconstructs inputVars dsIn env →
           out.reconstructs inputVars (dsIn ++ dsLocal) env'))
 
-theorem PassCorrect.refl (cs : ConstraintSystem p) (bs : BusSemantics p) :
+theorem PassCorrect.refl (cs : Circuit p) (bs : BusSemantics p) :
     PassCorrect cs cs [] bs :=
   ⟨cs.implies_refl bs, _root_.id, fun _ hv _ => hv,
    fun env hadm hsat =>
@@ -98,12 +98,12 @@ theorem PassCorrect.refl (cs : ConstraintSystem p) (bs : BusSemantics p) :
 
 /-- Sequential composition: derivations concatenate, soundness/invariants compose, reconstruction
     chains. -/
-theorem PassCorrect.andThen {cs mid out : ConstraintSystem p} {bs : BusSemantics p}
+theorem PassCorrect.andThen {cs mid out : Circuit p} {bs : BusSemantics p}
     {df dg : Derivations p} (hf : PassCorrect cs mid df bs) (hg : PassCorrect mid out dg bs) :
     PassCorrect cs out (df ++ dg) bs := by
   obtain ⟨hf1, hf2, hf3, hf4⟩ := hf
   obtain ⟨hg1, hg2, hg3, hg4⟩ := hg
-  refine ⟨ConstraintSystem.implies_trans hg1 hf1, fun h => hg2 (hf2 h),
+  refine ⟨Circuit.implies_trans hg1 hf1, fun h => hg2 (hf2 h),
     fun v hv hpw => hf3 v (hg3 v hv hpw) hpw, fun env hadm hsat => ?_⟩
   obtain ⟨env1, hs1, ha1, he1, hpw1, hr1⟩ := hf4 env hadm hsat
   obtain ⟨env2, hs2, ha2, he2, hpw2, hr2⟩ := hg4 env1 ha1 hs1
@@ -117,53 +117,53 @@ theorem PassCorrect.andThen {cs mid out : ConstraintSystem p} {bs : BusSemantics
 
 /-- A `PassCorrect` gives the audited `isSoundReplacementOf`. The completeness half is discharged
     at the pipeline top (`Implementation/Optimizer.lean`). -/
-theorem PassCorrect.toSound {cs out : ConstraintSystem p} {ds : Derivations p}
+theorem PassCorrect.toSound {cs out : Circuit p} {ds : Derivations p}
     {bs : BusSemantics p} (h : PassCorrect cs out ds bs) : out.isSoundReplacementOf cs bs :=
   ⟨h.1, h.2.1⟩
 
 /-- The result of a verified pass: transformed system, introduced derivations, correctness proof. -/
-structure PassResult {p : ℕ} (cs : ConstraintSystem p) (bs : BusSemantics p) where
-  out : ConstraintSystem p
+structure PassResult {p : ℕ} (cs : Circuit p) (bs : BusSemantics p) where
+  out : Circuit p
   derivs : Derivations p
   correct : PassCorrect cs out derivs bs
 
 /-! ## Variable-set membership -/
 
 /-- A variable of `cs.vars` occurs in some constraint, multiplicity, or payload expression. -/
-theorem ConstraintSystem.mem_vars {cs : ConstraintSystem p} {x : Variable} :
+theorem Circuit.mem_vars {cs : Circuit p} {x : Variable} :
     x ∈ cs.vars ↔
       (∃ c ∈ cs.algebraicConstraints, x ∈ c.vars) ∨
       (∃ bi ∈ cs.busInteractions, x ∈ bi.multiplicity.vars ∨ ∃ e ∈ bi.payload, x ∈ e.vars) := by
-  simp only [ConstraintSystem.vars, List.mem_append, List.mem_flatMap]
+  simp only [Circuit.vars, List.mem_append, List.mem_flatMap]
 
-theorem ConstraintSystem.mem_vars_of_constraint {cs : ConstraintSystem p} {c : Expression p}
+theorem Circuit.mem_vars_of_constraint {cs : Circuit p} {c : Expression p}
     {x : Variable} (hc : c ∈ cs.algebraicConstraints) (hx : x ∈ c.vars) : x ∈ cs.vars :=
-  ConstraintSystem.mem_vars.2 (Or.inl ⟨c, hc, hx⟩)
+  Circuit.mem_vars.2 (Or.inl ⟨c, hc, hx⟩)
 
-theorem ConstraintSystem.mem_vars_of_mult {cs : ConstraintSystem p}
+theorem Circuit.mem_vars_of_mult {cs : Circuit p}
     {bi : BusInteraction (Expression p)} {x : Variable} (hbi : bi ∈ cs.busInteractions)
     (hx : x ∈ bi.multiplicity.vars) : x ∈ cs.vars :=
-  ConstraintSystem.mem_vars.2 (Or.inr ⟨bi, hbi, Or.inl hx⟩)
+  Circuit.mem_vars.2 (Or.inr ⟨bi, hbi, Or.inl hx⟩)
 
-theorem ConstraintSystem.mem_vars_of_payload {cs : ConstraintSystem p}
+theorem Circuit.mem_vars_of_payload {cs : Circuit p}
     {bi : BusInteraction (Expression p)} {e : Expression p} {x : Variable}
     (hbi : bi ∈ cs.busInteractions) (he : e ∈ bi.payload) (hx : x ∈ e.vars) : x ∈ cs.vars :=
-  ConstraintSystem.mem_vars.2 (Or.inr ⟨bi, hbi, Or.inr ⟨e, he, hx⟩⟩)
+  Circuit.mem_vars.2 (Or.inr ⟨bi, hbi, Or.inr ⟨e, he, hx⟩⟩)
 
 /-! ## Decidable degree-bound check
 
-A `Bool` twin of the spec's `ConstraintSystem.withinDegree` for the degree guard to branch on. -/
+A `Bool` twin of the spec's `Circuit.withinDegree` for the degree guard to branch on. -/
 
-/-- Decidable twin of `ConstraintSystem.withinDegree`. -/
-def ConstraintSystem.withinDegreeB (s : ConstraintSystem p) (b : DegreeBound) : Bool :=
+/-- Decidable twin of `Circuit.withinDegree`. -/
+def Circuit.withinDegreeB (s : Circuit p) (b : DegreeBound) : Bool :=
   s.algebraicConstraints.all (fun c => c.degree ≤ b.identities) &&
   s.busInteractions.all (fun bi =>
     decide (bi.multiplicity.degree ≤ b.busInteractions) &&
       bi.payload.all (fun e => e.degree ≤ b.busInteractions))
 
-theorem ConstraintSystem.withinDegreeB_iff (s : ConstraintSystem p) (b : DegreeBound) :
+theorem Circuit.withinDegreeB_iff (s : Circuit p) (b : DegreeBound) :
     s.withinDegreeB b = true ↔ s.withinDegree b := by
-  unfold ConstraintSystem.withinDegreeB ConstraintSystem.withinDegree
+  unfold Circuit.withinDegreeB Circuit.withinDegree
   rw [Bool.and_eq_true, List.all_eq_true, List.all_eq_true]
   constructor
   · rintro ⟨hc, hb⟩

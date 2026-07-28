@@ -164,7 +164,7 @@ theorem pipeline_respectsDeg (b : DegreeBound) : RespectsDeg b (pipeline (p := p
 /-- The fact-aware circuit optimizer: given proven `BusFacts` (which fixes the implicit `bs`), run
     the pipeline and return the output system with the `Derivations` for its new variables. -/
 def optimizerWithBusFacts {bs : BusSemantics p} (b : DegreeBound) (facts : BusFacts p bs)
-    (cs : ConstraintSystem p) : ConstraintSystem p × Derivations p :=
+    (cs : Circuit p) : Circuit p × Derivations p :=
   let r := pipeline b cs bs facts
   -- Drop derivations for variables absent from the output: dead, and the spec requires every
   -- recorded derivation to name an output variable.
@@ -175,16 +175,16 @@ def optimizerWithBusFacts {bs : BusSemantics p} (b : DegreeBound) (facts : BusFa
 Two assignments agreeing on `cs.vars` are interchangeable for `satisfies`/`admissible`/`sideEffects`.
 The completeness proof below uses these to swap the abstract per-pass witness for `witgen`'s output. -/
 
-theorem ConstraintSystem.busEval_congr {cs : ConstraintSystem p} {f g : Variable → ZMod p}
+theorem Circuit.busEval_congr {cs : Circuit p} {f g : Variable → ZMod p}
     (h : ∀ x ∈ cs.vars, f x = g x) {bi : BusInteraction (Expression p)}
     (hbi : bi ∈ cs.busInteractions) : bi.eval f = bi.eval g :=
   BusInteraction.eval_congr bi f g (fun x hx => by
     simp only [BusInteraction.vars, List.mem_append, List.mem_flatMap] at hx
     rcases hx with hx | ⟨e, he, hx⟩
-    · exact h x (ConstraintSystem.mem_vars_of_mult hbi hx)
-    · exact h x (ConstraintSystem.mem_vars_of_payload hbi he hx))
+    · exact h x (Circuit.mem_vars_of_mult hbi hx)
+    · exact h x (Circuit.mem_vars_of_payload hbi he hx))
 
-theorem ConstraintSystem.satisfies_congr {cs : ConstraintSystem p} {bs : BusSemantics p}
+theorem Circuit.satisfies_congr {cs : Circuit p} {bs : BusSemantics p}
     {f g : Variable → ZMod p} (h : ∀ x ∈ cs.vars, f x = g x) :
     cs.satisfies bs f ↔ cs.satisfies bs g := by
   have imp : ∀ e1 e2 : Variable → ZMod p, (∀ x ∈ cs.vars, e1 x = e2 x) →
@@ -192,29 +192,29 @@ theorem ConstraintSystem.satisfies_congr {cs : ConstraintSystem p} {bs : BusSema
     intro e1 e2 hh hsat
     refine ⟨fun c hc => ?_, fun bi hbi => ?_⟩
     · rw [← Expression.eval_congr c e1 e2
-        (fun x hx => hh x (ConstraintSystem.mem_vars_of_constraint hc hx))]
+        (fun x hx => hh x (Circuit.mem_vars_of_constraint hc hx))]
       exact hsat.1 c hc
-    · have hbe : bi.eval e1 = bi.eval e2 := ConstraintSystem.busEval_congr hh hbi
+    · have hbe : bi.eval e1 = bi.eval e2 := Circuit.busEval_congr hh hbi
       show (bi.eval e2).multiplicity ≠ 0 → bs.violatesConstraint (bi.eval e2) = false
       rw [← hbe]
       exact hsat.2 bi hbi
   exact ⟨imp f g h, imp g f (fun x hx => (h x hx).symm)⟩
 
-theorem ConstraintSystem.admissible_congr {cs : ConstraintSystem p} {bs : BusSemantics p}
+theorem Circuit.admissible_congr {cs : Circuit p} {bs : BusSemantics p}
     {f g : Variable → ZMod p} (h : ∀ x ∈ cs.vars, f x = g x) :
     cs.admissible bs f ↔ cs.admissible bs g := by
   have hmap : (cs.busInteractions.map (fun bi => bi.eval f))
       = (cs.busInteractions.map (fun bi => bi.eval g)) :=
-    List.map_congr_left (fun bi hbi => ConstraintSystem.busEval_congr h hbi)
-  unfold ConstraintSystem.admissible
+    List.map_congr_left (fun bi hbi => Circuit.busEval_congr h hbi)
+  unfold Circuit.admissible
   rw [hmap]
 
-theorem ConstraintSystem.sideEffects_congr {cs : ConstraintSystem p} {bs : BusSemantics p}
+theorem Circuit.sideEffects_congr {cs : Circuit p} {bs : BusSemantics p}
     {f g : Variable → ZMod p} (h : ∀ x ∈ cs.vars, f x = g x) :
     cs.sideEffects bs f = cs.sideEffects bs g := by
-  unfold ConstraintSystem.sideEffects
+  unfold Circuit.sideEffects
   refine List.map_congr_left (fun bi hbi => ?_)
-  simp only [ConstraintSystem.busEval_congr h (List.mem_of_mem_filter hbi)]
+  simp only [Circuit.busEval_congr h (List.mem_of_mem_filter hbi)]
 
 /-- Pruning derivations to those naming a variable in `out` leaves `methodFor` unchanged on any
     variable in `out`. -/
@@ -238,7 +238,7 @@ theorem Derivations.methodFor_filter {out : List Variable} {v : Variable} (hv : 
     replaces the input's real-trace executions (`witgen` on any admissible input trace reproduces a
     valid witness) — the clauses `Optimizer.isCorrect` demands. -/
 theorem optimizerWithBusFacts_correct {bs : BusSemantics p} (b : DegreeBound) (facts : BusFacts p bs)
-    (cs : ConstraintSystem p) :
+    (cs : Circuit p) :
     (optimizerWithBusFacts b facts cs).1.isSoundReplacementOf cs bs ∧
       (optimizerWithBusFacts b facts cs).1.isCompleteReplacementOf cs bs (optimizerWithBusFacts b facts cs).2 := by
   refine ⟨(pipeline b cs bs facts).correct.toSound, ?_⟩
@@ -272,8 +272,8 @@ theorem optimizerWithBusFacts_correct {bs : BusSemantics p} (b : DegreeBound) (f
         = Derivations.witgen (pipeline b cs bs facts).derivs env v by
       simp only [Derivations.witgen, Derivations.methodFor_filter hv]]
     exact hagree v hv
-  refine ⟨?_, ?_, (ConstraintSystem.satisfies_congr hagree').mpr hsat',
-    (ConstraintSystem.admissible_congr hagree').mpr hadm', ?_⟩
+  refine ⟨?_, ?_, (Circuit.satisfies_congr hagree').mpr hsat',
+    (Circuit.admissible_congr hagree').mpr hadm', ?_⟩
   · -- `ds` covers the output columns: reused ones exist in the input (`hS`); derived ones have a
     -- method reading only powdr-ID columns, preserved by the pruning.
     intro v hv
@@ -289,13 +289,13 @@ theorem optimizerWithBusFacts_correct {bs : BusSemantics p} (b : DegreeBound) (f
         ≈ (pipeline b cs bs facts).out.sideEffects bs (Derivations.witgen
             ((pipeline b cs bs facts).derivs.filter
               (fun d => decide (d.1 ∈ (pipeline b cs bs facts).out.vars))) env)
-    rw [ConstraintSystem.sideEffects_congr hagree']
+    rw [Circuit.sideEffects_congr hagree']
     exact hse
 
 /-- The fact-aware optimizer never pushes a within-bound circuit past the zkVM's degree
     bound (every pass is degree-guarded). -/
 theorem optimizerWithBusFacts_respectsDegree {bs : BusSemantics p} (b : DegreeBound)
-    (facts : BusFacts p bs) (cs : ConstraintSystem p)
+    (facts : BusFacts p bs) (cs : Circuit p)
     (h : cs.withinDegree b) :
     (optimizerWithBusFacts b facts cs).1.withinDegree b :=
   pipeline_respectsDeg b cs bs facts h

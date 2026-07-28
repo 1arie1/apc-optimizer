@@ -54,8 +54,8 @@ def readInput (fileName : String) : IO String := do
     Rejects systems with bus ids missing from the map: an unmapped bus would be modeled as a
     no-op bus (stateless, never violating), silently licensing unsound optimizations. -/
 def parseFileWith {p : ℕ} {τ : Type}
-    (parse : String → Except String (ConstraintSystem p × (Nat → Option τ)))
-    (fileName : String) : IO (ConstraintSystem p × (Nat → Option τ)) := do
+    (parse : String → Except String (Circuit p × (Nat → Option τ)))
+    (fileName : String) : IO (Circuit p × (Nat → Option τ)) := do
   let contents ← readInput fileName
   match parse contents with
   | .error err =>
@@ -73,12 +73,12 @@ def parseFileWith {p : ℕ} {τ : Type}
 /-- The OpenVM (BabyBear) file parser: resolve the `BusMapList` to a lookup, dropping `next_free_id`
     (the CLI does not need powdr's column cursor). -/
 def parseOpenVm (contents : String) :
-    Except String (ConstraintSystem babyBear × (Nat → Option OpenVmBusType)) :=
+    Except String (Circuit babyBear × (Nat → Option OpenVmBusType)) :=
   (parseJsonSystem (p := babyBear) contents).map (fun (s, bm, _) => (s, bm.toBusMap))
 
 /-- The SP1 (KoalaBear) file parser. -/
 def parseSp1 (contents : String) :
-    Except String (ConstraintSystem ApcOptimizer.SP1.koalaBear ×
+    Except String (Circuit ApcOptimizer.SP1.koalaBear ×
       (Nat → Option ApcOptimizer.SP1.Sp1BusType)) :=
   (parseJsonSystemSp1 (p := ApcOptimizer.SP1.koalaBear) contents).map
     (fun (s, bm, _) => (s, bm.toBusMap))
@@ -89,22 +89,22 @@ structure Stats where
   constraints : Nat
   busInteractions : Nat
 
-/-- Same count as `ConstraintSystem.size` (distinct variables), but via a hash set —
+/-- Same count as `Circuit.size` (distinct variables), but via a hash set —
     `List.dedup` is quadratic and benchmark machines have ~10⁵ variable occurrences. -/
-def distinctVarCount {p : ℕ} (cs : ConstraintSystem p) : Nat :=
+def distinctVarCount {p : ℕ} (cs : Circuit p) : Nat :=
   let occurrences := cs.algebraicConstraints.flatMap Expression.vars ++
     cs.busInteractions.flatMap BusInteraction.vars
   (occurrences.foldl (init := (∅ : Std.HashSet Variable)) (·.insert ·)).size
 
 /-- The distinct variable names of a constraint system, sorted and rendered for display.
     Variables may carry structured powdr IDs internally, but reports show only `Variable.name`. -/
-def distinctVars {p : ℕ} (cs : ConstraintSystem p) : List String :=
+def distinctVars {p : ℕ} (cs : Circuit p) : List String :=
   let occurrences := cs.algebraicConstraints.flatMap Expression.vars ++
     cs.busInteractions.flatMap BusInteraction.vars
   ((occurrences.foldl (init := (∅ : Std.HashSet Variable)) (·.insert ·)).toList.map
     (fun x => x.name)).mergeSort (fun a b => decide (a ≤ b))
 
-def statsOf {p : ℕ} (cs : ConstraintSystem p) : Stats :=
+def statsOf {p : ℕ} (cs : Circuit p) : Stats :=
   { vars := distinctVarCount cs,
     constraints := cs.algebraicConstraints.length,
     busInteractions := cs.busInteractions.length }
@@ -138,8 +138,8 @@ def printEffectiveness (label : String) (before after : Stats) : IO Unit := do
     its fact-aware optimizer, and its degree bound (reported by `run`). All three are threaded
     through the generic `cmd*Impl` bodies so a single implementation serves both OpenVM and SP1. -/
 structure VmBackend (p : ℕ) (τ : Type) where
-  parse : String → Except String (ConstraintSystem p × (Nat → Option τ))
-  optimize : (Nat → Option τ) → ConstraintSystem p → ConstraintSystem p × Derivations p
+  parse : String → Except String (Circuit p × (Nat → Option τ))
+  optimize : (Nat → Option τ) → Circuit p → Circuit p × Derivations p
   degreeBound : DegreeBound
 
 def cmdRunImpl {p : ℕ} {τ : Type} (be : VmBackend p τ) (fileName : String) : IO Unit := do
@@ -205,7 +205,7 @@ def jsonEscape (s : String) : String :=
   s.replace "\t" "\\t"
 
 /-- One circuit as a JSON object: size stats plus the DSL render. -/
-def circuitJson {p : ℕ} (cs : ConstraintSystem p) : String :=
+def circuitJson {p : ℕ} (cs : Circuit p) : String :=
   let st := statsOf cs
   let vs := String.intercalate "," ((distinctVars cs).map (fun s => "\"" ++ jsonEscape s ++ "\""))
   "{\"vars\":" ++ toString st.vars ++
@@ -332,7 +332,7 @@ def denseProfileLoop {p : ℕ} (passes : List (String × DenseVerifiedPassW p))
     the dense prelude list once, iterate the dense `cleanupPasses` list to its fixpoint, step the
     dense coda list once, decode once at output. Encode and decode are reported on their own lines and
     never charged to any pass. -/
-def profileRun {p : ℕ} (b : DegreeBound) (fileName : String) (cs : ConstraintSystem p)
+def profileRun {p : ℕ} (b : DegreeBound) (fileName : String) (cs : Circuit p)
     (bs : BusSemantics p) (facts : BusFacts p bs) (verbose : Bool := false) : IO Unit := do
   let t0 ← IO.monoMsNow
   -- Encode once at the pipeline entry (reported on its own line, never charged to a pass).
