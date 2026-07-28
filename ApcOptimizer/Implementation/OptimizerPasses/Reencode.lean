@@ -638,6 +638,10 @@ structure DenseReencodeWork (p : ℕ) where
   lastPos : Std.HashMap VarId Nat
   /-- An upper bound on the positions of `cs` carrying a variable-free composite node. -/
   lastFold : Nat
+  /-- Whether `lastPos`/`lastFold` have been computed. They are seeded on the first accept rather than
+      at pass entry (`denseWorkEnsureBounded`): an APC that never accepts would otherwise pay a full
+      variable fold per cleanup cycle for a bound it never consults. -/
+  bounded : Bool
 
 def denseIsZero : DenseExpr p → Bool
   | .const n => n == 0
@@ -1101,7 +1105,8 @@ theorem denseBoolConstraints_not_zero (bits : List VarId) :
 
 
 /-- One accept on the working system: splice the constraints, gate the bus interactions (reusing the
-    fused traversal of `denseGateBisGo`), and accumulate the booleanity constraints. -/
+    fused traversal of `denseGateBisGo`), and accumulate the booleanity constraints. Assumes the
+    position bound is computed — `denseWorkStep` calls `denseWorkEnsureBounded` first. -/
 def denseWorkOut (b : DegreeBound) (w : DenseReencodeWork p) (xs bits : List VarId)
     (hm : Std.HashMap VarId (DenseExpr p)) : DenseReencodeWork p × Bool :=
   let σfn := denseGroupSubst xs hm
@@ -1112,7 +1117,7 @@ def denseWorkOut (b : DegreeBound) (w : DenseReencodeWork p) (xs bits : List Var
   let newBools := bits.map (denseBoolConstraint (p := p))
   ({ cs := rc.1, bis := rb.1, bools := w.bools ++ newBools,
      bitSet := bits.foldl (·.insert ·) w.bitSet,
-     lastPos := rc.2.1, lastFold := rc.2.2.1 },
+     lastPos := rc.2.1, lastFold := rc.2.2.1, bounded := true },
    (rc.2.2.2 && newBools.all (fun c => decide (c.degree ≤ b.identities))) && rb.2)
 
 /-- An accept on the working system is `denseReencodeOut` on the view, followed by dropping the
@@ -1567,6 +1572,37 @@ def denseReencodeStateUpdate (state : DenseReencodeCacheState p) (xs bits : List
     else st) st
   { st with varSet := bits.foldl (·.insert ·) st.varSet, dWithin := true }
 
+theorem densePosOk_from0 {lp : Std.HashMap VarId Nat} {lf : Nat} {cs : List (DenseExpr p)} :
+    DenseWorkPosOk lp lf cs ↔ DenseWorkPosOkFrom 0 lp lf cs := by
+  constructor <;> intro h j c hj <;> simpa using h j c hj
+
+/-- Compute the position bound if it has not been computed yet. Called on the accept path only, so a
+    pass application that accepts nothing never walks the variables at all. -/
+def denseWorkEnsureBounded (w : DenseReencodeWork p) : DenseReencodeWork p :=
+  if w.bounded then w
+  else { w with lastPos := denseSeedLp 0 w.cs ∅, lastFold := denseSeedLf 0 w.cs 0, bounded := true }
+
+theorem denseWorkEnsureBounded_view (w : DenseReencodeWork p) :
+    denseWorkView (denseWorkEnsureBounded w) = denseWorkView w := by
+  unfold denseWorkEnsureBounded denseWorkView; split <;> rfl
+
+theorem denseWorkEnsureBounded_bitSet (w : DenseReencodeWork p) :
+    (denseWorkEnsureBounded w).bitSet = w.bitSet := by
+  unfold denseWorkEnsureBounded; split <;> rfl
+
+theorem denseWorkEnsureBounded_bools (w : DenseReencodeWork p) :
+    (denseWorkEnsureBounded w).bools = w.bools := by
+  unfold denseWorkEnsureBounded; split <;> rfl
+
+theorem denseWorkEnsureBounded_posOk {w : DenseReencodeWork p}
+    (h : w.bounded = true → DenseWorkPosOk w.lastPos w.lastFold w.cs) :
+    DenseWorkPosOk (denseWorkEnsureBounded w).lastPos (denseWorkEnsureBounded w).lastFold
+      (denseWorkEnsureBounded w).cs := by
+  unfold denseWorkEnsureBounded
+  split
+  · next hb => exact h hb
+  · exact densePosOk_from0.mpr (denseSeed_posOk w.cs 0 ∅ 0)
+
 /-! ### The step, loop and pass over the working system -/
 
 /-- `d`'s item counts for the fresh-name prefix, read off the working system. -/
@@ -1601,7 +1637,7 @@ def denseWorkStep (b : DegreeBound) (reg : VarRegistry) (w : DenseReencodeWork p
     if xs.all (fun x => decide (x ∉ bits)) then
     if bits.all (fun bb => decide ((reg1.resolve bb).powdrId? = none)) then
     if denseCheckReencode { algebraicConstraints := w.cs, busInteractions := w.bis } xs bits hm then
-      let ro := denseWorkOut b w xs bits hm
+      let ro := denseWorkOut b (denseWorkEnsureBounded w) xs bits hm
       if (if state.dWithin then ro.2 else (denseWorkView ro.1).withinDegreeB b) then
         (reg1, ro.1,
          bits.map (fun bb => (bb, denseBitCM (denseAssignments (denseBitBox bits)) xs hm bb)),
@@ -1626,8 +1662,7 @@ def denseWorkLoop (b : DegreeBound) :
 
 def denseWorkSeed (d : DenseConstraintSystem p) : DenseReencodeWork p :=
   { cs := d.algebraicConstraints, bis := d.busInteractions, bools := [], bitSet := ∅,
-    lastPos := denseSeedLp 0 d.algebraicConstraints ∅,
-    lastFold := denseSeedLf 0 d.algebraicConstraints 0 }
+    lastPos := ∅, lastFold := 0, bounded := false }
 
 /-- Witness re-encoding. When a group of variables `xs` is so constrained that only a few value
     combinations survive, mint `Nat.clog 2 #survivors` fresh boolean bits, rewrite each group

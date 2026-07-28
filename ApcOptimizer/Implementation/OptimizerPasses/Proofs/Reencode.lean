@@ -1341,7 +1341,7 @@ theorem denseWorkStep_correct [Fact p.Prime] (b : DegreeBound)
     (reg : VarRegistry) (w : DenseReencodeWork p) (state : DenseReencodeCacheState p)
     (xs : List VarId) (freshBase : String) (bs : BusSemantics p)
     (hcov : (denseWorkView w).CoveredBy reg)
-    (hpos : DenseWorkPosOk w.lastPos w.lastFold w.cs)
+    (hpos : w.bounded = true → DenseWorkPosOk w.lastPos w.lastFold w.cs)
     (hbools : DenseWorkBoolsOk w.bitSet w.bools) :
     reg.Extends (denseWorkStep b reg w state xs freshBase).1
     ∧ (∀ i, (denseWorkStep b reg w state xs freshBase).1.isInput i = reg.isInput i)
@@ -1372,8 +1372,12 @@ theorem denseWorkStep_correct [Fact p.Prime] (b : DegreeBound)
     exact hD
   have hview : denseWorkView ro.1
       = (denseReencodeOut (denseWorkView w) xs bits hm).filterConstraints
-          (fun c => !denseIsZero c) :=
-    denseWorkOut_view b w xs bits hm hpos hbools hxsB'
+          (fun c => !denseIsZero c) := by
+    have h := denseWorkOut_view b (denseWorkEnsureBounded w) xs bits hm
+      (denseWorkEnsureBounded_posOk hpos)
+      (by rw [denseWorkEnsureBounded_bitSet, denseWorkEnsureBounded_bools]; exact hbools)
+      (by rw [denseWorkEnsureBounded_bitSet]; exact hxsB')
+    rwa [denseWorkEnsureBounded_view] at h
   have hpolyVars := denseCheckReencode_polyVars (denseWorkView w) xs bits hm hchkView
   have hxsInput : ∀ x ∈ xs, reg1.isInput x = true := fun x hx => by
     rw [hbii x]
@@ -1404,10 +1408,6 @@ theorem denseWorkStep_correct [Fact p.Prime] (b : DegreeBound)
       (fun c _ hk => denseIsZero_eval (by simpa using hk))
     simpa using h1.andThen h2
 
-theorem densePosOk_from0 {lp : Std.HashMap VarId Nat} {lf : Nat} {cs : List (DenseExpr p)} :
-    DenseWorkPosOk lp lf cs ↔ DenseWorkPosOkFrom 0 lp lf cs := by
-  constructor <;> intro h j c hj <;> simpa using h j c hj
-
 theorem denseBitSetFold_mono (bits : List VarId) :
     ∀ (s : Std.HashSet VarId) (v : VarId), s.contains v = true →
       (bits.foldl (·.insert ·) s).contains v = true := by
@@ -1432,24 +1432,29 @@ theorem denseBitSetFold_mem (bits : List VarId) :
 
 theorem denseWorkStep_inv (b : DegreeBound) (reg : VarRegistry) (w : DenseReencodeWork p)
     (state : DenseReencodeCacheState p) (xs : List VarId) (freshBase : String)
-    (hpos : DenseWorkPosOk w.lastPos w.lastFold w.cs)
+    (hpos : w.bounded = true → DenseWorkPosOk w.lastPos w.lastFold w.cs)
     (hbools : DenseWorkBoolsOk w.bitSet w.bools) :
-    DenseWorkPosOk (denseWorkStep b reg w state xs freshBase).2.1.lastPos
+    ((denseWorkStep b reg w state xs freshBase).2.1.bounded = true →
+      DenseWorkPosOk (denseWorkStep b reg w state xs freshBase).2.1.lastPos
         (denseWorkStep b reg w state xs freshBase).2.1.lastFold
-        (denseWorkStep b reg w state xs freshBase).2.1.cs
+        (denseWorkStep b reg w state xs freshBase).2.1.cs)
     ∧ DenseWorkBoolsOk (denseWorkStep b reg w state xs freshBase).2.1.bitSet
         (denseWorkStep b reg w state xs freshBase).2.1.bools := by
   fun_cases denseWorkStep b reg w state xs freshBase
   all_goals try exact ⟨hpos, hbools⟩
   rename_i hgate hbit hcoll reg1 bits hm rootCache hbeq state1 hbits hdpr hA hB hC hD ro hwd
   refine ⟨?_, ?_⟩
-  · show DenseWorkPosOk _ _ _
+  · intro _
+    show DenseWorkPosOk _ _ _
     rw [densePosOk_from0]
+    set w' := denseWorkEnsureBounded w with hw'
     exact denseWorkSpliceCs_posOk b.identities xs bits (denseGroupSubst xs hm)
-      (denseAssignments (denseBitBox bits)) (denseWorkMaxPos w.lastPos w.lastFold xs)
-      w.cs 0 [] w.lastPos w.lastFold true rfl (by intro j c hj; simp at hj)
-      (densePosOk_from0.mp hpos)
-  · show DenseWorkBoolsOk _ _
+      (denseAssignments (denseBitBox bits)) (denseWorkMaxPos w'.lastPos w'.lastFold xs)
+      w'.cs 0 [] w'.lastPos w'.lastFold true rfl (by intro j c hj; simp at hj)
+      (densePosOk_from0.mp (denseWorkEnsureBounded_posOk hpos))
+  · show DenseWorkBoolsOk (bits.foldl (·.insert ·) (denseWorkEnsureBounded w).bitSet)
+      ((denseWorkEnsureBounded w).bools ++ bits.map (denseBoolConstraint (p := p)))
+    rw [denseWorkEnsureBounded_bitSet, denseWorkEnsureBounded_bools]
     intro c hc
     rcases List.mem_append.mp hc with hc | hc
     · obtain ⟨bb, rfl, hbb⟩ := hbools c hc
@@ -1462,7 +1467,7 @@ theorem denseWorkLoop_correct [Fact p.Prime] (b : DegreeBound) (bs : BusSemantic
     ∀ (targets : List (List VarId)) (idx : Nat) (reg : VarRegistry) (w : DenseReencodeWork p)
       (state : DenseReencodeCacheState p) (nc nb : Nat),
       (denseWorkView w).CoveredBy reg →
-      DenseWorkPosOk w.lastPos w.lastFold w.cs →
+      (w.bounded = true → DenseWorkPosOk w.lastPos w.lastFold w.cs) →
       DenseWorkBoolsOk w.bitSet w.bools →
       reg.Extends (denseWorkLoop b targets idx reg w state nc nb).1
       ∧ (∀ i, (denseWorkLoop b targets idx reg w state nc nb).1.isInput i = reg.isInput i)
@@ -1532,8 +1537,9 @@ theorem denseReencodeF_props (pw : PrimeWitness p) (b : DegreeBound) (reg : VarR
     have hseedCov : (denseWorkView (denseWorkSeed d)).CoveredBy reg := by
       rw [denseWorkSeed_view]
       exact denseFilterConstraints_coveredBy hcov
-    have hseedPos : DenseWorkPosOk (denseWorkSeed d).lastPos (denseWorkSeed d).lastFold
-        (denseWorkSeed d).cs := densePosOk_from0.mpr (denseSeed_posOk d.algebraicConstraints 0 ∅ 0)
+    have hseedPos : (denseWorkSeed d).bounded = true →
+        DenseWorkPosOk (denseWorkSeed d).lastPos (denseWorkSeed d).lastFold
+          (denseWorkSeed d).cs := by intro hb; simp [denseWorkSeed] at hb
     have hseedBools : DenseWorkBoolsOk (denseWorkSeed d).bitSet (denseWorkSeed d).bools := by
       intro c hc; simp [denseWorkSeed] at hc
     set st : DenseReencodeCacheState p :=
