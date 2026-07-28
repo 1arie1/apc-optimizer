@@ -180,10 +180,9 @@ private theorem memory_recv_bytes (busMap : Nat → Option OpenVmBusType)
   rw [hbus, hpay, hm] at hok
   have has' : (a0.val == 1 || a0.val == 2) = true := by
     rcases has with h | h <;> simp [h]
-  simp only [decide_true, has', Bool.true_and, Bool.not_eq_false', List.all_eq_true,
-    List.mem_cons, List.not_mem_nil, or_false, forall_eq_or_imp, forall_eq,
-    isByte, decide_eq_true_eq] at hok
-  exact ⟨hok.1, hok.2.1, hok.2.2.1, hok.2.2.2⟩
+  simp only [memoryPayload?, MemoryPayload.isByteChecked, decide_true, has', Bool.true_and,
+    Bool.not_eq_false', Vector.all_eq_true, isByte, decide_eq_true_eq] at hok
+  exact ⟨hok 0 (by omega), hok 1 (by omega), hok 2 (by omega), hok 3 (by omega)⟩
 
 /-- A memory message that is not a receive (multiplicity ≠ -1) never violates. -/
 private theorem memory_nonRecv_ok (busMap : Nat → Option OpenVmBusType)
@@ -194,7 +193,7 @@ private theorem memory_nonRecv_ok (busMap : Nat → Option OpenVmBusType)
   unfold violates
   rw [hbus]
   rcases payload with _ | ⟨a0, _ | ⟨a1, _ | ⟨d0, _ | ⟨d1, _ | ⟨d2, _ | ⟨d3, rest⟩⟩⟩⟩⟩⟩ <;>
-    simp [hm]
+    simp [memoryPayload?, hm]
 
 /-- A memory *send* (multiplicity 1) never violates: either the characteristic is > 2 and a
     send is not a receive, or `p ∣ 2` and every value is trivially a byte. -/
@@ -216,7 +215,7 @@ private theorem memory_send_ok [NeZero p] (busMap : Nat → Option OpenVmBusType
     unfold violates
     rw [hbus]
     rcases payload with _ | ⟨a0, _ | ⟨a1, _ | ⟨d0, _ | ⟨d1, _ | ⟨d2, _ | ⟨d3, rest⟩⟩⟩⟩⟩⟩ <;>
-      simp [isByte, hbyte]
+      simp [memoryPayload?, MemoryPayload.isByteChecked, isByte, hbyte]
   · exact memory_nonRecv_ok busMap m hbus (by rw [hm]; exact hc)
 
 /-- A memory *receive* (multiplicity -1) with byte data limbs (payload slots 2–5, where
@@ -236,7 +235,7 @@ private theorem memory_recv_ok (busMap : Nat → Option OpenVmBusType)
   have h1 : d1.val < 256 := hslots 3 (by simp) d1 rfl
   have h2 : d2.val < 256 := hslots 4 (by simp) d2 rfl
   have h3 : d3.val < 256 := hslots 5 (by simp) d3 rfl
-  simp [isByte, h0, h1, h2, h3]
+  simp [memoryPayload?, MemoryPayload.isByteChecked, isByte, h0, h1, h2, h3]
 
 /-- A memory message whose address-space slot (slot 0) is a constant ∉ {1, 2} never violates:
     `violates` only rejects non-byte data on address spaces 1 and 2. -/
@@ -258,7 +257,7 @@ private theorem memory_recv_nonByte_ok (busMap : Nat → Option OpenVmBusType)
     rw [has]
     simp only [Bool.or_eq_false_iff, beq_eq_false_iff_ne]
     exact ⟨hne1, hne2⟩
-  simp only [hmid, Bool.and_false, Bool.false_and]
+  simp only [memoryPayload?, MemoryPayload.isByteChecked, hmid, Bool.and_false, Bool.false_and]
 
 /-- A bus with a declared last-write-wins shape (memory or execution bridge) is stateful. -/
 theorem openVm_isStateful_of_memShape {p : ℕ} (busMap : Nat → Option OpenVmBusType)

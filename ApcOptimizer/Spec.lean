@@ -18,8 +18,6 @@ structure Variable where
   powdrId? : Option Nat := none
   deriving DecidableEq, Repr
 
-instance : BEq Variable := ⟨fun a b => decide (a = b)⟩
-
 /-- An arithmetic expression over structured variables and field constants. -/
 inductive Expression (p : ℕ) where
   /-- A constant field element. -/
@@ -135,12 +133,14 @@ structure BusSemantics (p : ℕ) where
   /-- Whether sending this bus interaction message violates a constraint in
       *another* chip.
       An example of this is sending a message that conflicts with a lookup
-      table entry. -/
+      table entry.
+      Only consulted for messages with nonzero multiplicity. -/
   violatesConstraint (busInteractionMessage : BusInteraction (ZMod p)) : Bool
   /-- Whether sending this bus interaction message breaks an invariant on which
       soundness of the system depends.
       For example, a memory bus might have the invariant that all sent values
-      must be in a certain range. -/
+      must be in a certain range.
+      Only consulted for messages with nonzero multiplicity. -/
   breaksInvariant (busInteractionMessage : BusInteraction (ZMod p)) : Bool
   /-- A property on *stateful* bus messages with nonzero multiplicity.
       Completeness is only required for assignments whose stateful messages
@@ -207,8 +207,10 @@ def Derivations.methodFor :
     Derivations p → Variable → Option (ComputationMethod p)
   | [], _ => none
   | (u, cm) :: rest, v =>
-      (Derivations.methodFor rest v).orElse
-        (fun _ => if u = v then some cm else none)
+      match Derivations.methodFor rest v with
+      -- If `v` is derived later, that derivation overrides this one.
+      | some later => some later
+      | none => if u = v then some cm else none
 
 -- ANCHOR: witgen
 /-- Whether `ds` lets witness generation produce every element of `outputVars`

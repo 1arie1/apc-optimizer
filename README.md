@@ -15,6 +15,11 @@ apc-optimizer, it should be sufficient to review:
 3. [`ApcOptimizer/MemoryBus.lean`](./ApcOptimizer/MemoryBus.lean): The memory-discipline utility the semantics above build on (its `direction` selects OpenVM's send-then-receive convention or SP1's reverse); likely useful for other VMs as well.
 4. The correctness theorems in [`ApcOptimizer/Optimizer.lean`](./ApcOptimizer/Optimizer.lean): `optimizerWithBusFacts_maintainsCorrectness` — the master statement that the optimizer maintains correctness for *any* proven bus facts — together with its instances, `simpleOptimizer_maintainsCorrectness` (the fact-free optimizer), `openVmOptimizer_maintainsCorrectness` (the `openVmOptimizer` the CLI actually runs), and `sp1Optimizer_maintainsCorrectness` (the SP1 optimizer). Audit the statements and check that the proofs are correct by running `lake build`.
 
+### Assumptions (all VMs)
+
+All variables in the input circuit carry a powdr ID. If that was not the case, the completeness
+statement would be meaningless.
+
 ### Assumptions (OpenVM)
 
 The theorem is proven against the spec and the OpenVM semantics above. For the guarantee to carry over to a real OpenVM circuit, the auditor must verify that the following assumptions hold on the *input* circuits:

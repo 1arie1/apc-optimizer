@@ -309,7 +309,7 @@ private theorem memory_nonGetPrev_ok (busMap : Nat → Option Sp1BusType)
   unfold violates
   rw [hbus]
   rcases payload with _ | ⟨c0, _ | ⟨c1, _ | ⟨a0, _ | ⟨a1, _ | ⟨a2, _ | ⟨d0, _ | ⟨d1, _ | ⟨d2,
-    _ | ⟨d3, rest⟩⟩⟩⟩⟩⟩⟩⟩⟩ <;> simp [hm]
+    _ | ⟨d3, rest⟩⟩⟩⟩⟩⟩⟩⟩⟩ <;> simp [memoryPayload?, hm]
 
 /-- A memory `getPrevious` (multiplicity 1) with 16-bit data limbs (slots 5–8) never violates. -/
 private theorem memory_getPrev_ok (busMap : Nat → Option Sp1BusType)
@@ -327,7 +327,7 @@ private theorem memory_getPrev_ok (busMap : Nat → Option Sp1BusType)
   have h1 : d1.val < 65536 := hslots 6 (by simp) d1 rfl
   have h2 : d2.val < 65536 := hslots 7 (by simp) d2 rfl
   have h3 : d3.val < 65536 := hslots 8 (by simp) d3 rfl
-  simp [is16Bit, hm, h0, h1, h2, h3]
+  simp [memoryPayload?, is16Bit, hm, h0, h1, h2, h3]
 
 /-- The four data limbs (slots 5–8) of an accepted memory `getPrevious` (multiplicity `1`, ≥9-slot
     record) are 16-bit (converse of `memory_getPrev_ok`). -/
@@ -342,7 +342,7 @@ private theorem memory_read_data (busMap : Nat → Option Sp1BusType)
   rw [hbus, hm] at hok
   rcases hs with rfl | rfl | rfl | rfl <;>
     (rcases payload with _ | ⟨c0, _ | ⟨c1, _ | ⟨a0, _ | ⟨a1, _ | ⟨a2, _ | ⟨d0, _ | ⟨d1, _ | ⟨d2,
-      _ | ⟨d3, rest⟩⟩⟩⟩⟩⟩⟩⟩⟩ <;> simp_all [is16Bit, List.all_cons, List.all_nil])
+      _ | ⟨d3, rest⟩⟩⟩⟩⟩⟩⟩⟩⟩ <;> simp_all [memoryPayload?, is16Bit, List.all_cons, List.all_nil])
 
 /-- A memory `setNew` (multiplicity -1) never violates. -/
 private theorem memory_setNew_ok [NeZero p] (busMap : Nat → Option Sp1BusType)
@@ -362,7 +362,7 @@ private theorem memory_setNew_ok [NeZero p] (busMap : Nat → Option Sp1BusType)
     unfold violates
     rw [hbus]
     rcases payload with _ | ⟨c0, _ | ⟨c1, _ | ⟨a0, _ | ⟨a1, _ | ⟨a2, _ | ⟨d0, _ | ⟨d1, _ | ⟨d2,
-      _ | ⟨d3, rest⟩⟩⟩⟩⟩⟩⟩⟩⟩ <;> simp [is16Bit, h16]
+      _ | ⟨d3, rest⟩⟩⟩⟩⟩⟩⟩⟩⟩ <;> simp [memoryPayload?, is16Bit, h16]
   · exact memory_nonGetPrev_ok busMap m hbus (by rw [hm]; exact fun h => hc h.symm)
 
 /-- The proven facts about `sp1BusSemantics`, for any bus map. -/
