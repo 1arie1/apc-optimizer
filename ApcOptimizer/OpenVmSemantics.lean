@@ -136,7 +136,7 @@ def breaksInvariant (busMap : BusMap) (msg : BusInteraction (ZMod p)) : Bool :=
     (match msg.payload with
       | addressSpace :: _pointer :: b0 :: b1 :: b2 :: b3 :: _timeStamp =>
         bif (addressSpace.val == 1 || addressSpace.val == 2) then
-          !([b0, b1, b2, b3].all (fun d => decide (d.val < 256)))
+          !([b0, b1, b2, b3].all isByte)
         else false
       | _ => false)
   -- Circuits should not send messages to an unknown bus.

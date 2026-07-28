@@ -18,8 +18,6 @@ structure Variable where
   powdrId? : Option Nat := none
   deriving DecidableEq, Repr
 
-instance : BEq Variable := ⟨fun a b => decide (a = b)⟩
-
 /-- An arithmetic expression over structured variables and field constants. -/
 inductive Expression (p : ℕ) where
   /-- A constant field element. -/
@@ -207,8 +205,9 @@ def Derivations.methodFor :
     Derivations p → Variable → Option (ComputationMethod p)
   | [], _ => none
   | (u, cm) :: rest, v =>
-      (Derivations.methodFor rest v).orElse
-        (fun _ => if u = v then some cm else none)
+      match Derivations.methodFor rest v with
+      | some later => some later
+      | none => if u = v then some cm else none
 
 -- ANCHOR: witgen
 /-- Whether `ds` lets witness generation produce every element of `outputVars`
