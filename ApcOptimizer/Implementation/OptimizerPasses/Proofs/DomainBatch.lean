@@ -805,6 +805,178 @@ private theorem denseByteBoolSound_decode_iff (bs : BusSemantics p) (facts : Bus
   exact facts.byteBoolSound bi.busId spec hspec (denseBIEval bi denv).payload (op.eval denv)
     (o1.eval denv) (o2.eval denv) (r.eval denv) (denseBIEval bi denv).multiplicity hdecEv
 
+/-! ## Byte-operand domain soundness
+
+`denseAddByteDoms` mines each recognized byte interaction's operand bound (`spec.bound`): a
+bare-variable operand gets a `.range` domain, an affine operand `a·x + b < bound` the `bound`-element
+coset `{(v - b)·a⁻¹ : v < bound}`. -/
+
+/-- The single-variable affine form recovered by `denseAffineOfExpr` evaluates as expected, with a
+    nonzero leading coefficient. -/
+theorem denseAffineOfExpr_eval (e : DenseExpr p) (x : VarId) (a b : ZMod p)
+    (h : denseAffineOfExpr e = some (x, a, b)) (denv : VarId → ZMod p) :
+    e.eval denv = a * denv x + b ∧ a ≠ 0 := by
+  unfold denseAffineOfExpr at h
+  simp only [Option.bind_eq_some_iff] at h
+  obtain ⟨l, hlin, hm⟩ := h
+  cases ht : l.norm.terms with
+  | nil => rw [ht] at hm; simp at hm
+  | cons t rest =>
+    cases rest with
+    | cons _ _ => rw [ht] at hm; simp at hm
+    | nil =>
+      obtain ⟨x0, a0⟩ := t
+      rw [ht] at hm
+      simp only at hm
+      by_cases ha0 : a0 = 0
+      · rw [if_pos ha0] at hm; simp at hm
+      · rw [if_neg ha0] at hm
+        simp only [Option.some.injEq, Prod.mk.injEq] at hm
+        obtain ⟨rfl, rfl, rfl⟩ := hm
+        refine ⟨?_, ha0⟩
+        rw [denseLinearize_eval e l hlin, ← DenseLinExpr.norm_eval, DenseLinExpr.eval, ht]
+        simp only [List.map_cons, List.map_nil, List.sum_cons, List.sum_nil, add_zero]
+        rw [add_comm]
+
+/-- The affine coset domain contains `denv x` when the operand's value is below `bound`. -/
+theorem denseByteOperandCosetMem [Fact p.Prime] [NeZero p] (e : DenseExpr p) (bound : Nat)
+    (x : VarId) (a b : ZMod p) (haff : denseAffineOfExpr e = some (x, a, b))
+    (denv : VarId → ZMod p) (hbnd : (e.eval denv).val < bound) :
+    denv x ∈ ((List.range bound).map (Nat.cast : Nat → ZMod p)).map (fun z => (z - b) * a⁻¹) := by
+  obtain ⟨heval, ha0⟩ := denseAffineOfExpr_eval e x a b haff denv
+  have hmem : e.eval denv ∈ (List.range bound).map (Nat.cast : Nat → ZMod p) :=
+    mem_range_cast (e.eval denv) bound hbnd
+  set z0 := e.eval denv with hz0
+  have hdenv : denv x = (z0 - b) * a⁻¹ := by
+    rw [heval, add_sub_cancel_right, mul_right_comm, mul_inv_cancel₀ ha0, one_mul]
+  rw [hdenv]
+  exact List.mem_map_of_mem hmem
+
+/-- The operand domain `denseByteOperandDomain e bound` contains `denv`'s value for its variable,
+    whenever `e`'s value is below `bound`. -/
+theorem denseByteOperandDomain_sound [Fact p.Prime] [NeZero p] (e : DenseExpr p) (bound : Nat)
+    (i : VarId) (d : FiniteDomain p) (h : denseByteOperandDomain e bound = some (i, d))
+    (denv : VarId → ZMod p) (hbnd : (e.eval denv).val < bound) : denv i ∈ d.toList := by
+  unfold denseByteOperandDomain at h
+  cases e with
+  | var j =>
+    simp only [Option.some.injEq, Prod.mk.injEq] at h
+    obtain ⟨rfl, rfl⟩ := h
+    show denv j ∈ (List.range bound).map (Nat.cast : Nat → ZMod p)
+    exact mem_range_cast (denv j) bound (by simpa [DenseExpr.eval] using hbnd)
+  | const n =>
+    simp only [Option.map_eq_some_iff] at h
+    obtain ⟨⟨x, a, b⟩, haff, hik⟩ := h
+    simp only [Prod.mk.injEq] at hik; obtain ⟨rfl, rfl⟩ := hik
+    exact denseByteOperandCosetMem (.const n) bound x a b haff denv hbnd
+  | add ea eb =>
+    simp only [Option.map_eq_some_iff] at h
+    obtain ⟨⟨x, a, b⟩, haff, hik⟩ := h
+    simp only [Prod.mk.injEq] at hik; obtain ⟨rfl, rfl⟩ := hik
+    exact denseByteOperandCosetMem (.add ea eb) bound x a b haff denv hbnd
+  | mul ea eb =>
+    simp only [Option.map_eq_some_iff] at h
+    obtain ⟨⟨x, a, b⟩, haff, hik⟩ := h
+    simp only [Prod.mk.injEq] at hik; obtain ⟨rfl, rfl⟩ := hik
+    exact denseByteOperandCosetMem (.mul ea eb) bound x a b haff denv hbnd
+
+/-- Under a nonzero-constant multiplicity and a recognized byte op, both operands are below the byte
+    bound (`BusFacts.byteXorSpec_sound` / `byteBoolSound`). -/
+theorem denseByteOperandBound [NeZero p] (bs : BusSemantics p) (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) (denv : VarId → ZMod p) (mult : ZMod p)
+    (hmult : bi.multiplicity.constValue? = some mult) (hmz : mult ≠ 0) (spec : ByteXorSpec p)
+    (hspec : facts.byteXorSpec bi.busId = some spec) (op o1 o2 r : DenseExpr p)
+    (hdec : spec.decode bi.payload = some (op, o1, o2, r)) (opv : ZMod p)
+    (hop : op.constValue? = some opv) (hb : denseByteOpBounds spec opv = true)
+    (hob : (denseBIEval bi denv).multiplicity ≠ 0 →
+      bs.violatesConstraint (denseBIEval bi denv) = false) :
+    (o1.eval denv).val < spec.bound ∧ (o2.eval denv).val < spec.bound := by
+  have hmeval : (denseBIEval bi denv).multiplicity = mult :=
+    bi.multiplicity.constValue?_sound mult hmult denv
+  have hviol : bs.violatesConstraint (denseBIEval bi denv) = false := hob (by rw [hmeval]; exact hmz)
+  have hopeval : op.eval denv = opv := op.constValue?_sound opv hop denv
+  obtain ⟨hxor, hpair⟩ := denseByteXorSpec_decode_iff bs facts spec bi hspec op o1 o2 r hdec denv
+  obtain ⟨hor, hand⟩ := denseByteBoolSound_decode_iff bs facts spec bi hspec op o1 o2 r hdec denv
+  simp only [denseByteOpBounds, Bool.or_eq_true, Option.any_eq_true, decide_eq_true_eq] at hb
+  rcases hb with ((hsel | hsel) | ⟨o, ho, hsel⟩) | ⟨aop, ha, hsel⟩
+  · have := (hxor (by rw [hopeval, hsel])).1 hviol; exact ⟨this.1, this.2.1⟩
+  · have := (hpair (by rw [hopeval, hsel])).1 hviol; exact ⟨this.1, this.2.1⟩
+  · have := (hor o ho (by rw [hopeval, hsel])).1 hviol; exact ⟨this.1, this.2.1⟩
+  · have := (hand aop ha (by rw [hopeval, hsel])).1 hviol; exact ⟨this.1, this.2.1⟩
+
+/-- Inserting a byte interaction's operand domains preserves table soundness. -/
+theorem denseAddByteVarDoms_soundAt [Fact p.Prime] [NeZero p] {denv : VarId → ZMod p}
+    (bs : BusSemantics p) (facts : BusFacts p bs) (bi : BusInteraction (DenseExpr p))
+    (hob : (denseBIEval bi denv).multiplicity ≠ 0 →
+      bs.violatesConstraint (denseBIEval bi denv) = false)
+    (T : DenseDomainTable p) (hT : DenseTableSoundAt denv T) :
+    DenseTableSoundAt denv (denseAddByteVarDoms bs facts bi T) := by
+  unfold denseAddByteVarDoms
+  split
+  · exact hT
+  · rename_i mult hmult
+    split
+    · exact hT
+    · rename_i hmz
+      split
+      · exact hT
+      · rename_i spec hspec
+        split
+        · exact hT
+        · rename_i op o1 o2 r hdec
+          split
+          · exact hT
+          · rename_i opv hop
+            split
+            · rename_i hb
+              obtain ⟨hb1, hb2⟩ := denseByteOperandBound bs facts bi denv mult hmult
+                (by simpa using hmz) spec hspec op o1 o2 r hdec opv hop hb hob
+              have ins : ∀ (e : DenseExpr p), (e.eval denv).val < spec.bound →
+                  ∀ (T0 : DenseDomainTable p), DenseTableSoundAt denv T0 →
+                    DenseTableSoundAt denv
+                      (match denseByteOperandVar e with
+                       | none => T0
+                       | some i =>
+                         match T0.map[i]? with
+                         | none => T0
+                         | some d0 =>
+                           if spec.bound < d0.size then
+                             match denseByteOperandDomain e spec.bound with
+                             | some (i', d) => T0.insertEntry i' d
+                             | none => T0
+                           else T0) := by
+                intro e he T0 hT0
+                split
+                · exact hT0
+                · split
+                  · exact hT0
+                  · split
+                    · split
+                      · rename_i i' d hd
+                        exact DenseDomainTable.insertEntry_soundAt
+                          (denseByteOperandDomain_sound e spec.bound i' d hd denv he) hT0
+                      · exact hT0
+                    · exact hT0
+              exact ins o2 hb2 _ (ins o1 hb1 T hT)
+            · exact hT
+
+/-- Building all byte-operand domains preserves table soundness. -/
+theorem denseAddByteDoms_soundAt [Fact p.Prime] [NeZero p] {denv : VarId → ZMod p}
+    (bs : BusSemantics p) (facts : BusFacts p bs) :
+    ∀ (dbis : List (BusInteraction (DenseExpr p))),
+      (∀ bi ∈ dbis, (denseBIEval bi denv).multiplicity ≠ 0 →
+        bs.violatesConstraint (denseBIEval bi denv) = false) →
+      ∀ (T : DenseDomainTable p), DenseTableSoundAt denv T →
+        DenseTableSoundAt denv (denseAddByteDoms bs facts dbis T) := by
+  intro dbis
+  induction dbis with
+  | nil => intro _ T hT; exact hT
+  | cons bi rest ih =>
+    intro hob T hT
+    unfold denseAddByteDoms
+    exact ih (fun b hb => hob b (List.mem_cons_of_mem _ hb)) _
+      (denseAddByteVarDoms_soundAt bs facts bi (hob bi (List.mem_cons_self ..)) T hT)
+
 private theorem denseNotBoolEqDecide (b : Bool) (P : Prop) [Decidable P]
     (h : b = false ↔ P) : (!b) = decide P := by
   cases b <;> simp_all
@@ -1854,8 +2026,16 @@ theorem DensePassCorrect_refl (isInput : VarId → Bool) (d : DenseConstraintSys
 /-- The domain table built by `denseDomainBatchσV`. -/
 def dbT (bs : BusSemantics p) (facts : BusFacts p bs) (d : DenseConstraintSystem p) :
     DenseDomainTable p :=
-  denseAddBusDoms bs facts d.busInteractions
-    (denseAddConstraintDoms d.algebraicConstraints DenseDomainTable.empty)
+  denseAddByteDoms bs facts d.busInteractions
+    (denseAddBusDoms bs facts d.busInteractions
+      (denseAddConstraintDoms d.algebraicConstraints DenseDomainTable.empty))
+
+/-- Soundness of the whole `dbT` build, byte-operand domains included. -/
+theorem dbT_soundAt [Fact p.Prime] [NeZero p] (bs : BusSemantics p) (facts : BusFacts p bs)
+    (d : DenseConstraintSystem p) (denv : VarId → ZMod p) (hsat : d.satisfies bs denv) :
+    DenseTableSoundAt denv (dbT bs facts d) :=
+  denseAddByteDoms_soundAt bs facts d.busInteractions (fun bi hbi => hsat.2 bi hbi) _
+    (denseDomainTable_soundAt bs facts d denv hsat)
 
 def dbConstraintPlans (bs : BusSemantics p) (facts : BusFacts p bs)
     (d : DenseConstraintSystem p) : List (DenseConstraintPlan p) :=
@@ -1895,7 +2075,7 @@ theorem denseDomainBatchσV_entailed [Fact p.Prime] [NeZero p]
     intro xs f hf denv hsat
     refine denseForcedOverV_entails bs facts (dbT bs facts d) (dbFidx bs facts d) xs denv
       ?_ ?_ ?_ f hf
-    · exact denseDomainTable_soundAt bs facts d denv hsat
+    · exact dbT_soundAt bs facts d denv hsat
     · intro e he
       obtain ⟨plan, hplan, hpe, hpvars, _⟩ := denseGatherConstraintsV_plan_mem
         (dbFidx bs facts d) (dbConstraintPlans bs facts d) rfl xs he

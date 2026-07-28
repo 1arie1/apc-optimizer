@@ -644,6 +644,82 @@ def denseForcedIdxV (cs : List (DenseConstraintPlan p)) (bis : List (DenseBusPla
     bisIdx := denseFreezeCovIndex (denseAnchorCovBuild (fun bi => bi.vars) bis),
     arrBis := bis.toArray }
 
+/-- Is `op` a recognized byte-relation selector for `spec`? Every such op guarantees both operands
+    are below `spec.bound` (`BusFacts.byteXorSpec_sound` / `byteBoolSound`). -/
+def denseByteOpBounds (spec : ByteXorSpec p) (op : ZMod p) : Bool :=
+  decide (op = spec.xorOp) || decide (op = spec.pairOp) ||
+    spec.orOp.any (fun o => decide (op = o)) || spec.andOp.any (fun a => decide (op = a))
+
+/-- The single-variable affine form `(x, a, b)` with `e = a·x + b` and `a ≠ 0`, or `none`. -/
+def denseAffineOfExpr (e : DenseExpr p) : Option (VarId × ZMod p × ZMod p) :=
+  (denseLinearize e).bind (fun l =>
+    match l.norm.terms with
+    | [(x, a)] => if a = 0 then none else some (x, a, l.norm.const)
+    | _ => none)
+
+/-- The domain a byte operand `e` (known `< bound`) entails for its variable. A bare variable is in
+    `[0, bound)`; an affine operand `a·x + b < bound` confines `x` to the `bound`-element coset
+    `{(v - b)·a⁻¹ : v < bound}`. Either way it has exactly `bound` elements (`denseByteOperandVar`
+    reads off the variable without materializing the coset). -/
+def denseByteOperandDomain (e : DenseExpr p) (bound : Nat) : Option (VarId × FiniteDomain p) :=
+  match e with
+  | .var i => some (i, .range bound)
+  | _ => (denseAffineOfExpr e).map (fun t =>
+      (t.1, .explicit (((List.range bound).map (Nat.cast : Nat → ZMod p)).map
+        (fun z => (z - t.2.2) * t.2.1⁻¹))))
+
+/-- The variable a byte operand `e` confines — the first component of `denseByteOperandDomain`, read
+    without building the `bound`-element coset (`denseByteOperandDomain e bound = some (i, _)` iff
+    `denseByteOperandVar e = some i`). Used to gate the coset build below. -/
+def denseByteOperandVar (e : DenseExpr p) : Option VarId :=
+  match e with
+  | .var i => some i
+  | _ => (denseAffineOfExpr e).map (·.1)
+
+/-- Insert the entailed operand domains of a byte interaction whose op is a recognized relation
+    selector: both operands are then below `spec.bound`, sound by `BusFacts.byteXorSpec_sound` /
+    `byteBoolSound`. Refine-only: the coset (size exactly `spec.bound`) is built and inserted only
+    when it strictly refines the operand variable's existing table entry (`spec.bound < d0.size`).
+    A missing entry, or one already at most `spec.bound`, is left untouched — the same table
+    `insertEntry` would have produced, but without materializing a coset that would be discarded.
+    This shrinks a 16-bit limb's `.range 65536` down to `spec.bound` while skipping byte-width
+    operands whose variables are already bounded, avoiding wasted enumeration and coset builds. -/
+def denseAddByteVarDoms (bs : BusSemantics p) (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) (T : DenseDomainTable p) : DenseDomainTable p :=
+  match bi.multiplicity.constValue? with
+  | none => T
+  | some mult =>
+    if mult = 0 then T else
+    match facts.byteXorSpec bi.busId with
+    | none => T
+    | some spec =>
+      match spec.decode bi.payload with
+      | none => T
+      | some (op, o1, o2, _) =>
+        match op.constValue? with
+        | none => T
+        | some opv =>
+          if denseByteOpBounds spec opv then
+            let ins := fun (e : DenseExpr p) (T0 : DenseDomainTable p) =>
+              match denseByteOperandVar e with
+              | none => T0
+              | some i =>
+                match T0.map[i]? with
+                | none => T0
+                | some d0 =>
+                  if spec.bound < d0.size then
+                    match denseByteOperandDomain e spec.bound with
+                    | some (i', d) => T0.insertEntry i' d
+                    | none => T0
+                  else T0
+            ins o2 (ins o1 T)
+          else T
+
+def denseAddByteDoms (bs : BusSemantics p) (facts : BusFacts p bs) :
+    List (BusInteraction (DenseExpr p)) → DenseDomainTable p → DenseDomainTable p
+  | [], T => T
+  | bi :: rest, T => denseAddByteDoms bs facts rest (denseAddByteVarDoms bs facts bi T)
+
 /-- Domain-batch: builds a finite domain per variable (from constraints like `x*(x-1)=0` giving
     `x ∈ {0,1}`, and from bus range checks), enumerates the small Cartesian product of those
     domains, and for each variable that takes the same value in every surviving assignment infers
@@ -651,8 +727,9 @@ def denseForcedIdxV (cs : List (DenseConstraintPlan p)) (bis : List (DenseBusPla
 def denseDomainBatchσV (bs : BusSemantics p) (facts : BusFacts p bs)
     (d : DenseConstraintSystem p) : DenseSolved p :=
   let T : DenseDomainTable p :=
-    denseAddBusDoms bs facts d.busInteractions
-      (denseAddConstraintDoms d.algebraicConstraints DenseDomainTable.empty)
+    denseAddByteDoms bs facts d.busInteractions
+      (denseAddBusDoms bs facts d.busInteractions
+        (denseAddConstraintDoms d.algebraicConstraints DenseDomainTable.empty))
   let csPlans := denseConstraintPlansV T d.algebraicConstraints
   let busPlans := denseBusPlansV bs facts T d.busInteractions
   let targets := densePlanTargetsV csPlans busPlans
