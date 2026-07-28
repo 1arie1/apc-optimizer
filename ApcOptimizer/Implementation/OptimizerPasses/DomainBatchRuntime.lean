@@ -511,6 +511,370 @@ def denseForcedPreflightV (T : DenseDomainTable p) (fidx : DenseForcedIdx p)
       else none
     else none
 
+/-! ### Work-gated gathers
+
+`boxSize * items ≤ maxEnumWork` is a cap on the gathered item count, and a gather's counts only
+grow, so a target whose count passes the cap has already lost the work gate: the rest of its scan is
+wasted. On the sha256 case that is 39 980 of 66 062 gathers (61 %).
+
+`denseCapStep` bails to `none` at the cap and stays there, `denseForcedPreflightFastV` runs the
+gathers that way, and `denseForcedPreflightV_eq_fast` proves the two agree — so the plan list, and
+therefore the pass, is unchanged. The `@[csimp]` lemma has to sit above the call sites in this
+module, which is why these proofs live here rather than in `Proofs/`. -/
+
+/-- One capped fold step: apply `f`, and give up as soon as the count passes `cap`. `@[specialize]`
+    so the two gathers compile to direct calls rather than paying a closure per scanned position. -/
+@[specialize] def denseCapStep {β : Type} (cnt : β → Nat) (f : β → Nat → β) (cap : Nat)
+    (acc : Option β) (i : Nat) : Option β :=
+  match acc with
+  | none => none
+  | some a =>
+    let b := f a i
+    if cap < cnt b then none else some b
+
+private theorem denseCapFold_spec {β : Type} (cnt : β → Nat) (f : β → Nat → β) (cap : Nat)
+    (hmono : ∀ a i, cnt a ≤ cnt (f a i)) :
+    ∀ (ps : List Nat) (a : β), cnt a ≤ cap →
+      match ps.foldl (denseCapStep cnt f cap) (some a) with
+      | some b => ps.foldl f a = b ∧ cnt b ≤ cap
+      | none => cap < cnt (ps.foldl f a) := by
+  have hfoldMono : ∀ (ps : List Nat) (a : β), cnt a ≤ cnt (ps.foldl f a) := by
+    intro ps
+    induction ps with
+    | nil => intro a; exact Nat.le_refl _
+    | cons i rest ih => intro a; exact Nat.le_trans (hmono a i) (ih (f a i))
+  intro ps
+  induction ps with
+  | nil => intro a ha; exact ⟨rfl, ha⟩
+  | cons i rest ih =>
+    intro a ha
+    simp only [List.foldl_cons, denseCapStep]
+    by_cases hcap : cap < cnt (f a i)
+    · simp only [hcap, ↓reduceIte]
+      have : ∀ (qs : List Nat) (b : β), qs.foldl (denseCapStep cnt f cap) none = none := by
+        intro qs
+        induction qs with
+        | nil => intro _; rfl
+        | cons j qs' ihq => intro b; simpa [denseCapStep] using ihq b
+      rw [this rest a]
+      exact Nat.lt_of_lt_of_le hcap (hfoldMono rest (f a i))
+    · simp only [hcap, ↓reduceIte]
+      exact ih (f a i) (Nat.le_of_not_lt hcap)
+
+private theorem denseCapFolds_spec {β γ : Type} (cnt : β → Nat) (f : β → Nat → β) (cap : Nat)
+    (hmono : ∀ a i, cnt a ≤ cnt (f a i)) (bucket : γ → List Nat) :
+    ∀ (vs : List γ) (a : β), cnt a ≤ cap →
+      match vs.foldl (fun acc v => (bucket v).foldl (denseCapStep cnt f cap) acc) (some a) with
+      | some b => vs.foldl (fun acc v => (bucket v).foldl f acc) a = b ∧ cnt b ≤ cap
+      | none => cap < cnt (vs.foldl (fun acc v => (bucket v).foldl f acc) a) := by
+  have hfoldMono : ∀ (ps : List Nat) (a : β), cnt a ≤ cnt (ps.foldl f a) := by
+    intro ps
+    induction ps with
+    | nil => intro a; exact Nat.le_refl _
+    | cons i rest ih => intro a; exact Nat.le_trans (hmono a i) (ih (f a i))
+  have hfoldsMono : ∀ (vs : List γ) (a : β),
+      cnt a ≤ cnt (vs.foldl (fun acc v => (bucket v).foldl f acc) a) := by
+    intro vs
+    induction vs with
+    | nil => intro a; exact Nat.le_refl _
+    | cons v rest ih =>
+      intro a
+      exact Nat.le_trans (hfoldMono (bucket v) a) (ih ((bucket v).foldl f a))
+  have hnone : ∀ (vs : List γ),
+      vs.foldl (fun acc v => (bucket v).foldl (denseCapStep cnt f cap) acc) none = none := by
+    intro vs
+    induction vs with
+    | nil => rfl
+    | cons v rest ih =>
+      have : ∀ (qs : List Nat), qs.foldl (denseCapStep cnt f cap) none = none := by
+        intro qs
+        induction qs with
+        | nil => rfl
+        | cons j qs' ihq => simpa [denseCapStep] using ihq
+      simpa [this (bucket v)] using ih
+  intro vs
+  induction vs with
+  | nil => intro a ha; exact ⟨rfl, ha⟩
+  | cons v rest ih =>
+    intro a ha
+    simp only [List.foldl_cons]
+    have hb := denseCapFold_spec cnt f cap hmono (bucket v) a ha
+    cases hcase : (bucket v).foldl (denseCapStep cnt f cap) (some a) with
+    | none =>
+      rw [hcase] at hb
+      simp only [hnone rest]
+      exact Nat.lt_of_lt_of_le hb (hfoldsMono rest _)
+    | some b =>
+      rw [hcase] at hb
+      simp only [hb.1]
+      exact ih b hb.2
+
+private theorem denseCapNone_spec {β : Type} (cnt : β → Nat) (f : β → Nat → β) (cap : Nat)
+    (arr : Array Nat) : arr.foldl (denseCapStep cnt f cap) none = none := by
+  rw [← Array.foldl_toList]
+  induction arr.toList with
+  | nil => rfl
+  | cons j qs ih => simpa [denseCapStep] using ih
+
+private theorem denseCapFoldArr_spec {β : Type} (cnt : β → Nat) (f : β → Nat → β) (cap : Nat)
+    (hmono : ∀ a i, cnt a ≤ cnt (f a i)) (arr : Array Nat) (a : β) (ha : cnt a ≤ cap) :
+    match arr.foldl (denseCapStep cnt f cap) (some a) with
+    | some b => arr.foldl f a = b ∧ cnt b ≤ cap
+    | none => cap < cnt (arr.foldl f a) := by
+  rw [← Array.foldl_toList, ← Array.foldl_toList]
+  exact denseCapFold_spec cnt f cap hmono arr.toList a ha
+
+private theorem denseCapFoldArr_mono {β : Type} (cnt : β → Nat) (f : β → Nat → β)
+    (hmono : ∀ a i, cnt a ≤ cnt (f a i)) (arr : Array Nat) (a : β) :
+    cnt a ≤ cnt (arr.foldl f a) := by
+  rw [← Array.foldl_toList]
+  induction arr.toList generalizing a with
+  | nil => exact Nat.le_refl _
+  | cons i rest ih => exact Nat.le_trans (hmono a i) (ih (f a i))
+
+private theorem denseCapFoldsArr_spec {β γ : Type} (cnt : β → Nat) (f : β → Nat → β) (cap : Nat)
+    (hmono : ∀ a i, cnt a ≤ cnt (f a i)) (bucket : γ → Array Nat) :
+    ∀ (vs : List γ) (a : β), cnt a ≤ cap →
+      match vs.foldl (fun acc v => (bucket v).foldl (denseCapStep cnt f cap) acc) (some a) with
+      | some b => vs.foldl (fun acc v => (bucket v).foldl f acc) a = b ∧ cnt b ≤ cap
+      | none => cap < cnt (vs.foldl (fun acc v => (bucket v).foldl f acc) a) := by
+  have hfoldsMono : ∀ (vs : List γ) (a : β),
+      cnt a ≤ cnt (vs.foldl (fun acc v => (bucket v).foldl f acc) a) := by
+    intro vs
+    induction vs with
+    | nil => intro a; exact Nat.le_refl _
+    | cons v rest ih =>
+      intro a
+      exact Nat.le_trans (denseCapFoldArr_mono cnt f hmono (bucket v) a) (ih _)
+  have hnoneOuter : ∀ (vs : List γ),
+      vs.foldl (fun acc v => (bucket v).foldl (denseCapStep cnt f cap) acc) none = none := by
+    intro vs
+    induction vs with
+    | nil => rfl
+    | cons v rest ih => simpa [denseCapNone_spec cnt f cap (bucket v)] using ih
+  intro vs
+  induction vs with
+  | nil => intro a ha; exact ⟨rfl, ha⟩
+  | cons v rest ih =>
+    intro a ha
+    simp only [List.foldl_cons]
+    have hb := denseCapFoldArr_spec cnt f cap hmono (bucket v) a ha
+    cases hcase : (bucket v).foldl (denseCapStep cnt f cap) (some a) with
+    | none =>
+      rw [hcase] at hb
+      simp only [hnoneOuter rest]
+      exact Nat.lt_of_lt_of_le hb (hfoldsMono rest _)
+    | some b =>
+      rw [hcase] at hb
+      simp only [hb.1]
+      exact ih b hb.2
+
+private theorem denseGatherConstraintAtV_mono (arr : Array (DenseConstraintPlan p))
+    (xs : List VarId) (a : DenseConstraintGatherV p) (i : Nat) :
+    a.fullCount ≤ (denseGatherConstraintAtV arr xs a i).fullCount := by
+  unfold denseGatherConstraintAtV
+  by_cases h : i < arr.size
+  · by_cases hv : denseVarsInListF xs arr[i].vars = true <;> simp [h, hv]
+  · simp [h]
+
+private theorem denseGatherBusAtV_mono (arr : Array (DenseBusPlan p)) (xs : List VarId)
+    (a : DenseBusGatherV p) (i : Nat) :
+    a.count ≤ (denseGatherBusAtV arr xs a i).count := by
+  unfold denseGatherBusAtV
+  by_cases h : i < arr.size
+  · by_cases hv : (arr[i].usable && denseVarsInListF xs arr[i].vars) = true <;> simp [h, hv]
+  · simp [h]
+
+/-- `denseGatherConstraintsV`, abandoned as soon as the item count passes `cap`. -/
+def denseGatherConstraintsCapV (fidx : DenseForcedIdx p) (xs : List VarId) (cap : Nat) :
+    Option (DenseConstraintGatherV p) :=
+  let step := denseCapStep DenseConstraintGatherV.fullCount
+    (denseGatherConstraintAtV fidx.arrCs xs) cap
+  let acc := xs.foldl (fun acc v => (fidx.csIdx.buckets.getD v #[]).foldl step acc)
+    (if cap < fidx.csIdx.inactiveVarlessCount then none
+     else some ⟨fidx.csIdx.inactiveVarlessCount, []⟩)
+  fidx.csIdx.activeVarless.foldl step acc
+
+/-- `denseGatherBusesV`, abandoned as soon as the item count passes `cap`. -/
+def denseGatherBusesCapV (fidx : DenseForcedIdx p) (xs : List VarId) (cap : Nat) :
+    Option (DenseBusGatherV p) :=
+  let step := denseCapStep DenseBusGatherV.count (denseGatherBusAtV fidx.arrBis xs) cap
+  let acc := xs.foldl (fun acc v => (fidx.bisIdx.buckets.getD v #[]).foldl step acc)
+    (some ⟨0, false, true, []⟩)
+  fidx.bisIdx.varless.foldl step acc
+
+private theorem denseGatherConstraintsCapV_spec (fidx : DenseForcedIdx p) (xs : List VarId)
+    (cap : Nat) :
+    match denseGatherConstraintsCapV fidx xs cap with
+    | some g => denseGatherConstraintsV fidx xs = g ∧ g.fullCount ≤ cap
+    | none => cap < (denseGatherConstraintsV fidx xs).fullCount := by
+  unfold denseGatherConstraintsCapV denseGatherConstraintsV denseGatherConstraintArrayV
+  have hmono := denseGatherConstraintAtV_mono fidx.arrCs xs
+  set f := denseGatherConstraintAtV fidx.arrCs xs with hf
+  set cnt := DenseConstraintGatherV.fullCount (p := p) with hcnt
+  have hfoldsMono : ∀ (vs : List VarId) (a : DenseConstraintGatherV p),
+      cnt a ≤ cnt (vs.foldl (fun acc v => (fidx.csIdx.buckets.getD v #[]).foldl f acc) a) := by
+    intro vs
+    induction vs with
+    | nil => intro a; exact Nat.le_refl _
+    | cons v rest ih =>
+      intro a
+      exact Nat.le_trans (denseCapFoldArr_mono cnt f hmono _ a) (ih _)
+  by_cases hinit : cap < fidx.csIdx.inactiveVarlessCount
+  · have hnoneOuter : ∀ (vs : List VarId),
+        vs.foldl (fun acc v =>
+          (fidx.csIdx.buckets.getD v #[]).foldl (denseCapStep cnt f cap) acc) none = none := by
+      intro vs
+      induction vs with
+      | nil => rfl
+      | cons v rest ih =>
+        simpa [denseCapNone_spec cnt f cap (fidx.csIdx.buckets.getD v #[])] using ih
+    simp only [hinit, ↓reduceIte, hnoneOuter, denseCapNone_spec]
+    refine Nat.lt_of_lt_of_le hinit ?_
+    exact Nat.le_trans (hfoldsMono xs ⟨fidx.csIdx.inactiveVarlessCount, []⟩)
+      (denseCapFoldArr_mono cnt f hmono _ _)
+  · simp only [hinit, ↓reduceIte]
+    have h0 : cnt (⟨fidx.csIdx.inactiveVarlessCount, []⟩ : DenseConstraintGatherV p) ≤ cap :=
+      Nat.le_of_not_lt hinit
+    have houter := denseCapFoldsArr_spec cnt f cap hmono
+      (fun v => fidx.csIdx.buckets.getD v #[]) xs _ h0
+    cases hcase : xs.foldl (fun acc v =>
+        (fidx.csIdx.buckets.getD v #[]).foldl (denseCapStep cnt f cap) acc)
+        (some ⟨fidx.csIdx.inactiveVarlessCount, []⟩) with
+    | none =>
+      rw [hcase] at houter
+      simp only [denseCapNone_spec]
+      exact Nat.lt_of_lt_of_le houter (denseCapFoldArr_mono cnt f hmono _ _)
+    | some b =>
+      rw [hcase] at houter
+      simp only [houter.1]
+      have hfin := denseCapFoldArr_spec cnt f cap hmono fidx.csIdx.activeVarless b houter.2
+      cases hlast : Array.foldl (denseCapStep cnt f cap) (some b) fidx.csIdx.activeVarless with
+      | none => rw [hlast] at hfin; exact hfin
+      | some g => rw [hlast] at hfin; exact hfin
+
+private theorem denseGatherBusesCapV_spec (fidx : DenseForcedIdx p) (xs : List VarId) (cap : Nat) :
+    match denseGatherBusesCapV fidx xs cap with
+    | some g => denseGatherBusesV fidx xs = g ∧ g.count ≤ cap
+    | none => cap < (denseGatherBusesV fidx xs).count := by
+  unfold denseGatherBusesCapV denseGatherBusesV denseGatherBusArrayV
+  have hmono := denseGatherBusAtV_mono fidx.arrBis xs
+  set f := denseGatherBusAtV fidx.arrBis xs with hf
+  set cnt := DenseBusGatherV.count (p := p) with hcnt
+  have houter := denseCapFoldsArr_spec cnt f cap hmono
+    (fun v => fidx.bisIdx.buckets.getD v #[]) xs ⟨0, false, true, []⟩ (Nat.zero_le _)
+  cases hcase : xs.foldl (fun acc v =>
+      (fidx.bisIdx.buckets.getD v #[]).foldl (denseCapStep cnt f cap) acc)
+      (some ⟨0, false, true, []⟩) with
+  | none =>
+    rw [hcase] at houter
+    simp only [hcase, denseCapNone_spec]
+    exact Nat.lt_of_lt_of_le houter
+      (denseCapFoldArr_mono cnt f hmono fidx.bisIdx.varless _)
+  | some b =>
+    rw [hcase] at houter
+    simp only [hcase, houter.1]
+    have hfin := denseCapFoldArr_spec cnt f cap hmono fidx.bisIdx.varless b houter.2
+    cases hlast : Array.foldl (denseCapStep cnt f cap) (some b) fidx.bisIdx.varless with
+    | none => rw [hlast] at hfin; exact hfin
+    | some g => rw [hlast] at hfin; exact hfin
+
+/-- The tail of `denseForcedPreflightV`, shared with its capped twin. -/
+def denseForcedPlanOfV (fdoms : List (VarId × FiniteDomain p)) (boxSize : Nat)
+    (cs : DenseConstraintGatherV p) (bis : DenseBusGatherV p) : Option (DenseForcedPlanV p) :=
+  let informative := cs.fullCount != 0 || bis.informative
+  if informative && boxSize * (cs.fullCount + bis.count) ≤ maxEnumWork then
+    let keys := fdoms.map Prod.fst
+    let doms := fdoms.map Prod.snd
+    if cs.active.isEmpty && bis.allDomainRedundant &&
+        doms.all (fun d => d.size != 0) then
+      some (.done (denseConstantDomainsV fdoms))
+    else
+      some (.scan {
+        keys,
+        doms,
+        active := cs.active,
+        interactions := bis.interactions,
+        work := boxSize * (cs.active.length + bis.count + keys.length) })
+  else none
+
+/-- `denseForcedPreflightV` with the work gate pushed into the gathers
+    (`denseForcedPreflightV_eq_fast`). -/
+def denseForcedPreflightFastV (T : DenseDomainTable p) (fidx : DenseForcedIdx p)
+    (xs : List VarId) : Option (DenseForcedPlanV p) :=
+  match T.doms xs with
+  | none => none
+  | some fdoms =>
+    let boxSize := (fdoms.map (fun yd => yd.2.size)).prod
+    if boxSize ≤ maxEnumSize then
+      if boxSize = 0 then
+        -- an empty domain makes the work gate vacuous, so there is no cap to gate on
+        denseForcedPlanOfV fdoms boxSize (denseGatherConstraintsV fidx xs)
+          (denseGatherBusesV fidx xs)
+      else
+        let cap := maxEnumWork / boxSize
+        match denseGatherConstraintsCapV fidx xs cap with
+        | none => none
+        | some cs =>
+          match denseGatherBusesCapV fidx xs (cap - cs.fullCount) with
+          | none => none
+          | some bis => denseForcedPlanOfV fdoms boxSize cs bis
+    else none
+
+@[csimp] theorem denseForcedPreflightV_eq_fast :
+    @denseForcedPreflightV = @denseForcedPreflightFastV := by
+  funext p T fidx xs
+  unfold denseForcedPreflightV denseForcedPreflightFastV
+  cases hdoms : T.doms xs with
+  | none => rfl
+  | some fdoms =>
+    by_cases hbox : (fdoms.map (fun yd => yd.2.size)).prod ≤ maxEnumSize
+    · simp only [hbox, ↓reduceIte]
+      by_cases hzero : (fdoms.map (fun yd => yd.2.size)).prod = 0
+      · simp only [hzero, ↓reduceIte]
+        rfl
+      · simp only [hzero, ↓reduceIte]
+        have hpos : 0 < (fdoms.map (fun yd => yd.2.size)).prod := Nat.pos_of_ne_zero hzero
+        have hcs := denseGatherConstraintsCapV_spec fidx xs
+          (maxEnumWork / (fdoms.map (fun yd => yd.2.size)).prod)
+        cases hc : denseGatherConstraintsCapV fidx xs
+            (maxEnumWork / (fdoms.map (fun yd => yd.2.size)).prod) with
+        | none =>
+          rw [hc] at hcs
+          -- the work gate would have rejected: cap < fullCount means boxSize * fullCount > maxEnumWork
+          have hlt : maxEnumWork < (fdoms.map (fun yd => yd.2.size)).prod *
+              (denseGatherConstraintsV fidx xs).fullCount := by
+            rw [Nat.mul_comm]
+            exact (Nat.div_lt_iff_lt_mul hpos).mp hcs
+          have hgate : ¬ ((fdoms.map (fun yd => yd.2.size)).prod *
+              ((denseGatherConstraintsV fidx xs).fullCount +
+                (denseGatherBusesV fidx xs).count) ≤ maxEnumWork) := by
+            refine Nat.not_le.mpr (Nat.lt_of_lt_of_le hlt ?_)
+            exact Nat.mul_le_mul_left _ (Nat.le_add_right _ _)
+          simp [hgate]
+        | some cs =>
+          rw [hc] at hcs
+          have hbis := denseGatherBusesCapV_spec fidx xs
+            (maxEnumWork / (fdoms.map (fun yd => yd.2.size)).prod - cs.fullCount)
+          cases hb : denseGatherBusesCapV fidx xs
+              (maxEnumWork / (fdoms.map (fun yd => yd.2.size)).prod - cs.fullCount) with
+          | none =>
+            rw [hb] at hbis
+            have hle := hcs.2
+            have hsum : maxEnumWork / (fdoms.map (fun yd => yd.2.size)).prod <
+                cs.fullCount + (denseGatherBusesV fidx xs).count := by omega
+            have hgate : maxEnumWork < (fdoms.map (fun yd => yd.2.size)).prod *
+                (cs.fullCount + (denseGatherBusesV fidx xs).count) := by
+              rw [Nat.mul_comm]
+              exact (Nat.div_lt_iff_lt_mul hpos).mp hsum
+            simp only [hb, hcs.1]
+            simp [Nat.not_le.mpr hgate]
+          | some bis =>
+            rw [hb] at hbis
+            simp only [hb, hcs.1, hbis.1]
+            rfl
+    · simp [hbox]
+
 def denseRunForcedScanV (bs : BusSemantics p) (facts : BusFacts p bs)
     (job : DenseForcedScanV p) : List (VarId × ZMod p) :=
   let survC := denseCompiledSurvV bs facts job.active job.interactions job.keys

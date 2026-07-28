@@ -5304,3 +5304,47 @@ lazify `denseByteOperandDomain`'s coset build (21.3 % of the pass on SP1 keccak,
 (d) prefix-pruned / component-split enumeration for the big-box OpenVM cases, gated on a box-shape
 counter first.
 **Worked: yes (domainBatch 0.14x on its worst-share APC, output byte-identical; draft PR).**
+
+### 154. Runtime: push the work gate into domainBatch's gathers (sha256 domainBatch 0.81x)
+MEASURED FIRST, with **`IO` timers hooked at the pass's position** in the profiler rather than `perf`
+shares — after entry 153 showed a CPU share is not a wall budget. Per-phase wall on sha256 apc_001
+(ms, summed over all cleanup invocations): preflight **6032**, `denseConstraintPlansV` 1970,
+`denseAddConstraintDoms` 1344, `denseBusPlansV` 1225, target dedup 904, `denseAddBusDoms` 705,
+index/targets 632, `denseAddByteDoms` 161, and the scans themselves 3694 serial (~1 s of wall across
+64 chunks). Everything but the scans is serial. The same timers on keccak read prologue 660 /
+fan-out 550, and on SP1 keccak 832 / 154 — and they corrected two `perf` attributions from the same
+runs: the profile had merged the bus-table build with `denseBiInformative` under shared symbols, and
+put SP1's coset build at 21 % of CPU where it is 64 % of that case's pass wall.
+THE FUNNEL (sha256 cycle 0, instrumented): 190 243 unique targets → 122 881 die at `T.doms` (81 ms
+for the whole stage) → 1 300 at the box-size gate → **66 062 reach the gathers, costing 6040 ms** →
+of those **39 980 (61 %) are then dropped by the work gate**, 23 490 need no scan, 2 592 scan. One
+gather averages 91 µs at that system size, and 61 % of them are pure waste.
+THE CHANGE: `boxSize * items ≤ maxEnumWork` is a cap on the item count, and a gather's counts only
+grow, so a target that passes the cap has already lost the gate. `denseCapStep` (`@[specialize]`)
+folds with an `Option` accumulator that goes `none` at the cap and stays there;
+`denseGatherConstraintsCapV` / `denseGatherBusesCapV` use it, and `denseForcedPreflightFastV` runs
+the gathers capped at `maxEnumWork / boxSize` (the bus cap is the remainder after the constraint
+count). `denseForcedPreflightV_eq_fast` (`@[csimp]`) proves the twin equal to the original, so **no
+downstream proof changed at all** — the plan list, the scans and the output are the same by theorem.
+Two generic fold lemmas (`denseCapFold_spec`, `denseCapFoldsArr_spec`) carry the invariant "either
+the capped fold equals the uncapped one and stays under the cap, or the uncapped count exceeds it";
+`boxSize = 0` (an empty domain makes the gate vacuous) falls back to the uncapped gathers. The
+`@[csimp]` lemma has to precede the call sites, so these proofs live in the impl module — same
+placement as `denseEnvOfFast_eq_fast`.
+NUMBERS (interleaved vs `main` 3448080, this 20-core box; domainBatch ms, median of 3, sha256 single
+shot): **sha256 apc_001 18033 → 14576 (0.81x)**, case total 173.6 → 170.5 s; keccak 1328 → 1293
+(0.97x); wasm-eth apc_063 1566 → 1533 (0.98x); openvm-eth apc_071 565 → 564; wasm-eth apc_005 35 → 37
+(a 36 ms pass — the cap's arithmetic is visible there); SP1 keccak 1006 → 1007. No other pass column
+moves. Sizing was done first with `@[implemented_by]` (0.82x on sha256) exactly as
+`OptimizingRuntime.md` says, and the first *proved* version measured only 0.90x until `denseCapStep`
+got `@[specialize]` — the generic fold was paying two closure applications per scanned position (the
+csimp checklist's rule 3, confirmed in the C: the specialized step now calls
+`denseGatherConstraintAtV` directly).
+VERIFIED: `opt-export` byte-identical to main on OpenVM keccak / wasm-eth apc_005 / openvm-eth apc_071
+and SP1 keccak / rsp apc_001; keccak `run` counts 2021 / 186 / 1748; `lake build` clean; the csimp is
+live in the C (the original's only caller is its dead `_boxed` wrapper);
+`check-proof-integrity` passes (propext / Classical.choice / Quot.sound).
+NEXT in the same phase table: `denseConstraintPlansV` (1970 ms) and `denseAddConstraintDoms`'s
+per-variable re-linearization (1344 ms) on sha256; `denseAddByteDoms`'s coset build (633 ms of 986)
+on SP1.
+**Worked: yes (sha256 domainBatch 0.81x, output byte-identical; PR follows).**

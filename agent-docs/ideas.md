@@ -462,8 +462,30 @@ the per-variable bucket maps (`DenseCovIndex.buckets`, `denseVarBucket`, `denseT
 be `Array (List Nat)` / bitsets keyed directly — no hashing, no dispatch. Wide but mechanical;
 worth a prototype on one index first.
 
-**R13. domainBatch is per-target *setup*-bound, not enumeration-bound** (measured 2026-07-28, LBR
-profiles over five OpenVM cases + SP1 keccak; entry 152). Phase shares of in-pass samples:
+**R13. domainBatch is *serial-prologue*-bound, not enumeration-bound** (entries 152–154). The wall
+breakdown below comes from `IO` timers at the pass's position (`OptimizingRuntime.md`, *Timing phases
+from the profiler*); the `perf` table after it is kept only because it shows how a CPU share misleads
+here. Per-phase **wall** (ms, summed over all cleanup invocations, on `main` before entry 154):
+
+| phase | sha256 apc_001 | keccak | SP1 keccak |
+|---|---:|---:|---:|
+| preflight (gathers + `T.doms` over all targets) | **6032** | ~200 | — |
+| `denseConstraintPlansV` | 1970 | 189 | 31 |
+| `denseAddConstraintDoms` | 1344 | 131 | 21 |
+| `denseBusPlansV` | 1225 | 160 | 96 |
+| target dedup (`denseVarSetKey`) | 904 | — | — |
+| `denseAddBusDoms` | 705 | 128 | 43 |
+| index + targets | 632 | 34 | 8 |
+| `denseAddByteDoms` (coset) | 161 | 18 | **633** |
+| the scans (fan-out; ~1 s of wall on sha256) | 3694 serial | 314 | 154 |
+
+Entry 154 took the preflight — 61 % of sha256's gathers were work-gate rejects, and the gate is now
+evaluated *during* the gather (0.81× on the pass there). Remaining, in order:
+`denseConstraintPlansV`, `denseAddConstraintDoms`'s per-variable re-linearization, the target dedup's
+per-target `mergeSort`, and — SP1 only, but the largest single share anywhere in this pass —
+`denseAddByteDoms`.
+
+The older `perf` view (shares of in-pass samples), kept for the contrast:
 
 | phase | sha256 apc_001 | keccak | SP1 keccak | eth apc_071 | wasm apc_005 |
 |---|---:|---:|---:|---:|---:|
