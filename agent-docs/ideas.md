@@ -540,3 +540,19 @@ worth a prototype on one index first.
   nothing). Suspect `denseFuCandidates`' per-interaction `O.vars.eraseDups × splitAt` on large
   first-slot payloads, or the per-matched-pair box evaluation in `denseFuPairData?`. Sample the
   window before building anything.
+
+### domainBatch residual after entry 151 (byte-operand domains)  ·  *runtime, sp1*  ·  medium value
+Entry 151 BISECTED domainBatch (the ideas' "58% is the domain-table build/cache" guess was WRONG — the
+build is ~2%, the box SCANS are ~94%, all in cleanup cycle 4) and cut the dominant cost 4x by mining
+byte-operand bounds into the table (585 single-var 2^16 brute-force scans → 256-element cosets). What
+remains for a next pass:
+- **Two-variable deep scans** (cycle 4 had ~108 of them, boxes up to 65536 = ~256×256): entry 151's
+  coset shrink is single-var-operand; if BOTH operands of a byte/tuple interaction are affine in
+  distinct vars, each var could still get a coset, shrinking the 2-D box. Verify how many 2-var deep
+  scans survive after entry 151 (re-run the point counter) before implementing.
+- **Fuse the coset build**: `denseByteOperandDomain` currently materializes `((range bound).map cast).map
+  (fun z => (z-b)/a)` — two passes + a 256-elt intermediate, per byte operand per interaction (~2292×)
+  per cycle. A single fused map (or a `.range`+affine `FiniteDomain` variant carrying `(a,b)` lazily)
+  avoids the intermediate. Low risk, modest constant.
+- **Skip byte-domain work when it can't shrink**: only build the coset when the operand's current table
+  domain exceeds `bound` (otherwise `insertEntry` discards it anyway). Cheap guard, saves allocations.

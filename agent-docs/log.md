@@ -5222,3 +5222,36 @@ SP1 keccak apc_001 (`profile sp1`): busPairCancel **44.3 → 1.05 s (~42×)**, b
 (~32×, shares `denseAddrNonzeroNeq`), total 68.5 → 11.7 s. **Effectiveness IDENTICAL (2665/313/2067).**
 Output-identical also verified on OpenVM keccak (2021/186/1748) and SP1 rsp (112/69/65). `lake build`
 clean; `check-proof-integrity` passes (axioms: propext/Classical.choice/Quot.sound only).
+### 151. Runtime: mine byte-operand bounds into the domain table (domainBatch ~4x on SP1)
+Targeted the ideas.md `domainBatch ~58%` bottleneck, but **bisected first (the #219 lesson) and the
+a-priori idea was wrong**. Stubbing each sub-part on SP1 keccak apc_001 (`profile sp1`): the
+`DenseDomainTable` BUILD is ~80ms (~2%), plans+preflight (gathers/gating) ~220ms (~4%); the **box
+SCANS are ~94%**, concentrated entirely in cleanup cycle 4. So the ideas.md plan (cross-cycle
+cache/hoist of the domain-table build) would have saved ~2% — the table build was never the cost.
+Instrumented the real trajectory with a point counter (`work` is only a `boxSize*items` upper
+bound, not actual cost; single-var scans early-abort at the 2nd distinct survivor): cycle 4
+enumerates **38.3M actual points** across 585 "deep" single-variable scans, each brute-forcing the
+**full 2^16 domain** of a 16-bit limb variable. These have 0 active constraints and 2 byte-bus
+interactions; the forcing interaction carries the variable inside an **affine operand** `f(x)=a·x+b`
+that a recognized byte op bounds `< spec.bound` (256), while the variable's `.range 65536` domain
+comes only from a separate bare 16-bit range check. All 604 compile to fast paths (fixedRange/byte),
+no opaque fallback — so per-point work was already minimal; the cost is the sheer 2^16 point count.
+LEVER: a new `denseAddByteDoms` step reads each recognized byte interaction's operand bound into the
+table — a bare-var operand gets `.range bound`, an **affine operand the `bound`-element coset
+`{(v-b)·a⁻¹ : v<bound}`** (sound: under the byte relation `a·x+b<bound`, so `x` lies in that coset).
+`insertEntry` keeps the smaller domain, shrinking the deep scans from 65536 to 256 points. Guarded on
+a **nonzero constant multiplicity** so the byte obligation holds under `hsat`.
+PROOF (all under Implementation/, audited surface untouched): `denseAffineOfExpr_eval` (affine form +
+`a≠0` via `denseLinearize`/norm), `denseByteOperandCosetMem` (coset membership; the runtime coset is a
+two-stage `map` — cast then affine — to keep the operand var out from under `Nat.cast` so HO
+unification picks the right map), `denseByteOperandBound` (operand `<bound` from
+`byteXorSpec_sound`/`byteBoolSound` under nonzero-const mult), `denseAddByte{Var,}Doms_soundAt`,
+`dbT_soundAt` wrapping `denseDomainTable_soundAt`; the entailed/correct chain is unchanged.
+IMPACT (`profile sp1`, this box, before→after): keccak domainBatch **3963→1010 ms (~3.9x)**, total
+8320→5325; rsp apc_030 **819→165 (~5.0x)**, total 1402→660; rsp apc_024 **585→221 (~2.6x)**. SP1 rsp
+cases converge one fixpoint cycle sooner. **Final circuits byte-for-byte IDENTICAL** (opt-export diff)
+on SP1 keccak (2665/313/2067), SP1 rsp (527/196/449; 458/177/340), OpenVM keccak (2021/186/1748),
+OpenVM eth. `lake build` clean (no warnings); `check-proof-integrity` passes (axioms:
+propext/Classical.choice/Quot.sound only). General: any byte/range-bounded finite-domain circuit
+benefits; the coset handles the affine-operand case OpenVM's bare-operand range domains miss.
+**Worked: yes (domainBatch ~4x, output byte-identical; committed).**
