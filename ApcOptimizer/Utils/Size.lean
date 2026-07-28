@@ -37,53 +37,53 @@ def BusInteraction.vars (bi : BusInteraction (Expression p)) : List Variable :=
   bi.multiplicity.vars ++ bi.payload.flatMap Expression.vars
 
 /-- The distinct variables of a constraint system, across constraints and bus interactions. -/
-def ConstraintSystem.variables (cs : ConstraintSystem p) : List Variable :=
+def Circuit.variables (cs : Circuit p) : List Variable :=
   (cs.algebraicConstraints.flatMap Expression.vars ++
     cs.busInteractions.flatMap BusInteraction.vars).dedup
 
 /-! ## Size and effectiveness -/
 
 /-- The circuit size: the number of distinct variables. -/
-def ConstraintSystem.size (cs : ConstraintSystem p) : Nat := cs.variables.length
+def Circuit.size (cs : Circuit p) : Nat := cs.variables.length
 
 /-- The number of algebraic constraints — a coarser size measure than `size`. -/
-def ConstraintSystem.constraintCount (cs : ConstraintSystem p) : Nat :=
+def Circuit.constraintCount (cs : Circuit p) : Nat :=
   cs.algebraicConstraints.length
 
 /-- The number of bus interactions. -/
-def ConstraintSystem.busInteractionCount (cs : ConstraintSystem p) : Nat :=
+def Circuit.busInteractionCount (cs : Circuit p) : Nat :=
   cs.busInteractions.length
 
 /-- Number of occurrences of `x` (with multiplicity) across the whole system. Used e.g. to pick
     substitution pivots that minimize expression duplication. -/
-def ConstraintSystem.occurrences (cs : ConstraintSystem p) (x : Variable) : Nat :=
+def Circuit.occurrences (cs : Circuit p) (x : Variable) : Nat :=
   (cs.algebraicConstraints.flatMap Expression.vars
     ++ cs.busInteractions.flatMap BusInteraction.vars).count x
 
 /-- How much an optimizer shrinks a given circuit under a size `measure`, as the factor
     `measure original / measure optimized`. Equals `1` when the measure is unchanged; larger is
     better. Yields `0` if the optimized measure is `0` (Lean's convention `x / 0 = 0`). -/
-def effectivenessBy (measure : ConstraintSystem p → Nat)
-    (optimizer : ConstraintSystem p → BusSemantics p → ConstraintSystem p)
-    (cs : ConstraintSystem p) (bs : BusSemantics p) : ℚ :=
+def effectivenessBy (measure : Circuit p → Nat)
+    (optimizer : Circuit p → BusSemantics p → Circuit p)
+    (cs : Circuit p) (bs : BusSemantics p) : ℚ :=
   (measure cs : ℚ) / (measure (optimizer cs bs) : ℚ)
 
 /-- **Variable effectiveness** (primary): the factor by which the optimizer shrinks the distinct
     variable count. -/
-def effectiveness (optimizer : ConstraintSystem p → BusSemantics p → ConstraintSystem p)
-    (cs : ConstraintSystem p) (bs : BusSemantics p) : ℚ :=
-  effectivenessBy ConstraintSystem.size optimizer cs bs
+def effectiveness (optimizer : Circuit p → BusSemantics p → Circuit p)
+    (cs : Circuit p) (bs : BusSemantics p) : ℚ :=
+  effectivenessBy Circuit.size optimizer cs bs
 
 /-- **Bus-interaction effectiveness** (secondary): the factor by which the optimizer shrinks the
     number of bus interactions. -/
 def busInteractionEffectiveness
-    (optimizer : ConstraintSystem p → BusSemantics p → ConstraintSystem p)
-    (cs : ConstraintSystem p) (bs : BusSemantics p) : ℚ :=
-  effectivenessBy ConstraintSystem.busInteractionCount optimizer cs bs
+    (optimizer : Circuit p → BusSemantics p → Circuit p)
+    (cs : Circuit p) (bs : BusSemantics p) : ℚ :=
+  effectivenessBy Circuit.busInteractionCount optimizer cs bs
 
 /-- **Algebraic-constraint effectiveness** (tertiary): the factor by which the optimizer shrinks
     the number of algebraic constraints. -/
 def constraintEffectiveness
-    (optimizer : ConstraintSystem p → BusSemantics p → ConstraintSystem p)
-    (cs : ConstraintSystem p) (bs : BusSemantics p) : ℚ :=
-  effectivenessBy ConstraintSystem.constraintCount optimizer cs bs
+    (optimizer : Circuit p → BusSemantics p → Circuit p)
+    (cs : Circuit p) (bs : BusSemantics p) : ℚ :=
+  effectivenessBy Circuit.constraintCount optimizer cs bs

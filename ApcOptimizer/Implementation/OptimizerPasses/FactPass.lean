@@ -15,7 +15,7 @@ variable {p : ℕ}
 
 /-- A proof-carrying pass that may consult proven facts about the bus semantics. -/
 abbrev VerifiedPassW (p : ℕ) :=
-  (cs : ConstraintSystem p) → (bs : BusSemantics p) → (facts : BusFacts p bs) → PassResult cs bs
+  (cs : Circuit p) → (bs : BusSemantics p) → (facts : BusFacts p bs) → PassResult cs bs
 
 deriving instance DecidableEq for BusInteraction
 
@@ -24,16 +24,16 @@ deriving instance DecidableEq for BusInteraction
 `(#distinct variables, #bus interactions, #algebraic constraints)`, variables most significant —
 the optimizer's effectiveness priority. -/
 
-/-- Number of distinct variables via a `HashSet` (linear); same value as `ConstraintSystem.size`,
+/-- Number of distinct variables via a `HashSet` (linear); same value as `Circuit.size`,
     used only for the loop measure. -/
-def ConstraintSystem.varCount (cs : ConstraintSystem p) : Nat :=
+def Circuit.varCount (cs : Circuit p) : Nat :=
   ((cs.algebraicConstraints.flatMap Expression.vars ++
       cs.busInteractions.flatMap BusInteraction.vars).foldl
         (init := (∅ : Std.HashSet Variable)) (·.insert ·)).size
 
 /-- The lexicographic size key `(#distinct vars, #bus interactions, #constraints)`. Well-founded
     under `<`, so it serves as the fixpoint termination measure. -/
-def ConstraintSystem.sizeKey (cs : ConstraintSystem p) : Nat ×ₗ Nat ×ₗ Nat :=
+def Circuit.sizeKey (cs : Circuit p) : Nat ×ₗ Nat ×ₗ Nat :=
   toLex (cs.varCount, toLex (cs.busInteractions.length, cs.algebraicConstraints.length))
 
 /-! ## Degree guarding
@@ -43,5 +43,5 @@ exceed the degree bound; `RespectsDeg` propagates through composition and iterat
 
 /-- A pass never pushes a within-bound system past the degree bound `b`. -/
 def RespectsDeg (b : DegreeBound) (f : VerifiedPassW p) : Prop :=
-  ∀ (cs : ConstraintSystem p) (bs : BusSemantics p) (facts : BusFacts p bs),
+  ∀ (cs : Circuit p) (bs : BusSemantics p) (facts : BusFacts p bs),
     cs.withinDegree b → (f cs bs facts).out.withinDegree b

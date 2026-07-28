@@ -170,7 +170,7 @@ private def internExpr (m : Std.HashMap Variable Variable) : Expression p → Ex
   | .mul a b => .mul (internExpr m a) (internExpr m b)
 
 /-- Intern all variables of a freshly-parsed system (see the section comment). -/
-private def internSystem (cs : ConstraintSystem p) : ConstraintSystem p :=
+private def internSystem (cs : Circuit p) : Circuit p :=
   let m := cs.busInteractions.foldl
     (fun m bi => bi.payload.foldl collectVars (collectVars m bi.multiplicity))
     (cs.algebraicConstraints.foldl collectVars ∅)
@@ -183,7 +183,7 @@ private def internSystem (cs : ConstraintSystem p) : ConstraintSystem p :=
     `bus_map` with the right per-VM parser), the constraint system under `machine`, and the
     `next_free_id` cursor if present. -/
 private def parseMachinePart (jsonStr : String) :
-    Except String (Lean.Json × ConstraintSystem p × Option Nat) := do
+    Except String (Lean.Json × Circuit p × Option Nat) := do
   let json ← Lean.Json.parse jsonStr
   let machine ← json.getObjVal? "machine"
 
@@ -204,16 +204,16 @@ private def parseMachinePart (jsonStr : String) :
   -- powdr's `ColumnAllocator` cursor; absent or non-numeric parses as `none`.
   let nextFreeId? := (json.getObjVal? "next_free_id").toOption.bind (·.getNat?.toOption)
 
-  let system : ConstraintSystem p := internSystem {
+  let system : Circuit p := internSystem {
     algebraicConstraints := constraints,
     busInteractions := busInteractions
   }
   pure (json, system, nextFreeId?)
 
-/-- Parse a powdr export into a `ConstraintSystem`, its OpenVM `BusMap`, and the `next_free_id`
+/-- Parse a powdr export into a `Circuit`, its OpenVM `BusMap`, and the `next_free_id`
     cursor. -/
 def parseJsonSystem (jsonStr : String) :
-    Except String (ConstraintSystem p × BusMapList × Option Nat) := do
+    Except String (Circuit p × BusMapList × Option Nat) := do
   let (json, system, nextFreeId?) ← parseMachinePart (p := p) jsonStr
   let busMap ← parseBusMap (← json.getObjVal? "bus_map")
   pure (system, busMap, nextFreeId?)
@@ -221,7 +221,7 @@ def parseJsonSystem (jsonStr : String) :
 /-- The SP1 counterpart of `parseJsonSystem`: same machine parsing, but the `bus_map` is read as SP1
     bus types. SP1 exports are over KoalaBear, so instantiate `p := koalaBear`. -/
 def parseJsonSystemSp1 (jsonStr : String) :
-    Except String (ConstraintSystem p × ApcOptimizer.SP1.BusMapList × Option Nat) := do
+    Except String (Circuit p × ApcOptimizer.SP1.BusMapList × Option Nat) := do
   let (json, system, nextFreeId?) ← parseMachinePart (p := p) jsonStr
   let busMap ← parseBusMapSp1 (← json.getObjVal? "bus_map")
   pure (system, busMap, nextFreeId?)

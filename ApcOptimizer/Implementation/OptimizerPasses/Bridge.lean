@@ -214,7 +214,7 @@ theorem VarRegistry.decodeBI_eval (reg : VarRegistry) (bi : BusInteraction (Dens
 theorem VarRegistry.decodeCS_satisfies (reg : VarRegistry) (d : DenseConstraintSystem p)
     (bs : BusSemantics p) (E : Variable → ZMod p) :
     (reg.decodeCS d).satisfies bs E ↔ d.satisfies bs (fun i => E (reg.resolve i)) := by
-  simp only [ConstraintSystem.satisfies, DenseConstraintSystem.satisfies, VarRegistry.decodeCS,
+  simp only [Circuit.satisfies, DenseConstraintSystem.satisfies, VarRegistry.decodeCS,
     List.mem_map, forall_exists_index, and_imp]
   constructor
   · rintro ⟨h1, h2⟩
@@ -244,7 +244,7 @@ theorem VarRegistry.decodeCS_admissible (reg : VarRegistry) (d : DenseConstraint
     simp only [Function.comp_apply]
     exact reg.decodeBI_eval bi E
   have hAeq : (reg.decodeCS d).admissible bs E = d.admissible bs (fun i => E (reg.resolve i)) := by
-    unfold ConstraintSystem.admissible DenseConstraintSystem.admissible
+    unfold Circuit.admissible DenseConstraintSystem.admissible
     rw [hlist]
   exact iff_of_eq hAeq
 
@@ -265,7 +265,7 @@ theorem VarRegistry.decodeBI_filter_comm (reg : VarRegistry) (d : DenseConstrain
 theorem VarRegistry.decodeCS_sideEffects (reg : VarRegistry) (d : DenseConstraintSystem p)
     (bs : BusSemantics p) (E : Variable → ZMod p) :
     (reg.decodeCS d).sideEffects bs E = d.sideEffects bs (fun i => E (reg.resolve i)) := by
-  simp only [ConstraintSystem.sideEffects, DenseConstraintSystem.sideEffects, VarRegistry.decodeCS]
+  simp only [Circuit.sideEffects, DenseConstraintSystem.sideEffects, VarRegistry.decodeCS]
   rw [reg.decodeBI_filter_comm d bs, List.map_map]
   refine List.map_congr_left (fun bi _ => ?_)
   simp only [Function.comp_apply, reg.decodeBI_eval]
@@ -273,7 +273,7 @@ theorem VarRegistry.decodeCS_sideEffects (reg : VarRegistry) (d : DenseConstrain
 theorem VarRegistry.decodeCS_guaranteesInvariants (reg : VarRegistry) {d : DenseConstraintSystem p}
     (bs : BusSemantics p) (hc : d.CoveredBy reg) :
     (reg.decodeCS d).guaranteesInvariants bs ↔ d.guaranteesInvariants bs := by
-  unfold ConstraintSystem.guaranteesInvariants DenseConstraintSystem.guaranteesInvariants
+  unfold Circuit.guaranteesInvariants DenseConstraintSystem.guaranteesInvariants
   constructor
   · -- decode → dense (needs coverage, to transport a dense env to a spec one)
     intro hgi denv hsat bi hbi

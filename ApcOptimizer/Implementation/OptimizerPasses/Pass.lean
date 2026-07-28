@@ -103,7 +103,7 @@ theorem DenseVerifiedPassW.guardDegree_respectsDeg {b : DegreeBound} (f : DenseV
   simp only [DenseVerifiedPassW.guardDegree]
   by_cases hok : (f reg d hcov bs facts).out.withinDegreeB b = true
   · rw [if_pos hok]
-    refine (ConstraintSystem.withinDegreeB_iff _ _).1 ?_
+    refine (Circuit.withinDegreeB_iff _ _).1 ?_
     rw [(f reg d hcov bs facts).reg'.decodeCS_withinDegreeB]
     exact hok
   · rw [if_neg hok]
