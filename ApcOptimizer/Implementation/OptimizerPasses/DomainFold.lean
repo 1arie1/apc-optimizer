@@ -36,6 +36,40 @@ def DenseExpr.hasConstFoldableNode : DenseExpr p → Bool
   | .add a b => !(DenseExpr.add a b).hasVar || a.hasConstFoldableNode || b.hasConstFoldableNode
   | .mul a b => !(DenseExpr.mul a b).hasVar || a.hasConstFoldableNode || b.hasConstFoldableNode
 
+/-- `(hasVar, hasConstFoldableNode)` in one walk. The plain `hasConstFoldableNode` re-runs `hasVar`
+    over the subtree at every node, so it is O(nodes × depth) on the left-nested trees
+    `DenseLinExpr.toExpr` produces. -/
+def DenseExpr.hvFold : DenseExpr p → Bool × Bool
+  | .const _ => (false, false)
+  | .var _ => (true, false)
+  | .add a b =>
+      let ra := a.hvFold
+      let rb := b.hvFold
+      let v := ra.1 || rb.1
+      (v, !v || ra.2 || rb.2)
+  | .mul a b =>
+      let ra := a.hvFold
+      let rb := b.hvFold
+      let v := ra.1 || rb.1
+      (v, !v || ra.2 || rb.2)
+
+theorem DenseExpr.hvFold_eq (e : DenseExpr p) :
+    e.hvFold = (e.hasVar, e.hasConstFoldableNode) := by
+  induction e with
+  | const n => rfl
+  | var y => rfl
+  | add a b iha ihb =>
+      simp only [DenseExpr.hvFold, iha, ihb, DenseExpr.hasVar, DenseExpr.hasConstFoldableNode]
+  | mul a b iha ihb =>
+      simp only [DenseExpr.hvFold, iha, ihb, DenseExpr.hasVar, DenseExpr.hasConstFoldableNode]
+
+def DenseExpr.hasConstFoldableNodeFast (e : DenseExpr p) : Bool := e.hvFold.2
+
+@[csimp] theorem DenseExpr.hasConstFoldableNode_eq_fast :
+    @DenseExpr.hasConstFoldableNode = @DenseExpr.hasConstFoldableNodeFast := by
+  funext p e
+  rw [DenseExpr.hasConstFoldableNodeFast, DenseExpr.hvFold_eq]
+
 /-! ## Dense `findDomainAlg`, `coveredBy`, `coveredCsOf` -/
 
 /-- Find `i`'s finite domain: the roots (`denseRootsIn`) of the first constraint mentioning `i`
