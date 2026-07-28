@@ -1368,11 +1368,14 @@ theorem denseReencodeStepCached_correct [Fact p.Prime] (b : DegreeBound)
       rfl
     have hxsValid : ∀ x ∈ xs, reg1.Valid x := fun x hx =>
       hbext.valid (DenseConstraintSystem.occ_valid hcov x (hxsOcc x hx))
+    have hro : ro.1 = denseReencodeOut d xs bits hm := denseReencodeOutOk_fst b d xs bits hm
     refine ⟨hbext, hbii, ?_, ?_, ?_⟩
-    · exact denseReencodeOut_covered reg1 d xs bits hm (csCoveredBy_mono hbext hcov)
+    · rw [hro]
+      exact denseReencodeOut_covered reg1 d xs bits hm (csCoveredBy_mono hbext hcov)
         hbval hpolyVars
     · exact denseBitCM_covered reg1 xs bits hm hxsValid hbval
-    · exact denseCheckReencode_sound d bs reg1.isInput xs bits hm hxsInput hxsOcc hxsB
+    · rw [hro]
+      exact denseCheckReencode_sound d bs reg1.isInput xs bits hm hxsInput hxsOcc hxsB
         hbnInput hD
   all_goals first
     | exact stepIdentityPostC reg reg d bs (VarRegistry.Extends.refl reg)
@@ -1459,7 +1462,8 @@ theorem denseReencodeF_props (pw : PrimeWitness p) (b : DegreeBound) (reg : VarR
           useBis := denseCovBuild denseBIVars d.busInteractions
           arrBis := d.busInteractions.toArray
           foldCs := d.algebraicConstraints.zipIdx.foldl
-            (fun s ci => if ci.1.hasConstFoldableNode then s.insert ci.2 else s) ∅ }
+            (fun s ci => if ci.1.hasConstFoldableNode then s.insert ci.2 else s) ∅
+          dWithin := false }
         d.algebraicConstraints.length d.busInteractions.length hcov
     exact ⟨he, hc, hd, hcorr⟩
   · rw [if_neg hpr]

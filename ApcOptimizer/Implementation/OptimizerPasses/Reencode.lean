@@ -532,6 +532,201 @@ theorem denseReencodeOut_eq_fast : @denseReencodeOut = @denseReencodeOutFast := 
   simp only [denseReencodeOut, denseReencodeOutFast, denseBIRewriteGate_eq,
     denseGroupRewriteGate_eq]
 
+/-! ### The rewrite fused with its degree gate
+
+`denseReencodeStepCached` needs the rewritten system *and* `withinDegreeB` on it. Measured
+separately those are two whole-system walks — the gate walk and a `DenseExpr.degree` walk over every
+item of the output — and the second is redundant: the gate leaves most items untouched, and an
+untouched item's degree is whatever it was in the input. So when the input system is already within
+the bound, only the items the gate rewrote (and the fresh booleanity constraints) need measuring.
+`denseMapOk` carries the resulting `Bool` alongside the mapped list in one tail-recursive pass;
+`denseReencodeOutOk_snd` is where the input-within-bound side condition is discharged. -/
+
+/-- The read-only gate, paired with the degree test of the item it produced (`true` when it fires on
+    nothing — see the section note). -/
+def denseGateDeg (dmax : Nat) (xs bits : List VarId) (σfn : VarId → Option (DenseExpr p))
+    (patts : List (List (VarId × ZMod p))) (e : DenseExpr p) : DenseExpr p × Bool :=
+  if e.sharesVarIn xs || e.hasConstFoldableNode then
+    let e' := denseGroupRewrite xs bits σfn patts e
+    (e', decide (e'.degree ≤ dmax))
+  else (e, true)
+
+theorem denseGateDeg_fst (dmax : Nat) (xs bits : List VarId) (σfn : VarId → Option (DenseExpr p))
+    (patts : List (List (VarId × ZMod p))) (e : DenseExpr p) :
+    (denseGateDeg dmax xs bits σfn patts e).1 = denseGroupRewrite xs bits σfn patts e := by
+  unfold denseGateDeg
+  split
+  · rfl
+  · next h =>
+      rw [Bool.or_eq_true, not_or, Bool.not_eq_true, Bool.not_eq_true] at h
+      exact (denseGroupRewrite_eq_self h.1 h.2).symm
+
+/-- Per-interaction gate paired with the degree test of the interaction it produced. -/
+def denseBIGateDeg (dmax : Nat) (xs bits : List VarId) (σfn : VarId → Option (DenseExpr p))
+    (patts : List (List (VarId × ZMod p))) (bi : BusInteraction (DenseExpr p)) :
+    BusInteraction (DenseExpr p) × Bool :=
+  if bi.multiplicity.sharesVarIn xs || bi.multiplicity.hasConstFoldableNode
+      || bi.payload.any (fun e => e.sharesVarIn xs || e.hasConstFoldableNode) then
+    let bi' : BusInteraction (DenseExpr p) :=
+      { bi with multiplicity := denseGroupRewriteGate xs bits σfn patts bi.multiplicity,
+                payload := bi.payload.map (denseGroupRewriteGate xs bits σfn patts) }
+    (bi', decide (bi'.multiplicity.degree ≤ dmax) &&
+      bi'.payload.all (fun e => decide (e.degree ≤ dmax)))
+  else (bi, true)
+
+theorem denseBIGateDeg_fst (dmax : Nat) (xs bits : List VarId) (σfn : VarId → Option (DenseExpr p))
+    (patts : List (List (VarId × ZMod p))) (bi : BusInteraction (DenseExpr p)) :
+    (denseBIGateDeg dmax xs bits σfn patts bi).1 = denseBIRewriteGate xs bits σfn patts bi := by
+  unfold denseBIGateDeg denseBIRewriteGate
+  split <;> rfl
+
+/-- The constraint side: the gated rewrite of `l` reversed onto `acc`, with `ok` accumulating the
+    degree test of only the items the gate rewrote. Specialised rather than expressed through a
+    generic `α → β × Bool` map so the traversal allocates no per-item pair. -/
+def denseGateCsGo (dmax : Nat) (xs bits : List VarId) (σfn : VarId → Option (DenseExpr p))
+    (patts : List (List (VarId × ZMod p))) :
+    List (DenseExpr p) → List (DenseExpr p) → Bool → List (DenseExpr p) × Bool
+  | [], acc, ok => (acc.reverse, ok)
+  | e :: rest, acc, ok =>
+      if e.sharesVarIn xs || e.hasConstFoldableNode then
+        let e' := denseGroupRewrite xs bits σfn patts e
+        denseGateCsGo dmax xs bits σfn patts rest (e' :: acc) (ok && decide (e'.degree ≤ dmax))
+      else denseGateCsGo dmax xs bits σfn patts rest (e :: acc) ok
+
+theorem denseGateCsGo_eq (dmax : Nat) (xs bits : List VarId) (σfn : VarId → Option (DenseExpr p))
+    (patts : List (List (VarId × ZMod p))) :
+    ∀ (l acc : List (DenseExpr p)) (ok : Bool),
+      denseGateCsGo dmax xs bits σfn patts l acc ok
+        = (acc.reverse ++ l.map (fun e => (denseGateDeg dmax xs bits σfn patts e).1),
+           ok && l.all (fun e => (denseGateDeg dmax xs bits σfn patts e).2)) := by
+  intro l
+  induction l with
+  | nil => intro acc ok; simp [denseGateCsGo]
+  | cons e rest ih =>
+      intro acc ok
+      rw [denseGateCsGo]
+      split
+      · next h =>
+          rw [ih]
+          simp only [List.map_cons, List.all_cons, denseGateDeg, if_pos h,
+            List.reverse_cons, List.append_assoc, List.cons_append, List.nil_append, Bool.and_assoc]
+      · next h =>
+          rw [ih]
+          simp only [List.map_cons, List.all_cons, denseGateDeg, if_neg h,
+            List.reverse_cons, List.append_assoc, List.cons_append, List.nil_append,
+            Bool.true_and]
+
+/-- The bus side of `denseGateCsGo`. -/
+def denseGateBisGo (dmax : Nat) (xs bits : List VarId) (σfn : VarId → Option (DenseExpr p))
+    (patts : List (List (VarId × ZMod p))) :
+    List (BusInteraction (DenseExpr p)) → List (BusInteraction (DenseExpr p)) → Bool →
+      List (BusInteraction (DenseExpr p)) × Bool
+  | [], acc, ok => (acc.reverse, ok)
+  | bi :: rest, acc, ok =>
+      if bi.multiplicity.sharesVarIn xs || bi.multiplicity.hasConstFoldableNode
+          || bi.payload.any (fun e => e.sharesVarIn xs || e.hasConstFoldableNode) then
+        let bi' : BusInteraction (DenseExpr p) :=
+          { bi with multiplicity := denseGroupRewriteGate xs bits σfn patts bi.multiplicity,
+                    payload := bi.payload.map (denseGroupRewriteGate xs bits σfn patts) }
+        denseGateBisGo dmax xs bits σfn patts rest (bi' :: acc)
+          (ok && (decide (bi'.multiplicity.degree ≤ dmax) &&
+            bi'.payload.all (fun e => decide (e.degree ≤ dmax))))
+      else denseGateBisGo dmax xs bits σfn patts rest (bi :: acc) ok
+
+theorem denseGateBisGo_eq (dmax : Nat) (xs bits : List VarId) (σfn : VarId → Option (DenseExpr p))
+    (patts : List (List (VarId × ZMod p))) :
+    ∀ (l acc : List (BusInteraction (DenseExpr p))) (ok : Bool),
+      denseGateBisGo dmax xs bits σfn patts l acc ok
+        = (acc.reverse ++ l.map (fun bi => (denseBIGateDeg dmax xs bits σfn patts bi).1),
+           ok && l.all (fun bi => (denseBIGateDeg dmax xs bits σfn patts bi).2)) := by
+  intro l
+  induction l with
+  | nil => intro acc ok; simp [denseGateBisGo]
+  | cons bi rest ih =>
+      intro acc ok
+      rw [denseGateBisGo]
+      split
+      · next h =>
+          rw [ih]
+          simp only [List.map_cons, List.all_cons, denseBIGateDeg, if_pos h,
+            List.reverse_cons, List.append_assoc, List.cons_append, List.nil_append, Bool.and_assoc]
+      · next h =>
+          rw [ih]
+          simp only [List.map_cons, List.all_cons, denseBIGateDeg, if_neg h,
+            List.reverse_cons, List.append_assoc, List.cons_append, List.nil_append,
+            Bool.true_and]
+
+/-- `denseReencodeOut` together with `withinDegreeB` on its result. The `Bool` is only valid for an
+    input system that is itself within the bound (`denseReencodeOutOk_snd`); the caller keeps that
+    as an invariant (`DenseReencodeCacheState.dWithin`). -/
+def denseReencodeOutOk (b : DegreeBound) (d : DenseConstraintSystem p) (xs bits : List VarId)
+    (hm : Std.HashMap VarId (DenseExpr p)) : DenseConstraintSystem p × Bool :=
+  let σfn := denseGroupSubst xs hm
+  let patts := denseAssignments (denseBitBox bits)
+  let rc := denseGateCsGo b.identities xs bits σfn patts
+    (d.algebraicConstraints.filter (fun c => !denseCoveredBy xs c)) [] true
+  let rb := denseGateBisGo b.busInteractions xs bits σfn patts d.busInteractions [] true
+  let bools := bits.map denseBoolConstraint
+  ({ algebraicConstraints := rc.1 ++ bools, busInteractions := rb.1 },
+    (rc.2 && bools.all (fun c => decide (c.degree ≤ b.identities))) && rb.2)
+
+theorem denseReencodeOutOk_fst (b : DegreeBound) (d : DenseConstraintSystem p)
+    (xs bits : List VarId) (hm : Std.HashMap VarId (DenseExpr p)) :
+    (denseReencodeOutOk b d xs bits hm).1 = denseReencodeOut d xs bits hm := by
+  unfold denseReencodeOutOk denseReencodeOut
+  simp only [denseGateCsGo_eq, denseGateBisGo_eq, List.reverse_nil, List.nil_append,
+    denseGateDeg_fst, denseBIGateDeg_fst, denseBIRewriteGate_eq]
+
+/-- Two lists' `all` agree when the predicates agree pointwise on the members. -/
+theorem List.all_congr_mem {α : Type} (l : List α) (f g : α → Bool)
+    (h : ∀ x ∈ l, f x = g x) : l.all f = l.all g := by
+  induction l with
+  | nil => rfl
+  | cons x rest ih =>
+      rw [List.all_cons, List.all_cons, h x List.mem_cons_self,
+        ih (fun y hy => h y (List.mem_cons_of_mem x hy))]
+
+theorem denseReencodeOutOk_snd (b : DegreeBound) (d : DenseConstraintSystem p)
+    (xs bits : List VarId) (hm : Std.HashMap VarId (DenseExpr p))
+    (hd : d.withinDegreeB b = true) :
+    (denseReencodeOutOk b d xs bits hm).2 = (denseReencodeOut d xs bits hm).withinDegreeB b := by
+  rw [DenseConstraintSystem.withinDegreeB, Bool.and_eq_true] at hd
+  obtain ⟨hdc, hdb⟩ := hd
+  rw [List.all_eq_true] at hdc hdb
+  rw [← denseReencodeOutOk_fst b d xs bits hm]
+  unfold denseReencodeOutOk DenseConstraintSystem.withinDegreeB
+  simp only [denseGateCsGo_eq, denseGateBisGo_eq, List.reverse_nil, List.nil_append,
+    Bool.true_and, List.all_append, List.all_map, Function.comp_def]
+  -- the constraint side: an item the gate left alone is a member of `d`, so `hdc` bounds it
+  have hcs : (d.algebraicConstraints.filter (fun c => !denseCoveredBy xs c)).all
+        (fun e => (denseGateDeg b.identities xs bits (denseGroupSubst xs hm)
+          (denseAssignments (denseBitBox bits)) e).2)
+      = (d.algebraicConstraints.filter (fun c => !denseCoveredBy xs c)).all
+        (fun e => decide ((denseGateDeg b.identities xs bits (denseGroupSubst xs hm)
+          (denseAssignments (denseBitBox bits)) e).1.degree ≤ b.identities)) := by
+    refine List.all_congr_mem _ _ _ (fun e he => ?_)
+    have hmem : e ∈ d.algebraicConstraints := List.mem_of_mem_filter he
+    unfold denseGateDeg
+    split
+    · rfl
+    · exact (hdc e hmem).symm
+  -- the bus side, the same argument per interaction
+  have hbs : d.busInteractions.all
+        (fun bi => (denseBIGateDeg b.busInteractions xs bits (denseGroupSubst xs hm)
+          (denseAssignments (denseBitBox bits)) bi).2)
+      = d.busInteractions.all (fun bi =>
+          decide ((denseBIGateDeg b.busInteractions xs bits (denseGroupSubst xs hm)
+            (denseAssignments (denseBitBox bits)) bi).1.multiplicity.degree ≤ b.busInteractions) &&
+          (denseBIGateDeg b.busInteractions xs bits (denseGroupSubst xs hm)
+            (denseAssignments (denseBitBox bits)) bi).1.payload.all
+              (fun e => decide (e.degree ≤ b.busInteractions))) := by
+    refine List.all_congr_mem _ _ _ (fun bi hbi => ?_)
+    unfold denseBIGateDeg
+    split
+    · rfl
+    · exact (hdb bi hbi).symm
+  rw [hcs, hbs]
+
 /-! ## The build/step/loop/pass layer -/
 
 inductive DenseReencodeRootPlan (p : ℕ)
@@ -714,6 +909,14 @@ structure DenseReencodeCacheState (p : ℕ) where
   useBis : DenseCovIndex
   arrBis : Array (BusInteraction (DenseExpr p))
   foldCs : Std.HashSet Nat
+  /-- Whether `d` is *known* to be within the degree bound — the side condition that makes
+      `denseReencodeOutOk`'s fused degree test agree with measuring the rewritten system outright
+      (`denseReencodeOutOk_snd`). Starts `false`, so the first candidate to reach the gate measures
+      the rewritten system the plain way; from the first accept on it is `true`, since an accepted
+      `ro` passed the gate and becomes the new `d`. Deliberately not seeded with
+      `d.withinDegreeB b`: that walk would be charged to every APC, including the ones where no
+      candidate is ever accepted. -/
+  dWithin : Bool
 
 /-- Apply an accepted rewrite to the threaded state in place, mirroring `denseReencodeOut` on the
     stable-position arrays: only positions holding a group variable (bucket candidates) or a
@@ -762,7 +965,7 @@ def denseReencodeStateUpdate (state : DenseReencodeCacheState p) (xs bits : List
                     (HashedDedup.hashedDedup (hash ·) (denseBIVars bi')) i }
       else st
     else st) st
-  { st with varSet := bits.foldl (·.insert ·) st.varSet }
+  { st with varSet := bits.foldl (·.insert ·) st.varSet, dWithin := true }
 
 /-- One checked re-encoding step (identity if construction or the certificate fails). Applies the
     gates in order, minting fresh bits and rewriting `d` only on full acceptance; the threaded
@@ -788,9 +991,9 @@ def denseReencodeStepCached (b : DegreeBound)
     if xs.all (fun x => decide (x ∉ bits)) then
     if bits.all (fun b => decide ((reg1.resolve b).powdrId? = none)) then
     if denseCheckReencode d xs bits hm then
-      let ro := denseReencodeOut d xs bits hm
-      if ro.withinDegreeB b then
-        (reg1, ro,
+      let ro := denseReencodeOutOk b d xs bits hm
+      if (if state.dWithin then ro.2 else ro.1.withinDegreeB b) then
+        (reg1, ro.1,
          bits.map (fun b => (b, denseBitCM (denseAssignments (denseBitBox bits)) xs hm b)),
          denseReencodeStateUpdate state xs bits hm)
       else (reg1, d, [], state)
@@ -799,6 +1002,33 @@ def denseReencodeStepCached (b : DegreeBound)
     else (reg1, d, [], state)
     else (reg1, d, [], state)
   else (reg, d, [], state)
+
+/-- The `dWithin` invariant is preserved by a step, which is what makes the fused degree gate above
+    decide exactly what `(denseReencodeOut d xs bits hm).withinDegreeB b` decides
+    (`denseReencodeOutOk_snd`): the flag is only ever set on the accept path, and there the accepted
+    system passed the gate, and it starts `false`, so every step of the loop sees a valid flag.
+
+    Unreachable from the correctness roots by design: the degree bound is enforced *outside* the
+    pass, by `guardAll` in `Implementation/Optimizer.lean`, so this internal gate decides which
+    candidates are accepted — behaviour, not soundness. -/
+theorem denseReencodeStepCached_dWithin (b : DegreeBound) (reg : VarRegistry)
+    (d : DenseConstraintSystem p) (state : DenseReencodeCacheState p) (xs : List VarId)
+    (freshBase : String) (hdw : state.dWithin = true → d.withinDegreeB b = true) :
+    (denseReencodeStepCached b reg d state xs freshBase).2.2.2.dWithin = true →
+      (denseReencodeStepCached b reg d state xs freshBase).2.1.withinDegreeB b = true := by
+  fun_cases denseReencodeStepCached b reg d state xs freshBase
+  case case4 =>
+    rename_i hgate hcoll reg1 bits hm rootCache hbeq state1 hdpr hA hB hC hD ro hwd
+    intro _
+    show ro.1.withinDegreeB b = true
+    by_cases hsw : state1.dWithin = true
+    · rw [if_pos hsw] at hwd
+      rw [denseReencodeOutOk_fst b d xs bits hm,
+        ← denseReencodeOutOk_snd b d xs bits hm (hdw hsw)]
+      exact hwd
+    · rw [if_neg hsw] at hwd
+      exact hwd
+  all_goals exact hdw
 
 /-- `d`'s item counts for the fresh-name prefix, re-read only after a step that rewrote `d`
     (a step derives one method per minted bit, so nonempty derivations mark exactly the accepts). -/
@@ -853,7 +1083,8 @@ def denseReencodeF (pw : PrimeWitness p) (b : DegreeBound) (reg : VarRegistry)
         useBis := denseCovBuild denseBIVars d.busInteractions
         arrBis := d.busInteractions.toArray
         foldCs := d.algebraicConstraints.zipIdx.foldl
-          (fun s ci => if ci.1.hasConstFoldableNode then s.insert ci.2 else s) ∅ }
+          (fun s ci => if ci.1.hasConstFoldableNode then s.insert ci.2 else s) ∅
+        dWithin := false }
       d.algebraicConstraints.length d.busInteractions.length
   else (reg, d, [])
 
