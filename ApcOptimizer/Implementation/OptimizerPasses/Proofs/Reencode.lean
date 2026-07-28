@@ -1332,7 +1332,8 @@ theorem denseBuildReencodeCached_bits_valid_of_eq {reg reg1 : VarRegistry}
 set_option maxHeartbeats 1000000 in
 theorem denseReencodeStepCached_correct [Fact p.Prime] (b : DegreeBound)
     (reg : VarRegistry) (d : DenseConstraintSystem p) (state : DenseReencodeCacheState p)
-    (xs : List VarId) (freshBase : String) (bs : BusSemantics p) (hcov : d.CoveredBy reg) :
+    (xs : List VarId) (freshBase : String) (bs : BusSemantics p) (hcov : d.CoveredBy reg)
+    (hsumm : denseSummSound d.algebraicConstraints state.masks state.folds) :
     reg.Extends (denseReencodeStepCached b reg d state xs freshBase).1
     ∧ (∀ i, (denseReencodeStepCached b reg d state xs freshBase).1.isInput i
         = reg.isInput i)
@@ -1368,7 +1369,8 @@ theorem denseReencodeStepCached_correct [Fact p.Prime] (b : DegreeBound)
       rfl
     have hxsValid : ∀ x ∈ xs, reg1.Valid x := fun x hx =>
       hbext.valid (DenseConstraintSystem.occ_valid hcov x (hxsOcc x hx))
-    have hro : ro.1 = denseReencodeOut d xs bits hm := denseReencodeOutOk_fst b d xs bits hm
+    have hro : ro.1 = denseReencodeOut d xs bits hm :=
+      denseReencodeOutOkS_fst b d xs bits hm _ _ hsumm
     refine ⟨hbext, hbii, ?_, ?_, ?_⟩
     · rw [hro]
       exact denseReencodeOut_covered reg1 d xs bits hm (csCoveredBy_mono hbext hcov)
@@ -1390,6 +1392,7 @@ theorem denseReencodeLoopCached_correct [Fact p.Prime] (b : DegreeBound)
     ∀ (targets : List (List VarId)) (idx : Nat) (reg : VarRegistry) (d : DenseConstraintSystem p)
       (state : DenseReencodeCacheState p) (nc nb : Nat),
       d.CoveredBy reg →
+      denseSummSound d.algebraicConstraints state.masks state.folds →
       reg.Extends (denseReencodeLoopCached b targets idx reg d state nc nb).1
       ∧ (∀ i, (denseReencodeLoopCached b targets idx reg d state nc nb).1.isInput i
           = reg.isInput i)
@@ -1405,27 +1408,28 @@ theorem denseReencodeLoopCached_correct [Fact p.Prime] (b : DegreeBound)
   intro targets
   induction targets with
   | nil =>
-      intro idx reg d state nc nb hcov
+      intro idx reg d state nc nb hcov _
       show reg.Extends reg ∧ (∀ i, reg.isInput i = reg.isInput i) ∧ d.CoveredBy reg
         ∧ DenseDerivations.CoveredBy reg ([] : DenseDerivations p)
         ∧ DensePassCorrect reg.isInput d d ([] : DenseDerivations p) bs
       exact ⟨VarRegistry.Extends.refl reg, fun _ => rfl, hcov,
         (by intro x hx; simp at hx), DensePassCorrect.refl reg.isInput d bs⟩
   | cons xs rest ih =>
-      intro idx reg d state nc nb hcov
+      intro idx reg d state nc nb hcov hsumm
       simp only [denseReencodeLoopCached]
       rcases hstep : denseReencodeStepCached b reg d state xs s!"rnc{nc}_{nb}_{idx}"
           with ⟨reg1, d1, derivs1, state1⟩
       have hsp := denseReencodeStepCached_correct b reg d state xs
-          s!"rnc{nc}_{nb}_{idx}" bs hcov
-      simp only [hstep] at hsp
+          s!"rnc{nc}_{nb}_{idx}" bs hcov hsumm
+      have hss := denseReencodeStepCached_summ b reg d state xs s!"rnc{nc}_{nb}_{idx}" hsumm
+      simp only [hstep] at hsp hss
       obtain ⟨hs_ext, hs_ii, hs_cov, hs_dcov, hs_correct⟩ := hsp
       rcases hrec : denseReencodeLoopCached b rest (idx + 1) reg1 d1 state1
           (denseReencodeNameCounts derivs1 d1 nc nb).1 (denseReencodeNameCounts derivs1 d1 nc nb).2
           with ⟨reg2, d2, derivs2⟩
       have hih := ih (idx + 1) reg1 d1 state1
           (denseReencodeNameCounts derivs1 d1 nc nb).1 (denseReencodeNameCounts derivs1 d1 nc nb).2
-          hs_cov
+          hs_cov hss
       simp only [hrec] at hih
       obtain ⟨hr_ext, hr_ii, hr_cov, hr_dcov, hr_correct⟩ := hih
       refine ⟨hs_ext.trans hr_ext, fun i => (hr_ii i).trans (hs_ii i), hr_cov, ?_, ?_⟩
@@ -1463,8 +1467,11 @@ theorem denseReencodeF_props (pw : PrimeWitness p) (b : DegreeBound) (reg : VarR
           arrBis := d.busInteractions.toArray
           foldCs := d.algebraicConstraints.zipIdx.foldl
             (fun s ci => if ci.1.hasConstFoldableNode then s.insert ci.2 else s) ∅
-          dWithin := false }
+          dWithin := false
+          masks := #[]
+          folds := #[] }
         d.algebraicConstraints.length d.busInteractions.length hcov
+        (denseSummSound_empty d.algebraicConstraints)
     exact ⟨he, hc, hd, hcorr⟩
   · rw [if_neg hpr]
     refine ⟨VarRegistry.Extends.refl reg, hcov, ?_, DensePassCorrect.refl reg.isInput d bs⟩

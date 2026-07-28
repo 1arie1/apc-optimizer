@@ -34,3 +34,6 @@ ApcOptimizer.Dense.get_spawn
 ApcOptimizer.Dense.denseReencodeStepCached_dWithin
 ApcOptimizer.Dense.denseReencodeOutOk_snd
 ApcOptimizer.Dense.List.all_congr_mem
+# Same class: `denseReencodeOutOkS_snd` carries that verdict across the footprint-gated traversal
+# (`denseSummSound` holding), so the cached gate accepts exactly the candidates the walking gate did.
+ApcOptimizer.Dense.denseReencodeOutOkS_snd

@@ -411,6 +411,115 @@ def DenseExpr.sharesVarIn (xs : List VarId) : DenseExpr p → Bool
   | .add a b => a.sharesVarIn xs || b.sharesVarIn xs
   | .mul a b => a.sharesVarIn xs || b.sharesVarIn xs
 
+/-! ### Variable footprints
+
+A `Nat` bitmask summarising which variables an expression can mention: bit `v.index % denseMaskBits`
+for every `v` occurring in it. Disjoint footprints prove `sharesVarIn` false
+(`denseVarMask_sharesVarIn_of_land_eq_zero`) without walking the expression, which is what lets the
+rewrite gate skip an item in O(1) — see the cached gate below.
+
+`denseMaskBits` is 62 so a mask stays below `2 ^ 63` and is therefore a tagged scalar `Nat`, never a
+heap-allocated bignum; an `Array Nat` of masks then allocates nothing per element. -/
+
+def denseMaskBits : Nat := 62
+
+/-- The footprint bit of a single variable. -/
+def denseVarBit (v : VarId) : Nat := 1 <<< (v.index % denseMaskBits)
+
+/-- The footprint of an expression: the union of its variables' bits. -/
+def denseVarMask : DenseExpr p → Nat
+  | .const _ => 0
+  | .var y => denseVarBit y
+  | .add a b => denseVarMask a ||| denseVarMask b
+  | .mul a b => denseVarMask a ||| denseVarMask b
+
+/-- The footprint of a variable list. -/
+def denseVarsMask (xs : List VarId) : Nat :=
+  xs.foldl (fun m v => m ||| denseVarBit v) 0
+
+theorem denseLandOrLeft {x y m : Nat} (h : (x ||| y) &&& m = 0) : x &&& m = 0 := by
+  refine Nat.eq_of_testBit_eq (fun i => ?_)
+  have hi : ((x ||| y) &&& m).testBit i = false := by rw [h]; exact Nat.zero_testBit i
+  rw [Nat.testBit_and, Nat.testBit_or] at hi
+  rw [Nat.testBit_and, Nat.zero_testBit]
+  rcases Bool.and_eq_false_iff.mp hi with hor | hm
+  · rw [Bool.or_eq_false_iff] at hor
+    rw [hor.1, Bool.false_and]
+  · rw [hm, Bool.and_false]
+
+theorem denseLandOrRight {x y m : Nat} (h : (x ||| y) &&& m = 0) : y &&& m = 0 := by
+  refine Nat.eq_of_testBit_eq (fun i => ?_)
+  have hi : ((x ||| y) &&& m).testBit i = false := by rw [h]; exact Nat.zero_testBit i
+  rw [Nat.testBit_and, Nat.testBit_or] at hi
+  rw [Nat.testBit_and, Nat.zero_testBit]
+  rcases Bool.and_eq_false_iff.mp hi with hor | hm
+  · rw [Bool.or_eq_false_iff] at hor
+    rw [hor.2, Bool.false_and]
+  · rw [hm, Bool.and_false]
+
+theorem denseVarBit_testBit_self (v : VarId) :
+    (denseVarBit v).testBit (v.index % denseMaskBits) = true := by
+  unfold denseVarBit
+  rw [Nat.shiftLeft_eq, one_mul]
+  exact Nat.testBit_two_pow_self
+
+theorem denseVarsMask_testBit_of_mem {xs : List VarId} {v : VarId} (hv : v ∈ xs) :
+    (denseVarsMask xs).testBit (v.index % denseMaskBits) = true := by
+  unfold denseVarsMask
+  suffices h : ∀ (l : List VarId) (acc : Nat), v ∈ l →
+      (l.foldl (fun m u => m ||| denseVarBit u) acc).testBit (v.index % denseMaskBits) = true by
+    exact h xs 0 hv
+  intro l
+  induction l with
+  | nil => intro _ h; simp at h
+  | cons u rest ih =>
+      intro acc h
+      rcases List.mem_cons.mp h with rfl | h
+      · -- the accumulator keeps `v`'s bit once it is set, so the fold preserves it
+        clear ih h
+        suffices hk : ∀ (l : List VarId) (acc : Nat),
+            acc.testBit (v.index % denseMaskBits) = true →
+            (l.foldl (fun m u => m ||| denseVarBit u) acc).testBit
+              (v.index % denseMaskBits) = true by
+          exact hk rest (acc ||| denseVarBit v)
+            (by rw [Nat.testBit_or, denseVarBit_testBit_self]; simp)
+        intro l
+        induction l with
+        | nil => intro acc h; exact h
+        | cons w rest ihk =>
+            intro acc h
+            exact ihk (acc ||| denseVarBit w) (by rw [Nat.testBit_or, h]; simp)
+      · exact ih _ h
+
+/-- Disjoint footprints certify that no variable of `xs` occurs in `e`. This is the whole reason the
+    cached gate is sound: the mask may over-approximate, so a nonzero intersection means only
+    "walk the expression to find out". -/
+theorem denseVarMask_sharesVarIn_of_land_eq_zero {xs : List VarId} {e : DenseExpr p}
+    (h : denseVarMask e &&& denseVarsMask xs = 0) : e.sharesVarIn xs = false := by
+  induction e with
+  | const n => rfl
+  | var y =>
+      simp only [DenseExpr.sharesVarIn]
+      by_contra hc
+      rw [Bool.not_eq_false] at hc
+      have hc := denseContainsFast_sound xs y hc
+      have hbit : ((denseVarMask (p := p) (.var y)) &&& denseVarsMask xs).testBit
+          (y.index % denseMaskBits) = true := by
+        rw [Nat.testBit_and, denseVarsMask_testBit_of_mem hc]
+        simpa [denseVarMask] using denseVarBit_testBit_self y
+      rw [h] at hbit
+      simp at hbit
+  | add a b iha ihb =>
+      have h' : (denseVarMask a ||| denseVarMask b) &&& denseVarsMask xs = 0 := by
+        simpa [denseVarMask] using h
+      simp only [DenseExpr.sharesVarIn, Bool.or_eq_false_iff]
+      exact ⟨iha (denseLandOrLeft h'), ihb (denseLandOrRight h')⟩
+  | mul a b iha ihb =>
+      have h' : (denseVarMask a ||| denseVarMask b) &&& denseVarsMask xs = 0 := by
+        simpa [denseVarMask] using h
+      simp only [DenseExpr.sharesVarIn, Bool.or_eq_false_iff]
+      exact ⟨iha (denseLandOrLeft h'), ihb (denseLandOrRight h')⟩
+
 /-! ### Compiled twin of the system rewrite
 
 `denseGroupRewrite` is the identity on an item that shares no variable with the group and has no
@@ -616,6 +725,205 @@ theorem denseGateCsGo_eq (dmax : Nat) (xs bits : List VarId) (σfn : VarId → O
             List.reverse_cons, List.append_assoc, List.cons_append, List.nil_append,
             Bool.true_and]
 
+/-! ### The gate decided from cached footprints
+
+Both disjuncts of the rewrite gate — `sharesVarIn` and `hasConstFoldableNode` — are whole-expression
+walks, and both answer "no" for almost every item of the system, so caching one alone saves nothing:
+the other still walks. Caching a variable footprint (`denseVarMask`) *and* the foldable flag decides
+the gate in O(1) per item. `denseSummSound` is the invariant that makes the O(1) decision agree with
+walking, and it is soundness-critical: skipping an item that should have been rewritten would change
+the output, so `denseGateCsGoS_eq` takes it as a hypothesis and the loop maintains it. -/
+
+def denseMaskAll : Nat := (1 <<< denseMaskBits) - 1
+
+/-- Can position `i`'s item be passed through untouched, judged from the cached footprints alone?
+    Out-of-range positions answer `false` (the `folds` default), so a short array only costs work. -/
+def denseSummSkip (masks : Array Nat) (folds : Array Bool) (xsMask i : Nat) : Bool :=
+  !(folds.getD i true) && (masks.getD i denseMaskAll &&& xsMask == 0)
+
+/-- The cached footprints describe the items of `cs` positionally, *where they claim to*: the
+    obligation is conditioned on the cached foldable flag reading `false`, which is exactly when
+    `denseSummSkip` can fire. Empty arrays therefore satisfy this vacuously
+    (`denseSummSound_empty`) — the pass can start with no footprints at all, skip nothing, and let
+    the first accepting rewrite fill them in, so an APC that never accepts pays nothing for them. -/
+def denseSummSound (cs : List (DenseExpr p)) (masks : Array Nat) (folds : Array Bool) : Prop :=
+  ∀ i e, cs[i]? = some e → folds.getD i true = false →
+    e.hasConstFoldableNode = false ∧ masks.getD i denseMaskAll = denseVarMask e
+
+theorem denseSummSound_empty (cs : List (DenseExpr p)) : denseSummSound cs #[] #[] := by
+  intro i e _ hf
+  simp at hf
+
+theorem denseSummSkip_gate {masks : Array Nat} {folds : Array Bool} {xs : List VarId} {i : Nat}
+    {e : DenseExpr p} (hfe : e.hasConstFoldableNode = false)
+    (hm : masks.getD i denseMaskAll = denseVarMask e)
+    (hk : denseSummSkip masks folds (denseVarsMask xs) i = true) :
+    e.sharesVarIn xs = false ∧ e.hasConstFoldableNode = false := by
+  rw [denseSummSkip, Bool.and_eq_true, beq_iff_eq, hm] at hk
+  exact ⟨denseVarMask_sharesVarIn_of_land_eq_zero hk.2, hfe⟩
+
+/-- `denseSummSkip` only ever fires where the cached foldable flag reads `false`, which is what makes
+    `denseSummSound`'s conditional obligation enough. -/
+theorem denseSummSkip_folds {masks : Array Nat} {folds : Array Bool} {xsMask i : Nat}
+    (hk : denseSummSkip masks folds xsMask i = true) : folds.getD i true = false := by
+  rw [denseSummSkip, Bool.and_eq_true, Bool.not_eq_true'] at hk
+  exact hk.1
+
+/-- The constraint side of the rewrite, with the covered-item filter fused in so the position counter
+    tracks the *input* list (the filter compacts, the footprints do not), the gate decided from the
+    cached footprints, and the output's footprints accumulated as we go. -/
+def denseGateCsGoS (dmax : Nat) (xs bits : List VarId) (σfn : VarId → Option (DenseExpr p))
+    (patts : List (List (VarId × ZMod p))) (xsMask : Nat) (masks : Array Nat)
+    (folds : Array Bool) :
+    Nat → List (DenseExpr p) → List (DenseExpr p) → Array Nat → Array Bool → Bool →
+      List (DenseExpr p) × Bool × Array Nat × Array Bool
+  | _, [], acc, am, af, ok => (acc.reverse, ok, am, af)
+  | i, e :: rest, acc, am, af, ok =>
+      if denseCoveredBy xs e then
+        denseGateCsGoS dmax xs bits σfn patts xsMask masks folds (i + 1) rest acc am af ok
+      else if denseSummSkip masks folds xsMask i then
+        denseGateCsGoS dmax xs bits σfn patts xsMask masks folds (i + 1) rest (e :: acc)
+          (am.push (masks.getD i denseMaskAll)) (af.push (folds.getD i true)) ok
+      else if e.sharesVarIn xs || e.hasConstFoldableNode then
+        let e' := denseGroupRewrite xs bits σfn patts e
+        denseGateCsGoS dmax xs bits σfn patts xsMask masks folds (i + 1) rest (e' :: acc)
+          (am.push (denseVarMask e')) (af.push e'.hasConstFoldableNode)
+          (ok && decide (e'.degree ≤ dmax))
+      else
+        denseGateCsGoS dmax xs bits σfn patts xsMask masks folds (i + 1) rest (e :: acc)
+          (am.push (denseVarMask e)) (af.push e.hasConstFoldableNode) ok
+
+/-- The cached gate decides exactly what the walking gate decides, so the fused traversal produces
+    the same constraints and the same degree verdict as filtering and then gating. The footprints are
+    indexed from `i`, tracking the input list rather than the filtered one. -/
+theorem denseGateCsGoS_eq (dmax : Nat) (xs bits : List VarId) (σfn : VarId → Option (DenseExpr p))
+    (patts : List (List (VarId × ZMod p))) (masks : Array Nat) (folds : Array Bool) :
+    ∀ (l : List (DenseExpr p)) (i : Nat) (acc : List (DenseExpr p)) (am : Array Nat)
+      (af : Array Bool) (ok : Bool),
+      (∀ j e, l[j]? = some e → folds.getD (i + j) true = false →
+        e.hasConstFoldableNode = false ∧
+        masks.getD (i + j) denseMaskAll = denseVarMask e) →
+      (denseGateCsGoS dmax xs bits σfn patts (denseVarsMask xs) masks folds i l acc am af ok).1
+          = (denseGateCsGo dmax xs bits σfn patts
+              (l.filter (fun c => !denseCoveredBy xs c)) acc ok).1 ∧
+        (denseGateCsGoS dmax xs bits σfn patts (denseVarsMask xs) masks folds i l acc am af ok).2.1
+          = (denseGateCsGo dmax xs bits σfn patts
+              (l.filter (fun c => !denseCoveredBy xs c)) acc ok).2 := by
+  intro l
+  induction l with
+  | nil => intro i acc am af ok _; exact ⟨rfl, rfl⟩
+  | cons e rest ih =>
+      intro i acc am af ok hsound
+      have hrest : ∀ j e', rest[j]? = some e' → folds.getD (i + 1 + j) true = false →
+          e'.hasConstFoldableNode = false ∧
+          masks.getD (i + 1 + j) denseMaskAll = denseVarMask e' := by
+        intro j e' hj hf
+        rw [show i + 1 + j = i + (j + 1) by omega] at hf ⊢
+        exact hsound (j + 1) e' (by simpa using hj) hf
+      have hhead : folds.getD i true = false →
+          e.hasConstFoldableNode = false ∧ masks.getD i denseMaskAll = denseVarMask e := by
+        intro hf
+        simpa using hsound 0 e (by simp) (by simpa using hf)
+      rw [denseGateCsGoS]
+      by_cases hcov : denseCoveredBy xs e = true
+      · rw [if_pos hcov, List.filter_cons_of_neg (by simp [hcov])]
+        exact ih (i + 1) acc am af ok hrest
+      · rw [Bool.not_eq_true] at hcov
+        rw [if_neg (by simp [hcov]), List.filter_cons_of_pos (by simp [hcov]), denseGateCsGo]
+        by_cases hk : denseSummSkip masks folds (denseVarsMask xs) i = true
+        · obtain ⟨hfe, hme⟩ := hhead (denseSummSkip_folds hk)
+          obtain ⟨hs1, hs2⟩ := denseSummSkip_gate hfe hme hk
+          rw [if_pos hk, if_neg (by simp [hs1, hs2])]
+          exact ih (i + 1) (e :: acc) _ _ ok hrest
+        · rw [if_neg hk]
+          by_cases hg : e.sharesVarIn xs || e.hasConstFoldableNode
+          · rw [if_pos hg, if_pos hg]
+            exact ih (i + 1) _ _ _ _ hrest
+          · rw [if_neg hg, if_neg hg]
+            exact ih (i + 1) (e :: acc) _ _ ok hrest
+
+/-- The traversal accumulates the output's footprints: every position it keeps carries the mask of
+    the item it kept. Together with `denseGateCsGoS_folds` this re-establishes `denseSummSound` for
+    the rewritten system, which is what lets the next candidate use the cached gate. -/
+theorem denseGateCsGoS_masks (dmax : Nat) (xs bits : List VarId)
+    (σfn : VarId → Option (DenseExpr p)) (patts : List (List (VarId × ZMod p)))
+    (masks : Array Nat) (folds : Array Bool) :
+    ∀ (l : List (DenseExpr p)) (i : Nat) (acc : List (DenseExpr p)) (am : Array Nat)
+      (af : Array Bool) (ok : Bool),
+      (∀ j e, l[j]? = some e → folds.getD (i + j) true = false →
+        e.hasConstFoldableNode = false ∧
+        masks.getD (i + j) denseMaskAll = denseVarMask e) →
+      am = (acc.reverse.map (denseVarMask (p := p))).toArray →
+      (denseGateCsGoS dmax xs bits σfn patts (denseVarsMask xs) masks folds i l acc am af ok).2.2.1
+        = (((denseGateCsGoS dmax xs bits σfn patts (denseVarsMask xs) masks folds
+              i l acc am af ok).1).map (denseVarMask (p := p))).toArray := by
+  intro l
+  induction l with
+  | nil => intro i acc am af ok _ ham; simpa [denseGateCsGoS] using ham
+  | cons e rest ih =>
+      intro i acc am af ok hsound ham
+      have hrest : ∀ j e', rest[j]? = some e' → folds.getD (i + 1 + j) true = false →
+          e'.hasConstFoldableNode = false ∧
+          masks.getD (i + 1 + j) denseMaskAll = denseVarMask e' := by
+        intro j e' hj hf
+        rw [show i + 1 + j = i + (j + 1) by omega] at hf ⊢
+        exact hsound (j + 1) e' (by simpa using hj) hf
+      have hhead : folds.getD i true = false →
+          e.hasConstFoldableNode = false ∧ masks.getD i denseMaskAll = denseVarMask e := by
+        intro hf
+        simpa using hsound 0 e (by simp) (by simpa using hf)
+      rw [denseGateCsGoS]
+      split
+      · exact ih (i + 1) acc am af ok hrest ham
+      · split
+        · next hk =>
+            exact ih (i + 1) (e :: acc) _ _ ok hrest
+              (by rw [ham, (hhead (denseSummSkip_folds hk)).2]; simp)
+        · split
+          · exact ih (i + 1) _ _ _ _ hrest (by rw [ham]; simp)
+          · exact ih (i + 1) (e :: acc) _ _ ok hrest (by rw [ham]; simp)
+
+/-- The `hasConstFoldableNode` half of `denseGateCsGoS_masks`. -/
+theorem denseGateCsGoS_folds (dmax : Nat) (xs bits : List VarId)
+    (σfn : VarId → Option (DenseExpr p)) (patts : List (List (VarId × ZMod p)))
+    (masks : Array Nat) (folds : Array Bool) :
+    ∀ (l : List (DenseExpr p)) (i : Nat) (acc : List (DenseExpr p)) (am : Array Nat)
+      (af : Array Bool) (ok : Bool),
+      (∀ j e, l[j]? = some e → folds.getD (i + j) true = false →
+        e.hasConstFoldableNode = false ∧
+        masks.getD (i + j) denseMaskAll = denseVarMask e) →
+      af = (acc.reverse.map DenseExpr.hasConstFoldableNode).toArray →
+      (denseGateCsGoS dmax xs bits σfn patts (denseVarsMask xs) masks folds i l acc am af ok).2.2.2
+        = (((denseGateCsGoS dmax xs bits σfn patts (denseVarsMask xs) masks folds
+              i l acc am af ok).1).map DenseExpr.hasConstFoldableNode).toArray := by
+  intro l
+  induction l with
+  | nil => intro i acc am af ok _ haf; simpa [denseGateCsGoS] using haf
+  | cons e rest ih =>
+      intro i acc am af ok hsound haf
+      have hrest : ∀ j e', rest[j]? = some e' → folds.getD (i + 1 + j) true = false →
+          e'.hasConstFoldableNode = false ∧
+          masks.getD (i + 1 + j) denseMaskAll = denseVarMask e' := by
+        intro j e' hj hf
+        rw [show i + 1 + j = i + (j + 1) by omega] at hf ⊢
+        exact hsound (j + 1) e' (by simpa using hj) hf
+      have hhead : folds.getD i true = false →
+          e.hasConstFoldableNode = false ∧ masks.getD i denseMaskAll = denseVarMask e := by
+        intro hf
+        simpa using hsound 0 e (by simp) (by simpa using hf)
+      rw [denseGateCsGoS]
+      split
+      · exact ih (i + 1) acc am af ok hrest haf
+      · split
+        · next hk =>
+            have hfz := denseSummSkip_folds hk
+            exact ih (i + 1) (e :: acc) _ _ ok hrest
+              (by rw [haf, show folds.getD i true = e.hasConstFoldableNode from
+                    hfz.trans (hhead hfz).1.symm]; simp)
+        · split
+          · exact ih (i + 1) _ _ _ _ hrest (by rw [haf]; simp)
+          · exact ih (i + 1) (e :: acc) _ _ ok hrest (by rw [haf]; simp)
+
 /-- The bus side of `denseGateCsGo`. -/
 def denseGateBisGo (dmax : Nat) (xs bits : List VarId) (σfn : VarId → Option (DenseExpr p))
     (patts : List (List (VarId × ZMod p))) :
@@ -726,6 +1034,86 @@ theorem denseReencodeOutOk_snd (b : DegreeBound) (d : DenseConstraintSystem p)
     · rfl
     · exact (hdb bi hbi).symm
   rw [hcs, hbs]
+
+/-- Footprint arrays built directly from a constraint list are sound for it. -/
+theorem denseSummSound_of_toArray (cs : List (DenseExpr p)) :
+    denseSummSound cs ((cs.map (denseVarMask (p := p))).toArray)
+      ((cs.map DenseExpr.hasConstFoldableNode).toArray) := by
+  intro i e hi hf
+  have hm : ((cs.map (denseVarMask (p := p))).toArray).getD i denseMaskAll = denseVarMask e := by
+    simp only [Array.getD_eq_getD_getElem?, List.getElem?_toArray, List.getElem?_map, hi,
+      Option.map_some, Option.getD_some]
+  have hfv : ((cs.map DenseExpr.hasConstFoldableNode).toArray).getD i true
+      = e.hasConstFoldableNode := by
+    simp only [Array.getD_eq_getD_getElem?, List.getElem?_toArray, List.getElem?_map, hi,
+      Option.map_some, Option.getD_some]
+  exact ⟨hfv.symm.trans hf, hm⟩
+
+/-- `denseReencodeOutOk` with the constraint side driven by the cached footprints, returning the
+    footprints of the system it produced. Behaviour is identical whenever the incoming footprints
+    describe `d` (`denseReencodeOutOkS_fst`, `denseReencodeOutOkS_snd`), and the outgoing ones
+    describe the result (`denseReencodeOutOkS_summ`), which is the loop's invariant. -/
+def denseReencodeOutOkS (b : DegreeBound) (d : DenseConstraintSystem p) (xs bits : List VarId)
+    (hm : Std.HashMap VarId (DenseExpr p)) (masks : Array Nat) (folds : Array Bool) :
+    DenseConstraintSystem p × Bool × Array Nat × Array Bool :=
+  let σfn := denseGroupSubst xs hm
+  let patts := denseAssignments (denseBitBox bits)
+  let rc := denseGateCsGoS b.identities xs bits σfn patts (denseVarsMask xs) masks folds 0
+    d.algebraicConstraints [] #[] #[] true
+  let rb := denseGateBisGo b.busInteractions xs bits σfn patts d.busInteractions [] true
+  let bools := bits.map denseBoolConstraint
+  ({ algebraicConstraints := rc.1 ++ bools, busInteractions := rb.1 },
+    (rc.2.1 && bools.all (fun c => decide (c.degree ≤ b.identities))) && rb.2,
+    rc.2.2.1 ++ (bools.map (denseVarMask (p := p))).toArray,
+    rc.2.2.2 ++ (bools.map DenseExpr.hasConstFoldableNode).toArray)
+
+theorem denseReencodeOutOkS_fst (b : DegreeBound) (d : DenseConstraintSystem p)
+    (xs bits : List VarId) (hm : Std.HashMap VarId (DenseExpr p)) (masks : Array Nat)
+    (folds : Array Bool) (hs : denseSummSound d.algebraicConstraints masks folds) :
+    (denseReencodeOutOkS b d xs bits hm masks folds).1 = denseReencodeOut d xs bits hm := by
+  rw [← denseReencodeOutOk_fst b d xs bits hm]
+  unfold denseReencodeOutOkS denseReencodeOutOk
+  have h := (denseGateCsGoS_eq b.identities xs bits (denseGroupSubst xs hm)
+    (denseAssignments (denseBitBox bits)) masks folds d.algebraicConstraints 0 [] #[] #[] true
+    (fun j e hj hf => by
+      simpa [Nat.zero_add] using hs j e hj (by simpa [Nat.zero_add] using hf))).1
+  simp only [h]
+
+theorem denseReencodeOutOkS_snd (b : DegreeBound) (d : DenseConstraintSystem p)
+    (xs bits : List VarId) (hm : Std.HashMap VarId (DenseExpr p)) (masks : Array Nat)
+    (folds : Array Bool) (hs : denseSummSound d.algebraicConstraints masks folds) :
+    (denseReencodeOutOkS b d xs bits hm masks folds).2.1 = (denseReencodeOutOk b d xs bits hm).2 := by
+  unfold denseReencodeOutOkS denseReencodeOutOk
+  have h := (denseGateCsGoS_eq b.identities xs bits (denseGroupSubst xs hm)
+    (denseAssignments (denseBitBox bits)) masks folds d.algebraicConstraints 0 [] #[] #[] true
+    (fun j e hj hf => by
+      simpa [Nat.zero_add] using hs j e hj (by simpa [Nat.zero_add] using hf))).2
+  simp only [h]
+
+theorem denseReencodeOutOkS_summ (b : DegreeBound) (d : DenseConstraintSystem p)
+    (xs bits : List VarId) (hm : Std.HashMap VarId (DenseExpr p)) (masks : Array Nat)
+    (folds : Array Bool) (hs : denseSummSound d.algebraicConstraints masks folds) :
+    denseSummSound (denseReencodeOutOkS b d xs bits hm masks folds).1.algebraicConstraints
+      (denseReencodeOutOkS b d xs bits hm masks folds).2.2.1
+      (denseReencodeOutOkS b d xs bits hm masks folds).2.2.2 := by
+  have hshift : ∀ j e, d.algebraicConstraints[j]? = some e → folds.getD (0 + j) true = false →
+      e.hasConstFoldableNode = false ∧
+      masks.getD (0 + j) denseMaskAll = denseVarMask e :=
+    fun j e hj hf => by
+      simpa [Nat.zero_add] using hs j e hj (by simpa [Nat.zero_add] using hf)
+  have hm' := denseGateCsGoS_masks b.identities xs bits (denseGroupSubst xs hm)
+    (denseAssignments (denseBitBox bits)) masks folds d.algebraicConstraints 0 [] #[] #[] true
+    hshift (by simp)
+  have hf' := denseGateCsGoS_folds b.identities xs bits (denseGroupSubst xs hm)
+    (denseAssignments (denseBitBox bits)) masks folds d.algebraicConstraints 0 [] #[] #[] true
+    hshift (by simp)
+  have happ : ∀ {α : Type _} (u v : List α), (u ++ v).toArray = u.toArray ++ v.toArray :=
+    fun u v => Array.toArray_eq_append_iff.mpr rfl
+  show denseSummSound _ _ _
+  unfold denseReencodeOutOkS
+  simp only [hm', hf']
+  rw [← happ, ← happ, ← List.map_append, ← List.map_append]
+  exact denseSummSound_of_toArray _
 
 /-! ## The build/step/loop/pass layer -/
 
@@ -917,6 +1305,13 @@ structure DenseReencodeCacheState (p : ℕ) where
       `d.withinDegreeB b`: that walk would be charged to every APC, including the ones where no
       candidate is ever accepted. -/
   dWithin : Bool
+  /-- Per-position variable footprints of `d.algebraicConstraints`, and their cached
+      `hasConstFoldableNode`. Together they decide the rewrite gate without walking an expression;
+      `denseSummSound` (maintained by `denseReencodeStepCached_summ`) is what makes that agree with
+      walking. Unlike the other arrays here these track `d` positionally, not the stable
+      pre-tombstone positions — the gate runs on `d`'s compacted list. -/
+  masks : Array Nat
+  folds : Array Bool
 
 /-- Apply an accepted rewrite to the threaded state in place, mirroring `denseReencodeOut` on the
     stable-position arrays: only positions holding a group variable (bucket candidates) or a
@@ -991,11 +1386,12 @@ def denseReencodeStepCached (b : DegreeBound)
     if xs.all (fun x => decide (x ∉ bits)) then
     if bits.all (fun b => decide ((reg1.resolve b).powdrId? = none)) then
     if denseCheckReencode d xs bits hm then
-      let ro := denseReencodeOutOk b d xs bits hm
-      if (if state.dWithin then ro.2 else ro.1.withinDegreeB b) then
+      let ro := denseReencodeOutOkS b d xs bits hm state.masks state.folds
+      if (if state.dWithin then ro.2.1 else ro.1.withinDegreeB b) then
         (reg1, ro.1,
          bits.map (fun b => (b, denseBitCM (denseAssignments (denseBitBox bits)) xs hm b)),
-         denseReencodeStateUpdate state xs bits hm)
+         { denseReencodeStateUpdate state xs bits hm with
+             masks := ro.2.2.1, folds := ro.2.2.2 })
       else (reg1, d, [], state)
     else (reg1, d, [], state)
     else (reg1, d, [], state)
@@ -1013,7 +1409,8 @@ def denseReencodeStepCached (b : DegreeBound)
     candidates are accepted — behaviour, not soundness. -/
 theorem denseReencodeStepCached_dWithin (b : DegreeBound) (reg : VarRegistry)
     (d : DenseConstraintSystem p) (state : DenseReencodeCacheState p) (xs : List VarId)
-    (freshBase : String) (hdw : state.dWithin = true → d.withinDegreeB b = true) :
+    (freshBase : String) (hdw : state.dWithin = true → d.withinDegreeB b = true)
+    (hsumm : denseSummSound d.algebraicConstraints state.masks state.folds) :
     (denseReencodeStepCached b reg d state xs freshBase).2.2.2.dWithin = true →
       (denseReencodeStepCached b reg d state xs freshBase).2.1.withinDegreeB b = true := by
   fun_cases denseReencodeStepCached b reg d state xs freshBase
@@ -1021,14 +1418,32 @@ theorem denseReencodeStepCached_dWithin (b : DegreeBound) (reg : VarRegistry)
     rename_i hgate hcoll reg1 bits hm rootCache hbeq state1 hdpr hA hB hC hD ro hwd
     intro _
     show ro.1.withinDegreeB b = true
+    have hsumm1 : denseSummSound d.algebraicConstraints state1.masks state1.folds := hsumm
     by_cases hsw : state1.dWithin = true
     · rw [if_pos hsw] at hwd
-      rw [denseReencodeOutOk_fst b d xs bits hm,
-        ← denseReencodeOutOk_snd b d xs bits hm (hdw hsw)]
+      rw [denseReencodeOutOkS_fst b d xs bits hm _ _ hsumm1,
+        ← denseReencodeOutOk_snd b d xs bits hm (hdw hsw),
+        ← denseReencodeOutOkS_snd b d xs bits hm _ _ hsumm1]
       exact hwd
     · rw [if_neg hsw] at hwd
       exact hwd
   all_goals exact hdw
+
+/-- The footprint invariant is preserved by a step: an accepting step installs exactly the footprints
+    `denseReencodeOutOkS` accumulated for the system it produced, and every other branch leaves both
+    `d` and the footprints alone. This is what the loop threads. -/
+theorem denseReencodeStepCached_summ (b : DegreeBound) (reg : VarRegistry)
+    (d : DenseConstraintSystem p) (state : DenseReencodeCacheState p) (xs : List VarId)
+    (freshBase : String)
+    (hsumm : denseSummSound d.algebraicConstraints state.masks state.folds) :
+    denseSummSound (denseReencodeStepCached b reg d state xs freshBase).2.1.algebraicConstraints
+      (denseReencodeStepCached b reg d state xs freshBase).2.2.2.masks
+      (denseReencodeStepCached b reg d state xs freshBase).2.2.2.folds := by
+  fun_cases denseReencodeStepCached b reg d state xs freshBase
+  case case4 =>
+    rename_i hgate hcoll reg1 bits hm rootCache hbeq state1 hdpr hA hB hC hD ro hwd
+    exact denseReencodeOutOkS_summ b d xs bits hm _ _ hsumm
+  all_goals exact hsumm
 
 /-- `d`'s item counts for the fresh-name prefix, re-read only after a step that rewrote `d`
     (a step derives one method per minted bit, so nonempty derivations mark exactly the accepts). -/
@@ -1084,7 +1499,9 @@ def denseReencodeF (pw : PrimeWitness p) (b : DegreeBound) (reg : VarRegistry)
         arrBis := d.busInteractions.toArray
         foldCs := d.algebraicConstraints.zipIdx.foldl
           (fun s ci => if ci.1.hasConstFoldableNode then s.insert ci.2 else s) ∅
-        dWithin := false }
+        dWithin := false
+        masks := #[]
+        folds := #[] }
       d.algebraicConstraints.length d.busInteractions.length
   else (reg, d, [])
 
