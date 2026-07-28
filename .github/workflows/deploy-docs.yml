@@ -35,13 +35,17 @@ jobs:
       - uses: leanprover/lean-action@v1
         with:
           build: false
-      # LaTeX toolchain for the PDF: xelatex + latexmk, the Source Pro / DejaVu fonts the Verso
-      # preamble uses (texlive-fonts-extra), and rsvg-convert (librsvg2-bin) for the figures.
+      # LaTeX toolchain for the PDF: xelatex + latexmk, the base-35 URW fonts hyperref needs
+      # (texlive-fonts-recommended — e.g. ZapfDingbats/pzdr for link annotations), the Source Pro /
+      # DejaVu fonts the Verso preamble uses (texlive-fonts-extra), and rsvg-convert (librsvg2-bin)
+      # for the figures. `texlive-fonts-recommended` is a *Recommends*, so it must be listed
+      # explicitly under `--no-install-recommends`.
       - name: Install TeX + SVG tools
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            texlive-xetex texlive-latex-extra texlive-fonts-extra latexmk librsvg2-bin
+            texlive-xetex texlive-latex-extra texlive-fonts-recommended texlive-fonts-extra \
+            latexmk librsvg2-bin
       # Build the PDF (best-effort — never block publishing the site on it), then the site, then
       # drop the PDF into the site so it deploys at <site>/apc_optimizer.pdf.
       - name: Build site + PDF
