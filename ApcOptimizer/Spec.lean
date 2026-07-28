@@ -154,9 +154,7 @@ structure BusSemantics (p : ℕ) where
 abbrev BusMessage (p : ℕ) := Nat × List (ZMod p)
 
 /-- The effect on the stateful buses: the *net* multiplicity each message is
-    sent with. Two circuit instances have the same effect on the buses exactly
-    when these functions are equal, so side-effect equivalence below is plain
-    equality. -/
+    sent with. -/
 abbrev BusState (p : ℕ) := BusMessage p → ZMod p
 -- ANCHOR_END: busState
 
@@ -273,7 +271,7 @@ def Circuit.guaranteesInvariants (circuit : Circuit p)
 /-- Whether an optimized circuit is a sound replacement for an original
     circuit. Informally, for any satisfying assignment of the optimized
     circuit, there exists a corresponding satisfying assignment of the original
-    circuit *with equivalent side effects*. Also, the optimized circuit must
+    circuit *with equal side effects*. Also, the optimized circuit must
     maintain all invariants guaranteed by the original circuit. -/
 def Circuit.isSoundReplacementOf (optimizedCircuit originalCircuit : Circuit p)
     (busSemantics : BusSemantics p) : Prop :=
@@ -298,7 +296,7 @@ def Circuit.isCompleteReplacementOf
   -- variables, and the return derivations.
   ds.cover originalCircuit.vars optimizedCircuit.vars ∧
   -- For any admissible satisfying assignment of the original circuit, the
-  -- optimized circuit is also satisfied and admissible, with equivalent side
+  -- optimized circuit is also satisfied and admissible, with equal side
   -- effects, under the assignment produced by witness generation.
   ∀ assignment,
     originalCircuit.admissible busSemantics assignment →

@@ -84,7 +84,7 @@ A {deftech}_bus interaction_ sends a _payload_ tuple to a bus, weighted by a _mu
 
 A circuit (defined below) contains a list of _symbolic bus interactions_ (i.e., `BusInteraction Expression`). For a concrete run of the zkVM, the circuit might be instantiated several times with different variable assignments. Evaluating the symbolic bus interactions under an assignment yields a list of _bus messages_ (i.e., `BusInteraction (ZMod p)`).
 
-## Bus state and equivalent states
+## Bus state
 
 The {deftech}_bus state_ of a circuit instance is the _net_ effect it has on the buses: the net multiplicity each message is sent with. Two circuit instances therefore have the same effect on the buses exactly when their bus states are _equal_ — no separate equivalence relation is needed:
 ```anchor busState
@@ -92,9 +92,7 @@ The {deftech}_bus state_ of a circuit instance is the _net_ effect it has on the
 abbrev BusMessage (p : ℕ) := Nat × List (ZMod p)
 
 /-- The effect on the stateful buses: the *net* multiplicity each message is
-    sent with. Two circuit instances have the same effect on the buses exactly
-    when these functions are equal, so side-effect equivalence below is plain
-    equality. -/
+    sent with. -/
 abbrev BusState (p : ℕ) := BusMessage p → ZMod p
 ```
 
@@ -180,7 +178,7 @@ Finally, we formalize what it means for an optimized circuit to be a sound repla
 /-- Whether an optimized circuit is a sound replacement for an original
     circuit. Informally, for any satisfying assignment of the optimized
     circuit, there exists a corresponding satisfying assignment of the original
-    circuit *with equivalent side effects*. Also, the optimized circuit must
+    circuit *with equal side effects*. Also, the optimized circuit must
     maintain all invariants guaranteed by the original circuit. -/
 def Circuit.isSoundReplacementOf (optimizedCircuit originalCircuit : Circuit p)
     (busSemantics : BusSemantics p) : Prop :=
@@ -261,7 +259,7 @@ def Derivations.witgen (ds : Derivations p)
 
 ## The full completeness property
 
-Putting the pieces together, we define what it means for an optimized circuit to be a _complete_ replacement for an original circuit. Structurally, the returned derivations must contain no unused entries and must cover every output variable from the input variables. Semantically, every admissible satisfying input assignment must produce a satisfying and admissible output assignment with equivalent side effects.
+Putting the pieces together, we define what it means for an optimized circuit to be a _complete_ replacement for an original circuit. Structurally, the returned derivations must contain no unused entries and must cover every output variable from the input variables. Semantically, every admissible satisfying input assignment must produce a satisfying and admissible output assignment with equal side effects.
 
 ```anchor isCompleteReplacementOf
 /-- Whether an optimized circuit is a complete replacement for an original one. -/
@@ -276,7 +274,7 @@ def Circuit.isCompleteReplacementOf
   -- variables, and the return derivations.
   ds.cover originalCircuit.vars optimizedCircuit.vars ∧
   -- For any admissible satisfying assignment of the original circuit, the
-  -- optimized circuit is also satisfied and admissible, with equivalent side
+  -- optimized circuit is also satisfied and admissible, with equal side
   -- effects, under the assignment produced by witness generation.
   ∀ assignment,
     originalCircuit.admissible busSemantics assignment →
