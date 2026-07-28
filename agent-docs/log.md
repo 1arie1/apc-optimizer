@@ -5304,3 +5304,50 @@ lazify `denseByteOperandDomain`'s coset build (21.3 % of the pass on SP1 keccak,
 (d) prefix-pruned / component-split enumeration for the big-box OpenVM cases, gated on a box-shape
 counter first.
 **Worked: yes (domainBatch 0.14x on its worst-share APC, output byte-identical; draft PR).**
+
+### 153. Runtime: hoist domainBatch's bus classification out of the per-target compile — CPU 0.55x, wall +2% (NEGATIVE on wall)
+Entry 152's attribution named this the top lever: `denseCompileCBiPredV` queries `facts` and re-decodes
+the payload for every gathered interaction of every target, and everything but the
+`denseCompileE keys …` of a few slots depends on `bi` alone — 56.1 % of in-pass samples on sha256
+apc_001, 40.5 % on keccak, 34.4 % on SP1 keccak.
+IMPLEMENTED (byte-identical, and it does remove the work): a keys-free `DenseBiPredShape` +
+`denseClassifyBi` (all fact queries and `spec.decode` resolved once per interaction, stored on the
+already-per-invocation `DenseBusPlan`), a facts-free `denseCompileShapeV`/`denseCompileBiShapeV` per
+target, and `denseCompileBiShapeV_eq : denseCompileBiShapeV facts keys bi (denseClassifyBi facts bi) =
+denseCompileCBiPredV facts keys bi` (structural; every semantic `_eval` lemma is reused untouched).
+The gather carries the shapes next to the interactions and `denseGatherBusesV_shapes` keeps the two
+lists aligned, discharged from `DenseBusPlansClassified` (`denseBusPlansV` stores the classification of
+each usable plan by construction). ~440 lines, all under `Implementation/`.
+MEASURED: the hoist works exactly as designed — on keccak the compile phase drops from **31.3 % to
+2.8 %** of in-pass samples and the pass's whole CPU falls **10310 → 5638 samples (0.55x)** at the same
+sampling frequency. **The wall time does not follow**: interleaved best-of-3 against `main` (3448080,
+after the #243/#245 audited-surface refactors — re-measured on rebase, the pre-rebase reading against
+5ea2665 agreed) on this 20-core box, domainBatch ms, main → this change: **sha256 apc_001 (single shot)
+17994 → 19287 (1.07×, total 175.4 → 175.6 s)**, SP1 keccak 1006 → 1038 (1.03×), SP1 rsp apc_030
+150 → 153, keccak 1350 → 1367 (1.01×), wasm-eth apc_063 1578 → 1583, openvm-eth apc_071 565 → 567,
+wasm-eth apc_005 36 → 36. Wall-neutral to 7 % worse — nowhere near the land bar — while the pass burns
+45 % less CPU.
+WHY (the lesson): every case whose compile share is large fans out — `domainBatch` runs its targets in
+up to 64 parallel chunks at ≥ 8192 constraints — so the per-target compile lived in **parallel slack**,
+and the pass's *wall* is set by its **serial prologue**. After the hoist, 65 % of the pass's remaining
+CPU is that prologue (domain-table build 31 %, constraint plans/redundancy 11 %, `denseRootsIn` 10 %,
+targets/index/preflight ~6 %), which no per-target optimization can touch. The residual +2–5 % is the
+classification now running for every usable interaction per invocation instead of only for gathered
+ones (a first variant that also pre-resolved the range/byte arms for two-slot range checks cost +4 %;
+those arms are now re-derived from `facts` on the never-taken fall-through path instead).
+**Measurement lesson: for a parallel pass, a `perf` CPU share is not a wall budget — check whether the
+phase you are about to optimize is inside the fan-out before sizing the win.** Entry 152 already hinted
+at this (sha256's 14 % `violates` share bought 6 % of wall); here it is decisive.
+STATUS: byte-identical output verified by `opt-export` on OpenVM keccak / wasm-eth apc_005 /
+openvm-eth apc_071 and SP1 keccak / rsp apc_001; `lake build` clean; `check-proof-integrity` passes.
+Draft PR opened so the serial CI `Runtime Bench` (32-core) can arbitrate — the verdict is
+machine-dependent (on a core-starved box the 0.55x CPU should convert to wall), but on this box it is
+**below the land bar and should not merge on these numbers**.
+NEXT: the pass's wall is now the serial prologue. Top lever is the domain-table build — one constant
+pattern (`payload.map constValue?`) and one bound per interaction instead of per queried variable
+(ideas R13(b), 31 % of the pass and shared with intervalForce/rootPairUnify) — then
+`denseConstraintRedundantV` and `denseRootsIn`. Anything per-target (R13(a), (d)) is parallel slack on
+exactly the cases that hurt.
+A measurement slip worth recording: one SP1 sweep was run while the sha256 A/B was still going and
+produced a 7495 ms outlier — the numbers above are all from strictly serial re-runs.
+**Worked: no (CPU 0.55x, wall 0.97–1.04×; kept as a draft PR for CI arbitration, dead end recorded).**

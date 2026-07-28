@@ -364,13 +364,43 @@ structure DenseConstraintPlan (p : ℕ) where
   vars : List VarId
   active : Bool
 
-/-- A bus interaction and the target-planning data reused by every enumeration. -/
+/-- Direct relation implemented by a compiled byte-bus predicate. -/
+inductive DenseBytePredKind where
+  | xor
+  | pair
+  | or
+  | and
+
+/-- The classification of an interaction that is neither `.always` nor a two-slot range/tuple check:
+    the range-check and byte-relation decodings, and the payload the opaque fallback compiles. -/
+structure DenseBiOtherShape (p : ℕ) where
+  busId : Nat
+  /-- `rangeCheckAt`'s value slot expression and bound (cf. `denseCompileRangeCBiPredV`). -/
+  range : Option (DenseExpr p × Nat)
+  /-- Decoded byte relation: operands, result, bound, relation (cf. `denseCompileByteCBiPredV`). -/
+  byte : Option (DenseExpr p × DenseExpr p × DenseExpr p × Nat × DenseBytePredKind)
+  payload : List (DenseExpr p)
+
+/-- An interaction's compilation plan with every `BusFacts` query already resolved. The two-slot
+    shapes carry no fallback data: a slot that does not compile against the target's keys cannot
+    happen for a gathered item (its variables are all keys), and `denseCompileShapeV` re-derives that
+    arm from `facts` rather than paying for it on every range check. -/
+inductive DenseBiPredShape (p : ℕ) where
+  | always
+  | varRange (x width : DenseExpr p) (constBound : Option Nat)
+  | tupleRange (x y : DenseExpr p) (boundX boundY : Nat)
+  | other (o : DenseBiOtherShape p)
+
+/-- A bus interaction and the target-planning data reused by every enumeration. `predShape` is the
+    keys-free half of the survivor-predicate compilation, so a target only compiles slots (see
+    `denseClassifyBi`); it is meaningful only for `usable` plans, the only ones a gather keeps. -/
 structure DenseBusPlan (p : ℕ) where
   interaction : BusInteraction (DenseExpr p)
   vars : List VarId
   usable : Bool
   informative : Bool
   domainRedundant : Bool
+  predShape : DenseBiPredShape p
 
 /-- Compact anchor buckets used by the read-only per-target gathers. -/
 structure DenseArrayCovIndex where

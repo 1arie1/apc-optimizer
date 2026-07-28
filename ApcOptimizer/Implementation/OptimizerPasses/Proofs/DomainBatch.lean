@@ -1463,6 +1463,177 @@ private theorem denseCompileCBiPredsV_all (ops : DenseZModOps p)
           denseCompileCBiPredV_eval ops isZero hz bs facts keys pt bi pred hb,
           ih restPreds hr]
 
+/-! ### The classification splits the compilation
+
+`denseClassifyBi` (per interaction, in `denseBusPlansV`) and `denseCompileBiShapeV` (per target)
+compose to `denseCompileCBiPredV`, so the compiled predicate — hence the scan and the pass output —
+is unchanged. These are purely structural: the semantic `_eval` lemmas above are reused as they are. -/
+
+private theorem denseClassifyRange_eq {bs : BusSemantics p} (facts : BusFacts p bs)
+    (keys : List VarId) (bi : BusInteraction (DenseExpr p)) (mult : IExpr p) :
+    (denseClassifyRange facts bi).bind
+        (fun vb => (denseCompileE keys vb.1).map (fun iv => DenseCBiPred.fixedRange mult iv vb.2))
+      = denseCompileRangeCBiPredV facts keys bi mult := by
+  unfold denseClassifyRange denseCompileRangeCBiPredV
+  cases hm : bi.multiplicity.constValue? with
+  | none => simp
+  | some mval =>
+    by_cases h1 : mval = 1
+    · cases hr : facts.rangeCheckAt bi.busId (bi.payload.map DenseExpr.constValue?) with
+      | none => simp [h1]
+      | some sb =>
+        obtain ⟨slot, bound⟩ := sb
+        cases hp : bi.payload[slot]? with
+        | none => simp [h1, hp]
+        | some value => simp [h1, hp]
+    · simp [h1]
+
+private theorem denseClassifyByte_eq {bs : BusSemantics p} (facts : BusFacts p bs)
+    (keys : List VarId) (bi : BusInteraction (DenseExpr p)) (mult : IExpr p) :
+    (denseClassifyByte facts bi).bind (denseCompileByteShapeV keys mult)
+      = denseCompileByteCBiPredV facts keys bi mult := by
+  unfold denseClassifyByte denseCompileByteCBiPredV denseCompileByteShapeV
+  cases hspec : facts.byteXorSpec bi.busId with
+  | none => simp
+  | some spec =>
+    cases hdec : spec.decode bi.payload with
+    | none => simp [hdec]
+    | some t =>
+      obtain ⟨op, o1, o2, result⟩ := t
+      cases hop : op.constValue? with
+      | none => simp [hdec, hop]
+      | some opValue =>
+        cases h1 : denseCompileE keys o1 with
+        | none =>
+          simp only [hdec, hop, h1]
+          cases hk : denseByteKindOf spec opValue <;> simp [h1]
+        | some io1 =>
+          cases h2 : denseCompileE keys o2 with
+          | none =>
+            simp only [hdec, hop, h1, h2]
+            cases hk : denseByteKindOf spec opValue <;> simp [h1, h2]
+          | some io2 =>
+            cases h3 : denseCompileE keys result with
+            | none =>
+              simp only [hdec, hop, h1, h2, h3]
+              cases hk : denseByteKindOf spec opValue <;> simp [h1, h2, h3]
+            | some iresult =>
+              -- Both sides now branch on the same op comparisons (`denseByteKindOf` mirrors
+              -- `denseCompileByteCBiPredV`'s arm order); reduce them in lockstep.
+              simp only [hdec, hop, h1, h2, h3, denseByteKindOf]
+              by_cases hx : opValue = spec.xorOp
+              · simp only [if_pos hx]; simp [h1, h2, h3]
+              · simp only [if_neg hx]
+                by_cases hpair : opValue = spec.pairOp
+                · simp only [if_pos hpair]; simp [h1, h2, h3]
+                · simp only [if_neg hpair]
+                  cases hor : spec.orOp with
+                  | some orOp =>
+                    by_cases ho : opValue = orOp
+                    · simp only [if_pos ho]; simp [h1, h2, h3]
+                    · simp only [if_neg ho]
+                      cases hand : spec.andOp with
+                      | some andOp =>
+                        by_cases ha : opValue = andOp
+                        · simp only [if_pos ha]; simp [h1, h2, h3]
+                        · simp only [if_neg ha]; simp
+                      | none => simp
+                  | none =>
+                    cases hand : spec.andOp with
+                    | some andOp =>
+                      by_cases ha : opValue = andOp
+                      · simp only [if_pos ha]; simp [h1, h2, h3]
+                      · simp only [if_neg ha]; simp
+                    | none => simp
+
+private theorem denseCompileOtherShapeV_eq {bs : BusSemantics p} (facts : BusFacts p bs)
+    (keys : List VarId) (bi : BusInteraction (DenseExpr p)) (mult : IExpr p) :
+    denseCompileOtherShapeV keys mult (denseClassifyOther facts bi)
+      = denseCompileOtherCBiPredV facts keys bi mult := by
+  unfold denseCompileOtherShapeV denseCompileOtherCBiPredV denseClassifyOther
+  simp only [denseClassifyRange_eq facts keys bi mult, denseClassifyByte_eq facts keys bi mult]
+
+private theorem denseCompileBiShapeV_eq {bs : BusSemantics p} (facts : BusFacts p bs)
+    (keys : List VarId) (bi : BusInteraction (DenseExpr p)) :
+    denseCompileBiShapeV facts keys bi (denseClassifyBi facts bi)
+      = denseCompileCBiPredV facts keys bi := by
+  unfold denseCompileBiShapeV denseClassifyBi denseCompileCBiPredV
+  by_cases halways : denseBiAlwaysOk facts bi = true
+  · simp [halways]
+  · have hfalse : denseBiAlwaysOk facts bi = false := Bool.eq_false_of_not_eq_true halways
+    simp only [hfalse, Bool.false_eq_true, if_false]
+    cases hmult : denseCompileE keys bi.multiplicity with
+    | none =>
+      cases hpay : bi.payload with
+      | nil => simp
+      | cons x rest =>
+        cases rest with
+        | nil => simp
+        | cons width rest' =>
+          cases rest' with
+          | nil =>
+            by_cases hvr : facts.varRangeBus bi.busId = true
+            · simp [hvr]
+            · have hvrf : facts.varRangeBus bi.busId = false := Bool.eq_false_of_not_eq_true hvr
+              cases htr : facts.tupleRangeBus bi.busId with
+              | none => simp [hvrf]
+              | some b => obtain ⟨bx, by'⟩ := b; simp [hvrf]
+          | cons _ _ => simp
+    | some mult =>
+      cases hpay : bi.payload with
+      | nil =>
+        simp only [denseCompilePayloadCBiPredV, denseCompileShapeV]
+        exact denseCompileOtherShapeV_eq facts keys bi mult
+      | cons x rest =>
+        cases rest with
+        | nil =>
+          simp only [denseCompilePayloadCBiPredV, denseCompileShapeV]
+          exact denseCompileOtherShapeV_eq facts keys bi mult
+        | cons width rest' =>
+          cases rest' with
+          | nil =>
+            simp only [denseCompilePayloadCBiPredV, denseCompilePairCBiPredV]
+            by_cases hvr : facts.varRangeBus bi.busId = true
+            · simp only [hvr, if_pos, denseCompileShapeV]
+              cases h1 : denseCompileE keys x with
+              | none => rfl
+              | some ix =>
+                cases h2 : denseCompileE keys width with
+                | none => rfl
+                | some iwidth =>
+                  cases hw : width.constValue? with
+                  | none => simp
+                  | some widthValue => by_cases hle : widthValue.val ≤ 17 <;> simp [hle]
+            · have hvrf : facts.varRangeBus bi.busId = false := Bool.eq_false_of_not_eq_true hvr
+              cases htr : facts.tupleRangeBus bi.busId with
+              | none =>
+                -- both sides are the `other` arm, whether or not the slots compile
+                simp only [hvrf, Bool.false_eq_true, if_false, denseCompileShapeV]
+                rw [denseCompileOtherShapeV_eq facts keys bi mult]
+                cases h1 : denseCompileE keys x with
+                | none => rfl
+                | some ix => cases h2 : denseCompileE keys width with
+                  | none => rfl
+                  | some iwidth => rfl
+              | some b =>
+                obtain ⟨bx, by'⟩ := b
+                simp only [hvrf, Bool.false_eq_true, if_false, denseCompileShapeV]
+          | cons _ _ =>
+            simp only [denseCompilePayloadCBiPredV, denseCompileShapeV]
+            exact denseCompileOtherShapeV_eq facts keys bi mult
+
+private theorem denseCompileShapesV_eq {bs : BusSemantics p} (facts : BusFacts p bs)
+    (keys : List VarId) :
+    ∀ (bis : List (BusInteraction (DenseExpr p))),
+      denseCompileShapesV facts keys bis (bis.map (denseClassifyBi facts))
+        = denseCompileCBiPredsV facts keys bis := by
+  intro bis
+  induction bis with
+  | nil => rfl
+  | cons bi rest ih =>
+    simp only [List.map_cons, denseCompileShapesV, denseCompileCBiPredsV,
+      denseCompileBiShapeV_eq facts keys bi, ih]
+
 theorem denseSurvivesAllCWV_eq (ops : DenseZModOps p) (isZero : ZMod p → Bool)
     (hz : ∀ v, isZero v = decide (v = 0)) (bs : BusSemantics p) (facts : BusFacts p bs)
     (es : List (DenseExpr p)) (bis : List (BusInteraction (DenseExpr p))) (keys : List VarId)
@@ -1477,9 +1648,12 @@ theorem denseSurvivesAllCWV_eq (ops : DenseZModOps p) (isZero : ZMod p → Bool)
 
 theorem denseCompiledSurvV_eq (bs : BusSemantics p) (facts : BusFacts p bs)
     (es : List (DenseExpr p)) (bis : List (BusInteraction (DenseExpr p)))
-    (keys : List VarId) (pt : List (ZMod p)) :
-    (denseCompiledSurvV bs facts es bis keys).run pt = denseSurvivesAllMV facts es bis keys pt := by
+    (shapes : List (DenseBiPredShape p)) (keys : List VarId) (pt : List (ZMod p))
+    (hsh : shapes = bis.map (denseClassifyBi facts)) :
+    (denseCompiledSurvV bs facts es bis shapes keys).run pt
+      = denseSurvivesAllMV facts es bis keys pt := by
   unfold denseCompiledSurvV
+  rw [hsh, denseCompileShapesV_eq facts keys bis]
   cases hce : denseCompileEs keys es with
   | none => rfl
   | some ces =>
@@ -1526,14 +1700,16 @@ theorem denseSurvivesAllMV_restriction {bs : BusSemantics p} (facts : BusFacts p
 /-- The restriction survives the compiled survivor predicate (value-only). -/
 theorem denseCompiledSurvV_restriction (bs : BusSemantics p) (facts : BusFacts p bs)
     (es : List (DenseExpr p))
-    (bis : List (BusInteraction (DenseExpr p))) (keys : List VarId) (denv : VarId → ZMod p)
+    (bis : List (BusInteraction (DenseExpr p))) (shapes : List (DenseBiPredShape p))
+    (keys : List VarId) (denv : VarId → ZMod p)
+    (hsh : shapes = bis.map (denseClassifyBi facts))
     (hes0 : ∀ e ∈ es, e.eval denv = 0)
     (hbi0 : ∀ bi ∈ bis, (denseBIEval bi denv).multiplicity ≠ 0 →
       bs.accepts (denseBIEval bi denv))
     (hesk : ∀ e ∈ es, ∀ i ∈ e.vars, i ∈ keys)
     (hbik : ∀ bi ∈ bis, ∀ i ∈ denseBIVars bi, i ∈ keys) :
-    (denseCompiledSurvV bs facts es bis keys).run (keys.map denv) = true := by
-  rw [denseCompiledSurvV_eq]
+    (denseCompiledSurvV bs facts es bis shapes keys).run (keys.map denv) = true := by
+  rw [denseCompiledSurvV_eq bs facts es bis shapes keys _ hsh]
   exact denseSurvivesAllMV_restriction facts es bis keys denv hes0 hbi0 hesk hbik
 
 /-! ## `forcedOver` entailment (value-only) -/
@@ -1772,7 +1948,7 @@ theorem denseGatherBusesV_interactions_mem (fidx : DenseForcedIdx p) (xs : List 
   rw [denseGatherBusesV] at hbi
   apply denseGatherBusArrayV_interactions_mem fidx.arrBis xs fidx.bisIdx.varless _
     (denseGatherBusBucketsV_interactions_mem fidx.arrBis fidx.bisIdx xs xs
-      ⟨0, false, true, []⟩ (by simp)) bi hbi
+      ⟨0, false, true, [], []⟩ (by simp)) bi hbi
 
 theorem denseGatherBusesV_plan_mem (fidx : DenseForcedIdx p) (plans : List (DenseBusPlan p))
     (harr : fidx.arrBis = plans.toArray) (xs : List VarId)
@@ -1789,10 +1965,76 @@ theorem denseGatherBusesV_plan_mem (fidx : DenseForcedIdx p) (plans : List (Dens
   exact ⟨plan, hmem, by simpa [plan] using hbi', by simpa [plan] using husable,
     by simpa [plan] using hvars⟩
 
+/-! ### The gathered shapes are the gathered interactions' classifications
+
+`denseBusPlansV` stores each usable plan's classification (`DenseBusPlansClassified`), and the gather
+conses interaction and shape together, so the two lists stay aligned — which is what
+`denseCompiledSurvV_eq` needs. -/
+
+/-- Every usable plan carries the classification of its own interaction. -/
+def DenseBusPlansClassified {bs : BusSemantics p} (facts : BusFacts p bs)
+    (arr : Array (DenseBusPlan p)) : Prop :=
+  ∀ (i : Nat) (h : i < arr.size),
+    arr[i].usable = true → arr[i].predShape = denseClassifyBi facts arr[i].interaction
+
+theorem denseGatherBusAtV_shapes {bs : BusSemantics p} (facts : BusFacts p bs)
+    (arr : Array (DenseBusPlan p)) (hcl : DenseBusPlansClassified facts arr)
+    (xs : List VarId) (acc : DenseBusGatherV p) (i : Nat)
+    (hacc : acc.shapes = acc.interactions.map (denseClassifyBi facts)) :
+    (denseGatherBusAtV arr xs acc i).shapes
+      = (denseGatherBusAtV arr xs acc i).interactions.map (denseClassifyBi facts) := by
+  by_cases hi : i < arr.size
+  · by_cases husable : arr[i].usable = true
+    · by_cases hvars : denseVarsInListF xs arr[i].vars = true
+      · simp only [denseGatherBusAtV, hi, ↓reduceDIte, husable, hvars, Bool.and_self,
+          ↓reduceIte, List.map_cons, hacc, hcl i hi husable]
+      · simpa [denseGatherBusAtV, hi, husable, hvars] using hacc
+    · simpa [denseGatherBusAtV, hi, husable] using hacc
+  · simpa [denseGatherBusAtV, hi] using hacc
+
+theorem denseGatherBusArrayV_shapes {bs : BusSemantics p} (facts : BusFacts p bs)
+    (arr : Array (DenseBusPlan p)) (hcl : DenseBusPlansClassified facts arr)
+    (xs : List VarId) (positions : Array Nat) (acc : DenseBusGatherV p)
+    (hacc : acc.shapes = acc.interactions.map (denseClassifyBi facts)) :
+    (denseGatherBusArrayV arr xs positions acc).shapes
+      = (denseGatherBusArrayV arr xs positions acc).interactions.map (denseClassifyBi facts) := by
+  rw [denseGatherBusArrayV, ← Array.foldl_toList]
+  induction positions.toList generalizing acc with
+  | nil => simpa using hacc
+  | cons i rest ih =>
+      simp only [List.foldl_cons]
+      exact ih (denseGatherBusAtV arr xs acc i)
+        (denseGatherBusAtV_shapes facts arr hcl xs acc i hacc)
+
+theorem denseGatherBusBucketsV_shapes {bs : BusSemantics p} (facts : BusFacts p bs)
+    (arr : Array (DenseBusPlan p)) (hcl : DenseBusPlansClassified facts arr)
+    (idx : DenseArrayCovIndex) (xs vs : List VarId) (acc : DenseBusGatherV p)
+    (hacc : acc.shapes = acc.interactions.map (denseClassifyBi facts)) :
+    (vs.foldl (fun acc v => denseGatherBusArrayV arr xs (idx.buckets.getD v #[]) acc) acc).shapes
+      = (vs.foldl (fun acc v =>
+          denseGatherBusArrayV arr xs (idx.buckets.getD v #[]) acc) acc).interactions.map
+            (denseClassifyBi facts) := by
+  induction vs generalizing acc with
+  | nil => simpa using hacc
+  | cons v rest ih =>
+      simp only [List.foldl_cons]
+      exact ih _ (denseGatherBusArrayV_shapes facts arr hcl xs _ acc hacc)
+
+theorem denseGatherBusesV_shapes {bs : BusSemantics p} (facts : BusFacts p bs)
+    (fidx : DenseForcedIdx p) (hcl : DenseBusPlansClassified facts fidx.arrBis)
+    (xs : List VarId) :
+    (denseGatherBusesV fidx xs).shapes
+      = (denseGatherBusesV fidx xs).interactions.map (denseClassifyBi facts) := by
+  rw [denseGatherBusesV]
+  exact denseGatherBusArrayV_shapes facts fidx.arrBis hcl xs fidx.bisIdx.varless _
+    (denseGatherBusBucketsV_shapes facts fidx.arrBis hcl fidx.bisIdx xs xs
+      ⟨0, false, true, [], []⟩ (by simp))
+
 /-- **Value-only `forcedOver` entailment.** Every forced pair `(x, c)` is entailed by `denv`, given
     the domain table is sound at `denv` and the covered items evaluate/oblige correctly. -/
 theorem denseForcedOverV_entails (bs : BusSemantics p) (facts : BusFacts p bs)
     (T : DenseDomainTable p) (fidx : DenseForcedIdx p) (xs : List VarId) (denv : VarId → ZMod p)
+    (hcl : DenseBusPlansClassified facts fidx.arrBis)
     (hTs : DenseTableSoundAt denv T)
     (hes : ∀ e ∈ (denseGatherConstraintsV fidx xs).active,
       e.eval denv = 0 ∧ ∀ i ∈ e.vars, i ∈ xs)
@@ -1815,8 +2057,10 @@ theorem denseForcedOverV_entails (bs : BusSemantics p) (facts : BusFacts p bs)
     · have hsurv : (denseCompiledSurvV bs facts
           (denseGatherConstraintsV fidx xs).active
           (denseGatherBusesV fidx xs).interactions
+          (denseGatherBusesV fidx xs).shapes
           (fdoms.map Prod.fst)).run ((fdoms.map Prod.fst).map denv) = true := by
-        apply denseCompiledSurvV_restriction
+        apply denseCompiledSurvV_restriction bs facts _ _ _ _ denv
+          (denseGatherBusesV_shapes facts fidx hcl xs)
         · exact fun e he => (hes e he).1
         · exact fun bi hbi => (hbis bi hbi).1
         · intro e he i hi; rw [hkeys]; exact (hes e he).2 i hi
@@ -1824,6 +2068,7 @@ theorem denseForcedOverV_entails (bs : BusSemantics p) (facts : BusFacts p bs)
       cases hscan : denseScanBoxV (denseCompiledSurvV bs facts
           (denseGatherConstraintsV fidx xs).active
           (denseGatherBusesV fidx xs).interactions
+          (denseGatherBusesV fidx xs).shapes
           (fdoms.map Prod.fst)).run (fdoms.map Prod.snd) with
       | none =>
           intro f hf
@@ -2072,6 +2317,18 @@ def dbFidx (bs : BusSemantics p) (facts : BusFacts p bs) (d : DenseConstraintSys
     DenseForcedIdx p :=
   denseForcedIdxV (dbConstraintPlans bs facts d) (dbBusPlans bs facts d)
 
+/-- The pass's own plans satisfy the classification invariant: `denseBusPlansV` stores
+    `denseClassifyBi facts bi` on every usable plan. -/
+theorem dbFidx_classified (bs : BusSemantics p) (facts : BusFacts p bs)
+    (d : DenseConstraintSystem p) :
+    DenseBusPlansClassified facts (dbFidx bs facts d).arrBis := by
+  intro i hi husable
+  simp only [dbFidx, denseForcedIdxV, dbBusPlans, denseBusPlansV, List.size_toArray,
+    List.length_map] at hi
+  simp only [dbFidx, denseForcedIdxV, dbBusPlans, denseBusPlansV, List.getElem_toArray,
+    List.getElem_map] at husable ⊢
+  simp [husable]
+
 theorem denseDomainBatchσV_eq (bs : BusSemantics p) (facts : BusFacts p bs)
     (d : DenseConstraintSystem p) :
     denseDomainBatchσV bs facts d
@@ -2091,7 +2348,7 @@ theorem denseDomainBatchσV_entailed [Fact p.Prime] [NeZero p]
   case hforced =>
     intro xs f hf denv hsat
     refine denseForcedOverV_entails bs facts (dbT bs facts d) (dbFidx bs facts d) xs denv
-      ?_ ?_ ?_ f hf
+      (dbFidx_classified bs facts d) ?_ ?_ ?_ f hf
     · exact dbT_soundAt bs facts d denv hsat
     · intro e he
       obtain ⟨plan, hplan, hpe, hpvars, _⟩ := denseGatherConstraintsV_plan_mem

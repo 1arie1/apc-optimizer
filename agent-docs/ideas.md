@@ -475,9 +475,26 @@ profiles over five OpenVM cases + SP1 keccak; entry 152). Phase shares of in-pas
 | gathers + preflight | 6.2 | 1.9 | 0.6 | 1.1 | 0.2 |
 
 Pass-only cost classes on sha256: 32.5 % closure-apply + 25 % refcount — `BusFacts` closure calls and
-the allocation traffic of their results. The `.fallback` row is **done (entry 152)**. Open, in order:
+the allocation traffic of their results. The `.fallback` row is **done (entry 152)**.
 
-   - **(a) Hoist the target-independent bus classification.** `denseCompiledSurvV` runs
+**Read this table as CPU, not wall.** `domainBatch` fans out into up to 64 chunks at ≥ 8192
+constraints, which is exactly the regime of every compile-heavy case here, so the per-target rows
+(classification, compile, scan) are largely parallel slack: entry 153 removed 45 % of the pass's CPU
+and the wall did not improve (1.00–1.07× across seven cases). The pass's wall is its **serial prologue** — table build, constraint
+plans/redundancy, `denseRootsIn`, targets/index/preflight — which is 65 % of the remaining CPU. Size
+any candidate against the prologue first. Open, in order:
+
+   - ~~**(a) Hoist the target-independent bus classification**~~ · **implemented and measured; wall
+     negative (entry 153)**. The hoist does what it promised — keccak's compile phase 31.3 % → 2.8 %
+     of in-pass samples, pass CPU **0.55×** — but the *wall* did not (sha256 apc_001 1.07×, SP1
+     keccak 1.03×, keccak 1.01×, apc_063/apc_071/apc_005 1.00×), because `domainBatch` fans out at ≥ 8192 constraints and the
+     per-target compile therefore sat in **parallel slack**. **65 % of the pass's remaining CPU is its
+     serial prologue** (table build 31 %, constraint plans 11 %, `denseRootsIn` 10 %,
+     targets/index/preflight ~6 %), and that is what sets the wall. Do not re-propose a per-target
+     optimization for the big cases without first moving the prologue; the code sits on
+     `perf/domainbatch-arity-never-violates` (draft PR) if a core-starved runner ever makes the CPU
+     win convert. The description below is kept for that reason:
+     **(a) Hoist the target-independent bus classification.** `denseCompiledSurvV` runs
      `denseCompileCBiPredV facts keys bi` per gathered interaction *per target*, and everything it
      does except `denseCompileE keys <slot>` depends on `bi` alone (`neverViolates`, `varRangeBus`,
      `tupleRangeBus`, `byteXorSpec`, `spec.decode`, `rangeCheckAt` + its pattern, `constValue?`).
@@ -489,7 +506,9 @@ the allocation traffic of their results. The `.fallback` row is **done (entry 15
      invocation) plus `denseCompileShape keys mult shape = denseCompileCBiPredV facts keys bi`, whose
      hypothesis discharges through the existing `denseGatherBusesV_plan_mem`, ~200–350 lines.
      Expect pass ≈ 0.55× on sha256/keccak.
-   - **(b) One constant pattern per interaction.** `denseInteractionBound` rebuilds
+   - **(b) One constant pattern per interaction** · **now the top lever** (entry 153: the table build
+     is 31 % of the pass and is serial).
+      `denseInteractionBound` rebuilds
      `bi.payload.map DenseExpr.constValue?` per *queried variable*, and `denseAddBusVars` /
      `denseBiInformative` compute the same bound twice per variable. `denseInteractionBoundPat`
      (`BusPairCancelWits.lean:26`) is the hoisted twin already. The same specialized map is 6 % of the
@@ -521,6 +540,10 @@ the allocation traffic of their results. The `.fallback` row is **done (entry 15
 
 ### Runtime dead ends (measured; do not re-propose without new evidence)
 
+- **Per-target work in `domainBatch` as a wall-time lever** (entry 153): the pass fans out at ≥ 8192
+  constraints, so per-target phases are parallel slack on every case where they are large. Removing
+  45 % of the pass's CPU (the whole per-target bus classification) left the wall at 1.00–1.07× on seven
+  cases (worst on the biggest case). Optimize the serial prologue instead, or re-measure on a core-starved runner.
 - **Whole-system content-hash gating of passes across cycles**: catches ~0 % — the fixpoint only
   retains cycles that changed something, so some pass always dirties the hash (#146 measurement).
   Only fine-grained dirtiness (R6) reaches the ~61 % no-op invocations.

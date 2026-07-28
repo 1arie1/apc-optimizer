@@ -32,13 +32,6 @@ def denseIExprEvalWithV (ops : DenseZModOps p) (pt : List (ZMod p)) :
   | .add a b => ops.add (denseIExprEvalWithV ops pt a) (denseIExprEvalWithV ops pt b)
   | .mul a b => ops.mul (denseIExprEvalWithV ops pt a) (denseIExprEvalWithV ops pt b)
 
-/-- Direct relation implemented by a compiled byte-bus predicate. -/
-inductive DenseBytePredKind where
-  | xor
-  | pair
-  | or
-  | and
-
 def DenseBytePredKind.Holds (kind : DenseBytePredKind) (a b r : ZMod p) : Prop :=
   match kind with
   | .xor => r.val = Nat.xor a.val b.val
@@ -162,6 +155,137 @@ def denseCompileCBiPredsV {bs : BusSemantics p} (facts : BusFacts p bs) (keys : 
     | some pred, some preds => some (pred :: preds)
     | _, _ => none
 
+/-! ### The keys-free half of the compilation
+
+`denseCompileCBiPredV` queries `facts` and re-decodes the payload for every gathered interaction of
+every target, although only the `denseCompileE keys …` of a few slots depends on the target.
+`denseClassifyBi` resolves the target-independent half once per interaction (in `denseBusPlansV`) and
+`denseCompileBiShapeV` finishes it per target; `denseCompileBiShapeV_eq` (`Proofs/DomainBatch.lean`)
+proves the two compose to `denseCompileCBiPredV`, so the compiled predicate — and the scan — is
+unchanged. -/
+
+def denseClassifyRange {bs : BusSemantics p} (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) : Option (DenseExpr p × Nat) :=
+  match bi.multiplicity.constValue? with
+  | some mult =>
+    if mult = 1 then
+      match facts.rangeCheckAt bi.busId (bi.payload.map DenseExpr.constValue?) with
+      | some (slot, bound) =>
+        match bi.payload[slot]? with
+        | some value => some (value, bound)
+        | none => none
+      | none => none
+    else none
+  | none => none
+
+/-- The byte relation a constant op selects, or `none` if it selects no recognized relation. The
+    arm order is `denseCompileByteCBiPredV`'s (`denseByteKindOf_eq` bridges the two). -/
+def denseByteKindOf (spec : ByteXorSpec p) (opValue : ZMod p) : Option DenseBytePredKind :=
+  if opValue = spec.xorOp then some .xor
+  else if opValue = spec.pairOp then some .pair
+  else
+    match spec.orOp, spec.andOp with
+    | some orOp, _ =>
+      if opValue = orOp then some .or
+      else match spec.andOp with
+        | some andOp => if opValue = andOp then some .and else none
+        | none => none
+    | none, some andOp => if opValue = andOp then some .and else none
+    | none, none => none
+
+def denseClassifyByte {bs : BusSemantics p} (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) :
+    Option (DenseExpr p × DenseExpr p × DenseExpr p × Nat × DenseBytePredKind) :=
+  match facts.byteXorSpec bi.busId with
+  | none => none
+  | some spec =>
+    match spec.decode bi.payload with
+    | none => none
+    | some (op, o1, o2, result) =>
+      match op.constValue? with
+      | none => none
+      | some opValue =>
+        (denseByteKindOf spec opValue).map (fun kind => (o1, o2, result, spec.bound, kind))
+
+def denseClassifyOther {bs : BusSemantics p} (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) : DenseBiOtherShape p :=
+  { busId := bi.busId, range := denseClassifyRange facts bi, byte := denseClassifyByte facts bi,
+    payload := bi.payload }
+
+def denseClassifyBi {bs : BusSemantics p} (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) : DenseBiPredShape p :=
+  if denseBiAlwaysOk facts bi then .always
+  else
+    match bi.payload with
+    | [x, width] =>
+      if facts.varRangeBus bi.busId then
+        .varRange x width
+          (match width.constValue? with
+           | some widthValue => if widthValue.val ≤ 17 then some (2 ^ widthValue.val) else none
+           | none => none)
+      else
+        match facts.tupleRangeBus bi.busId with
+        | some (boundX, boundY) => .tupleRange x width boundX boundY
+        | none => .other (denseClassifyOther facts bi)
+    | _ => .other (denseClassifyOther facts bi)
+
+/-- Compile a decoded byte relation's three operand slots. -/
+def denseCompileByteShapeV (keys : List VarId) (mult : IExpr p)
+    (t : DenseExpr p × DenseExpr p × DenseExpr p × Nat × DenseBytePredKind) :
+    Option (DenseCBiPred p) :=
+  match denseCompileE keys t.1, denseCompileE keys t.2.1, denseCompileE keys t.2.2.1 with
+  | some io1, some io2, some iresult => some (.byte mult io1 io2 iresult t.2.2.2.1 t.2.2.2.2)
+  | _, _, _ => none
+
+def denseCompileOtherShapeV (keys : List VarId) (mult : IExpr p) (o : DenseBiOtherShape p) :
+    Option (DenseCBiPred p) :=
+  match o.range.bind (fun vb =>
+      (denseCompileE keys vb.1).map (fun iv => .fixedRange mult iv vb.2)) with
+  | some pred => some pred
+  | none =>
+    match o.byte.bind (denseCompileByteShapeV keys mult) with
+    | some pred => some pred
+    | none => (denseCompileEs keys o.payload).map (fun payload =>
+        .fallback ⟨o.busId, mult, payload⟩)
+
+def denseCompileShapeV {bs : BusSemantics p} (facts : BusFacts p bs) (keys : List VarId)
+    (bi : BusInteraction (DenseExpr p)) (mult : IExpr p) :
+    DenseBiPredShape p → Option (DenseCBiPred p)
+  | .always => some .always
+  | .varRange x width constBound =>
+    match denseCompileE keys x, denseCompileE keys width with
+    | some ix, some iwidth =>
+      match constBound with
+      | some bound => some (.varRangeConst mult ix bound)
+      | none => some (.varRange mult ix iwidth)
+    | _, _ => denseCompileOtherCBiPredV facts keys bi mult
+  | .tupleRange x y boundX boundY =>
+    match denseCompileE keys x, denseCompileE keys y with
+    | some ix, some iy => some (.tupleRange mult ix iy boundX boundY)
+    | _, _ => denseCompileOtherCBiPredV facts keys bi mult
+  | .other o => denseCompileOtherShapeV keys mult o
+
+/-- The per-target half: compile the slots a classified interaction needs against `keys`. -/
+def denseCompileBiShapeV {bs : BusSemantics p} (facts : BusFacts p bs) (keys : List VarId)
+    (bi : BusInteraction (DenseExpr p)) (sh : DenseBiPredShape p) : Option (DenseCBiPred p) :=
+  match sh with
+  | .always => some .always
+  | _ =>
+    match denseCompileE keys bi.multiplicity with
+    | none => none
+    | some mult => denseCompileShapeV facts keys bi mult sh
+
+/-- The gathered interactions and their classifications, walked in lockstep. -/
+def denseCompileShapesV {bs : BusSemantics p} (facts : BusFacts p bs) (keys : List VarId) :
+    List (BusInteraction (DenseExpr p)) → List (DenseBiPredShape p) →
+    Option (List (DenseCBiPred p))
+  | [], _ => some []
+  | bi :: rest, sh :: shs =>
+    match denseCompileBiShapeV facts keys bi sh, denseCompileShapesV facts keys rest shs with
+    | some pred, some preds => some (pred :: preds)
+    | _, _ => none
+  | _ :: _, [] => none
+
 def denseCBiPredEvalV (ops : DenseZModOps p) (isZero : ZMod p → Bool)
     {bs : BusSemantics p} (facts : BusFacts p bs) (pt : List (ZMod p)) : DenseCBiPred p → Bool
   | .always => true
@@ -250,9 +374,10 @@ structure DenseSurvV (p : ℕ) where
     items against `keys` once, hoisting ring ops and the zero test, with the uncompiled fallback if
     compilation fails. Boxed in `DenseSurvV` (see there). -/
 def denseCompiledSurvV (bs : BusSemantics p) (facts : BusFacts p bs) (es : List (DenseExpr p))
-    (bis : List (BusInteraction (DenseExpr p))) (keys : List VarId) :
+    (bis : List (BusInteraction (DenseExpr p))) (shapes : List (DenseBiPredShape p))
+    (keys : List VarId) :
     DenseSurvV p :=
-  match denseCompileEs keys es, denseCompileCBiPredsV facts keys bis with
+  match denseCompileEs keys es, denseCompileShapesV facts keys bis shapes with
   | some ces, some cbis =>
     let ops : DenseZModOps p := denseZModOps
     let dec : DecidableEq (ZMod p) := inferInstance
@@ -442,6 +567,8 @@ structure DenseBusGatherV (p : ℕ) where
   informative : Bool
   allDomainRedundant : Bool
   interactions : List (BusInteraction (DenseExpr p))
+  /-- The gathered interactions' classifications, in the same order (`denseCompileShapesV`). -/
+  shapes : List (DenseBiPredShape p)
 
 def denseGatherBusAtV (arr : Array (DenseBusPlan p)) (xs : List VarId)
     (acc : DenseBusGatherV p) (i : Nat) : DenseBusGatherV p :=
@@ -451,7 +578,8 @@ def denseGatherBusAtV (arr : Array (DenseBusPlan p)) (xs : List VarId)
       { count := acc.count + 1,
         informative := acc.informative || plan.informative,
         allDomainRedundant := acc.allDomainRedundant && plan.domainRedundant,
-        interactions := plan.interaction :: acc.interactions }
+        interactions := plan.interaction :: acc.interactions,
+        shapes := plan.predShape :: acc.shapes }
     else acc
   else acc
 
@@ -462,7 +590,7 @@ def denseGatherBusArrayV (arr : Array (DenseBusPlan p)) (xs : List VarId)
 def denseGatherBusesV (fidx : DenseForcedIdx p) (xs : List VarId) : DenseBusGatherV p :=
   let acc := xs.foldl (fun acc v =>
     denseGatherBusArrayV fidx.arrBis xs (fidx.bisIdx.buckets.getD v #[]) acc)
-    ⟨0, false, true, []⟩
+    ⟨0, false, true, [], []⟩
   denseGatherBusArrayV fidx.arrBis xs fidx.bisIdx.varless acc
 
 structure DenseForcedScanV (p : ℕ) where
@@ -470,6 +598,7 @@ structure DenseForcedScanV (p : ℕ) where
   doms : List (FiniteDomain p)
   active : List (DenseExpr p)
   interactions : List (BusInteraction (DenseExpr p))
+  shapes : List (DenseBiPredShape p)
   work : Nat
 
 inductive DenseForcedPlanV (p : ℕ) where
@@ -507,13 +636,14 @@ def denseForcedPreflightV (T : DenseDomainTable p) (fidx : DenseForcedIdx p)
             doms,
             active := cs.active,
             interactions := bis.interactions,
+            shapes := bis.shapes,
             work := boxSize * (cs.active.length + bis.count + keys.length) })
       else none
     else none
 
 def denseRunForcedScanV (bs : BusSemantics p) (facts : BusFacts p bs)
     (job : DenseForcedScanV p) : List (VarId × ZMod p) :=
-  let survC := denseCompiledSurvV bs facts job.active job.interactions job.keys
+  let survC := denseCompiledSurvV bs facts job.active job.interactions job.shapes job.keys
   match denseScanBoxV survC.run job.doms with
   | none => job.keys.map (fun x => (x, (0 : ZMod p)))
   | some cands =>
@@ -620,7 +750,9 @@ def denseBusPlansV (bs : BusSemantics p) (facts : BusFacts p bs) (T : DenseDomai
       vars := HashedDedup.hashedDedup (hash ·) (denseBIVars bi),
       usable,
       informative := usable && denseBiInformative bs facts bi,
-      domainRedundant := usable && denseBiDomainRedundantV bs facts T bi }
+      domainRedundant := usable && denseBiDomainRedundantV bs facts T bi,
+      -- Only `usable` plans are gathered, so an unusable one needs no classification.
+      predShape := if usable then denseClassifyBi facts bi else .always }
 
 def densePlanTargetsV (cs : List (DenseConstraintPlan p)) (bis : List (DenseBusPlan p)) :
     List (List VarId) :=
