@@ -340,6 +340,14 @@ theorem denseFreshFused_eq (d : DenseConstraintSystem p) (bits : List VarId) :
     exact ⟨fun c hc b hb => (h b hb).1 c hc, fun bi hbi =>
       ⟨fun b hb => ((h b hb).2 bi hbi).1, fun e he b hb => ((h b hb).2 bi hbi).2 e he⟩⟩
 
+/-- Freshness against a prebuilt bit set. The set is a parameter of the function that *contains*
+    the walks, so it is built once per certificate rather than once per item (a `let` in the caller
+    would be zeta-expanded straight back into the `all` bodies). -/
+def denseFreshAgainst (s : Std.HashSet VarId) (d : DenseConstraintSystem p) : Bool :=
+  d.algebraicConstraints.all (fun c => !c.mentionsAny s) &&
+    d.busInteractions.all (fun bi =>
+      !bi.multiplicity.mentionsAny s && bi.payload.all (fun e => !e.mentionsAny s))
+
 /-- `denseCheckReencode` with the covered set shared between the domain and soundness conjuncts
     and the freshness conjunct decided in one system walk. -/
 def denseCheckReencodeFast (d : DenseConstraintSystem p) (xs bits : List VarId)
@@ -362,14 +370,11 @@ def denseCheckReencodeFast (d : DenseConstraintSystem p) (xs bits : List VarId)
           = denseEnvOfFast s x)))) &&
     patts.all (fun aβ => es.all (fun c =>
       decide ((c.substF (denseGroupSubst xs hm)).evalFast (denseEnvOfFast aβ) = 0))) &&
-    (d.algebraicConstraints.all (fun c => !c.mentionsAny (Std.HashSet.ofList bits)) &&
-      d.busInteractions.all (fun bi =>
-        !bi.multiplicity.mentionsAny (Std.HashSet.ofList bits) &&
-        bi.payload.all (fun e => !e.mentionsAny (Std.HashSet.ofList bits))))
+    denseFreshAgainst (Std.HashSet.ofList bits) d
 
 @[csimp] theorem denseCheckReencode_eq_fast : @denseCheckReencode = @denseCheckReencodeFast := by
   funext q d xs bits hm
-  unfold denseCheckReencode denseCheckReencodeFast
+  unfold denseCheckReencode denseCheckReencodeFast denseFreshAgainst
   simp only [denseFreshFused_eq]
 
 /-! ## Derived-variable methods for the fresh bits
