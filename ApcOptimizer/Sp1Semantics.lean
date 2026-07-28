@@ -63,6 +63,23 @@ def isByte (x : ZMod p) : Bool := decide (x.val < 256)
 /-- Whether a field element is a 16-bit limb (`0 ≤ x < 2^16`). -/
 def is16Bit (x : ZMod p) : Bool := decide (x.val < 2 ^ 16)
 
+/-- The named fields of an SP1 memory payload,
+    `(clk… (2 fields), address… (3 limbs), data… (4 × 16-bit limbs))`. `memShapeOf` and
+    `x0ReturnsZero` address the same layout by slot index. -/
+structure MemoryPayload (p : ℕ) where
+  /-- The two clock fields. -/
+  clk : List (ZMod p)
+  /-- The three address limbs. -/
+  address : List (ZMod p)
+  /-- The four limbs of the memory word. -/
+  data : List (ZMod p)
+
+/-- Read a memory payload's named fields; `none` if it is too short to be one. -/
+def memoryPayload? : List (ZMod p) → Option (MemoryPayload p)
+  | c0 :: c1 :: a0 :: a1 :: a2 :: d0 :: d1 :: d2 :: d3 :: _ =>
+      some { clk := [c0, c1], address := [a0, a1, a2], data := [d0, d1, d2, d3] }
+  | _ => none
+
 /-- Whether a message conflicts with the lookup table of the bus it is sent on. -/
 def violates (busMap : BusMap) (msg : BusInteraction (ZMod p)) : Bool :=
   match busMap msg.busId, msg.payload with
@@ -96,11 +113,11 @@ def violates (busMap : BusMap) (msg : BusInteraction (ZMod p)) : Bool :=
   | some .executionBridge, _ => false
 
   -- In SP1, the invariant is that memory data limbs are 16-bit range-checked. A *send*
-  -- (multiplicity 1) reads the previous record, so its data must be 16-bit. The payload is
-  -- `(clk, clk, address, address, address, data, data, data, data)`.
-  | some .memory, _ :: _ :: _ :: _ :: _ :: d0 :: d1 :: d2 :: d3 :: _ =>
-    decide (msg.multiplicity = 1) && !([d0, d1, d2, d3].all is16Bit)
-  | some .memory, _ => false
+  -- (multiplicity 1) reads the previous record, so its data must be 16-bit.
+  | some .memory, payload =>
+    match memoryPayload? payload with
+    | some f => decide (msg.multiplicity = 1) && !(f.data.all is16Bit)
+    | none => false
 
   -- Invalid bus ID. Won't have a matching receive.
   | none, _ => true
@@ -116,13 +133,12 @@ def breaksInvariant (busMap : BusMap) (msg : BusInteraction (ZMod p)) : Bool :=
   | some .executionBridge =>
     !decide (msg.multiplicity = 1 ∨ msg.multiplicity = -1)
   -- Memory is stateful (multiplicity 1 or -1), and additionally maintains the invariant that its
-  -- data limbs are 16-bit range. The payload is `(clk, clk, address×3, data×4)`.
+  -- data limbs are 16-bit range.
   | some .memory =>
     !decide (msg.multiplicity = 1 ∨ msg.multiplicity = -1) ||
-    (match msg.payload with
-      | _ :: _ :: _ :: _ :: _ :: d0 :: d1 :: d2 :: d3 :: _ =>
-        !([d0, d1, d2, d3].all is16Bit)
-      | _ => false)
+    (match memoryPayload? msg.payload with
+      | some f => !(f.data.all is16Bit)
+      | none => false)
   -- Circuits should not send messages to an unknown bus.
   | none => true
 

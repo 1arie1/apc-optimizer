@@ -61,6 +61,28 @@ def OpenVmBusType.isStateful : OpenVmBusType → Bool
 /-- Whether a field element is a byte (`0 ≤ x < 256`). -/
 def isByte (x : ZMod p) : Bool := decide (x.val < 256)
 
+/-- The named fields of an OpenVM memory payload,
+    `(address_space, pointer, data… (4 limbs), timestamp)`. `memShapeOf` and `x0ReturnsZero` address
+    the same layout by slot index. -/
+structure MemoryPayload (p : ℕ) where
+  /-- `1` = registers, `2` = main memory; other address spaces carry no byte invariant. -/
+  addressSpace : ZMod p
+  /-- The cell's address within its address space. -/
+  pointer : ZMod p
+  /-- The four limbs of the memory word. -/
+  data : List (ZMod p)
+
+/-- Read a memory payload's named fields; `none` if it is too short to be one. -/
+def memoryPayload? : List (ZMod p) → Option (MemoryPayload p)
+  | addressSpace :: pointer :: d0 :: d1 :: d2 :: d3 :: _timestamp =>
+      some { addressSpace := addressSpace, pointer := pointer, data := [d0, d1, d2, d3] }
+  | _ => none
+
+/-- Whether the address space is one whose words OpenVM byte-range-checks: registers (`1`) or main
+    memory (`2`). -/
+def MemoryPayload.isByteChecked (f : MemoryPayload p) : Bool :=
+  f.addressSpace.val == 1 || f.addressSpace.val == 2
+
 /-- Whether a message conflicts with the lookup table of the bus it is sent on. -/
 def violates (busMap : BusMap) (msg : BusInteraction (ZMod p)) : Bool :=
   match busMap msg.busId, msg.payload with
@@ -108,11 +130,10 @@ def violates (busMap : BusMap) (msg : BusInteraction (ZMod p)) : Bool :=
 
   -- In OpenVM, the invariant is that only range-checked values are sent to
   -- the register & memory address spaces.
-  | some .memory, addressSpace :: _pointer :: b0 :: b1 :: b2 :: b3 :: _timeStamp =>
-    decide (msg.multiplicity = -1) &&
-      (addressSpace.val == 1 || addressSpace.val == 2) &&
-      !([b0, b1, b2, b3].all isByte)
-  | some .memory, _ => false
+  | some .memory, payload =>
+    match memoryPayload? payload with
+    | some f => decide (msg.multiplicity = -1) && f.isByteChecked && !(f.data.all isByte)
+    | none => false
 
   -- Invalid bus ID. Won't have a matching receive.
   | none, _ => true
@@ -130,15 +151,12 @@ def breaksInvariant (busMap : BusMap) (msg : BusInteraction (ZMod p)) : Bool :=
     !decide (msg.multiplicity = 1 ∨ msg.multiplicity = -1)
   -- Memory is stateful (multiplicity 1 or -1), and additionally maintains the invariant
   -- that data limbs written to the register / main-memory address spaces (1 and 2) are
-  -- byte-range. The payload is `(address_space, pointer, data.. (4 bytes), timestamp)`.
+  -- byte-range.
   | some .memory =>
     !decide (msg.multiplicity = 1 ∨ msg.multiplicity = -1) ||
-    (match msg.payload with
-      | addressSpace :: _pointer :: b0 :: b1 :: b2 :: b3 :: _timeStamp =>
-        bif (addressSpace.val == 1 || addressSpace.val == 2) then
-          !([b0, b1, b2, b3].all isByte)
-        else false
-      | _ => false)
+    (match memoryPayload? msg.payload with
+      | some f => bif f.isByteChecked then !(f.data.all isByte) else false
+      | none => false)
   -- Circuits should not send messages to an unknown bus.
   | none => true
 
