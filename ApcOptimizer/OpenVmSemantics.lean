@@ -9,7 +9,7 @@ variable {p : ℕ}
 
 /-- The OpenVM bus types that appear in the default bus map. -/
 inductive OpenVmBusType where
-  /-- A instruction should receive a `(pc, timestamp)` and send updated values to the bus. -/
+  /-- An instruction should receive a `(pc, timestamp)` and send updated values to the bus. -/
   | executionBridge
   /-- To access a memory cell, instructions should:
       1. Receive a `(address_space, pointer, data... (4 bytes), prev_timestamp)` tuple
@@ -39,7 +39,7 @@ abbrev BusMapList := List (Nat × OpenVmBusType)
 def BusMapList.toBusMap (busMap : BusMapList) : BusMap :=
   fun busId => busMap.lookup busId
 
-/-- The hard-coded default OpenVM bus map, mirroring powdr's `default_openvm_bus_map` -/
+/-- The hard-coded default OpenVM bus map, mirroring powdr's `default_openvm_bus_map`. -/
 def defaultBusMap : BusMap
   | 0 => some .executionBridge
   | 1 => some .memory
@@ -157,8 +157,8 @@ def memShapeOf (busMap : BusMap) (busId : Nat) : Option MemoryBusShape :=
   | some .memory => some { addressFields := [0, 1], direction := .receiveThenSend }
   -- The execution bridge can also be viewed as a memory bus with a single global cell (address `[]`).
   -- Note that in this bus, the memory discipline (for any consecutive send/receive pair, the values
-  -- must match) is *not* enforced by the bus itself. By adding the execution bridge here, make
-  -- completeness partial: We assume that the prover will always *chose* to prove consecutive cycles.
+  -- must match) is *not* enforced by the bus itself. By adding the execution bridge here, we make
+  -- completeness partial: we assume the prover will always *choose* to prove consecutive cycles.
   | some .executionBridge => some { addressFields := [], direction := .receiveThenSend }
   | _ => none
 

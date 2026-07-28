@@ -4,12 +4,14 @@
 #   docs/build.sh            build once
 #   docs/build.sh --serve    build once, then serve
 #   docs/build.sh --watch    build + serve, then rebuild and live-reload on source changes
+#   docs/build.sh --pdf      build the PDF instead of the site (needs xelatex + latexmk)
 # Override the start port with PORT=NNNN.
 set -euo pipefail
 cd "$(dirname "$0")/.."             # repo root
 
 OUT=docs/_out
 HTML="$OUT/html-single"
+TEX="$OUT/tex"
 
 build_once() {
   lake build docs
@@ -17,6 +19,55 @@ build_once() {
   lake exe docs --output "$OUT"
   # Ship the image assets alongside the page (Verso references them relatively).
   find docs/assets -type f -exec cp {} "$HTML/" \;
+}
+
+# Emit Verso's TeX output and compile it with xelatex (required: the preamble uses
+# `fontspec`). Two fixups bridge the gap between Verso's TeX and this machine:
+#   * figures are SVGs, which LaTeX cannot include — convert them to PDF;
+#   * the mono font is requested by family name, which fontspec resolves through the OS font
+#     manager; that doesn't know TeX Live's copy, so load the shipped files by name instead.
+build_pdf() {
+  lake build docs
+  rm -rf "$OUT"
+  lake exe docs --output "$OUT" --with-tex --without-html-single
+
+  if command -v rsvg-convert >/dev/null 2>&1; then
+    find docs/assets -name '*.svg' -exec sh -c \
+      'rsvg-convert -f pdf -o "$1/$(basename "$2" .svg).pdf" "$2"' _ "$TEX" {} \;
+    perl -0pi -e 's{\\includegraphics\{"([^"]+)\.svg"\}}
+                   {\\includegraphics[width=\\textwidth]{$1.pdf}}g' "$TEX/main.tex"
+  else
+    echo "warning: rsvg-convert not found — building without the SVG figures" >&2
+    perl -0pi -e 's{\\includegraphics\{"[^"]+\.svg"\}}{\\emph{[figure omitted]}}g' "$TEX/main.tex"
+  fi
+  find docs/assets -type f ! -name '*.svg' -exec cp {} "$TEX/" \;
+
+  mono='\setmonofont{DejaVuSansMono.ttf}[BoldFont=DejaVuSansMono-Bold.ttf,'
+  mono+='ItalicFont=DejaVuSansMono-Oblique.ttf,BoldItalicFont=DejaVuSansMono-BoldOblique.ttf]'
+  MONO="$mono" perl -0pi -e 's{\\setmonofont\{DejaVu Sans Mono\}}{$ENV{MONO}}e' "$TEX/main.tex"
+
+  # Make the short document read as a continuous whole instead of many half-empty pages: chapters
+  # run on within the text rather than each starting a new page (memoir's default), and
+  # `\cleardoublepage` becomes a plain `\clearpage` so the title/ToC/mainmatter breaks don't insert
+  # blank verso pages.
+  perl -0pi -e 's{\\documentclass\{memoir\}}{"\\documentclass{memoir}\n\\renewcommand*{\\clearforchapter}{}\n\\let\\cleardoublepage\\clearpage"}e' "$TEX/main.tex"
+
+  # Stamp the title page with the build date and source commit.
+  stamp="Built $(date -u '+%Y-%m-%d %H:%M UTC') · commit $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  STAMP="$stamp" perl -0pi -e 's{\\date\{\\sffamily ?\}}{"\\date{\\sffamily " . $ENV{STAMP} . "}"}e' "$TEX/main.tex"
+
+  if ! command -v latexmk >/dev/null 2>&1 || ! command -v xelatex >/dev/null 2>&1; then
+    echo "Wrote $TEX/main.tex — install a LaTeX distribution (xelatex + latexmk) to compile it"
+    return 0
+  fi
+  # Quiet on success; on failure the captured log is the diagnosis. `-jobname` names the PDF.
+  if ! (cd "$TEX" && latexmk -xelatex -halt-on-error -interaction=nonstopmode \
+      -jobname=apc_optimizer main.tex) >"$OUT/latex.log" 2>&1; then
+    cat "$OUT/latex.log" >&2
+    echo "PDF build failed — see $TEX/apc_optimizer.log" >&2
+    exit 1
+  fi
+  echo "Wrote $TEX/apc_optimizer.pdf"
 }
 
 # First free port at or above ${PORT:-8017}, so a leftover server doesn't cause
@@ -88,6 +139,11 @@ JS
   perl -0pi -e 's{</body>}{  <script src="__reload.js"></script>\n</body>}' "$HTML/index.html"
   python3 -c 'import time; print(time.time_ns())' > "$HTML/reload.txt"
 }
+
+if [ "${1:-}" = "--pdf" ]; then
+  build_pdf
+  exit 0
+fi
 
 build_once
 echo "Wrote $HTML/index.html"

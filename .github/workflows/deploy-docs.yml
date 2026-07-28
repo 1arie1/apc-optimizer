@@ -1,20 +1,22 @@
 name: Docs
 
+# Publishes the docs site to GitHub Pages. Spec/docs drift is caught on PRs by the `build` job in
+# lean_action_ci.yml (which runs `lake build docs`), so this workflow only builds to *deploy* — from
+# main or a manual dispatch, never on PRs (a second `build`-named job on PRs would collide with the
+# required `build` check).
 on:
   push:
     branches: [main]
-    paths: &docs-paths
+    paths:
       - 'docs/**'
       - 'ApcOptimizer/**'
       - 'lakefile.toml'
       - 'lake-manifest.json'
       - 'lean-toolchain'
       - '.github/workflows/deploy-docs.yml'
-  pull_request:
-    paths: *docs-paths
   workflow_dispatch:
 
-# Supersede older runs of the same branch/PR; the Pages deploy has its own group below.
+# Supersede older runs; the Pages deploy has its own group below.
 concurrency:
   group: docs-${{ github.ref }}
   cancel-in-progress: true
@@ -25,10 +27,7 @@ permissions:
   id-token: write
 
 jobs:
-  # Runs on every relevant PR and on main. The docs splice the audited spec live (via
-  # `{docstring}` and `anchor` regions of ApcOptimizer/), so a successful build is a
-  # spec/docs drift check: renaming a definition or a `-- ANCHOR:` comment fails here.
-  build:
+  docs-build:
     runs-on: warp-ubuntu-2404-x64-32x
     steps:
       - uses: actions/checkout@v4
@@ -36,16 +35,32 @@ jobs:
       - uses: leanprover/lean-action@v1
         with:
           build: false
-      - name: Build docs site
-        run: docs/build.sh
+      # LaTeX toolchain for the PDF: xelatex + latexmk, the Source Pro / DejaVu fonts the Verso
+      # preamble uses (texlive-fonts-extra), and rsvg-convert (librsvg2-bin) for the figures.
+      - name: Install TeX + SVG tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            texlive-xetex texlive-latex-extra texlive-fonts-extra latexmk librsvg2-bin
+      # Build the PDF (best-effort — never block publishing the site on it), then the site, then
+      # drop the PDF into the site so it deploys at <site>/apc_optimizer.pdf.
+      - name: Build site + PDF
+        run: |
+          if docs/build.sh --pdf; then
+            cp docs/_out/tex/apc_optimizer.pdf "$RUNNER_TEMP/apc_optimizer.pdf"
+          else
+            echo "::warning::PDF build failed; publishing the site without it"
+          fi
+          docs/build.sh
+          if [ -f "$RUNNER_TEMP/apc_optimizer.pdf" ]; then
+            cp "$RUNNER_TEMP/apc_optimizer.pdf" docs/_out/html-single/
+          fi
       - uses: actions/upload-pages-artifact@v3
         with:
           path: docs/_out/html-single
 
-  # Publish only from main (and manual dispatch); PRs build but never deploy.
   deploy:
-    if: github.event_name != 'pull_request'
-    needs: build
+    needs: docs-build
     runs-on: ubuntu-latest
     concurrency:
       group: pages
