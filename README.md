@@ -17,12 +17,8 @@ apc-optimizer, it should be sufficient to review:
 
 ### Assumptions (all VMs)
 
-Completeness (`isCompleteReplacementOf`) is stated *conditionally* on *every variable of the input
-circuit carrying a powdr ID*: witness generation reconstructs the optimized assignment from the
-input variables, so a variable with no ID has nothing to be reconstructed from. powdr's exporter
-satisfies this, and the parser assigns IDs to all parsed variables — but the spec states it as a
-hypothesis rather than enforcing it, so an input circuit violating it gets no completeness
-guarantee (soundness is unconditional).
+All variables in the input circuit carry a powdr ID. If that was not the case, the completeness
+statement would be meaningless.
 
 ### Assumptions (OpenVM)
 
