@@ -35,7 +35,7 @@ build_pdf() {
     find docs/assets -name '*.svg' -exec sh -c \
       'rsvg-convert -f pdf -o "$1/$(basename "$2" .svg).pdf" "$2"' _ "$TEX" {} \;
     perl -0pi -e 's{\\includegraphics\{"([^"]+)\.svg"\}}
-                   {\\includegraphics[width=\\textwidth]{$1.pdf}}g' "$TEX/main.tex"
+                   {\\noindent\\includegraphics[width=\\textwidth]{$1.pdf}}g' "$TEX/main.tex"
   else
     echo "warning: rsvg-convert not found — building without the SVG figures" >&2
     perl -0pi -e 's{\\includegraphics\{"[^"]+\.svg"\}}{\\emph{[figure omitted]}}g' "$TEX/main.tex"
@@ -45,6 +45,9 @@ build_pdf() {
   mono='\setmonofont{DejaVuSansMono.ttf}[BoldFont=DejaVuSansMono-Bold.ttf,'
   mono+='ItalicFont=DejaVuSansMono-Oblique.ttf,BoldItalicFont=DejaVuSansMono-BoldOblique.ttf]'
   MONO="$mono" perl -0pi -e 's{\\setmonofont\{DejaVu Sans Mono\}}{$ENV{MONO}}e' "$TEX/main.tex"
+
+  cp docs/theme.tex "$TEX/theme.tex"
+  perl -0pi -e 's{\\begin\{document\}}{\\input{theme.tex}\n\\begin{document}}' "$TEX/main.tex"
 
   # Use a screen-friendly one-sided layout with a larger title and a compact text block. Chapters
   # run on within the text rather than each starting a new page (memoir's default).
@@ -100,7 +103,7 @@ watch_sig() {
   python3 - <<'PY'
 import os, hashlib
 h = hashlib.md5()
-exts = (".lean", ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp")
+exts = (".lean", ".css", ".tex", ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp")
 paths = []
 for dp, _, fs in os.walk("docs"):
     if os.sep + "_out" in dp + os.sep:

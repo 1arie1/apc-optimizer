@@ -1,0 +1,68 @@
+\definecolor{leanCodeText}{HTML}{334155}
+\definecolor{leanCodeBackground}{HTML}{F8FAFC}
+\definecolor{leanCodeBorder}{HTML}{CBD5E1}
+\definecolor{leanKeyword}{HTML}{6D28D9}
+\definecolor{leanVariable}{HTML}{9A3412}
+\definecolor{leanDocBorder}{HTML}{CBD5E1}
+\definecolor{leanDocLabel}{HTML}{5B21B6}
+\definecolor{leanDocLabelBackground}{HTML}{FAF7FF}
+
+\newcommand{\leanKeywordStyle}[1]{\textcolor{leanKeyword}{\bfseries #1}}
+\newcommand{\leanVariableStyle}[1]{\textcolor{leanVariable}{\itshape #1}}
+\newcommand{\leanCodeFormat}{%
+  \color{leanCodeText}%
+  \let\textbf\leanKeywordStyle%
+  \let\textit\leanVariableStyle%
+}
+
+\RecustomVerbatimEnvironment{LeanVerbatim}{Verbatim}{
+  commandchars=\\\{\},
+  fontsize=\small,
+  breaklines=true,
+  breakanywhere=true,
+  frame=single,
+  framesep=2.5mm,
+  framerule=0.35pt,
+  rulecolor=\color{leanCodeBorder},
+  fillcolor=\color{leanCodeBackground},
+  formatcom=\leanCodeFormat
+}
+
+\RecustomVerbatimCommand{\LeanVerb}{Verb}{
+  commandchars=\\\{\},
+  fontsize=\small,
+  breaklines=true,
+  breakanywhere=true,
+  formatcom=\leanCodeFormat
+}
+
+\renewtcolorbox{docstringBox}[2][]{
+  enhanced,
+  breakable,
+  colback=white,
+  colframe=leanDocBorder,
+  colbacktitle=leanDocLabelBackground,
+  coltitle=leanDocLabel,
+  boxrule=0.45pt,
+  arc=1.5mm,
+  left=3.5mm,
+  right=3.5mm,
+  top=3mm,
+  bottom=3mm,
+  before upper={\setlength{\parskip}{0.25em}\setlength{\parindent}{0pt}},
+  before lower={\setlength{\parskip}{0.45em}\setlength{\parindent}{0pt}},
+  segmentation style={draw=leanDocBorder,dashed},
+  attach boxed title to top left={xshift=2mm,yshift=-2mm},
+  fonttitle=\sffamily\bfseries\fontsize{7pt}{8pt}\selectfont,
+  boxed title style={
+    top=0.1mm,
+    bottom=0.1mm,
+    left=0.7mm,
+    right=0.7mm,
+    boxrule=0.4pt,
+    colframe=leanDocBorder,
+    arc=1mm
+  },
+  title={#2},
+  #1
+}
