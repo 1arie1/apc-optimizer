@@ -541,21 +541,18 @@ worth a prototype on one index first.
   first-slot payloads, or the per-matched-pair box evaluation in `denseFuPairData?`. Sample the
   window before building anything.
 
-### SP1 finite-domain machinery: hoist/cache the per-variable domain table  ·  *runtime, sp1*  ·  high value / med-high effort
-Fresh profiling (post-#219, on main #220–229) on SP1 keccak AND rsp: **domainBatch ≈ 58% of optimizer
-time on BOTH sets** (biggest absolute cost), sub-linear (~n^0.79) — a large SP1-specific CONSTANT.
-flagFold is the residual super-linear pass (~n^1.71) but main is already indexing it (densePdDropSet),
-so it's lower priority. Root cause: SP1's 16-bit memory limbs → ~55% single-variable finite-domain
-constraints (vs OpenVM 32%). The finite-domain machinery is rebuilt EVERY fixpoint cycle (5× on keccak)
-and `denseFindDomainAlg` is recomputed across 8 passes (BoxRewrite, BusPairCancel(+Justify), DomainFold,
-FlagFoldDrops, FlagUnify, Reencode, RootPairUnify).
-IDEA: compute the `DenseDomainTable` once and reuse it — first as a cross-cycle cache in domainBatch
-(rebuild only entries whose defining constraints changed), then as an accumulating table threaded
-read-only through the fixpoint that the domain-consuming passes read instead of recomputing.
-SOUND: a proven finite domain persists under any sound refinement (`refines` preserves surviving vars'
-values) — one reusable lemma, no re-proving as the pipeline runs. EFFECTIVENESS-SAFE: make it
-accumulating (passes add domains, none removed) so mid-fixpoint domains aren't lost.
-BISECT FIRST (the #219 lesson — the a-priori guess can be wrong): stub domainBatch's apply vs the
-per-cycle rebuild vs the table build and measure which sub-part is the 58% BEFORE implementing.
-General (any finite-domain-heavy circuit; SP1 hardest). Bench on Benchmarks/SP1/keccak AND rsp (both
-domainBatch-dominant); effectiveness must stay identical.
+### domainBatch residual after entry 151 (byte-operand domains)  ·  *runtime, sp1*  ·  medium value
+Entry 151 BISECTED domainBatch (the ideas' "58% is the domain-table build/cache" guess was WRONG — the
+build is ~2%, the box SCANS are ~94%, all in cleanup cycle 4) and cut the dominant cost 4x by mining
+byte-operand bounds into the table (585 single-var 2^16 brute-force scans → 256-element cosets). What
+remains for a next pass:
+- **Two-variable deep scans** (cycle 4 had ~108 of them, boxes up to 65536 = ~256×256): entry 151's
+  coset shrink is single-var-operand; if BOTH operands of a byte/tuple interaction are affine in
+  distinct vars, each var could still get a coset, shrinking the 2-D box. Verify how many 2-var deep
+  scans survive after entry 151 (re-run the point counter) before implementing.
+- **Fuse the coset build**: `denseByteOperandDomain` currently materializes `((range bound).map cast).map
+  (fun z => (z-b)/a)` — two passes + a 256-elt intermediate, per byte operand per interaction (~2292×)
+  per cycle. A single fused map (or a `.range`+affine `FiniteDomain` variant carrying `(a,b)` lazily)
+  avoids the intermediate. Low risk, modest constant.
+- **Skip byte-domain work when it can't shrink**: only build the coset when the operand's current table
+  domain exceeds `bound` (otherwise `insertEntry` discards it anyway). Cheap guard, saves allocations.
