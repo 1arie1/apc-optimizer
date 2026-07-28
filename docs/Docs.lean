@@ -31,6 +31,8 @@ set_option verso.docstring.allowMissing true
 shortTitle := "apc-optimizer"
 %%%
 
+# Introduction
+
 This document describes `apc-optimizer`{citeNum powdr_apc_compiler}[], a formally verified zkVM circuit optimizer. `apc-optimizer` is a core component in the powdr autoprecompiles{citeNum powdr_autoprecompiles}[] pipeline.
 
 # Background: zkVMs and autoprecompiles
