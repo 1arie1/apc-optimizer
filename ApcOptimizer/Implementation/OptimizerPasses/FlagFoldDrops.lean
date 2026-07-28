@@ -152,28 +152,40 @@ structure DensePdEntry (p : ℕ) where
   bi : BusInteraction (DenseExpr p)
   sigs : Array (UInt64 × UInt64)
 
-/-- The coarse class key (bus id, constant multiplicity, payload length) and per-slot signatures
-    of one interaction — shared by both sweep paths. -/
+/-- The coarse class key — bus id, constant multiplicity, payload length, and the hashes of every
+    *constant* payload slot (in position order) — and the per-slot signatures. Folding the constant
+    slots into the key is a valid necessary condition (`denseMsgEqCert` forces a constant slot to
+    match its twin syntactically), and it splits classes that share their opcode/bound constants but
+    differ in a variable — SP1's byte/range checks on 16-bit limbs, e.g. `[op, xᵢ, bound, flag]`. -/
 @[inline] def densePdKeySigs (bi : BusInteraction (DenseExpr p)) (m : ZMod p) :
     UInt64 × Array (UInt64 × UInt64) :=
-  (mixHash (hash bi.busId) (mixHash (hash m.val) (hash bi.payload.length)),
-    (bi.payload.map (fun e => (e.bHash, e.pdVarBloom))).toArray)
+  let base := mixHash (hash bi.busId) (mixHash (hash m.val) (hash bi.payload.length))
+  let key := bi.payload.foldl (fun h e => if e.vars.isEmpty then mixHash h e.bHash else h) base
+  (key, (bi.payload.map (fun e => (e.bHash, e.pdVarBloom))).toArray)
+
+/-- The discriminating index slot: the first payload slot that carries a variable. `denseMsgEqCert`
+    forces the non-constant positions of two equal messages to coincide, and their first such slots
+    to share a variable, so indexing representatives by this slot (not by a leading shared constant)
+    is a valid necessary condition and keeps huge same-constant classes out of the O(k²) scan. -/
+@[inline] def densePdIndexExpr (bi : BusInteraction (DenseExpr p)) : Option (DenseExpr p) :=
+  bi.payload.find? (fun e => !e.vars.isEmpty)
 
 /-- The value-keyed set of interactions the sweep decides to drop — the same set `densePdKeep`
     would drop (drops are value-based: `findIdx?` evaluates each duplicate at its first occurrence). -/
 def densePdDropSet (bs : BusSemantics p) (domIdx : Std.HashMap VarId (List (DenseExpr p)))
     (bis : List (BusInteraction (DenseExpr p))) :
     Std.HashMap UInt64 (List (BusInteraction (DenseExpr p))) := Id.run do
-  -- Per coarse key (bus id, constant multiplicity, payload length), keep only the first-of-class
-  -- *representatives* seen so far; a later interaction certified equal to a representative is a
-  -- drop. Representatives are indexed by their first payload slot: a certified twin's slot pair
-  -- is value-equal or shares a decomposition carrier (`denseSlotEqCert`), so every true match has
-  -- a representative whose slot 0 is hash-equal to — or shares a variable with — the incoming
-  -- slot 0, and only those buckets are scanned (huge same-key classes, e.g. range checks, would
-  -- otherwise cost O(classes) per interaction). Candidates are re-checked with the full
-  -- signature + certificate tests, so the drop set is unchanged. Only a heuristic drop
-  -- *proposal*: `densePointwiseDupDropF` re-verifies every proposal against `densePdKeep`, so
-  -- this carries no soundness obligation.
+  -- Per coarse key (bus id, constant multiplicity, payload length, and every constant slot's hash),
+  -- keep only the first-of-class *representatives* seen so far; a later interaction certified equal
+  -- to a representative is a drop. Representatives are indexed by their first variable-carrying slot
+  -- (`densePdIndexExpr`): a certified twin's slot pair is value-equal or shares a decomposition
+  -- carrier (`denseSlotEqCert`), and `denseMsgEqCert` forces the non-constant positions to coincide,
+  -- so every true match has a representative whose index slot is hash-equal to — or shares a variable
+  -- with — the incoming index slot, and only those buckets are scanned (huge classes that differ
+  -- only in a constant, e.g. SP1 byte checks sharing an opcode, would otherwise cost O(classes) per
+  -- interaction). Candidates are re-checked with the full signature + certificate tests, so the drop
+  -- set is unchanged. Only a heuristic drop *proposal*: `densePointwiseDupDropF` re-verifies every
+  -- proposal against `densePdKeep`, so this carries no soundness obligation.
   if bis.length < pointwiseDupDropIndexThreshold then
     -- Fixture-scale direct scan: same checks against the whole per-class representative list.
     let mut reps : Std.HashMap UInt64 (List (DensePdEntry p)) := ∅
@@ -204,11 +216,11 @@ def densePdDropSet (bs : BusSemantics p) (domIdx : Std.HashMap VarId (List (Dens
       | some m =>
         let (key, sigs) := densePdKeySigs bi m
         let hit :=
-          match bi.payload with
-          | [] =>
+          match densePdIndexExpr bi with
+          | none =>
             (repsEmpty.getD key []).any (fun e =>
               densePdSigsCompatible e.sigs sigs && denseMsgEqCert domIdx e.bi bi)
-          | e0 :: _ =>
+          | some e0 =>
             let check := fun (e : DensePdEntry p) =>
               densePdSigsCompatible e.sigs sigs && denseMsgEqCert domIdx e.bi bi
             (repsByHash.getD (key, e0.bHash) []).any check ||
@@ -219,9 +231,9 @@ def densePdDropSet (bs : BusSemantics p) (domIdx : Std.HashMap VarId (List (Dens
           drops := drops.insert vk (bi :: (drops.getD vk []))
         else
           let entry : DensePdEntry p := { bi, sigs }
-          match bi.payload with
-          | [] => repsEmpty := repsEmpty.insert key (entry :: repsEmpty.getD key [])
-          | e0 :: _ =>
+          match densePdIndexExpr bi with
+          | none => repsEmpty := repsEmpty.insert key (entry :: repsEmpty.getD key [])
+          | some e0 =>
             repsByHash := repsByHash.insert (key, e0.bHash)
               (entry :: repsByHash.getD (key, e0.bHash) [])
             for v in HashedDedup.hashedEraseDups (hash ·) e0.vars do

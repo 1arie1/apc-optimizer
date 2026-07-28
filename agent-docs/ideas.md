@@ -540,3 +540,12 @@ worth a prototype on one index first.
   nothing). Suspect `denseFuCandidates`' per-interaction `O.vars.eraseDups × splitAt` on large
   first-slot payloads, or the per-matched-pair box evaluation in `denseFuPairData?`. Sample the
   window before building anything.
+
+### flagFold: cut the per-cert denseMsgEqCert/denseBoxAgree cost (bucket-key half is DONE in log 151)  ·  *runtime, sp1*  ·  medium value / high effort
+After log 151 the residual flagFold cost is a cycle-1 bucket (~525) whose members share the index variable
++ all constant slots but differ in a SECOND non-constant slot (64-bit per-slot Bloom collides). Two hard
+directions: (a) strengthen the key past the multi-var wall — keying on the full variable set is UNSOUND
+because `denseSlotEqCert`'s split branch lets two equal messages have different variable sets; needs
+per-non-const-slot shared-variable indexing (hit only if ALL slots' buckets agree). (b) make
+`denseMsgEqCert` cheaper on the false path (cheap necessary pre-check before `denseBoxAgree`) — its boolean
+result must stay identical (shared with re-verification). The cost is per-call, not per-bucket.

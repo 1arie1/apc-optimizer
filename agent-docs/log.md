@@ -5222,3 +5222,17 @@ SP1 keccak apc_001 (`profile sp1`): busPairCancel **44.3 → 1.05 s (~42×)**, b
 (~32×, shares `denseAddrNonzeroNeq`), total 68.5 → 11.7 s. **Effectiveness IDENTICAL (2665/313/2067).**
 Output-identical also verified on OpenVM keccak (2021/186/1748) and SP1 rsp (112/69/65). `lake build`
 clean; `check-proof-integrity` passes (axioms: propext/Classical.choice/Quot.sound only).
+
+### 151. Runtime: discriminate flagFold pointwise-dedup buckets by first variable slot
+flagFold part C (pointwiseDupDrop) is SP1's #1 pass (~27% of keccak apc_001, ~n^1.65). BISECTED — the
+"O(k²) within-bucket pairwise" framing was WRONG: part C is ~1330ms; bucket building + per-interaction
+hashing are free; the entire ~1180ms is the scan's `denseMsgEqCert` calls (~16µs each, `denseBoxAgree`
+domain enumeration). SP1's byte/range checks share the opcode constant in slot 0 → collide into one giant
+bucket (1694 on keccak cycle 0; 70K certs finding 0 drops). LEVER: fold every constant payload slot's hash
+into the coarse key + index representatives by the FIRST variable-carrying slot (not slot 0) — both sound
+necessary conditions for `denseMsgEqCert`. Cycle-0 buckets 1694→5, certs 70K→1.7K. flagFold ~4.5–10% faster
+on SP1 keccak/rsp; OpenVM keccak ~−8% (no regression). Effectiveness byte-identical. ZERO proof change:
+`densePdDropSet` is a re-verified drop PROPOSAL (`densePdVerdictKeep_false` re-checks each drop against
+`densePdKeep`), so a tighter necessary-condition key cannot change output. Residual: the expensive certs are
+a cycle-1 bucket (~525) differing in a 2nd non-constant slot whose Bloom collides — the real lever is the
+per-cert `denseBoxAgree` cost (follow-up in ideas.md).
