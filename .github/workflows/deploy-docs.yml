@@ -1,0 +1,48 @@
+name: Deploy docs to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'ApcOptimizer/**'
+      - 'lakefile.toml'
+      - 'lake-manifest.json'
+      - 'lean-toolchain'
+      - '.github/workflows/deploy-docs.yml'
+  workflow_dispatch:
+
+# One deployment at a time; let a newer push supersede an in-flight run.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: warp-ubuntu-2404-x64-32x
+    steps:
+      - uses: actions/checkout@v4
+      # Installs the toolchain from lean-toolchain and fetches the mathlib olean cache.
+      - uses: leanprover/lean-action@v1
+        with:
+          build: false
+      - name: Build docs site
+        run: docs/build.sh
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/_out/html-single
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
