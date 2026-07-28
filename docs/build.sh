@@ -46,18 +46,28 @@ build_pdf() {
   mono+='ItalicFont=DejaVuSansMono-Oblique.ttf,BoldItalicFont=DejaVuSansMono-BoldOblique.ttf]'
   MONO="$mono" perl -0pi -e 's{\\setmonofont\{DejaVu Sans Mono\}}{$ENV{MONO}}e' "$TEX/main.tex"
 
+  # Make the short document read as a continuous whole instead of many half-empty pages: chapters
+  # run on within the text rather than each starting a new page (memoir's default), and
+  # `\cleardoublepage` becomes a plain `\clearpage` so the title/ToC/mainmatter breaks don't insert
+  # blank verso pages.
+  perl -0pi -e 's{\\documentclass\{memoir\}}{"\\documentclass{memoir}\n\\renewcommand*{\\clearforchapter}{}\n\\let\\cleardoublepage\\clearpage"}e' "$TEX/main.tex"
+
+  # Stamp the title page with the build date and source commit.
+  stamp="Built $(date -u '+%Y-%m-%d %H:%M UTC') · commit $(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  STAMP="$stamp" perl -0pi -e 's{\\date\{\\sffamily ?\}}{"\\date{\\sffamily " . $ENV{STAMP} . "}"}e' "$TEX/main.tex"
+
   if ! command -v latexmk >/dev/null 2>&1 || ! command -v xelatex >/dev/null 2>&1; then
     echo "Wrote $TEX/main.tex — install a LaTeX distribution (xelatex + latexmk) to compile it"
     return 0
   fi
-  # Quiet on success; on failure the captured log is the diagnosis.
-  if ! (cd "$TEX" && latexmk -xelatex -halt-on-error -interaction=nonstopmode main.tex) \
-      >"$OUT/latex.log" 2>&1; then
+  # Quiet on success; on failure the captured log is the diagnosis. `-jobname` names the PDF.
+  if ! (cd "$TEX" && latexmk -xelatex -halt-on-error -interaction=nonstopmode \
+      -jobname=apc_optimizer main.tex) >"$OUT/latex.log" 2>&1; then
     cat "$OUT/latex.log" >&2
-    echo "PDF build failed — see $TEX/main.log" >&2
+    echo "PDF build failed — see $TEX/apc_optimizer.log" >&2
     exit 1
   fi
-  echo "Wrote $TEX/main.pdf"
+  echo "Wrote $TEX/apc_optimizer.pdf"
 }
 
 # First free port at or above ${PORT:-8017}, so a leftover server doesn't cause
