@@ -128,7 +128,7 @@ theorem denseScaledSlotBound_sound [Fact p.Prime] (bs : BusSemantics p) (facts :
     (B : Nat) (h : denseScaledSlotBound bs facts domCs bi x = some B) (denv : VarId → ZMod p)
     (hdom : ∀ c ∈ domCs, c.eval denv = 0)
     (hob : (denseBIEval bi denv).multiplicity ≠ 0 →
-      bs.violatesConstraint (denseBIEval bi denv) = false) :
+      bs.accepts (denseBIEval bi denv)) :
     (denv x).val < B := by
   unfold denseScaledSlotBound at h
   cases hmv : bi.multiplicity.constValue? with
@@ -155,7 +155,7 @@ theorem denseScaledSlotBound_sound [Fact p.Prime] (bs : BusSemantics p) (facts :
           obtain ⟨hunit, hcover, _hcap⟩ := hcond
           have hmeval : (denseBIEval bi denv).multiplicity = mval :=
             bi.multiplicity.constValue?_sound mval hmv denv
-          have hviol : bs.violatesConstraint (denseBIEval bi denv) = false :=
+          have hviol : bs.accepts (denseBIEval bi denv) :=
             hob (by rw [hmeval]; exact hmz)
           have hget : (denseBIEval bi denv).payload[slot]? = some (O.eval denv) := by
             show (bi.payload.map (fun e => e.eval denv))[slot]? = _
@@ -228,7 +228,7 @@ theorem denseFindVarBound_sound (bs : BusSemantics p) (facts : BusFacts p bs)
     (bis : List (BusInteraction (DenseExpr p))) (x : VarId) (bound : Nat)
     (h : denseFindVarBound bs facts bis x = some bound) (denv : VarId → ZMod p)
     (hbus : ∀ bi ∈ bis, (denseBIEval bi denv).multiplicity ≠ 0 →
-      bs.violatesConstraint (denseBIEval bi denv) = false) : (denv x).val < bound := by
+      bs.accepts (denseBIEval bi denv)) : (denv x).val < bound := by
   induction bis with
   | nil => exact absurd h (by simp [denseFindVarBound])
   | cons bi rest ih =>
@@ -250,7 +250,7 @@ theorem denseAnyVarBound_sound [Fact p.Prime] (bs : BusSemantics p) (facts : Bus
     (denv : VarId → ZMod p)
     (hdom : ∀ c ∈ domCs, c.eval denv = 0)
     (hbus : ∀ bi ∈ bis, (denseBIEval bi denv).multiplicity ≠ 0 →
-      bs.violatesConstraint (denseBIEval bi denv) = false) : (denv x).val < B := by
+      bs.accepts (denseBIEval bi denv)) : (denv x).val < B := by
   unfold denseAnyVarBound at h
   cases hfb : denseFindVarBound bs facts bis x with
   | some B' =>
@@ -274,7 +274,7 @@ theorem denseRpCheckPair_sound [Fact p.Prime] (bs : BusSemantics p)
     (hdom : ∀ c ∈ domCs, c.eval denv = 0)
     (hcXe : cX.eval denv = 0) (hcYe : cY.eval denv = 0)
     (hbus : ∀ bi ∈ bis, (denseBIEval bi denv).multiplicity ≠ 0 →
-      bs.violatesConstraint (denseBIEval bi denv) = false) :
+      bs.accepts (denseBIEval bi denv)) :
     denv x = denv y := by
   unfold denseRpCheckPair at h
   cases hxt : denseTwoRootOf? cX x with

@@ -47,7 +47,7 @@ theorem denseRangeEq?_stateless (one : Bool) (bs : BusSemantics p) (facts : BusF
 theorem denseRangeEq?_violates_iff (one : Bool) (hone : one = true → Nat.Prime p)
     (bs : BusSemantics p) (facts : BusFacts p bs) (bi : BusInteraction (DenseExpr p))
     (e : DenseExpr p) (denv : VarId → ZMod p) (h : denseRangeEq? one bs facts bi = some e) :
-    bs.violatesConstraint (denseBIEval bi denv) = false ↔ e.eval denv = 0 := by
+    bs.accepts (denseBIEval bi denv) ↔ e.eval denv = 0 := by
   obtain ⟨hm, v, hcase⟩ := denseRangeEq?_spec one bs facts bi e h
   rcases hcase with ⟨hz, hp', rfl⟩ | ⟨hone', hv, hp', rfl⟩
   · have hev : denseBIEval bi denv
@@ -97,7 +97,7 @@ theorem denseBoolCheck?_spec {bs : BusSemantics p} (facts : BusFacts p bs)
 theorem denseBoolCheck?_violates_iff {bs : BusSemantics p} (hp : Nat.Prime p) (facts : BusFacts p bs)
     (bi : BusInteraction (DenseExpr p)) (c : DenseExpr p) (h : denseBoolCheck? facts bi = some c)
     (denv : VarId → ZMod p) :
-    bs.violatesConstraint (denseBIEval bi denv) = false ↔ c.eval denv = 0 := by
+    bs.accepts (denseBIEval bi denv) ↔ c.eval denv = 0 := by
   obtain ⟨valSlot, x, hrc, hmc, hxp, rfl⟩ := denseBoolCheck?_spec facts bi c h
   obtain ⟨_, hm⟩ := facts.rangeCheckAt_sound bi.busId (bi.payload.map DenseExpr.constValue?)
     valSlot 2 hrc

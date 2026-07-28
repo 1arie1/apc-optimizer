@@ -131,18 +131,18 @@ A {deftech}_circuit_ is simply a collection of algebraic constraints and symboli
 
 {docstring Circuit}
 
-A circuit is satisfied under an assignment when all algebraic constraints evaluate to zero and no bus interaction message violates the bus semantics:
+A circuit is satisfied under an assignment when all algebraic constraints evaluate to zero and every bus interaction message is accepted by the bus semantics:
 
 ```anchor satisfies
 /-- Whether a circuit is satisfied under a given assignment and bus semantics,
-    i.e., whether it satisfies all algebraic constraints and does not violate
-    any bus constraints. -/
+    i.e., whether it satisfies all algebraic constraints and every active bus
+    interaction message is accepted. -/
 def Circuit.satisfies (circuit : Circuit p) (busSemantics : BusSemantics p)
     (assignment : Variable → ZMod p) : Prop :=
   (∀ c ∈ circuit.algebraicConstraints, c.eval assignment = 0) ∧
   (∀ bi ∈ circuit.busInteractions,
     let message := bi.eval assignment
-    message.multiplicity ≠ 0 → busSemantics.violatesConstraint message = false)
+    message.multiplicity ≠ 0 → busSemantics.accepts message)
 ```
 
 # Bus Semantics
@@ -168,7 +168,7 @@ def Circuit.sideEffects (circuit : Circuit p) (busSemantics : BusSemantics p)
       ((m.busId, m.payload), m.multiplicity))
 ```
 
-Second, we define that a circuit _guarantees invariants_ if, under any satisfying assignment, no bus interaction breaks an invariant of the bus semantics.
+Second, we define that a circuit _guarantees invariants_ if, under any satisfying assignment, every bus interaction maintains the invariants of the bus semantics.
 
 ```anchor guaranteesInvariants
 /-- Whether a circuit guarantees that all invariants are maintained under a
@@ -178,7 +178,7 @@ def Circuit.guaranteesInvariants (circuit : Circuit p)
   ∀ assignment, circuit.satisfies busSemantics assignment →
     ∀ bi ∈ circuit.busInteractions,
       let message := bi.eval assignment
-      message.multiplicity ≠ 0 → busSemantics.breaksInvariant message = false
+      message.multiplicity ≠ 0 → busSemantics.maintainsInvariants message
 ```
 
 Finally, we formalize what it means for an optimized circuit to be a sound replacement for an original circuit:

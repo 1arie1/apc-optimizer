@@ -73,7 +73,7 @@ structure BusFacts (p : ℕ) (bs : BusSemantics p) where
       (x : ZMod p),
       slotBound m.busId m.multiplicity pattern slot = some bound →
       Matches m.payload pattern →
-      bs.violatesConstraint m = false →
+      bs.accepts m →
       m.payload[slot]? = some x →
       x.val < bound
   /-- Functional dependence: for accepted messages matching `pattern`, `outSlot`'s value is `f` of
@@ -86,20 +86,26 @@ structure BusFacts (p : ℕ) (bs : BusSemantics p) where
       (f : List (ZMod p) → ZMod p) (z : ZMod p),
       slotFun m.busId pattern outSlot = some f →
       Matches m.payload pattern →
-      bs.violatesConstraint m = false →
+      bs.accepts m →
       m.payload[outSlot]? = some z →
       z = f (m.payload.set outSlot 0)
-  /-- Buses whose messages never violate a constraint (e.g. stateful buses with no table). -/
+  /-- Buses that accept every message (e.g. stateful buses with no table). -/
   neverViolates : (busId : Nat) → Bool
   neverViolates_sound :
     ∀ (m : BusInteraction (ZMod p)),
-      neverViolates m.busId = true → bs.violatesConstraint m = false
+      neverViolates m.busId = true → bs.accepts m
   /-- Buses whose only table obligation is the payload arity: a message of the declared arity never
       violates, whatever its values (both VMs' instruction-table lookups are of this shape). -/
   neverViolatesArity : (busId : Nat) → (arity : Nat) → Bool
   neverViolatesArity_sound :
     ∀ (m : BusInteraction (ZMod p)),
-      neverViolatesArity m.busId m.payload.length = true → bs.violatesConstraint m = false
+      neverViolatesArity m.busId m.payload.length = true → bs.accepts m
+  /-- Decides `bs.accepts`. The audited `accepts` is a `Prop`, so this is how a pass evaluates the
+      bus semantics at runtime. It is a full decision procedure, not merely sound: passes rewrite
+      between it and the semantic condition (see `Proofs/DomainBatch.lean`), which needs both
+      directions. -/
+  acceptsDec : BusInteraction (ZMod p) → Bool
+  acceptsDec_iff : ∀ (m : BusInteraction (ZMod p)), acceptsDec m = true ↔ bs.accepts m
   /-- Last-write-wins shape declared for a bus, or `none` (see `ApcOptimizer/MemoryBus.lean`). -/
   memShape : (busId : Nat) → Option MemoryBusShape
   /-- Table obligations of a memory-style stateful bus, for pair cancellation:
@@ -113,10 +119,10 @@ structure BusFacts (p : ℕ) (bs : BusSemantics p) where
     ∀ (pattern : List (Option (ZMod p))) (slots : List Nat) (bound : Nat),
       recvByteSlots busId pattern = some (slots, bound) →
       ∀ (m : BusInteraction (ZMod p)), m.busId = busId →
-        (m.multiplicity = shape.setNewMult → bs.violatesConstraint m = false) ∧
+        (m.multiplicity = shape.setNewMult → bs.accepts m) ∧
         (m.multiplicity = -shape.setNewMult → Matches m.payload pattern →
           (∀ slot ∈ slots, ∀ x : ZMod p, m.payload[slot]? = some x → x.val < bound) →
-          bs.violatesConstraint m = false)
+          bs.accepts m)
   /-- Every bus with a declared shape is stateful. -/
   memShape_stateful : ∀ (busId : Nat) (shape : MemoryBusShape),
     memShape busId = some shape → bs.isStateful busId = true
@@ -157,8 +163,7 @@ structure BusFacts (p : ℕ) (bs : BusSemantics p) where
     ∀ (busId : Nat), varRangeBus busId = true →
       bs.isStateful busId = false ∧
       ∀ (x b mult : ZMod p),
-        bs.violatesConstraint { busId := busId, multiplicity := mult, payload := [x, b] }
-            = false ↔ (b.val ≤ 17 ∧ x.val < 2 ^ b.val)
+        bs.accepts { busId := busId, multiplicity := mult, payload := [x, b] } ↔ (b.val ≤ 17 ∧ x.val < 2 ^ b.val)
   /-- Tuple-range-checker stateless bus: `[x, y]` accepted iff `x.val < s1 ∧ y.val < s2`, and at
       multiplicity `1` breaks no invariant. -/
   tupleRangeBus : (busId : Nat) → Option (Nat × Nat)
@@ -166,10 +171,9 @@ structure BusFacts (p : ℕ) (bs : BusSemantics p) where
     ∀ (busId s1 s2 : Nat), tupleRangeBus busId = some (s1, s2) →
       bs.isStateful busId = false ∧
       (∀ (x y : ZMod p),
-        bs.breaksInvariant { busId := busId, multiplicity := 1, payload := [x, y] } = false) ∧
+        bs.maintainsInvariants { busId := busId, multiplicity := 1, payload := [x, y] }) ∧
       ∀ (x y mult : ZMod p),
-        bs.violatesConstraint { busId := busId, multiplicity := mult, payload := [x, y] }
-            = false ↔ (x.val < s1 ∧ y.val < s2)
+        bs.accepts { busId := busId, multiplicity := mult, payload := [x, y] } ↔ (x.val < s1 ∧ y.val < s2)
   /-- Real-trace fixed-zero cells (e.g. the RISC-V `x0` register):
       `zeroCell busId = some (addrReq, dataSlots)` asserts that on the stateful bus `busId`, every
       active message with `payload[s] = v` for each `(s, v) ∈ addrReq` carries `0` in every slot of
@@ -192,7 +196,7 @@ structure BusFacts (p : ℕ) (bs : BusSemantics p) where
     ∀ (busId : Nat), zeroRangeEq busId = true →
       bs.isStateful busId = false ∧
       ∀ (x : ZMod p),
-        bs.violatesConstraint { busId := busId, multiplicity := 1, payload := [x, 0] } = false
+        bs.accepts { busId := busId, multiplicity := 1, payload := [x, 0] }
           ↔ x = 0
   /-- VM-neutral bitwise/byte-lookup fact (`ByteXorSpec`): a payload decoding to `(op, o₁, o₂, r)`
       is accepted, when `op = xorOp`, iff `o₁, o₂` are bytes and `r = o₁ ⊕ o₂`; when `op = pairOp`,
@@ -203,14 +207,14 @@ structure BusFacts (p : ℕ) (bs : BusSemantics p) where
     ∀ (busId : Nat) (spec : ByteXorSpec p), byteXorSpec busId = some spec →
       bs.isStateful busId = false ∧
       (∀ (pl : List (ZMod p)),
-        bs.breaksInvariant { busId := busId, multiplicity := 1, payload := pl } = false) ∧
+        bs.maintainsInvariants { busId := busId, multiplicity := 1, payload := pl }) ∧
       ∀ (pl : List (ZMod p)) (op o1 o2 r mult : ZMod p),
         spec.decode pl = some (op, o1, o2, r) →
         (op = spec.xorOp →
-           (bs.violatesConstraint { busId := busId, multiplicity := mult, payload := pl } = false
+           (bs.accepts { busId := busId, multiplicity := mult, payload := pl }
              ↔ o1.val < spec.bound ∧ o2.val < spec.bound ∧ r.val = Nat.xor o1.val o2.val)) ∧
         (op = spec.pairOp →
-           (bs.violatesConstraint { busId := busId, multiplicity := mult, payload := pl } = false
+           (bs.accepts { busId := busId, multiplicity := mult, payload := pl }
              ↔ o1.val < spec.bound ∧ o2.val < spec.bound ∧ r = 0))
   /-- Soundness of the optional `orOp`/`andOp` relations, for a payload decoding to
       `(op, o₁, o₂, r)`: when `op = orOp`, accepted iff `o₁, o₂` are bytes and `r = o₁ | o₂`; when
@@ -220,10 +224,10 @@ structure BusFacts (p : ℕ) (bs : BusSemantics p) where
       ∀ (pl : List (ZMod p)) (op o1 o2 r mult : ZMod p),
         spec.decode pl = some (op, o1, o2, r) →
         (∀ oop, spec.orOp = some oop → op = oop →
-           (bs.violatesConstraint { busId := busId, multiplicity := mult, payload := pl } = false
+           (bs.accepts { busId := busId, multiplicity := mult, payload := pl }
              ↔ o1.val < spec.bound ∧ o2.val < spec.bound ∧ r.val = Nat.lor o1.val o2.val)) ∧
         (∀ aop, spec.andOp = some aop → op = aop →
-           (bs.violatesConstraint { busId := busId, multiplicity := mult, payload := pl } = false
+           (bs.accepts { busId := busId, multiplicity := mult, payload := pl }
              ↔ o1.val < spec.bound ∧ o2.val < spec.bound ∧ r.val = Nat.land o1.val o2.val))
   /-- A single-value range check at an arbitrary payload position:
       `rangeCheckAt busId pattern = some (valSlot, bound)` means every multiplicity-`1` message on
@@ -236,12 +240,12 @@ structure BusFacts (p : ℕ) (bs : BusSemantics p) where
       bs.isStateful busId = false ∧
       ∀ (m : BusInteraction (ZMod p)), m.busId = busId → m.multiplicity = 1 →
         Matches m.payload pattern →
-        bs.breaksInvariant m = false ∧
+        bs.maintainsInvariants m ∧
         ∀ (x : ZMod p), m.payload[valSlot]? = some x →
-          (bs.violatesConstraint m = false ↔ x.val < bound)
+          (bs.accepts m ↔ x.val < bound)
 
 /-- The fact-free instance: claims nothing, exists for every semantics. -/
-def BusFacts.trivial (bs : BusSemantics p) : BusFacts p bs where
+def BusFacts.trivial (bs : BusSemantics p) [DecidablePred bs.accepts] : BusFacts p bs where
   slotBound _ _ _ _ := none
   slotBound_sound := by intro _ _ _ _ _ h; exact absurd h (by simp)
   slotFun _ _ _ := none
@@ -250,6 +254,8 @@ def BusFacts.trivial (bs : BusSemantics p) : BusFacts p bs where
   neverViolates_sound := by intro _ h; exact absurd h (by simp)
   neverViolatesArity _ _ := false
   neverViolatesArity_sound := by intro _ h; exact absurd h (by simp)
+  acceptsDec m := decide (bs.accepts m)
+  acceptsDec_iff := by intro _; exact decide_eq_true_iff
   recvByteSlots _ _ := none
   recvByteSlots_sound := by intro _ _ h; exact absurd h (by simp)
   memShape _ := none

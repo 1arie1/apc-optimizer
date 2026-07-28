@@ -160,7 +160,7 @@ theorem denseMkByteCheck_eval (spec : ByteXorSpec p) (busId : Nat) (e : DenseExp
 theorem denseMkByteCheck_breaks (bs : BusSemantics p) (facts : BusFacts p bs)
     (spec : ByteXorSpec p) (busId : Nat) (hspec : facts.byteXorSpec busId = some spec)
     (e : DenseExpr p) (denv : VarId → ZMod p) :
-    bs.breaksInvariant (denseBIEval (denseMkByteCheck spec busId e) denv) = false := by
+    bs.maintainsInvariants (denseBIEval (denseMkByteCheck spec busId e) denv) := by
   obtain ⟨_, hbreak, _⟩ := facts.byteXorSpec_sound busId spec hspec
   rw [denseMkByteCheck_eval]; exact hbreak _
 
@@ -168,7 +168,7 @@ theorem denseMkByteCheck_breaks (bs : BusSemantics p) (facts : BusFacts p bs)
 theorem denseMkByteCheck_accepted (bs : BusSemantics p) (facts : BusFacts p bs)
     (spec : ByteXorSpec p) (busId : Nat) (hspec : facts.byteXorSpec busId = some spec)
     (e : DenseExpr p) (denv : VarId → ZMod p) :
-    bs.violatesConstraint (denseBIEval (denseMkByteCheck spec busId e) denv) = false
+    bs.accepts (denseBIEval (denseMkByteCheck spec busId e) denv)
       ↔ (e.eval denv).val < spec.bound := by
   obtain ⟨_, _, hsound⟩ := facts.byteXorSpec_sound busId spec hspec
   rw [denseMkByteCheck_eval]
@@ -198,9 +198,9 @@ theorem denseEmitOk_sound (ops : DenseZModOps p) (bs : BusSemantics p)
     (hRbus : R.busId = busId)
     (hRmEv : ∀ denv, (denseBIEval R denv).multiplicity = -shape.setNewMult) :
     bs.isStateful ck.busId = false ∧
-    (∀ denv, bs.violatesConstraint (denseBIEval R denv) = false →
-      bs.violatesConstraint (denseBIEval ck denv) = false) ∧
-    (∀ denv, bs.breaksInvariant (denseBIEval ck denv) = false) ∧
+    (∀ denv, bs.accepts (denseBIEval R denv) →
+      bs.accepts (denseBIEval ck denv)) ∧
+    (∀ denv, bs.maintainsInvariants (denseBIEval ck denv)) ∧
     (∀ v ∈ denseBIVars ck, v ∈ denseBIVars R) := by
   unfold denseEmitOk at h
   rw [ops.one_eq, ops.zero_eq, denseGetPreviousMult_eq ops shape] at h

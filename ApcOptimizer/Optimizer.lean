@@ -21,7 +21,7 @@ variable {p : ℕ}
 
 /-- Optimizer which does not use any bus facts. Works with any VM, but is less effective. Returns
     the optimized system together with the `Derivations` for its newly-introduced columns. -/
-def simpleOptimizer (bs : BusSemantics p) (b : DegreeBound) :
+def simpleOptimizer (bs : BusSemantics p) [DecidablePred bs.accepts] (b : DegreeBound) :
     Circuit p → Circuit p × Derivations p :=
   optimizerWithBusFacts b (BusFacts.trivial bs)
 
@@ -53,7 +53,8 @@ theorem optimizerWithBusFacts_maintainsCorrectness (bs : BusSemantics p) (b : De
   ⟨fun cs => optimizerWithBusFacts_correct b facts cs,
    fun cs => optimizerWithBusFacts_respectsDegree b facts cs⟩
 
-theorem simpleOptimizer_maintainsCorrectness (bs : BusSemantics p) (b : DegreeBound) :
+theorem simpleOptimizer_maintainsCorrectness (bs : BusSemantics p) [DecidablePred bs.accepts]
+    (b : DegreeBound) :
     Optimizer.isCorrect (simpleOptimizer bs b) bs b :=
   optimizerWithBusFacts_maintainsCorrectness bs b (BusFacts.trivial bs)
 

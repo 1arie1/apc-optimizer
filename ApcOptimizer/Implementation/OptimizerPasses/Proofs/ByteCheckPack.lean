@@ -27,7 +27,7 @@ theorem denseMkBytePair_eval (spec : ByteXorSpec p) (busId : Nat) (e₁ e₂ : D
 theorem denseMkBytePair_breaks (bs : BusSemantics p) (facts : BusFacts p bs)
     (spec : ByteXorSpec p) (busId : Nat) (hspec : facts.byteXorSpec busId = some spec)
     (e₁ e₂ : DenseExpr p) (denv : VarId → ZMod p) :
-    bs.breaksInvariant (denseBIEval (denseMkBytePair spec busId e₁ e₂) denv) = false := by
+    bs.maintainsInvariants (denseBIEval (denseMkBytePair spec busId e₁ e₂) denv) := by
   obtain ⟨_, hbreak, _⟩ := facts.byteXorSpec_sound busId spec hspec
   rw [denseMkBytePair_eval]; exact hbreak _
 
@@ -35,7 +35,7 @@ theorem denseMkBytePair_breaks (bs : BusSemantics p) (facts : BusFacts p bs)
 theorem denseMkBytePair_accepted (bs : BusSemantics p) (facts : BusFacts p bs)
     (spec : ByteXorSpec p) (busId : Nat) (hspec : facts.byteXorSpec busId = some spec)
     (e₁ e₂ : DenseExpr p) (denv : VarId → ZMod p) :
-    bs.violatesConstraint (denseBIEval (denseMkBytePair spec busId e₁ e₂) denv) = false
+    bs.accepts (denseBIEval (denseMkBytePair spec busId e₁ e₂) denv)
       ↔ (e₁.eval denv).val < spec.bound ∧ (e₂.eval denv).val < spec.bound := by
   obtain ⟨_, _, hsound⟩ := facts.byteXorSpec_sound busId spec hspec
   rw [denseMkBytePair_eval]
@@ -47,9 +47,9 @@ theorem denseMkBytePair_accepted (bs : BusSemantics p) (facts : BusFacts p bs)
 theorem denseMkBytePair_iff_singles (bs : BusSemantics p) (facts : BusFacts p bs)
     (spec : ByteXorSpec p) (busId : Nat) (hspec : facts.byteXorSpec busId = some spec)
     (e₁ e₂ : DenseExpr p) (denv : VarId → ZMod p) :
-    bs.violatesConstraint (denseBIEval (denseMkBytePair spec busId e₁ e₂) denv) = false
-      ↔ bs.violatesConstraint (denseBIEval (denseMkByteCheck spec busId e₁) denv) = false
-        ∧ bs.violatesConstraint (denseBIEval (denseMkByteCheck spec busId e₂) denv) = false := by
+    bs.accepts (denseBIEval (denseMkBytePair spec busId e₁ e₂) denv)
+      ↔ bs.accepts (denseBIEval (denseMkByteCheck spec busId e₁) denv)
+        ∧ bs.accepts (denseBIEval (denseMkByteCheck spec busId e₂) denv) := by
   rw [denseMkBytePair_accepted bs facts spec busId hspec,
       denseMkByteCheck_accepted bs facts spec busId hspec,
       denseMkByteCheck_accepted bs facts spec busId hspec]
@@ -79,11 +79,11 @@ theorem denseByteXorSpec_decode_iff (bs : BusSemantics p) (facts : BusFacts p bs
     (op o1 o2 r : DenseExpr p) (hdec : spec.decode bi.payload = some (op, o1, o2, r))
     (denv : VarId → ZMod p) :
     (op.eval denv = spec.xorOp →
-        (bs.violatesConstraint (denseBIEval bi denv) = false ↔
+        (bs.accepts (denseBIEval bi denv) ↔
           (o1.eval denv).val < spec.bound ∧ (o2.eval denv).val < spec.bound
             ∧ (r.eval denv).val = Nat.xor (o1.eval denv).val (o2.eval denv).val)) ∧
     (op.eval denv = spec.pairOp →
-        (bs.violatesConstraint (denseBIEval bi denv) = false ↔
+        (bs.accepts (denseBIEval bi denv) ↔
           (o1.eval denv).val < spec.bound ∧ (o2.eval denv).val < spec.bound ∧ r.eval denv = 0)) := by
   obtain ⟨_, _, hsound⟩ := facts.byteXorSpec_sound bi.busId spec hspec
   have hdecEv : spec.decode (denseBIEval bi denv).payload
@@ -100,11 +100,11 @@ theorem denseByteBoolSound_decode_iff (bs : BusSemantics p) (facts : BusFacts p 
     (op o1 o2 r : DenseExpr p) (hdec : spec.decode bi.payload = some (op, o1, o2, r))
     (denv : VarId → ZMod p) :
     (∀ oop, spec.orOp = some oop → op.eval denv = oop →
-        (bs.violatesConstraint (denseBIEval bi denv) = false ↔
+        (bs.accepts (denseBIEval bi denv) ↔
           (o1.eval denv).val < spec.bound ∧ (o2.eval denv).val < spec.bound
             ∧ (r.eval denv).val = Nat.lor (o1.eval denv).val (o2.eval denv).val)) ∧
     (∀ aop, spec.andOp = some aop → op.eval denv = aop →
-        (bs.violatesConstraint (denseBIEval bi denv) = false ↔
+        (bs.accepts (denseBIEval bi denv) ↔
           (o1.eval denv).val < spec.bound ∧ (o2.eval denv).val < spec.bound
             ∧ (r.eval denv).val = Nat.land (o1.eval denv).val (o2.eval denv).val)) := by
   have hdecEv : spec.decode (denseBIEval bi denv).payload
@@ -178,7 +178,7 @@ theorem denseByteShape?_sound (bs : BusSemantics p) (facts : BusFacts p bs)
     (bi : BusInteraction (DenseExpr p)) (sh : DenseByteShape) (spec : ByteXorSpec p)
     (o1 o2 : DenseExpr p) (h : denseByteShape? cmp bs facts bi = some (sh, spec, o1, o2)) :
     bs.isStateful bi.busId = false ∧ (∀ e ∈ sh.operands o1 o2, e ∈ bi.payload) ∧
-      ∀ denv, bs.violatesConstraint (denseBIEval bi denv) = false ↔
+      ∀ denv, bs.accepts (denseBIEval bi denv) ↔
         ∀ e ∈ sh.operands o1 o2, (e.eval denv).val < 256 := by
   unfold denseByteShape? at h
   split at h
@@ -263,7 +263,7 @@ theorem denseSvCheck?_sound (bs : BusSemantics p) (facts : BusFacts p bs)
     (bi : BusInteraction (DenseExpr p)) (e : DenseExpr p)
     (h : denseSvCheck? bs facts bi = some e) :
     bs.isStateful bi.busId = false ∧ bi.multiplicity = DenseExpr.const 1 ∧ e ∈ bi.payload ∧
-      (∀ denv, bs.violatesConstraint (denseBIEval bi denv) = false ↔ (e.eval denv).val < 256) := by
+      (∀ denv, bs.accepts (denseBIEval bi denv) ↔ (e.eval denv).val < 256) := by
   unfold denseSvCheck? at h
   split_ifs at h with hm
   cases hc : denseByteShape? denseCmpStructural bs facts bi with
@@ -319,10 +319,10 @@ theorem denseMergeStateless2_correct (isInput : VarId → Bool) (d : DenseConstr
     (hstC : bs.isStateful C.busId = false)
     (hm1 : D₁.multiplicity = DenseExpr.const 1) (hm2 : D₂.multiplicity = DenseExpr.const 1)
     (hmC : C.multiplicity = DenseExpr.const 1)
-    (hkey : ∀ denv, bs.violatesConstraint (denseBIEval C denv) = false ↔
-        bs.violatesConstraint (denseBIEval D₁ denv) = false ∧
-          bs.violatesConstraint (denseBIEval D₂ denv) = false)
-    (hbrk : ∀ denv, bs.breaksInvariant (denseBIEval C denv) = false)
+    (hkey : ∀ denv, bs.accepts (denseBIEval C denv) ↔
+        bs.accepts (denseBIEval D₁ denv) ∧
+          bs.accepts (denseBIEval D₂ denv))
+    (hbrk : ∀ denv, bs.maintainsInvariants (denseBIEval C denv))
     (hvars : ∀ v ∈ denseBIVars C, v ∈ denseBIVars D₁ ∨ v ∈ denseBIVars D₂)
     (pre mid post : List (BusInteraction (DenseExpr p)))
     (hsplit : d.busInteractions = pre ++ D₁ :: mid ++ D₂ :: post) :
@@ -331,7 +331,7 @@ theorem denseMergeStateless2_correct (isInput : VarId → Bool) (d : DenseConstr
     with hout
   have houtb : out.busInteractions = pre ++ C :: mid ++ post := rfl
   set P : (VarId → ZMod p) → BusInteraction (DenseExpr p) → Prop :=
-    fun denv bi => (denseBIEval bi denv).multiplicity ≠ 0 → bs.violatesConstraint (denseBIEval bi denv) = false
+    fun denv bi => (denseBIEval bi denv).multiplicity ≠ 0 → bs.accepts (denseBIEval bi denv)
     with hP
   have hme1 : ∀ denv, (denseBIEval D₁ denv).multiplicity = 1 := fun denv => by
     show D₁.multiplicity.eval denv = 1; rw [hm1]; rfl
@@ -339,11 +339,11 @@ theorem denseMergeStateless2_correct (isInput : VarId → Bool) (d : DenseConstr
     show D₂.multiplicity.eval denv = 1; rw [hm2]; rfl
   have hmeC : ∀ denv, (denseBIEval C denv).multiplicity = 1 := fun denv => by
     show C.multiplicity.eval denv = 1; rw [hmC]; rfl
-  have hP1 : ∀ denv, (P denv D₁ ↔ bs.violatesConstraint (denseBIEval D₁ denv) = false) := fun denv =>
+  have hP1 : ∀ denv, (P denv D₁ ↔ bs.accepts (denseBIEval D₁ denv)) := fun denv =>
     ⟨fun h => h (by rw [hme1 denv]; exact hp1), fun h _ => h⟩
-  have hP2 : ∀ denv, (P denv D₂ ↔ bs.violatesConstraint (denseBIEval D₂ denv) = false) := fun denv =>
+  have hP2 : ∀ denv, (P denv D₂ ↔ bs.accepts (denseBIEval D₂ denv)) := fun denv =>
     ⟨fun h => h (by rw [hme2 denv]; exact hp1), fun h _ => h⟩
-  have hPC : ∀ denv, (P denv C ↔ bs.violatesConstraint (denseBIEval C denv) = false) := fun denv =>
+  have hPC : ∀ denv, (P denv C ↔ bs.accepts (denseBIEval C denv)) := fun denv =>
     ⟨fun h => h (by rw [hmeC denv]; exact hp1), fun h _ => h⟩
   have hsatiff : ∀ denv, d.satisfies bs denv ↔ out.satisfies bs denv := by
     intro denv

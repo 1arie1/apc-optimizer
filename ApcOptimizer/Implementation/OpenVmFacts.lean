@@ -8,13 +8,145 @@ set_option autoImplicit false
 # Proven bus facts for the OpenVM semantics
 
 The `BusFacts` instance for `openVmBusSemantics` (see `ApcOptimizer/Implementation/BusFacts.lean`
-for the design). Every claim is proven against the concrete `violates`, so none needs auditing.
-Parameterized by the bus map (defaulting to `defaultBusMap`).
+for the design). Every claim is proven against the audited `accepts`/`maintainsInvariants`, so none
+needs auditing. Parameterized by the bus map (defaulting to `defaultBusMap`).
 -/
 
 namespace ApcOptimizer.OpenVM
 
 variable {p : ℕ}
+
+
+/-! ## Deciding the semantics
+
+The audited `accepts`/`maintainsInvariants` are `Prop`s, so a pass cannot evaluate them. `violates`
+and `breaksInvariant` below are the `Bool` decision procedures the pipeline actually runs, each
+proven equivalent to its audited counterpart (`violates_eq_false_iff`,
+`breaksInvariant_eq_false_iff`); the helper lemmas in this file are stated over them and bridged at
+the `BusFacts` interface. -/
+
+private def isByteB (x : ZMod p) : Bool := decide (x.val < 256)
+
+private theorem isByteB_iff (x : ZMod p) : isByteB x = true ↔ isByte x := by
+  simp [isByteB, isByte]
+
+private def isByteCheckedB (f : MemoryPayload p) : Bool :=
+  f.addressSpace.val == 1 || f.addressSpace.val == 2
+
+private theorem isByteCheckedB_iff (f : MemoryPayload p) :
+    isByteCheckedB f = true ↔ f.isByteChecked := by
+  simp [isByteCheckedB, MemoryPayload.isByteChecked]
+
+/-- Bool decision procedure for `accepts` (`violates_eq_false_iff`). -/
+private def violates (busMap : Nat → Option OpenVmBusType) (msg : BusInteraction (ZMod p)) : Bool :=
+  match busMap msg.busId, msg.payload with
+  | some .pcLookup, args => !decide (args.length = 9)
+  | some .bitwiseLookup, [x, y, z, op] =>
+    match op.val with
+    | 0 => !(isByteB x && isByteB y && decide (z.val = 0))
+    | 1 => !(isByteB x && isByteB y && decide (z.val = Nat.xor x.val y.val))
+    | _ => true
+  | some .variableRangeChecker, [x, bits] =>
+    !(decide (bits.val ≤ 17) && decide (x.val < 2 ^ bits.val))
+  | some (.tupleRangeChecker s1 s2), [x, y] =>
+    !(decide (x.val < s1) && decide (y.val < s2))
+  | some .bitwiseLookup, _ => true
+  | some .variableRangeChecker, _ => true
+  | some (.tupleRangeChecker _ _), _ => true
+  | some .executionBridge, _ => false
+  | some .memory, payload =>
+    match memoryPayload? payload with
+    | some f => decide (msg.multiplicity = -1) && isByteCheckedB f && !(f.data.all isByteB)
+    | none => false
+  | none, _ => true
+
+/-- Bool decision procedure for `maintainsInvariants` (`breaksInvariant_eq_false_iff`). -/
+private def breaksInvariant (busMap : Nat → Option OpenVmBusType)
+    (msg : BusInteraction (ZMod p)) : Bool :=
+  match busMap msg.busId with
+  | some .pcLookup | some .variableRangeChecker | some .bitwiseLookup
+  | some (.tupleRangeChecker _ _) =>
+    !decide (msg.multiplicity = 1)
+  | some .executionBridge =>
+    !decide (msg.multiplicity = 1 ∨ msg.multiplicity = -1)
+  | some .memory =>
+    !decide (msg.multiplicity = 1 ∨ msg.multiplicity = -1) ||
+    (match memoryPayload? msg.payload with
+      | some f => bif isByteCheckedB f then !(f.data.all isByteB) else false
+      | none => false)
+  | none => true
+
+private theorem all_isByteB_iff (v : Vector (ZMod p) 4) :
+    v.all isByteB = true ↔ ∀ d ∈ v, isByte d := by
+  rw [Vector.all_eq_true_iff_forall_mem]
+  simp only [isByteB_iff]
+
+private theorem forall_isByteB_iff (v : Vector (ZMod p) 4) :
+    (∀ (i : Nat) (h : i < 4), isByteB v[i] = true) ↔ ∀ d ∈ v, isByte d :=
+  Vector.all_eq_true.symm.trans (all_isByteB_iff v)
+
+private theorem violates_eq_false_iff (busMap : Nat → Option OpenVmBusType)
+    (m : BusInteraction (ZMod p)) : violates busMap m = false ↔ accepts busMap m := by
+  obtain ⟨bid, mult, payload⟩ := m
+  unfold violates accepts
+  cases hb : busMap bid with
+  | none => simp
+  | some t =>
+    cases t with
+    | executionBridge => simp
+    | pcLookup => simp
+    | variableRangeChecker =>
+        rcases payload with _ | ⟨x, _ | ⟨b, _ | ⟨w, rest⟩⟩⟩ <;> simp
+    | tupleRangeChecker s1 s2 =>
+        rcases payload with _ | ⟨x, _ | ⟨y, _ | ⟨w, rest⟩⟩⟩ <;> simp
+    | bitwiseLookup =>
+        rcases payload with _ | ⟨x, _ | ⟨y, _ | ⟨z, _ | ⟨op, _ | ⟨w, rest⟩⟩⟩⟩⟩ <;> try simp
+        rcases op.val with _ | _ | n <;> simp [isByteB_iff, and_assoc]
+    | memory =>
+        cases hp : memoryPayload? payload with
+        | none => simp [hp]
+        | some f =>
+            simp [hp, isByteCheckedB_iff, forall_isByteB_iff, imp_iff_not_or, or_assoc]
+
+private theorem breaksInvariant_eq_false_iff (busMap : Nat → Option OpenVmBusType)
+    (m : BusInteraction (ZMod p)) :
+    breaksInvariant busMap m = false ↔ maintainsInvariants busMap m := by
+  obtain ⟨bid, mult, payload⟩ := m
+  unfold breaksInvariant maintainsInvariants
+  cases hb : busMap bid with
+  | none => simp
+  | some t =>
+    cases t with
+    | pcLookup => simp
+    | variableRangeChecker => simp
+    | bitwiseLookup => simp
+    | tupleRangeChecker s1 s2 => simp
+    | executionBridge => simp [or_iff_not_imp_left]
+    | memory =>
+        cases hp : memoryPayload? payload with
+        | none => simp [or_iff_not_imp_left]
+        | some f =>
+            cases hc : isByteCheckedB f with
+            | false =>
+                have hnc : ¬ f.isByteChecked := fun h => by
+                  simp [(isByteCheckedB_iff f).mpr h] at hc
+                simp [hc, hnc, or_iff_not_imp_left]
+            | true =>
+                simp [hc, (isByteCheckedB_iff f).mp hc, forall_isByteB_iff,
+                  or_iff_not_imp_left]
+
+
+/-- The `BusFacts` interface speaks the audited `accepts`; the lemmas here speak `violates`. Marked
+`@[simp]` so field proofs translate without restating each one. -/
+@[simp] private theorem openVm_accepts_iff (busMap : Nat → Option OpenVmBusType)
+    (m : BusInteraction (ZMod p)) :
+    (openVmBusSemantics p busMap).accepts m ↔ violates busMap m = false :=
+  (violates_eq_false_iff busMap m).symm
+
+@[simp] private theorem openVm_maintains_iff (busMap : Nat → Option OpenVmBusType)
+    (m : BusInteraction (ZMod p)) :
+    (openVmBusSemantics p busMap).maintainsInvariants m ↔ breaksInvariant busMap m = false :=
+  (breaksInvariant_eq_false_iff busMap m).symm
 
 
 private def slotBoundImpl (busMap : Nat → Option OpenVmBusType) (busId : Nat) (mult : ZMod p)
@@ -154,7 +286,8 @@ private theorem payload_seven {payload : List (ZMod p)}
 /-- An execution-bridge message never violates. -/
 private theorem execBridge_ok (busMap : Nat → Option OpenVmBusType)
     (m : BusInteraction (ZMod p)) (hbus : busMap m.busId = some .executionBridge) :
-    violates busMap m = false := by
+    (openVmBusSemantics p busMap).accepts m := by
+  rw [openVm_accepts_iff]
   unfold violates
   rw [hbus]
 
@@ -180,14 +313,15 @@ private theorem memory_recv_bytes (busMap : Nat → Option OpenVmBusType)
   rw [hbus, hpay, hm] at hok
   have has' : (a0.val == 1 || a0.val == 2) = true := by
     rcases has with h | h <;> simp [h]
-  simp only [memoryPayload?, MemoryPayload.isByteChecked, decide_true, has', Bool.true_and,
-    Bool.not_eq_false', Vector.all_eq_true, isByte, decide_eq_true_eq] at hok
+  simp only [memoryPayload?, isByteCheckedB, decide_true, has', Bool.true_and,
+    Bool.not_eq_false', Vector.all_eq_true, isByteB, decide_eq_true_eq] at hok
   exact ⟨hok 0 (by omega), hok 1 (by omega), hok 2 (by omega), hok 3 (by omega)⟩
 
 /-- A memory message that is not a receive (multiplicity ≠ -1) never violates. -/
 private theorem memory_nonRecv_ok (busMap : Nat → Option OpenVmBusType)
     (m : BusInteraction (ZMod p)) (hbus : busMap m.busId = some .memory)
-    (hm : m.multiplicity ≠ -1) : violates busMap m = false := by
+    (hm : m.multiplicity ≠ -1) : (openVmBusSemantics p busMap).accepts m := by
+  rw [openVm_accepts_iff]
   obtain ⟨bid, mult, payload⟩ := m
   simp only at hbus hm
   unfold violates
@@ -199,7 +333,8 @@ private theorem memory_nonRecv_ok (busMap : Nat → Option OpenVmBusType)
     send is not a receive, or `p ∣ 2` and every value is trivially a byte. -/
 private theorem memory_send_ok [NeZero p] (busMap : Nat → Option OpenVmBusType)
     (m : BusInteraction (ZMod p)) (hbus : busMap m.busId = some .memory)
-    (hm : m.multiplicity = 1) : violates busMap m = false := by
+    (hm : m.multiplicity = 1) : (openVmBusSemantics p busMap).accepts m := by
+  rw [openVm_accepts_iff]
   by_cases hc : (1 : ZMod p) = -1
   · -- `p ∣ 2`: every value is `< 2 ≤ 256`, so the byte test never fails.
     have hadd : (1 : ZMod p) + 1 = 0 := (congrArg (· + 1) hc).trans (neg_add_cancel 1)
@@ -215,8 +350,8 @@ private theorem memory_send_ok [NeZero p] (busMap : Nat → Option OpenVmBusType
     unfold violates
     rw [hbus]
     rcases payload with _ | ⟨a0, _ | ⟨a1, _ | ⟨d0, _ | ⟨d1, _ | ⟨d2, _ | ⟨d3, rest⟩⟩⟩⟩⟩⟩ <;>
-      simp [memoryPayload?, MemoryPayload.isByteChecked, isByte, hbyte]
-  · exact memory_nonRecv_ok busMap m hbus (by rw [hm]; exact hc)
+      simp [memoryPayload?, isByteCheckedB, isByteB, hbyte]
+  · exact (openVm_accepts_iff busMap m).mp (memory_nonRecv_ok busMap m hbus (by rw [hm]; exact hc))
 
 /-- A memory *receive* (multiplicity -1) with byte data limbs (payload slots 2–5, where
     present) never violates. -/
@@ -224,7 +359,8 @@ private theorem memory_recv_ok (busMap : Nat → Option OpenVmBusType)
     (m : BusInteraction (ZMod p)) (hbus : busMap m.busId = some .memory)
     (hm : m.multiplicity = -1)
     (hslots : ∀ slot ∈ [2, 3, 4, 5], ∀ x : ZMod p, m.payload[slot]? = some x → x.val < 256) :
-    violates busMap m = false := by
+    (openVmBusSemantics p busMap).accepts m := by
+  rw [openVm_accepts_iff]
   obtain ⟨bid, mult, payload⟩ := m
   simp only at hbus hm hslots
   unfold violates
@@ -235,14 +371,15 @@ private theorem memory_recv_ok (busMap : Nat → Option OpenVmBusType)
   have h1 : d1.val < 256 := hslots 3 (by simp) d1 rfl
   have h2 : d2.val < 256 := hslots 4 (by simp) d2 rfl
   have h3 : d3.val < 256 := hslots 5 (by simp) d3 rfl
-  simp [memoryPayload?, MemoryPayload.isByteChecked, isByte, h0, h1, h2, h3]
+  simp [memoryPayload?, isByteCheckedB, isByteB, h0, h1, h2, h3]
 
 /-- A memory message whose address-space slot (slot 0) is a constant ∉ {1, 2} never violates:
     `violates` only rejects non-byte data on address spaces 1 and 2. -/
 private theorem memory_recv_nonByte_ok (busMap : Nat → Option OpenVmBusType)
     (m : BusInteraction (ZMod p)) (hbus : busMap m.busId = some .memory)
     (as : ZMod p) (hasval : ¬ (as.val = 1 ∨ as.val = 2)) (has : m.payload[0]? = some as) :
-    violates busMap m = false := by
+    (openVmBusSemantics p busMap).accepts m := by
+  rw [openVm_accepts_iff]
   obtain ⟨bid, mult, payload⟩ := m
   simp only at hbus has
   unfold violates
@@ -257,7 +394,7 @@ private theorem memory_recv_nonByte_ok (busMap : Nat → Option OpenVmBusType)
     rw [has]
     simp only [Bool.or_eq_false_iff, beq_eq_false_iff_ne]
     exact ⟨hne1, hne2⟩
-  simp only [memoryPayload?, MemoryPayload.isByteChecked, hmid, Bool.and_false, Bool.false_and]
+  simp only [memoryPayload?, isByteCheckedB, hmid, Bool.and_false, Bool.false_and]
 
 /-- A bus with a declared last-write-wins shape (memory or execution bridge) is stateful. -/
 theorem openVm_isStateful_of_memShape {p : ℕ} (busMap : Nat → Option OpenVmBusType)
@@ -284,10 +421,14 @@ private theorem memShapeOf_setNewMult_eq_one {p : ℕ} (busMap : Nat → Option 
 def openVmFacts (p : ℕ) [NeZero p]
     (busMap : Nat → Option OpenVmBusType := defaultBusMap) :
     BusFacts p (openVmBusSemantics p busMap) where
+  acceptsDec m := !violates busMap m
+  acceptsDec_iff m := by
+    rw [Bool.not_eq_true']
+    exact violates_eq_false_iff busMap m
   slotBound := slotBoundImpl busMap
   slotBound_sound := by
     intro m pattern slot bound x hfact hmatch hok hget
-    have hok' : violates busMap m = false := hok
+    have hok' : violates busMap m = false := (openVm_accepts_iff busMap m).mp hok
     unfold slotBoundImpl at hfact
     split at hfact
     · -- bitwise lookup, slot 0
@@ -448,7 +589,7 @@ def openVmFacts (p : ℕ) [NeZero p]
   slotFun := slotFunImpl busMap
   slotFun_sound := by
     intro m pattern outSlot f z hfact hmatch hok hget
-    have hok' : violates busMap m = false := hok
+    have hok' : violates busMap m = false := (openVm_accepts_iff busMap m).mp hok
     unfold slotFunImpl at hfact
     split at hfact
     · rename_i q0 q1 q2 op hbus
@@ -483,7 +624,8 @@ def openVmFacts (p : ℕ) [NeZero p]
     intro m h
     unfold neverViolatesArityImpl at h
     split at h
-    · rename_i hbus; exact pcLookup_ok busMap m hbus (by simpa using h)
+    · rename_i hbus
+      exact (openVm_accepts_iff busMap m).mpr (pcLookup_ok busMap m hbus (by simpa using h))
     · exact absurd h (by simp)
   recvByteSlots := recvByteSlotsImpl busMap
   recvByteSlots_sound := by
@@ -620,6 +762,7 @@ def openVmFacts (p : ℕ) [NeZero p]
     · intro x
       -- variableRangeChecker `[x, 0]`: `!(0 ≤ 17 ∧ x.val < 2^0) = false ↔ x.val < 1 ↔ x = 0`.
       have hv0 : (0 : ZMod p).val = 0 := ZMod.val_zero
+      rw [openVm_accepts_iff]
       show violates busMap { busId := busId, multiplicity := 1, payload := [x, 0] } = false ↔ x = 0
       unfold violates; rw [hbus]
       rw [Bool.not_eq_false', Bool.and_eq_true, decide_eq_true_eq, decide_eq_true_eq,
@@ -638,6 +781,7 @@ def openVmFacts (p : ℕ) [NeZero p]
     · show (match busMap busId with | some t => t.isStateful | none => false) = false
       rw [hbus]; rfl
     · intro x b mult
+      rw [openVm_accepts_iff]
       show violates busMap { busId := busId, multiplicity := mult, payload := [x, b] }
           = false ↔ (b.val ≤ 17 ∧ x.val < 2 ^ b.val)
       unfold violates; rw [hbus]
@@ -655,10 +799,12 @@ def openVmFacts (p : ℕ) [NeZero p]
     · show (match busMap busId with | some t => t.isStateful | none => false) = false
       rw [hbus]; rfl
     · intro x y
+      rw [openVm_maintains_iff]
       show breaksInvariant busMap { busId := busId, multiplicity := 1, payload := [x, y] }
         = false
       unfold breaksInvariant; rw [hbus]; simp
     · intro x y mult
+      rw [openVm_accepts_iff]
       show violates busMap { busId := busId, multiplicity := mult, payload := [x, y] }
           = false ↔ (x.val < s1 ∧ y.val < s2)
       unfold violates; rw [hbus]
@@ -714,6 +860,7 @@ def openVmFacts (p : ℕ) [NeZero p]
     · show (match busMap busId with | some t => t.isStateful | none => false) = false
       rw [hbus]; rfl
     · intro pl
+      rw [openVm_maintains_iff]
       show breaksInvariant busMap { busId := busId, multiplicity := 1, payload := pl } = false
       unfold breaksInvariant; rw [hbus]; simp
     · intro pl op o1 o2 r mult hdec
@@ -723,6 +870,7 @@ def openVmFacts (p : ℕ) [NeZero p]
       · -- op = xorOp = 1
         have hop1 : op = 1 := hxor
         subst hop1
+        rw [openVm_accepts_iff]
         show violates busMap { busId := busId, multiplicity := mult, payload := [o1, o2, r, 1] } = false
           ↔ o1.val < 256 ∧ o2.val < 256 ∧ r.val = Nat.xor o1.val o2.val
         unfold violates; rw [hbus]
@@ -733,15 +881,16 @@ def openVmFacts (p : ℕ) [NeZero p]
           have ho1 : o1.val = 0 := Nat.lt_one_iff.1 (ZMod.val_lt o1)
           have ho2 : o2.val = 0 := Nat.lt_one_iff.1 (ZMod.val_lt o2)
           have hrr : r.val = 0 := Nat.lt_one_iff.1 (ZMod.val_lt r)
-          simp [h1, isByte, ho1, ho2, hrr]
-        · simp [h1, isByte, and_assoc]
+          simp [h1, isByteB, ho1, ho2, hrr]
+        · simp [h1, isByteB, and_assoc]
       · -- op = pairOp = 0
         have hop0 : op = 0 := hpair
         subst hop0
+        rw [openVm_accepts_iff]
         show violates busMap { busId := busId, multiplicity := mult, payload := [o1, o2, r, 0] } = false
           ↔ o1.val < 256 ∧ o2.val < 256 ∧ r = 0
         unfold violates; rw [hbus]
-        simp [isByte, ZMod.val_eq_zero, and_assoc]
+        simp [isByteB, ZMod.val_eq_zero, and_assoc]
   -- OpenVM's bitwise-lookup bus has no OR/AND op (XOR + range only), so `orOp`/`andOp` default to
   -- `none` and the boolean-op soundness is vacuous.
   byteBoolSound := by

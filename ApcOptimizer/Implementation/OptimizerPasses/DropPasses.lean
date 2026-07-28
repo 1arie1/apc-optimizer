@@ -33,10 +33,11 @@ def denseConstMessage? (bi : BusInteraction (DenseExpr p)) : Option (BusInteract
 
 /-- Recognizes a tautological lookup: a stateless interaction whose message is fully constant and
     already accepted by the bus — e.g. a range check `[5]` against `[0..255]` — hence droppable. -/
-def denseIsTautoLookup (bs : BusSemantics p) (bi : BusInteraction (DenseExpr p)) : Bool :=
+def denseIsTautoLookup (bs : BusSemantics p) (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) : Bool :=
   !bs.isStateful bi.busId &&
     (match denseConstMessage? bi with
-     | some msg => !bs.violatesConstraint msg
+     | some msg => facts.acceptsDec msg
      | none => false)
 
 end ApcOptimizer.Dense

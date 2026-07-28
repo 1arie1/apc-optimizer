@@ -64,18 +64,18 @@ theorem denseTupleKey (bs : BusSemantics p) (facts : BusFacts p bs)
     (htr : facts.tupleRangeBus trBus = some (s1, s2))
     (hs1 : s1 = 256) (b : ZMod p) (hble : b.val ≤ 17) (hs2 : 2 ^ b.val = s2)
     (x y : DenseExpr p) :
-    ∀ denv, bs.violatesConstraint (denseBIEval (denseTupleCheck trBus x y) denv) = false ↔
-      bs.violatesConstraint (denseBIEval (denseMkByteCheck spec bcBus x) denv) = false ∧
-        bs.violatesConstraint (denseBIEval (denseRangeCheck1 vrBus y (.const b)) denv) = false := by
+    ∀ denv, bs.accepts (denseBIEval (denseTupleCheck trBus x y) denv) ↔
+      bs.accepts (denseBIEval (denseMkByteCheck spec bcBus x) denv) ∧
+        bs.accepts (denseBIEval (denseRangeCheck1 vrBus y (.const b)) denv) := by
   intro denv
   obtain ⟨-, -, htriff⟩ := facts.tupleRangeBus_sound trBus s1 s2 htr
   obtain ⟨-, hvriff⟩ := facts.varRangeBus_sound vrBus hvr
   rw [denseTupleCheck_eval, denseRangeCheck1_eval,
     denseMkByteCheck_accepted bs facts spec bcBus hspec x denv, hbound]
   rw [htriff (x.eval denv) (y.eval denv) 1]
-  have hB : bs.violatesConstraint
-      { busId := vrBus, multiplicity := 1,
-        payload := [y.eval denv, (DenseExpr.const b).eval denv] } = false ↔
+  have hB : bs.accepts
+        { busId := vrBus, multiplicity := 1,
+          payload := [y.eval denv, (DenseExpr.const b).eval denv] } ↔
       (b.val ≤ 17 ∧ (y.eval denv).val < 2 ^ b.val) :=
     hvriff (y.eval denv) b 1
   rw [hB, hs1, ← hs2]

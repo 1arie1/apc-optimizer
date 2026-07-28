@@ -142,7 +142,7 @@ theorem denseCarryBranchF_correct (pw : PrimeWitness p) (reg : VarRegistry) (bs 
     -- for any assignment whose bus interactions are non-violating, the built bounds are valid
     have hBof : ∀ denv, (∀ bi ∈ d.busInteractions,
         (denseBIEval bi denv).multiplicity ≠ 0 →
-          bs.violatesConstraint (denseBIEval bi denv) = false) →
+          bs.accepts (denseBIEval bi denv)) →
         ∀ v bound, B[v]? = some bound → (denv v).val < bound := by
       intro denv hbus v bound hlk
       rw [hBdef] at hlk

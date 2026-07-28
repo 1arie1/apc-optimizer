@@ -160,7 +160,7 @@ the use site in `denseDisconnectedF`. -/
 /-- The two reachable sets: `conn` (variables connected to a stateful bus interaction) and `bad`
     (the co-occurrence closure of any disconnected item the all-zero witness fails on). Treated
     opaquely by the correctness proof. -/
-def denseConnBad (bs : BusSemantics p) (d : DenseConstraintSystem p) :
+def denseConnBad (bs : BusSemantics p) (facts : BusFacts p bs) (d : DenseConstraintSystem p) :
     Std.HashSet VarId × Std.HashSet VarId :=
   let (groups, v2g) := denseBuildGraph d
   -- variables connected to a stateful bus interaction
@@ -176,7 +176,7 @@ def denseConnBad (bs : BusSemantics p) (d : DenseConstraintSystem p) :
         then c.vars ++ acc else acc)
       (d.busInteractions.foldl (fun acc bi =>
         if !bs.isStateful bi.busId && !(denseBIVars bi).isEmpty && (denseBIVars bi).all disc
-            && bs.violatesConstraint (denseBIEval bi (fun _ => 0))
+            && !facts.acceptsDec (denseBIEval bi (fun _ => 0))
         then denseBIVars bi ++ acc else acc) [])
   let bad := denseBfsClosure groups v2g ∅ ∅ badSeeds
   (conn, bad)
@@ -186,12 +186,14 @@ def denseConnBad (bs : BusSemantics p) (d : DenseConstraintSystem p) :
 /-- The run-time re-check: the induced partition is a genuine drop, the all-zero witness satisfies
     every removed constraint and non-violates every removed interaction, and every kept item uses
     only non-removable variables. Stated for an arbitrary `remV`. -/
-def denseDropCheck (bs : BusSemantics p) (d : DenseConstraintSystem p) (remV : VarId → Bool) : Bool :=
+def denseDropCheck (bs : BusSemantics p) (facts : BusFacts p bs) (d : DenseConstraintSystem p)
+    (remV : VarId → Bool) : Bool :=
   (d.algebraicConstraints.any (fun c => !denseKeepConWith remV c) ||
     d.busInteractions.any (fun bi => !denseKeepBiWith bs remV bi)) &&
   d.algebraicConstraints.all (fun c => denseKeepConWith remV c || decide (c.eval (fun _ => 0) = 0)) &&
   d.busInteractions.all (fun bi =>
-    denseKeepBiWith bs remV bi || !bs.violatesConstraint (denseBIEval bi (fun _ => 0))) &&
+    denseKeepBiWith bs remV bi ||
+      facts.acceptsDec (denseBIEval bi (fun _ => 0))) &&
   d.algebraicConstraints.all (fun c =>
     !denseKeepConWith remV c || c.vars.all (fun x => !remV x)) &&
   d.busInteractions.all (fun bi =>
@@ -199,9 +201,9 @@ def denseDropCheck (bs : BusSemantics p) (d : DenseConstraintSystem p) (remV : V
 
 /-- Drop the removable component if the re-check passes; otherwise the identity. Stated for an
     arbitrary `remV` so the correctness proof is generic in the connectivity search. -/
-def denseDropGuarded (bs : BusSemantics p) (d : DenseConstraintSystem p) (remV : VarId → Bool) :
-    DenseConstraintSystem p :=
-  if denseDropCheck bs d remV then
+def denseDropGuarded (bs : BusSemantics p) (facts : BusFacts p bs) (d : DenseConstraintSystem p)
+    (remV : VarId → Bool) : DenseConstraintSystem p :=
+  if denseDropCheck bs facts d remV then
     { algebraicConstraints := d.algebraicConstraints.filter (denseKeepConWith remV),
       busInteractions := d.busInteractions.filter (denseKeepBiWith bs remV) }
   else d
@@ -209,9 +211,9 @@ def denseDropGuarded (bs : BusSemantics p) (d : DenseConstraintSystem p) (remV :
 /-- Finds a set of constraints and stateless interactions whose variables never reach a stateful
     bus, and — if the all-zero witness satisfies them (re-checked at run time by `denseDropCheck`) —
     drops the whole component. -/
-def denseDisconnectedF (bs : BusSemantics p) (d : DenseConstraintSystem p) :
+def denseDisconnectedF (bs : BusSemantics p) (facts : BusFacts p bs) (d : DenseConstraintSystem p) :
     DenseConstraintSystem p :=
-  let cb := denseConnBad bs d
-  denseDropGuarded bs d (fun x => !cb.1.contains x && !cb.2.contains x)
+  let cb := denseConnBad bs facts d
+  denseDropGuarded bs facts d (fun x => !cb.1.contains x && !cb.2.contains x)
 
 end ApcOptimizer.Dense

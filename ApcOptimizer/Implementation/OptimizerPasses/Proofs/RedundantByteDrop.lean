@@ -34,7 +34,7 @@ theorem denseByteCheckOperands?_accepted (bs : BusSemantics p) (facts : BusFacts
     (bi : BusInteraction (DenseExpr p)) (ops : List (DenseExpr p))
     (h : denseByteCheckOperands? bs facts bi = some ops) (denv : VarId → ZMod p)
     (hops : ∀ e ∈ ops, (e.eval denv).val < 256) :
-    bs.violatesConstraint (denseBIEval bi denv) = false := by
+    bs.accepts (denseBIEval bi denv) := by
   unfold denseByteCheckOperands? at h
   cases hc : denseByteShape? denseCmpFolded bs facts bi with
   | none => rw [hc] at h; exact absurd h (by simp)
@@ -77,7 +77,7 @@ theorem denseRedundantByteDropF_correct (pw : PrimeWitness p) (bs : BusSemantics
       -- every justification-base interaction survives the filter, so `hsat` accepts it
       have hbusbase : ∀ bi' ∈ denseByteDropBase bs facts d,
           (denseBIEval bi' denv).multiplicity ≠ 0 →
-          bs.violatesConstraint (denseBIEval bi' denv) = false := by
+          bs.accepts (denseBIEval bi' denv) := by
         intro bi' hbi' hmult
         have hnone : denseByteCheckOperands? bs facts bi' = none := by
           have h := (List.mem_filter.1 hbi').2

@@ -26,7 +26,7 @@ def SubsumedRecognizerSound (bs : BusSemantics p)
   ∀ bi x B, f bi = some (x, B) →
     bs.isStateful bi.busId = false ∧
     ∀ denv : VarId → ZMod p, (denv x).val < B →
-      bs.violatesConstraint (denseBIEval bi denv) = false
+      bs.accepts (denseBIEval bi denv)
 
 /-- Every dropped interaction is a recognised check whose variable is already bounded `< B` by the
     retained base, so it is accepted under every assignment satisfying the filtered system. -/

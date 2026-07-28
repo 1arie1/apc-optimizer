@@ -283,8 +283,7 @@ theorem DenseConstraintSystem.boxRewrite_denseCorrect [Fact p.Prime]
     intro hgi denv hsat bi hbi
     obtain ⟨bi0, hbi0, rfl⟩ := List.mem_map.1 hbi
     show (denseBIEval (denseBrBi (denseSingleVarCs d.algebraicConstraints) b bi0) denv).multiplicity
-        ≠ 0 → bs.breaksInvariant
-          (denseBIEval (denseBrBi (denseSingleVarCs d.algebraicConstraints) b bi0) denv) = false
+        ≠ 0 → bs.maintainsInvariants (denseBIEval (denseBrBi (denseSingleVarCs d.algebraicConstraints) b bi0) denv)
     rw [denseBrBi_eval _ _ bi0 denv (hdomOut denv hsat)]
     exact hgi denv ((hiff denv).1 hsat) bi0 hbi0
   · -- output occurrences are input occurrences

@@ -190,7 +190,7 @@ theorem dense_seqzCollapse_correct [Fact p.Prime] (isInput : VarId → Bool)
       (denseSeqzClusterBus r.busId r.m3 r.m2 r.m1 r.m0 r.dv spec) w = true)
     (habyteAll : ∀ (denv : VarId → ZMod p),
       (∀ bi ∈ (denseSeqzCollapsedSystem d r invId spec).busInteractions,
-        (denseBIEval bi denv).multiplicity ≠ 0 → bs.violatesConstraint (denseBIEval bi denv) = false) →
+        (denseBIEval bi denv).multiplicity ≠ 0 → bs.accepts (denseBIEval bi denv)) →
       ∀ a ∈ ([r.a0, r.a1, r.a2, r.a3] : List VarId), (denv a).val < 256)
     (hnodup : ([r.R, r.a0, r.a1, r.a2, r.a3, r.m3, r.m2, r.m1, r.m0, r.dv] : List VarId).Nodup)
     (hinv_fresh : invId ∉ d.occ) (hinv_id : isInput invId = false)
@@ -392,7 +392,7 @@ theorem dense_seqzCollapse_correct [Fact p.Prime] (isInput : VarId → Bool)
           rw [hgframeE c (fun w hw => hpureC w hw c hc hccl)]
           exact hsatOut.1 c hcout
       · by_cases hbe : bi = busE
-        · show (denseBIEval bi g).multiplicity ≠ 0 → bs.violatesConstraint (denseBIEval bi g) = false
+        · show (denseBIEval bi g).multiplicity ≠ 0 → bs.accepts (denseBIEval bi g)
           rw [hbe, hbusEval]
           intro hmult
           exact SeqzCollapse.bus_accepts_byte_zero facts r.busId spec hspec hbound (-1 + vd)
@@ -400,7 +400,7 @@ theorem dense_seqzCollapse_correct [Fact p.Prime] (isInput : VarId → Bool)
         · have hbout : bi ∈ out.busInteractions := by
             rw [houtdef, denseSeqzCollapsedSystem, ← hbusEdef]
             exact List.mem_filter.2 ⟨hbi, by simpa using hbe⟩
-          show (denseBIEval bi g).multiplicity ≠ 0 → bs.violatesConstraint (denseBIEval bi g) = false
+          show (denseBIEval bi g).multiplicity ≠ 0 → bs.accepts (denseBIEval bi g)
           rw [hgframeBus bi hbi hbe]
           exact hsatOut.2 bi hbout
     have hseSound : d.sideEffects bs g = d.sideEffects bs env := by
@@ -453,7 +453,7 @@ theorem dense_seqzCollapse_correct [Fact p.Prime] (isInput : VarId → Bool)
     exact BusState.equiv_refl _
   · -- invariant preservation
     intro hdInv env hsatOut bi hbiOut
-    show (denseBIEval bi env).multiplicity ≠ 0 → bs.breaksInvariant (denseBIEval bi env) = false
+    show (denseBIEval bi env).multiplicity ≠ 0 → bs.maintainsInvariants (denseBIEval bi env)
     obtain ⟨g, hgcs, hgfr, _⟩ := hReconstruct env hsatOut
     have hbicsmem : bi ∈ d.busInteractions := by
       have := hbiOut; rw [houtdef, denseSeqzCollapsedSystem] at this
@@ -483,7 +483,7 @@ theorem dense_seqzCollapse_correct [Fact p.Prime] (isInput : VarId → Bool)
       (denseClusterEval_iff r.m3 r.m2 r.m1 r.m0 r.dv r.R r.a3 r.a2 r.a1 r.a0 r.K env).mp
         (fun c hc => hsat.1 c (hclMem c hc))
     have hbusOutEnv : ∀ bi ∈ (denseSeqzCollapsedSystem d r invId spec).busInteractions,
-        (denseBIEval bi env).multiplicity ≠ 0 → bs.violatesConstraint (denseBIEval bi env) = false := by
+        (denseBIEval bi env).multiplicity ≠ 0 → bs.accepts (denseBIEval bi env) := by
       intro bi hbi hm
       rw [denseSeqzCollapsedSystem] at hbi
       exact hsat.2 bi (List.mem_of_mem_filter hbi) hm
@@ -536,7 +536,7 @@ theorem dense_seqzCollapse_correct [Fact p.Prime] (isInput : VarId → Bool)
             rw [mul_right_comm, inv_mul_cancel₀ hS0, one_mul]; ring
     · have hbics : bi ∈ d.busInteractions := by
         rw [houtdef, denseSeqzCollapsedSystem] at hbi; exact List.mem_of_mem_filter hbi
-      show (denseBIEval bi envC).multiplicity ≠ 0 → bs.violatesConstraint (denseBIEval bi envC) = false
+      show (denseBIEval bi envC).multiplicity ≠ 0 → bs.accepts (denseBIEval bi envC)
       rw [hbeC bi hbics]; exact hsat.2 bi hbics
     · -- admissibility preserved
       show bs.admissible ((out.busInteractions.map (fun bi => denseBIEval bi envC)).filter
@@ -678,7 +678,7 @@ theorem dense_seqzCollapse_bundle (reg : VarRegistry) (d : DenseConstraintSystem
   -- byte bounds on the limbs for any output-satisfying assignment, via `denseBuild_sound`
   have habyteAll : ∀ (denv : VarId → ZMod p),
       (∀ bi ∈ (denseSeqzCollapsedSystem d r (reg.register (denseSeqzInvVar reg r)).2 spec).busInteractions,
-        (denseBIEval bi denv).multiplicity ≠ 0 → bs.violatesConstraint (denseBIEval bi denv) = false) →
+        (denseBIEval bi denv).multiplicity ≠ 0 → bs.accepts (denseBIEval bi denv)) →
       ∀ a ∈ ([r.a0, r.a1, r.a2, r.a3] : List VarId), (denv a).val < 256 := by
     intro denv hnv a ha
     have hb := hboundsB a ha

@@ -734,7 +734,7 @@ theorem DenseConstraintSystem.reencode_correct_D (d out : DenseConstraintSystem 
         have h1 := hsat'.1 _ hmem
         rw [hA c hc] at h1; exact h1
       · exact hdrop c hc (by simpa using hk)
-    · show (denseBIEval bi denv).multiplicity ≠ 0 → bs.violatesConstraint (denseBIEval bi denv) = false
+    · show (denseBIEval bi denv).multiplicity ≠ 0 → bs.accepts (denseBIEval bi denv)
       have hmem : { bi with multiplicity := grw bi.multiplicity, payload := bi.payload.map grw }
           ∈ (d.busInteractions.map (fun bi =>
             { bi with multiplicity := grw bi.multiplicity, payload := bi.payload.map grw })) :=
@@ -754,7 +754,7 @@ theorem DenseConstraintSystem.reencode_correct_D (d out : DenseConstraintSystem 
     have hd := hsatd denv denv' hA hB hdrop hsat'
     obtain ⟨bi0, hbi0, rfl⟩ := List.mem_map.1 hbi'
     show (denseBIEval { bi0 with multiplicity := grw bi0.multiplicity, payload := bi0.payload.map grw } denv').multiplicity ≠ 0 →
-      bs.breaksInvariant (denseBIEval { bi0 with multiplicity := grw bi0.multiplicity, payload := bi0.payload.map grw } denv') = false
+      bs.maintainsInvariants (denseBIEval { bi0 with multiplicity := grw bi0.multiplicity, payload := bi0.payload.map grw } denv')
     rw [hB bi0 hbi0]
     exact hinv denv hd bi0 hbi0
   · -- Completeness with derivations.
@@ -768,7 +768,7 @@ theorem DenseConstraintSystem.reencode_correct_D (d out : DenseConstraintSystem 
       · exact hnew c h
     · obtain ⟨bi0, hbi0, rfl⟩ := List.mem_map.1 hbi
       show (denseBIEval { bi0 with multiplicity := grw bi0.multiplicity, payload := bi0.payload.map grw } denv').multiplicity ≠ 0 →
-        bs.violatesConstraint (denseBIEval { bi0 with multiplicity := grw bi0.multiplicity, payload := bi0.payload.map grw } denv') = false
+        bs.accepts (denseBIEval { bi0 with multiplicity := grw bi0.multiplicity, payload := bi0.payload.map grw } denv')
       rw [hB bi0 hbi0]
       exact hsat.2 bi0 hbi0
     · rw [hside denv denv' hB]; exact BusState.equiv_refl _

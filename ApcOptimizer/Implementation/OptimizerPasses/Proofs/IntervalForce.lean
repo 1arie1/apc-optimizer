@@ -343,7 +343,7 @@ theorem denseBoundIdxBuild_witnessed {bs : BusSemantics p} (facts : BusFacts p b
 theorem denseBoundIdxBuild_lookup_sound {bs : BusSemantics p} (facts : BusFacts p bs)
     (d : DenseConstraintSystem p) (denv : VarId → ZMod p)
     (hbus : ∀ bi ∈ d.busInteractions, (denseBIEval bi denv).multiplicity ≠ 0 →
-      bs.violatesConstraint (denseBIEval bi denv) = false) :
+      bs.accepts (denseBIEval bi denv)) :
     ∀ v B, (denseBoundIdxBuild bs facts d.busInteractions)[v]? = some B → (denv v).val < B := by
   intro v B h
   obtain ⟨bi, hbi, hib⟩ := denseBoundIdxBuild_witnessed facts d.busInteractions v B h
@@ -355,7 +355,7 @@ theorem denseInteractionSeeds_sound {bs : BusSemantics p} (facts : BusFacts p bs
     (bnd : VarId → Option Nat) (bi : BusInteraction (DenseExpr p)) (denv : VarId → ZMod p)
     (hbnd : ∀ v b, bnd v = some b → (denv v).val < b)
     (hviol : (denseBIEval bi denv).multiplicity ≠ 0 →
-      bs.violatesConstraint (denseBIEval bi denv) = false) :
+      bs.accepts (denseBIEval bi denv)) :
     ∀ s ∈ denseInteractionSeeds bs facts bnd bi, s.eval denv = 0 := by
   intro s hs
   unfold denseInteractionSeeds at hs
@@ -379,7 +379,7 @@ theorem denseInteractionSeeds_sound {bs : BusSemantics p} (facts : BusFacts p bs
         simp only [hpe, hsb] at hsi
         have hmeval : (denseBIEval bi denv).multiplicity = mval :=
           bi.multiplicity.constValue?_sound mval hmc denv
-        have hv : bs.violatesConstraint (denseBIEval bi denv) = false := by
+        have hv : bs.accepts (denseBIEval bi denv) := by
           apply hviol
           rw [hmeval]
           exact hmz

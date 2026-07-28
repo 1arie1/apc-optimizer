@@ -81,9 +81,9 @@ theorem denseFxCheck_sound [Fact p.Prime] (bs : BusSemantics p) (facts : BusFact
     (denv : VarId → ZMod p)
     (hdom : ∀ v, ∀ c ∈ denseVarBucketLookup domIdx v, c.eval denv = 0)
     (hobX : (denseBIEval biX denv).multiplicity ≠ 0 →
-      bs.violatesConstraint (denseBIEval biX denv) = false)
+      bs.accepts (denseBIEval biX denv))
     (hobY : (denseBIEval biY denv).multiplicity ≠ 0 →
-      bs.violatesConstraint (denseBIEval biY denv) = false) :
+      bs.accepts (denseBIEval biY denv)) :
     denv vy = E.eval denv := by
   unfold denseFxCheck at h
   cases hd : denseFuPairData? bs facts domIdx biX biY x with
@@ -138,9 +138,9 @@ theorem denseFxCheck_sound [Fact p.Prime] (bs : BusSemantics p) (facts : BusFact
                       biX.multiplicity.constValue?_sound mx hmx denv
                     have hmYe : (denseBIEval biY denv).multiplicity = my :=
                       biY.multiplicity.constValue?_sound my hmy denv
-                    have hviolX : bs.violatesConstraint (denseBIEval biX denv) = false :=
+                    have hviolX : bs.accepts (denseBIEval biX denv) :=
                       hobX (by rw [hmXe]; exact hmx0)
-                    have hviolY : bs.violatesConstraint (denseBIEval biY denv) = false :=
+                    have hviolY : bs.accepts (denseBIEval biY denv) :=
                       hobY (by rw [hmYe]; exact hmy0)
                     have hgetX : (denseBIEval biX denv).payload[0]? = some (OX.eval denv) := by
                       show (biX.payload.map (fun e => e.eval denv))[0]? = _

@@ -143,14 +143,14 @@ theorem denseDropPair_correct (isInput : VarId → Bool)
     (checks : List (BusInteraction (DenseExpr p)))
     (hchecks : ∀ ck ∈ checks,
       bs.isStateful ck.busId = false ∧
-      (∀ denv, bs.violatesConstraint (denseBIEval R denv) = false →
-        bs.violatesConstraint (denseBIEval ck denv) = false) ∧
-      (∀ denv, bs.breaksInvariant (denseBIEval ck denv) = false) ∧
+      (∀ denv, bs.accepts (denseBIEval R denv) →
+        bs.accepts (denseBIEval ck denv)) ∧
+      (∀ denv, bs.maintainsInvariants (denseBIEval ck denv)) ∧
       (∀ v ∈ denseBIVars ck, v ∈ denseBIVars R))
     (hbyte : ∀ (denv : VarId → ZMod p),
       (∀ c ∈ d.algebraicConstraints, c.eval denv = 0) →
       (∀ bi ∈ A ++ B ++ C ++ checks, (denseBIEval bi denv).multiplicity ≠ 0 →
-        bs.violatesConstraint (denseBIEval bi denv) = false) →
+        bs.accepts (denseBIEval bi denv)) →
       ∀ slot ∈ slots, ∀ x : ZMod p, (denseBIEval R denv).payload[slot]? = some x → x.val < bound)
     (hsplit : d.busInteractions = A ++ S :: B ++ R :: C)
     (hSbus : S.busId = busId) (hRbus : R.busId = busId)
@@ -198,10 +198,10 @@ theorem denseDropPair_correct (isInput : VarId → Bool)
     intro bi hbi
     rw [hsplit]
     simp only [List.mem_append, List.mem_cons] at hbi ⊢; tauto
-  have hnvS : ∀ denv, bs.violatesConstraint (denseBIEval S denv) = false := fun denv =>
+  have hnvS : ∀ denv, bs.accepts (denseBIEval S denv) := fun denv =>
     (facts.recvByteSlots_sound busId shape hshape pattern slots bound hslots (denseBIEval S denv)
       (show (denseBIEval S denv).busId = busId from hSbus)).1 (hSmEv denv)
-  have hnvR : ∀ denv, out.satisfies bs denv → bs.violatesConstraint (denseBIEval R denv) = false := by
+  have hnvR : ∀ denv, out.satisfies bs denv → bs.accepts (denseBIEval R denv) := by
     intro denv hsat
     have hbyteEnv : ∀ slot ∈ slots, ∀ x : ZMod p, (denseBIEval R denv).payload[slot]? = some x →
         x.val < bound := by

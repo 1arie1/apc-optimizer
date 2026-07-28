@@ -27,7 +27,7 @@ theorem denseAsBytePair_eq (bs : BusSemantics p) (facts : BusFacts p bs)
 /-- The obligation predicate appearing in dense `satisfies`. -/
 private def denseP (bs : BusSemantics p) (denv : VarId → ZMod p)
     (bi : BusInteraction (DenseExpr p)) : Prop :=
-  (denseBIEval bi denv).multiplicity ≠ 0 → bs.violatesConstraint (denseBIEval bi denv) = false
+  (denseBIEval bi denv).multiplicity ≠ 0 → bs.accepts (denseBIEval bi denv)
 
 private theorem filter_cons_append {α : Type} (q : α → Bool) (x : α) (ys : List α) :
     ([x].filter q) ++ ys.filter q = (x :: ys).filter q := by
@@ -45,19 +45,19 @@ private theorem denseSplitOne_P (bs : BusSemantics p) (facts : BusFacts p bs)
     obtain ⟨rfl, hspec⟩ := denseAsBytePair_eq bs facts bi busId spec a b hab
     simp only [List.mem_cons, List.not_mem_nil, or_false, forall_eq_or_imp, forall_eq]
     have hsaP : denseP bs denv (denseMkByteCheck spec busId a) ↔
-        bs.violatesConstraint (denseBIEval (denseMkByteCheck spec busId a) denv) = false := by
+        bs.accepts (denseBIEval (denseMkByteCheck spec busId a) denv) := by
       unfold denseP
       have hmul : (denseBIEval (denseMkByteCheck spec busId a) denv).multiplicity = 1 := by
         rw [denseMkByteCheck_eval]
       exact ⟨fun h => h (by rw [hmul]; exact hp1), fun h _ => h⟩
     have hsbP : denseP bs denv (denseMkByteCheck spec busId b) ↔
-        bs.violatesConstraint (denseBIEval (denseMkByteCheck spec busId b) denv) = false := by
+        bs.accepts (denseBIEval (denseMkByteCheck spec busId b) denv) := by
       unfold denseP
       have hmul : (denseBIEval (denseMkByteCheck spec busId b) denv).multiplicity = 1 := by
         rw [denseMkByteCheck_eval]
       exact ⟨fun h => h (by rw [hmul]; exact hp1), fun h _ => h⟩
     have hpairP : denseP bs denv (denseMkBytePair spec busId a b) ↔
-        bs.violatesConstraint (denseBIEval (denseMkBytePair spec busId a b) denv) = false := by
+        bs.accepts (denseBIEval (denseMkBytePair spec busId a b) denv) := by
       unfold denseP
       have hmul : (denseBIEval (denseMkBytePair spec busId a b) denv).multiplicity = 1 := by
         rw [denseMkBytePair_eval]
@@ -174,7 +174,7 @@ private theorem denseSplitOne_vars (bs : BusSemantics p) (facts : BusFacts p bs)
 private theorem denseSplitOne_breaksInvariant (bs : BusSemantics p) (facts : BusFacts p bs)
     (bi b : BusInteraction (DenseExpr p)) (hb : b ∈ denseSplitOne bs facts bi)
     (denv : VarId → ZMod p) :
-    (b = bi) ∨ bs.breaksInvariant (denseBIEval b denv) = false := by
+    (b = bi) ∨ bs.maintainsInvariants (denseBIEval b denv) := by
   cases hab : denseAsBytePair bs facts bi with
   | none => simp only [denseSplitOne, hab, List.mem_singleton] at hb; exact Or.inl hb
   | some t =>
@@ -246,7 +246,7 @@ private theorem denseSplitBytePair_correct_aux (isInput : VarId → Bool) (bs : 
   · intro hgi denv hsat bi hbi
     rw [hbus, List.mem_flatMap] at hbi
     obtain ⟨orig, horig, hbimem⟩ := hbi
-    show (denseBIEval bi denv).multiplicity ≠ 0 → bs.breaksInvariant (denseBIEval bi denv) = false
+    show (denseBIEval bi denv).multiplicity ≠ 0 → bs.maintainsInvariants (denseBIEval bi denv)
     intro hne
     rcases denseSplitOne_breaksInvariant bs facts orig bi hbimem denv with heq | hbrk
     · rw [heq]; exact hgi denv ((hsatiff denv).2 hsat) orig horig (heq ▸ hne)
