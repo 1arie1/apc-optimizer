@@ -479,8 +479,12 @@ here. Per-phase **wall** (ms, summed over all cleanup invocations, on `main` bef
 | `denseAddByteDoms` (coset) | 161 | 18 | **633** |
 | the scans (fan-out; ~1 s of wall on sha256) | 3694 serial | 314 | 154 |
 
-Entry 154 took the preflight — 61 % of sha256's gathers were work-gate rejects, and the gate is now
-evaluated *during* the gather (0.81× on the pass there). Remaining, in order:
+Entry 154 attacked the preflight — 61 % of sha256's gathers are work-gate rejects, so the gate is
+evaluated *during* the gather (`denseCapStep` + `denseForcedPreflightV_eq_fast`, on
+`perf/domainbatch-work-gated-gathers`; output identical by theorem). **Unresolved:** 0.81× on the
+pass locally, flat on CI's end-to-end quick bench, which reports sha256 as one number with no
+per-stage table. Re-run `Runtime Bench -f benchmark=sha256` before reviving or retiring it, and note
+it is a one-case change — 1.00× on every other set. Remaining, in order:
 `denseConstraintPlansV`, `denseAddConstraintDoms`'s per-variable re-linearization, the target dedup's
 per-target `mergeSort`, and — SP1 only, but the largest single share anywhere in this pass —
 `denseAddByteDoms`.

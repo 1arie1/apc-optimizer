@@ -5347,4 +5347,16 @@ live in the C (the original's only caller is its dead `_boxed` wrapper);
 NEXT in the same phase table: `denseConstraintPlansV` (1970 ms) and `denseAddConstraintDoms`'s
 per-variable re-linearization (1344 ms) on sha256; `denseAddByteDoms`'s coset build (633 ms of 986)
 on SP1.
-**Worked: yes (sha256 domainBatch 0.81x, output byte-identical; PR follows).**
+CI (PR #250, closed): the effectiveness workflow's `runtime-bench-quick` reported sha256 **179.5 →
+179.8 s (+0 %)** and no movement elsewhere (openvm-eth −3 %, wasm-eth +1 %, keccak +2 %, SP1 ±1 %,
+per-case sizes identical on all six sets). That run measures sha256 as a **single end-to-end number
+with no per-stage table** — the per-pass breakdowns exist only for the 100-block sets, where this
+change is 1.00× by construction (openvm-eth domainBatch 411 → 413 ms, matching the local
+`apc_071` reading) — so it neither confirms nor refutes a −1.8 % end-to-end claim on one case. The
+decisive instrument was not run: `gh workflow run "Runtime Bench" -f benchmark=sha256 -f repeat=2`,
+which benches both sides serially on one runner and reports per-pass.
+**Worked: unresolved (local sha256 domainBatch 0.81× over three interleaved runs — 14838 / 14707 /
+14576 against 17949 / 17918 / 18033 — output byte-identical; CI's end-to-end quick bench flat; PR
+#250 closed pending a serial `Runtime Bench` on sha256). The change is worth exactly one case: on
+every other benchmark set it is 1.00×, and even locally it is 1.8 % end-to-end there, so it clears
+the pass-level land bar and not the end-to-end one.**
