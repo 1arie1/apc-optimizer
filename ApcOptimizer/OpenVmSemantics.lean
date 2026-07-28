@@ -138,9 +138,9 @@ def violates (busMap : BusMap) (msg : BusInteraction (ZMod p)) : Bool :=
   -- Invalid bus ID. Won't have a matching receive.
   | none, _ => true
 
-/-- Whether a message breaks an invariant on which soundness depends. -/
+/-- Whether a message breaks an invariant on which soundness depends. Only meaningful for an
+    *active* message — the multiplicity tests below reject `0`, and callers guard on it. -/
 def breaksInvariant (busMap : BusMap) (msg : BusInteraction (ZMod p)) : Bool :=
-  -- Note that this function is not called for multiplicity = 0
   match busMap msg.busId with
   -- Lookups are only ever sent (multiplicity 1).
   | some .pcLookup | some .variableRangeChecker | some .bitwiseLookup

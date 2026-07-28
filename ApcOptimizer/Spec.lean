@@ -133,12 +133,17 @@ structure BusSemantics (p : ℕ) where
   /-- Whether sending this bus interaction message violates a constraint in
       *another* chip.
       An example of this is sending a message that conflicts with a lookup
-      table entry. -/
+      table entry.
+      Only consulted for *active* messages: `Circuit.satisfies` guards on
+      `multiplicity ≠ 0`, so the value at multiplicity `0` is never used. -/
   violatesConstraint (busInteractionMessage : BusInteraction (ZMod p)) : Bool
   /-- Whether sending this bus interaction message breaks an invariant on which
       soundness of the system depends.
       For example, a memory bus might have the invariant that all sent values
-      must be in a certain range. -/
+      must be in a certain range.
+      Only consulted for *active* messages: `Circuit.guaranteesInvariants`
+      guards on `multiplicity ≠ 0`, so the value at multiplicity `0` is never
+      used. -/
   breaksInvariant (busInteractionMessage : BusInteraction (ZMod p)) : Bool
   /-- A property on *stateful* bus messages with nonzero multiplicity.
       Completeness is only required for assignments whose stateful messages
