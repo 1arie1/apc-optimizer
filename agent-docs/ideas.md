@@ -540,3 +540,22 @@ worth a prototype on one index first.
   nothing). Suspect `denseFuCandidates`' per-interaction `O.vars.eraseDups × splitAt` on large
   first-slot payloads, or the per-matched-pair box evaluation in `denseFuPairData?`. Sample the
   window before building anything.
+
+### SP1 finite-domain machinery: hoist/cache the per-variable domain table  ·  *runtime, sp1*  ·  high value / med-high effort
+Fresh profiling (post-#219, on main #220–229) on SP1 keccak AND rsp: **domainBatch ≈ 58% of optimizer
+time on BOTH sets** (biggest absolute cost), sub-linear (~n^0.79) — a large SP1-specific CONSTANT.
+flagFold is the residual super-linear pass (~n^1.71) but main is already indexing it (densePdDropSet),
+so it's lower priority. Root cause: SP1's 16-bit memory limbs → ~55% single-variable finite-domain
+constraints (vs OpenVM 32%). The finite-domain machinery is rebuilt EVERY fixpoint cycle (5× on keccak)
+and `denseFindDomainAlg` is recomputed across 8 passes (BoxRewrite, BusPairCancel(+Justify), DomainFold,
+FlagFoldDrops, FlagUnify, Reencode, RootPairUnify).
+IDEA: compute the `DenseDomainTable` once and reuse it — first as a cross-cycle cache in domainBatch
+(rebuild only entries whose defining constraints changed), then as an accumulating table threaded
+read-only through the fixpoint that the domain-consuming passes read instead of recomputing.
+SOUND: a proven finite domain persists under any sound refinement (`refines` preserves surviving vars'
+values) — one reusable lemma, no re-proving as the pipeline runs. EFFECTIVENESS-SAFE: make it
+accumulating (passes add domains, none removed) so mid-fixpoint domains aren't lost.
+BISECT FIRST (the #219 lesson — the a-priori guess can be wrong): stub domainBatch's apply vs the
+per-cycle rebuild vs the table build and measure which sub-part is the 58% BEFORE implementing.
+General (any finite-domain-heavy circuit; SP1 hardest). Bench on Benchmarks/SP1/keccak AND rsp (both
+domainBatch-dominant); effectiveness must stay identical.
