@@ -410,16 +410,24 @@ reencode's per-target *gating* work is also independent between accepts, but the
 if their serial remainder grows relative to the rest. busPairCancel/busUnify are inherently
 sequential scans (window state).
 
-**R8. busPairCancel residual quadratics** (formerly part of R1). Design (a) — array-segment
-twins of `liveArr`+`shieldScan`/`List.all` (`denseLiveAllSeg`/`denseShieldScanSeg` with `…_eq`
-lemmas) — is **done (#210)**: sha256_big busPairCancel 107 → 89.5 s, and entry 143 took the
-justification's domain scans out (89.5 → 50 s). The remaining 50 s is the O(live²) certificate work
-itself — `denseShieldScanSeg` is ~4 % of whole-run CPU: `shieldOk` still evaluates
-`densePreRefuted` over the whole live prefix per candidate send, and `midRefuted` over the
-between-region. Design (b) stands: the busUnify entry-111 treatment — `shieldOk` left-folds
-to a single per-address-key `pending` bit, maintainable across one sweep — but the pass's
-tombstone-and-restart structure (drops invalidate prefix state: removing a consumed receive
-un-shields earlier messages) forces a recompute-on-drop scheme, bounded by #drops × O(B).
+**R8. busPairCancel residual quadratics** (formerly part of R1) · **done (entries 141/143/148/153)**.
+Design (a), array-segment twins of `liveArr`+`shieldScan`, landed in #210 (sha256_big 107 → 89.5 s);
+entry 143 took the justification's domain scans out (89.5 → 50 s); entry 148's sparse same-key index
+cut the region scans to the same-key + symbolic positions (0.54× on the big case). **Entry 153 closes
+the O(live²) certificate work itself**: the shield fold is decided by the *topmost* visited live
+position `q` with `¬P q ∨ Q q` (`ok = P q`), so a descending early-exit walk over the index arrays
+computes the same boolean while touching only the positions above the last provable receive —
+28.6 M → 0.86 M positions on sha256 `apc_001`, pass 19.3 → 6.4 s (0.33×), output byte-identical.
+Design (b) (a maintained per-address-key `pending` bit with recompute-on-drop) is therefore
+**retired**: the early exit gets the same asymptotics with no cross-candidate state, no drop
+invalidation, and a value-identical transformation of the existing fold.
+   **What is left in the pass (6.4 s on sha256 `apc_001`, measured post-153)**, in order:
+   the surviving certificate evaluations — `denseAddrNonzeroNeqP` is allocation- and
+   `ZMod`-dictionary-bound (R9; `denseIsZeroLin` derives the whole `CommRing` chain *before* testing
+   `terms.isEmpty`, and `denseDiffSumP` rebuilds it per subset, 4 subsets per compared pair on a
+   two-slot address); the per-invocation index builds (`denseRecvIndexAll`, `denseKeyIdxBuild`,
+   `denseBuildBoundIdx`/`FormIdx`, 5.4 % of the pre-153 pass); the per-drop `alive` copy (below);
+   and `denseInteractionBound`'s per-variable pattern rebuild (R13b).
 
 **R9a (done, entry 144).** `DenseTwoRootMap.addVars` re-linearized a product's factors per
 variable; `addVarsFast` + `@[csimp] addVars_eq_fast` hoists them. The `@[csimp]` twin is the
@@ -572,15 +580,26 @@ the allocation traffic of their results. The `.fallback` row is **done (entry 15
   effectiveness hides single-case regressions that the lexicographic merge rule forbids.
 - **Runtime is a de-facto merge criterion**: build per-invocation indexes once; keep expensive
   arms out of hot per-query paths; put once-suffices passes in the coda.
+- **Count the change before proving it.** Entry 153 validated a fold reformulation with a throwaway
+  `dbg_trace` probe that ran the proposed function *next to* the real one on every candidate of the
+  worst case: identical verdict on 14 433/14 433 and a 33× drop in visited positions, both known
+  before a line of proof. A counter probe is cheaper than a prototype and strictly more informative
+  than a sample share.
+- **Re-attribute after every landing; a pass's residual moves.** Entry 148's closing note put
+  busPairCancel's remaining cost in "per-drop `alive` copies, `denseCheckCancel`, `denseFirstMatchAt`";
+  measured in entry 153 those are 2.1 %, ~0 % and ~0 % — the cost had never left the region scans, it
+  had only moved from "every prefix position" to "every same-key-or-symbolic prefix position".
 - **Check open PRs / recent `claude/*` branches for duplicates before implementing.**
 
 ## Runtime ideas (2026-07-27 session, entry 148)
 
-- **Per-drop `alive` copies in busPairCancel**: with the region scans now sparse, the heavy-drop
-  cycle's residual includes `(alive.setIfInBounds iP false).setIfInBounds jP false` copying the
-  71k-entry array per drop (alive is shared by the scan closures). ~12k drops ≈ 1.7 GB of copies.
-  A persistent-friendly representation (e.g. a `Std.HashSet Nat` of tombstones consulted alongside
-  a stable array, or batching drops per findCancel sweep) could cut most of it.
+- **Per-drop `alive` copies in busPairCancel**: **measured (entry 153) at 2.1 % of the pass**
+  (~410 ms of 19.3 s on sha256 `apc_001`), 97 % of it `lean_copy_expand_array` — the array is still
+  referenced by the loop frame, so the first `setIfInBounds` copies all 71 402 entries (≈ 8 GB of
+  memcpy over 14 418 drops). Below the land bar on its own; bundle it with a bigger change. Cheap
+  forms: a `ByteArray` (1 byte per entry, 8× less copying) or handing both tombstone positions to
+  `denseCancelLoop`, which owns the array uniquely. **Do not** switch to a `Std.HashSet Nat` of
+  tombstones: liveness is *read* tens of millions of times per invocation.
 - **busUnify same-key mid verification**: `denseCheckPair` re-verifies each candidate's whole mid
   window (`mid.all`). The same constant-key argument as entry 148 applies: mid messages with a
   different constant key are refuted by the ConstsNeq arm. Needs the window's positions (the sweep

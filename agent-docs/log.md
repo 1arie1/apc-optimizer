@@ -5304,3 +5304,61 @@ lazify `denseByteOperandDomain`'s coset build (21.3 % of the pass on SP1 keccak,
 (d) prefix-pruned / component-split enumeration for the big-box OpenVM cases, gated on a box-shape
 counter first.
 **Worked: yes (domainBatch 0.14x on its worst-share APC, output byte-identical; draft PR).**
+
+### 153. Runtime: busPairCancel's shield scan stops at the first deciding position (0.33x on the pass, sha256)
+TARGETED the top pass of the corpus (`ranked_passes.md`: busPairCancel 31.5 s / 10.8 % of the corpus,
+19.0 s of 171 s on its worst case sha256 `apc_001`). ATTRIBUTED FIRST (LBR + the phase / cost-class /
+caller scripts, every sample required to carry a pass frame): **65 % of the pass is the
+address-disequality certificate chain** — `denseAddrNonzeroNeqP` alone 47.5 % — and 92 % of those
+samples are reached from `denseShieldScanSparse`, the *before-region* scan; another **13.9 %** builds
+the per-candidate `bucket.filter` / `sym.filter` / `denseMergeAsc` lists. Pass-only cost classes:
+31 % refcount, 21 % allocator, 13 % `ZMod` dictionaries, 17 % real logic — the budget is the memory
+traffic of intermediate `DenseLinExpr`s. A throwaway `dbg_trace` counter probe then measured the
+volume: 14 848 candidates reach the region tests, **14 418 are accepted (97 %)**, the shield visits
+**28.6 M positions** (mean 1982, max 8003) and the range filters walk **104 M** list cells, while the
+whole mid region visits 32 k. Two structural reasons: OpenVM's execution bridge has
+`addressFields = []`, so all 8006 bridge messages share **one** key bucket (4002 candidates × mean
+4002 positions = 56 % of all shield work), and hot memory cells have 900–1500-entry buckets plus 1114
+symbolic-address messages that every memory candidate visits. Entry 148's sparse index has an
+unintended consequence: it visits exactly the positions the *cheap* certificate arms cannot refute,
+so every visited position runs the chain to its last and most expensive arm.
+THE FIX is a reformulation of the existing fold, not a new certificate. `denseShieldScanW`'s verdict
+is `∀ k, P l_k ∨ ∃ k' > k, Q l_k'`, so it is decided by the **topmost** visited live position `q` with
+`¬P q ∨ Q q`: `ok = P q` (`true` when there is none). A descending walk with an early exit computes
+the same boolean while touching only the positions above the last provable receive. Measured with the
+same probe *before* writing any proof: **28.6 M → 0.86 M positions (0.030×)**, verdict identical on
+**14 433 / 14 433** candidates (bridge candidates settle in exactly 1 position instead of 4002;
+memory candidates mean 82.5, median 7).
+IMPLEMENTATION (`BusPairCancelKeyIdx.lean`, all under `Implementation/`): `DenseKeyIdx` also carries
+its buckets and `sym` as ascending arrays (`byKeyA` via `Std.HashMap.map`, `symA`); the mid test is a
+gated array walk (`denseLiveAllGated`) and the shield a descending two-array early-exit walk
+(`denseShieldEarly`, plus `denseShieldEarlySeg` for the symbolic-key fallback, which needs no index).
+Both walks re-check the position window at every entry, so **no range search is needed**: a
+binary-searched variant was built and measured first and is only 2 % faster on sha256 (6250 vs
+6388 ms) — not worth the extra correctness argument.
+PROOF: two semantic lemmas replace the whole sparse-list layer, which is deleted (`denseMergeAsc`,
+`denseLiveAllSparse`, `denseShieldScanSparse` and their `_eq` lemmas). `denseLiveAllSegP_true_of`:
+per-position refutations give the segment `all`. `denseShieldScanSegP_true_aux`/`_of`: the shield fold
+holds when every live position is refuted except possibly below a witness position that is itself a
+live provable receive — one induction, carrying the fold's `.1` ("a provable receive occurs later")
+flag leftwards. The walks' soundness (`denseShieldEarly_sound`, `denseShieldEarlySeg_sound`,
+`denseLiveAllGated_sound`) supplies exactly those hypotheses; the per-array `Pairwise (· < ·)` from
+`denseKeyIdxBuild_sound` is what makes "every entry above the stop position was examined" true.
+Positions that are not index entries are refuted by the unchanged `denseMidRefuted_of_keyNe` /
+`_of_crossBus` + `densePreRefuted_of_midRefuted`.
+NUMBERS (this 20-core box, interleaved, `profile`; median of 3 reps for the cheap cases, single shot
+for sha256): sha256 `apc_001` busPairCancel **19276 → 6391 ms (0.332×)**, total 159266 → 146419
+(**0.919×**); wasm-eth `apc_028` **708 → 108 (0.153×)**, total 0.745×; wasm-eth `apc_012`
+2197 → 1186 (0.540×), total 0.945×; keccak `apc_001` 1143 → 469 (0.410×), total 0.952×; openvm-eth
+`apc_100` 146 → 121 (0.829×). No other pass column moves outside noise; `busPairCancelLate` flat
+(250 → 239 ms).
+VERIFIED: `opt-export` **byte-identical** on sha256 apc_001 (5.76 MB export), OpenVM keccak,
+openvm-eth apc_006 / apc_100, wasm-eth apc_012 / apc_028 and SP1 keccak; keccak `run` counts
+identical (2021 / 186 / 1748); `lake build` clean (no warnings); `check-proof-integrity` passes
+(axioms propext / Classical.choice / Quot.sound, no unused theorems).
+RESIDUAL for the next pass at this: the surviving 0.86 M certificate evaluations (the
+`denseAddrNonzeroNeqP` allocation + `ZMod`-dictionary chain — R9 threading is the lever; `denseIsZeroLin`
+builds the whole `CommRing` chain before testing `terms.isEmpty`), the per-invocation index builds
+(5.4 % of the old pass), the per-drop `alive` array copy (2.1 %, all `lean_copy_expand_array`, ~8 GB of
+memcpy over 14 418 drops) and `denseInteractionBound`'s per-variable pattern rebuild (R13b).
+**Worked: yes (busPairCancel 0.33× on its worst case, −8.1 % end-to-end, output byte-identical; draft PR).**
