@@ -647,9 +647,33 @@ def denseIsZero : DenseExpr p → Bool
   | .const n => n == 0
   | _ => false
 
+/-- `denseIsZero` with the field zero as a parameter. The compiler floats the `0`'s whole
+    `ZMod.commRing` chain to the head of `denseIsZero`, *before* the constructor test, so a caller
+    scanning a list pays four dictionary constructions per item; binding the zero in the function
+    that contains the scan hoists it out of the loop. -/
+def denseIsZeroW (zero : ZMod p) : DenseExpr p → Bool
+  | .const n => n == zero
+  | _ => false
+
+theorem denseIsZeroW_zero : denseIsZeroW (0 : ZMod p) = denseIsZero (p := p) := by
+  funext e; cases e <;> rfl
+
 def denseWorkView (w : DenseReencodeWork p) : DenseConstraintSystem p :=
   { algebraicConstraints := w.cs.filter (fun c => !denseIsZero c) ++ w.bools,
     busInteractions := w.bis }
+
+/-- Boxed twin: `zero` must be a parameter of the function *containing* the scan. A `let` at the
+    head of `denseWorkViewFast` is floated back into the `filter` body by the compiler (verified in
+    the generated C), which is the whole cost being removed here. -/
+def denseWorkViewW (zero : ZMod p) (w : DenseReencodeWork p) : DenseConstraintSystem p :=
+  { algebraicConstraints := w.cs.filter (fun c => !denseIsZeroW zero c) ++ w.bools,
+    busInteractions := w.bis }
+
+def denseWorkViewFast (w : DenseReencodeWork p) : DenseConstraintSystem p := denseWorkViewW 0 w
+
+@[csimp] theorem denseWorkView_eq_fast : @denseWorkView = @denseWorkViewFast := by
+  funext p w
+  simp only [denseWorkView, denseWorkViewFast, denseWorkViewW, denseIsZeroW_zero]
 
 /-- One position's new content: the placeholder if the group covers it, else the gated rewrite. -/
 def denseTombify (xs bits : List VarId) (σfn : VarId → Option (DenseExpr p))
@@ -1514,6 +1538,12 @@ structure DenseReencodeCacheState (p : ℕ) where
   useBis : DenseCovIndex
   arrBis : Array (BusInteraction (DenseExpr p))
   foldCs : Std.HashSet Nat
+  /-- The number of non-tombstone entries of `w.cs`, and `w.bis.length`. Both feed the fresh-name
+      prefix only (`denseWorkNameCountsS`), which is why they live on the untrusted state: a wrong
+      count can cost a rejected candidate, never soundness. Maintained exactly — the state update
+      visits every position an accept can turn into `.const 0`. -/
+  liveCs : Nat
+  bisN : Nat
   /-- Whether `d` is *known* to be within the degree bound — the side condition that makes
       `denseReencodeOutOk`'s fused degree test agree with measuring the rewritten system outright
       (`denseReencodeOutOk_snd`). Starts `false`, so the first candidate to reach the gate measures
@@ -1538,12 +1568,14 @@ def denseReencodeStateUpdate (state : DenseReencodeCacheState p) (xs bits : List
     if h : i < st.arrCs.size then
       let c := st.arrCs[i]
       if denseCoveredBy xs c then
+        -- covered ⇒ `c.hasVar` ⇒ `c` was not a tombstone, so the live count drops by one
         { st with arrCs := st.arrCs.set i (.const 0), rootCache := st.rootCache.erase i,
-                  foldCs := st.foldCs.erase i }
+                  foldCs := st.foldCs.erase i, liveCs := st.liveCs - 1 }
       else if c.sharesVarIn xs || c.hasConstFoldableNode then
         let c' := denseGroupRewrite xs bits σfn patts c
         let vs := HashedDedup.hashedDedup (hash ·) c'.vars
         { st with
+          liveCs := if denseIsZero c' then st.liveCs - 1 else st.liveCs
           arrCs := st.arrCs.set i c'
           rootCache := st.rootCache.erase i
           csIdx := if vs.length ≤ 8 then bucketAdd st.csIdx vs i else st.csIdx
@@ -1611,6 +1643,14 @@ def denseWorkNameCounts (derivs : DenseDerivations p) (w : DenseReencodeWork p) 
   if derivs.isEmpty then (nc, nb)
   else ((w.cs.filter (fun c => !denseIsZero c)).length + w.bools.length, w.bis.length)
 
+/-- The same counts, served from the threaded state instead of re-walking the whole system on every
+    accept (`state.liveCs` mirrors `(w.cs.filter (!denseIsZero ·)).length`, `state.bisN` is
+    `w.bis.length`, which no accept changes). Names only need to be fresh, and freshness is checked
+    separately, so this is untrusted. -/
+def denseWorkNameCountsS (derivs : DenseDerivations p) (w : DenseReencodeWork p)
+    (state : DenseReencodeCacheState p) (nc nb : Nat) : Nat × Nat :=
+  if derivs.isEmpty then (nc, nb) else (state.liveCs + w.bools.length, state.bisN)
+
 /-- One checked re-encoding step. Mirrors the cached step, with two extra guards — no group variable
     and no freshly minted bit may be a bit minted earlier — which is what keeps the deferred
     booleanity constraints inert for this group (`denseBoolConstraint_inert`). Rejecting a candidate is
@@ -1656,7 +1696,7 @@ def denseWorkLoop (b : DegreeBound) :
   | [], _, reg, w, _, _, _ => (reg, w, [])
   | xs :: rest, idx, reg, w, state, nc, nb =>
     let (reg1, w1, derivs1, state1) := denseWorkStep b reg w state xs s!"rnc{nc}_{nb}_{idx}"
-    let (nc1, nb1) := denseWorkNameCounts derivs1 w1 nc nb
+    let (nc1, nb1) := denseWorkNameCountsS derivs1 w1 state1 nc nb
     let (reg2, w2, derivs2) := denseWorkLoop b rest (idx + 1) reg1 w1 state1 nc1 nb1
     (reg2, w2, derivs1 ++ derivs2)
 
@@ -1696,6 +1736,8 @@ def denseReencodeF (pw : PrimeWitness p) (b : DegreeBound) (reg : VarRegistry)
         arrBis := d.busInteractions.toArray
         foldCs := d.algebraicConstraints.zipIdx.foldl
           (fun s ci => if ci.1.hasConstFoldableNode then s.insert ci.2 else s) ∅
+        liveCs := (d.algebraicConstraints.filter (fun c => !denseIsZero c)).length
+        bisN := d.busInteractions.length
         dWithin := false }
       (d.algebraicConstraints.filter (fun c => !denseIsZero c)).length d.busInteractions.length
     (r.1, denseWorkView r.2.1, r.2.2)

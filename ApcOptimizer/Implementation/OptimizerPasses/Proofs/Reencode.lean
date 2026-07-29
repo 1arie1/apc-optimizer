@@ -1501,10 +1501,12 @@ theorem denseWorkLoop_correct [Fact p.Prime] (b : DegreeBound) (bs : BusSemantic
       obtain ⟨hs_ext, hs_ii, hs_cov, hs_dcov, hs_correct⟩ := hsp
       obtain ⟨hi_pos, hi_bools⟩ := hinv
       rcases hrec : denseWorkLoop b rest (idx + 1) reg1 w1 state1
-          (denseWorkNameCounts derivs1 w1 nc nb).1 (denseWorkNameCounts derivs1 w1 nc nb).2
+          (denseWorkNameCountsS derivs1 w1 state1 nc nb).1
+          (denseWorkNameCountsS derivs1 w1 state1 nc nb).2
           with ⟨reg2, w2, derivs2⟩
       have hih := ih (idx + 1) reg1 w1 state1
-          (denseWorkNameCounts derivs1 w1 nc nb).1 (denseWorkNameCounts derivs1 w1 nc nb).2
+          (denseWorkNameCountsS derivs1 w1 state1 nc nb).1
+          (denseWorkNameCountsS derivs1 w1 state1 nc nb).2
           hs_cov hi_pos hi_bools
       simp only [hrec] at hih
       obtain ⟨hr_ext, hr_ii, hr_cov, hr_dcov, hr_correct⟩ := hih
@@ -1553,6 +1555,8 @@ theorem denseReencodeF_props (pw : PrimeWitness p) (b : DegreeBound) (reg : VarR
         arrBis := d.busInteractions.toArray
         foldCs := d.algebraicConstraints.zipIdx.foldl
           (fun s ci => if ci.1.hasConstFoldableNode then s.insert ci.2 else s) ∅
+        liveCs := (d.algebraicConstraints.filter (fun c => !denseIsZero c)).length
+        bisN := d.busInteractions.length
         dWithin := false } with hst
     obtain ⟨he, _, hc, hd, hcorr⟩ :=
       denseWorkLoop_correct b bs targets 0 reg (denseWorkSeed d) st
