@@ -5364,7 +5364,9 @@ memcpy over 14 418 drops) and `denseInteractionBound`'s per-variable pattern reb
 CI FOLLOW-UP: the effectiveness matrix's runtime row reported wasm-eth +20 %, SP1 rsp +67 %,
 openvm-eth +5 % (keccak −4 %, sha256 −6 %, SP1 keccak −7 %) — the parallel-harness artifact, measured
 twice. CI's serial `Runtime Bench` on the same runner: openvm-eth total **0.99×**, busPairCancel
-**0.83×**, every other pass 1.00× ± noise. Local serial interleaved re-run of the three flagged sets
+**0.83×**, every other pass 1.00× ± noise; SP1 rsp (100 cases, once the serial bench could reach SP1
+at all — the `<vm>:<set>` selector, PR #254) total **0.95×**, busPairCancel **0.77×**, slowest five
+cases 0.86–0.97×. Local serial interleaved re-run of the three flagged sets
 (300 cases, one process at a time): wall **118967 → 113145 ms (0.951×)**, busPairCancel
 **12749 → 7263 ms (0.570×)** — SP1/rsp 0.982× wall / 0.762× pass, openvm-eth 0.990× / 0.819×,
 wasm-eth 0.926× / 0.507×; all 23 cases with ≥ 50 ms of pass time improve (0.16×–0.97×), and the row's
