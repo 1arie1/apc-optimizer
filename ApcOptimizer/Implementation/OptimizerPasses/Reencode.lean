@@ -582,47 +582,6 @@ theorem denseBIGateDeg_fst (dmax : Nat) (xs bits : List VarId) (σfn : VarId →
   unfold denseBIGateDeg denseBIRewriteGate
   split <;> rfl
 
-/-- The bus side of the fused gate: an interaction none of whose expressions can change is kept
-    as-is, and only the ones it rewrites are measured against the degree bound. -/
-def denseGateBisGo (dmax : Nat) (xs bits : List VarId) (σfn : VarId → Option (DenseExpr p))
-    (patts : List (List (VarId × ZMod p))) :
-    List (BusInteraction (DenseExpr p)) → List (BusInteraction (DenseExpr p)) → Bool →
-      List (BusInteraction (DenseExpr p)) × Bool
-  | [], acc, ok => (acc.reverse, ok)
-  | bi :: rest, acc, ok =>
-      if bi.multiplicity.sharesVarIn xs || bi.multiplicity.hasConstFoldableNode
-          || bi.payload.any (fun e => e.sharesVarIn xs || e.hasConstFoldableNode) then
-        let bi' : BusInteraction (DenseExpr p) :=
-          { bi with multiplicity := denseGroupRewriteGate xs bits σfn patts bi.multiplicity,
-                    payload := bi.payload.map (denseGroupRewriteGate xs bits σfn patts) }
-        denseGateBisGo dmax xs bits σfn patts rest (bi' :: acc)
-          (ok && (decide (bi'.multiplicity.degree ≤ dmax) &&
-            bi'.payload.all (fun e => decide (e.degree ≤ dmax))))
-      else denseGateBisGo dmax xs bits σfn patts rest (bi :: acc) ok
-
-theorem denseGateBisGo_eq (dmax : Nat) (xs bits : List VarId) (σfn : VarId → Option (DenseExpr p))
-    (patts : List (List (VarId × ZMod p))) :
-    ∀ (l acc : List (BusInteraction (DenseExpr p))) (ok : Bool),
-      denseGateBisGo dmax xs bits σfn patts l acc ok
-        = (acc.reverse ++ l.map (fun bi => (denseBIGateDeg dmax xs bits σfn patts bi).1),
-           ok && l.all (fun bi => (denseBIGateDeg dmax xs bits σfn patts bi).2)) := by
-  intro l
-  induction l with
-  | nil => intro acc ok; simp [denseGateBisGo]
-  | cons bi rest ih =>
-      intro acc ok
-      rw [denseGateBisGo]
-      split
-      · next h =>
-          rw [ih]
-          simp only [List.map_cons, List.all_cons, denseBIGateDeg, if_pos h,
-            List.reverse_cons, List.append_assoc, List.cons_append, List.nil_append, Bool.and_assoc]
-      · next h =>
-          rw [ih]
-          simp only [List.map_cons, List.all_cons, denseBIGateDeg, if_neg h,
-            List.reverse_cons, List.append_assoc, List.cons_append, List.nil_append,
-            Bool.true_and]
-
 /-- Two lists' `all` agree when the predicates agree pointwise on the members. -/
 theorem List.all_congr_mem {α : Type} (l : List α) (f g : α → Bool)
     (h : ∀ x ∈ l, f x = g x) : l.all f = l.all g := by
@@ -631,6 +590,153 @@ theorem List.all_congr_mem {α : Type} (l : List α) (f g : α → Bool)
   | cons x rest ih =>
       rw [List.all_cons, List.all_cons, h x List.mem_cons_self,
         ih (fun y hy => h y (List.mem_cons_of_mem x hy))]
+
+/-- Whether any expression of the interaction carries a variable-free composite node. Independent of
+    the group, so it is a property of the interaction and does not need re-deriving per accept. -/
+def denseBiHasFold (bi : BusInteraction (DenseExpr p)) : Bool :=
+  bi.multiplicity.hasConstFoldableNode || bi.payload.any (fun e => e.hasConstFoldableNode)
+
+/-- Whether the group rewrite can change the interaction: it touches a group variable, or it carries
+    a variable-free composite node the rewrite would fold. `denseBIRewriteGate` and
+    `denseBIGateDeg` are the identity when this is `false` (`denseBIGateDeg_of_not_fires`). -/
+def denseBiGateFires (xs : List VarId) (bi : BusInteraction (DenseExpr p)) : Bool :=
+  bi.multiplicity.sharesVarIn xs || bi.multiplicity.hasConstFoldableNode ||
+    bi.payload.any (fun e => e.sharesVarIn xs || e.hasConstFoldableNode)
+
+/-- The bus side of an accept, driven by an ascending position list instead of by a gate test at
+    every interaction: `denseBIRewriteGate` is the identity wherever the gate cannot fire
+    (`denseBIRewriteGate_eq` + `denseGroupRewrite_eq_self`), and the positions where it can are the
+    `useBis` bucket candidates for `xs` together with the interactions carrying a variable-free
+    composite node. Once the positions run out the remaining suffix is shared untouched, which is
+    what makes this `O(prefix + candidates)` rather than `O(system)` tree walks. -/
+def denseGateBisPos (dmax : Nat) (xs bits : List VarId) (σfn : VarId → Option (DenseExpr p))
+    (patts : List (List (VarId × ZMod p))) :
+    List Nat → Nat → List (BusInteraction (DenseExpr p)) →
+      List (BusInteraction (DenseExpr p)) → Bool →
+      List (BusInteraction (DenseExpr p)) × Bool
+  | _, _, [], acc, ok => (acc.reverse, ok)
+  | [], _, rest, acc, ok => (acc.reverse ++ rest, ok)
+  | j :: ps, i, bi :: rest, acc, ok =>
+      if j < i then denseGateBisPos dmax xs bits σfn patts ps i (bi :: rest) acc ok
+      else if j == i then
+        let r := denseBIGateDeg dmax xs bits σfn patts bi
+        denseGateBisPos dmax xs bits σfn patts ps (i + 1) rest (r.1 :: acc) (ok && r.2)
+      else denseGateBisPos dmax xs bits σfn patts (j :: ps) (i + 1) rest (bi :: acc) ok
+
+/-- The gate leaves an interaction it cannot fire on completely alone. -/
+theorem denseBIGateDeg_of_not_fires (dmax : Nat) (xs bits : List VarId)
+    (σfn : VarId → Option (DenseExpr p)) (patts : List (List (VarId × ZMod p)))
+    {bi : BusInteraction (DenseExpr p)} (h : denseBiGateFires xs bi = false) :
+    denseBIGateDeg dmax xs bits σfn patts bi = (bi, true) := by
+  unfold denseBIGateDeg
+  rw [if_neg (by simpa [denseBiGateFires] using h)]
+
+/-- The position-driven bus rewrite equals the dense one, provided every position the gate can fire
+    on is listed. Extra and out-of-range positions are harmless (each visited position is re-tested by
+    `denseBIGateDeg`); the listed positions must be ascending, which is what lets the scan share the
+    suffix once they run out. -/
+theorem denseGateBisPos_eq (dmax : Nat) (xs bits : List VarId)
+    (σfn : VarId → Option (DenseExpr p)) (patts : List (List (VarId × ZMod p))) :
+    ∀ (bis : List (BusInteraction (DenseExpr p))) (ps : List Nat) (i : Nat)
+      (acc : List (BusInteraction (DenseExpr p))) (ok : Bool),
+      ps.Pairwise (· ≤ ·) →
+      (∀ k bi, bis[k]? = some bi → denseBiGateFires xs bi = true → (i + k) ∈ ps) →
+      denseGateBisPos dmax xs bits σfn patts ps i bis acc ok
+        = (acc.reverse ++ bis.map (fun bi => (denseBIGateDeg dmax xs bits σfn patts bi).1),
+           ok && bis.all (fun bi => (denseBIGateDeg dmax xs bits σfn patts bi).2)) := by
+  -- `gid l` : the gate is the identity on every item of `l`
+  have gid : ∀ (l : List (BusInteraction (DenseExpr p))),
+      (∀ bi ∈ l, denseBiGateFires xs bi = false) →
+      l.map (fun bi => (denseBIGateDeg dmax xs bits σfn patts bi).1) = l ∧
+      (l.all (fun bi => (denseBIGateDeg dmax xs bits σfn patts bi).2)) = true := by
+    intro l hl
+    constructor
+    · have h := List.map_congr_left (l := l)
+        (f := fun bi => (denseBIGateDeg dmax xs bits σfn patts bi).1) (g := id)
+        (fun bi hbi => by
+          simp [denseBIGateDeg_of_not_fires dmax xs bits σfn patts (hl bi hbi)])
+      rwa [List.map_id] at h
+    · rw [List.all_eq_true]
+      intro bi hbi
+      simp only [denseBIGateDeg_of_not_fires dmax xs bits σfn patts (hl bi hbi)]
+  intro bis
+  induction bis with
+  | nil =>
+      intro ps i acc ok _ _
+      cases ps <;> simp [denseGateBisPos]
+  | cons bi rest ih =>
+      intro ps i acc ok hsorted hcov
+      induction ps with
+      | nil =>
+          have hl : ∀ bi' ∈ bi :: rest, denseBiGateFires xs bi' = false := by
+            intro bi' hbi'
+            cases hf : denseBiGateFires xs bi' with
+            | false => rfl
+            | true =>
+                obtain ⟨k, hk⟩ := List.mem_iff_getElem?.1 hbi'
+                exact absurd (hcov k bi' hk hf) (by simp)
+          obtain ⟨hmap, hall⟩ := gid (bi :: rest) hl
+          simp only [denseGateBisPos, hmap, hall, Bool.and_true]
+      | cons j ps' ihps =>
+          have hsorted' : ps'.Pairwise (· ≤ ·) :=
+            List.Pairwise.sublist (List.sublist_cons_self j ps') hsorted
+          rcases Nat.lt_trichotomy j i with hji | hji | hji
+          · -- a position already passed: drop it and keep the same items
+            rw [denseGateBisPos, if_pos hji]
+            refine ihps hsorted' ?_
+            intro k bi' hk hf
+            rcases List.mem_cons.1 (hcov k bi' hk hf) with h | h
+            · omega
+            · exact h
+          · -- the current position: rewrite this item
+            rw [denseGateBisPos, if_neg (by omega), if_pos (show (j == i) = true by simp [hji])]
+            rw [ih ps' (i + 1) _ _ hsorted' ?_]
+            · simp [Bool.and_assoc]
+            · intro k bi' hk hf
+              have h1 := hcov (k + 1) bi' (by simpa using hk) hf
+              rcases List.mem_cons.1 h1 with h | h
+              · omega
+              · have : i + 1 + k = i + (k + 1) := by omega
+                rwa [this]
+          · -- the next listed position is later: this item cannot fire
+            have hni : denseBiGateFires xs bi = false := by
+              cases hf : denseBiGateFires xs bi with
+              | false => rfl
+              | true =>
+                  have h0 := hcov 0 bi (by simp) hf
+                  rcases List.mem_cons.1 (by simpa using h0) with h | h
+                  · omega
+                  · have := (List.pairwise_cons.1 hsorted).1 i h
+                    omega
+            rw [denseGateBisPos, if_neg (by omega),
+              if_neg (show ¬ ((j == i) = true) by simp; omega)]
+            rw [ih (j :: ps') (i + 1) _ _ hsorted ?_]
+            · simp [denseBIGateDeg_of_not_fires dmax xs bits σfn patts hni]
+            · intro k bi' hk hf
+              have h1 := hcov (k + 1) bi' (by simpa using hk) hf
+              have : i + 1 + k = i + (k + 1) := by omega
+              rwa [this]
+
+/-- A position the rewrite did not visit keeps its interaction. -/
+theorem denseGateBisPos_untouched (dmax : Nat) (xs bits : List VarId)
+    (σfn : VarId → Option (DenseExpr p)) (patts : List (List (VarId × ZMod p)))
+    (ps : List Nat) (bis : List (BusInteraction (DenseExpr p)))
+    (hsorted : ps.Pairwise (· ≤ ·))
+    (hcov : ∀ k bi, bis[k]? = some bi → denseBiGateFires xs bi = true → k ∈ ps) :
+    ∀ i bi, ((denseGateBisPos dmax xs bits σfn patts ps 0 bis [] true).1)[i]? = some bi →
+      i ∉ ps → bis[i]? = some bi := by
+  intro i bi hi hni
+  rw [denseGateBisPos_eq dmax xs bits σfn patts bis ps 0 [] true hsorted
+    (by simpa using hcov)] at hi
+  simp only [List.reverse_nil, List.nil_append, List.getElem?_map,
+    Option.map_eq_some_iff] at hi
+  obtain ⟨bi0, hbi0, hgate⟩ := hi
+  have hfires : denseBiGateFires xs bi0 = false := by
+    cases hf : denseBiGateFires xs bi0 with
+    | false => rfl
+    | true => exact absurd (hcov i bi0 hbi0 hf) hni
+  rw [denseBIGateDeg_of_not_fires dmax xs bits σfn patts hfires] at hgate
+  rw [hbi0, ← hgate]
 
 /-! ## Deferred materialisation: the loop's working system
 
@@ -1150,30 +1256,45 @@ theorem denseBoolConstraints_not_zero (bits : List VarId) :
 
 
 /-- One accept on the working system: splice the constraints, gate the bus interactions (reusing the
-    fused traversal of `denseGateBisGo`), and accumulate the booleanity constraints. Assumes the
+    position-driven `denseGateBisPos`), and accumulate the booleanity constraints. Assumes the
     position bound is computed — `denseWorkStep` calls `denseWorkEnsureBounded` first. -/
-def denseWorkOut (b : DegreeBound) (w : DenseReencodeWork p) (xs bits : List VarId)
+def denseWorkOut (b : DegreeBound) (w : DenseReencodeWork p) (usePosB : List Nat)
+    (xs bits : List VarId)
     (hm : Std.HashMap VarId (DenseExpr p)) : DenseReencodeWork p × Bool :=
   let σfn := denseGroupSubst xs hm
   let patts := denseAssignments (denseBitBox bits)
   let mp := denseWorkMaxPos w.lastPos w.lastFold xs
   let rc := denseWorkSpliceCs b.identities xs bits σfn patts mp 0 w.cs [] w.lastPos w.lastFold true
-  let rb := denseGateBisGo b.busInteractions xs bits σfn patts w.bis [] true
+  let rb := denseGateBisPos b.busInteractions xs bits σfn patts usePosB 0 w.bis [] true
   let newBools := bits.map (denseBoolConstraint (p := p))
   ({ cs := rc.1, bis := rb.1, bools := w.bools ++ newBools,
      bitSet := bits.foldl (·.insert ·) w.bitSet,
      lastPos := rc.2.1, lastFold := rc.2.2.1, bounded := true },
    (rc.2.2.2 && newBools.all (fun c => decide (c.degree ≤ b.identities))) && rb.2)
 
-/-- An accept on the working system is `denseReencodeOut` on the view, followed by dropping the
-    placeholders — and dropping those is itself a verified transformation
-    (`DensePassCorrect.denseFilterConstraintsEntailed`), so both halves reuse existing correctness. -/
-theorem denseWorkOut_view (b : DegreeBound) (w : DenseReencodeWork p) (xs bits : List VarId)
+/-- **Unproven on this branch (measurement).** The real statement adds the completeness side
+    condition that makes the position-driven bus rewrite agree with `denseReencodeOut`:
+
+    `hcomplete : ∀ i bi, w.bis[i]? = some bi →
+       (bi.multiplicity.sharesVarIn xs = true ∨ bi.multiplicity.hasConstFoldableNode = true ∨
+        bi.payload.any (fun e => e.sharesVarIn xs || e.hasConstFoldableNode) = true) → i ∈ usePosB`
+
+    plus `usePosB` ascending. The `useBis` buckets are complete by construction and `foldBis` tracks
+    the fold positions, so a superset is fine and every visited position is re-tested by
+    `denseBIGateDeg`. Given that, the bus half of the old proof goes through with
+    `denseBIRewriteGate_eq` + `denseGroupRewrite_eq_self` supplying the identity at every unvisited
+    position and at the shared suffix — structurally the same argument
+    `denseTombify_id_of_untouched` already makes on the constraint side, which is why this shape was
+    chosen over the array-backed one. The constraint half of this lemma is untouched. -/
+theorem denseWorkOut_view (b : DegreeBound) (w : DenseReencodeWork p) {usePosB : List Nat}
+    (xs bits : List VarId)
     (hm : Std.HashMap VarId (DenseExpr p))
     (hpos : DenseWorkPosOk w.lastPos w.lastFold w.cs)
     (hbools : DenseWorkBoolsOk w.bitSet w.bools)
-    (hxs : ∀ x ∈ xs, w.bitSet.contains x = false) :
-    denseWorkView (denseWorkOut b w xs bits hm).1
+    (hxs : ∀ x ∈ xs, w.bitSet.contains x = false)
+    (hsortedB : usePosB.Pairwise (· ≤ ·))
+    (hcoverB : ∀ k bi, w.bis[k]? = some bi → denseBiGateFires xs bi = true → k ∈ usePosB) :
+    denseWorkView (denseWorkOut b w usePosB xs bits hm).1
       = (denseReencodeOut (denseWorkView w) xs bits hm).filterConstraints
           (fun c => !denseIsZero c) := by
   obtain ⟨hbcov, hbmap, hbz⟩ := denseWorkBools_filter_covered (bools := w.bools) bits
@@ -1187,14 +1308,16 @@ theorem denseWorkOut_view (b : DegreeBound) (w : DenseReencodeWork p) (xs bits :
       (denseAssignments (denseBitBox bits)) (denseWorkMaxPos w.lastPos w.lastFold xs)
       w.cs 0 [] w.lastPos w.lastFold true (denseWorkBounded_of_posOk hpos)
     simpa using this
-  have hbus : (denseGateBisGo b.busInteractions xs bits (denseGroupSubst xs hm)
-      (denseAssignments (denseBitBox bits)) w.bis [] true).1
+  have hbus : (denseGateBisPos b.busInteractions xs bits (denseGroupSubst xs hm)
+      (denseAssignments (denseBitBox bits)) usePosB 0 w.bis [] true).1
       = w.bis.map (fun bi => { bi with
           multiplicity := denseGroupRewrite xs bits (denseGroupSubst xs hm)
             (denseAssignments (denseBitBox bits)) bi.multiplicity,
           payload := bi.payload.map (denseGroupRewrite xs bits (denseGroupSubst xs hm)
             (denseAssignments (denseBitBox bits))) }) := by
-    rw [denseGateBisGo_eq]
+    rw [denseGateBisPos_eq b.busInteractions xs bits (denseGroupSubst xs hm)
+      (denseAssignments (denseBitBox bits)) w.bis usePosB 0 [] true hsortedB
+      (by simpa using hcoverB)]
     simp only [List.reverse_nil, List.nil_append]
     exact List.map_congr_left (fun bi _ => by
       rw [denseBIGateDeg_fst, denseBIRewriteGate_eq])
@@ -1559,6 +1682,11 @@ structure DenseReencodeCacheState (p : ℕ) where
   useBis : DenseCovIndex
   arrBis : Array (BusInteraction (DenseExpr p))
   foldCs : Std.HashSet Nat
+  /-- Bus positions carrying a variable-free composite node (`denseBiHasFold`). With the `useBis`
+      buckets this is exactly the set of positions an accept's bus rewrite can touch. A `Thunk` so
+      that an invocation which never accepts never pays the scan — the accept path is the only
+      consumer, mirroring how `denseWorkEnsureBounded` defers the constraint-side bound. -/
+  foldBis : Thunk (Std.HashSet Nat)
   /-- The number of non-tombstone entries of `w.cs`, and `w.bis.length`. Both feed the fresh-name
       prefix only (`denseWorkNameCountsS`), which is why they live on the untrusted state: a wrong
       count can cost a rejected candidate, never soundness. Maintained exactly — the state update
@@ -1590,11 +1718,28 @@ def denseCheckReencodeVS (state : DenseReencodeCacheState p) (d : DenseConstrain
     (xs bits : List VarId) (hm : Std.HashMap VarId (DenseExpr p)) : Bool :=
   bits.all (fun bb => !state.varSet.contains bb) && denseCheckReencodeNoFresh d xs bits hm
 
+/-- The bus half of an accept's index update: for each position the rewrite visited, record the new
+    interaction's variables in the buckets and whether it still carries a variable-free composite
+    node. Standalone (a fold over `(buckets, foldSet)`) so its result does not depend on the
+    constraint half — which is what makes `denseBusIdxOk_update` a plain list induction. -/
+def denseBusIdxFold (arrB : Array (BusInteraction (DenseExpr p))) :
+    List Nat → DenseCovIndex × Std.HashSet Nat → DenseCovIndex × Std.HashSet Nat
+  | [], acc => acc
+  | i :: rest, acc =>
+      if h : i < arrB.size then
+        let bi := arrB[i]
+        let vs := HashedDedup.hashedDedup (hash ·) (denseBIVars bi)
+        denseBusIdxFold arrB rest
+          (⟨vs.foldl (fun m v => m.insert v (i :: m.getD v [])) acc.1.buckets, acc.1.varless⟩,
+           if denseBiHasFold bi then acc.2.insert i else acc.2.erase i)
+      else denseBusIdxFold arrB rest acc
+
 /-- Apply an accepted rewrite to the threaded state in place, mirroring `denseReencodeOut` on the
     stable-position arrays: only positions holding a group variable (bucket candidates) or a
     variable-free composite node (`foldCs`) can change. The root cache keeps every untouched
     position (it memoizes a pure function of the position's content). -/
-def denseReencodeStateUpdate (state : DenseReencodeCacheState p) (xs bits : List VarId)
+def denseReencodeStateUpdate (state : DenseReencodeCacheState p) (usePosB : List Nat)
+    (bisNew : List (BusInteraction (DenseExpr p))) (xs bits : List VarId)
     (hm : Std.HashMap VarId (DenseExpr p)) : DenseReencodeCacheState p :=
   let σfn := denseGroupSubst xs hm
   let patts := denseAssignments (denseBitBox bits)
@@ -1625,23 +1770,14 @@ def denseReencodeStateUpdate (state : DenseReencodeCacheState p) (xs bits : List
     { st with arrCs := st.arrCs.push (denseBoolConstraint b),
               csIdx := bucketAdd st.csIdx [b] i,
               useCs := bucketAdd st.useCs [b] i }) st
-  let posB := (denseCandidates state.useBis xs).foldl (·.insert ·) (∅ : Std.HashSet Nat)
-  let st := posB.fold (fun st i =>
-    if h : i < st.arrBis.size then
-      let bi := st.arrBis[i]
-      if bi.multiplicity.sharesVarIn xs || bi.multiplicity.hasConstFoldableNode
-          || bi.payload.any (fun e => e.sharesVarIn xs || e.hasConstFoldableNode) then
-        let bi' : BusInteraction (DenseExpr p) :=
-          { bi with multiplicity := denseGroupRewriteGate xs bits σfn patts bi.multiplicity,
-                    payload := bi.payload.map (denseGroupRewriteGate xs bits σfn patts) }
-        { st with arrBis := st.arrBis.set i bi',
-                  useBis := bucketAdd st.useBis
-                    (HashedDedup.hashedDedup (hash ·) (denseBIVars bi')) i }
-      else st
-    else st) st
+  -- The bus side takes the accept's own output and its own position list: one rewrite, two
+  -- consumers, folding over exactly the positions the splice visited.
+  let arrB := bisNew.toArray
+  let bus := denseBusIdxFold arrB usePosB (state.useBis, state.foldBis.get)
   -- `varSet` is grown from the *input* state: the position folds above never touch it, and reading
   -- it from `state` keeps `denseReencodeStateUpdate_varSet` a projection instead of a fold invariant.
-  { st with varSet := bits.foldl (·.insert ·) state.varSet, dWithin := true }
+  { st with arrBis := arrB, useBis := bus.1, foldBis := Thunk.mk (fun _ => bus.2),
+            varSet := bits.foldl (·.insert ·) state.varSet, dWithin := true }
 
 theorem densePosOk_from0 {lp : Std.HashMap VarId Nat} {lf : Nat} {cs : List (DenseExpr p)} :
     DenseWorkPosOk lp lf cs ↔ DenseWorkPosOkFrom 0 lp lf cs := by
@@ -1656,6 +1792,10 @@ def denseWorkEnsureBounded (w : DenseReencodeWork p) : DenseReencodeWork p :=
 theorem denseWorkEnsureBounded_view (w : DenseReencodeWork p) :
     denseWorkView (denseWorkEnsureBounded w) = denseWorkView w := by
   unfold denseWorkEnsureBounded denseWorkView; split <;> rfl
+
+theorem denseWorkEnsureBounded_bis (w : DenseReencodeWork p) :
+    (denseWorkEnsureBounded w).bis = w.bis := by
+  unfold denseWorkEnsureBounded; split <;> rfl
 
 theorem denseWorkEnsureBounded_bitSet (w : DenseReencodeWork p) :
     (denseWorkEnsureBounded w).bitSet = w.bitSet := by
@@ -1717,11 +1857,15 @@ def denseWorkStep (b : DegreeBound) (reg : VarRegistry) (w : DenseReencodeWork p
     if bits.all (fun bb => decide ((reg1.resolve bb).powdrId? = none)) then
     if denseCheckReencodeVS state { algebraicConstraints := w.cs, busInteractions := w.bis }
         xs bits hm then
-      let ro := denseWorkOut b (denseWorkEnsureBounded w) xs bits hm
+      let ro := denseWorkOut b (denseWorkEnsureBounded w)
+        (((denseCandidates state.useBis xs).foldl (·.insert ·)
+          state.foldBis.get).toList.mergeSort (· ≤ ·)) xs bits hm
       if (if state.dWithin then ro.2 else (denseWorkView ro.1).withinDegreeB b) then
         (reg1, ro.1,
          bits.map (fun bb => (bb, denseBitCM (denseAssignments (denseBitBox bits)) xs hm bb)),
-         denseReencodeStateUpdate state xs bits hm)
+         denseReencodeStateUpdate state
+           (((denseCandidates state.useBis xs).foldl (·.insert ·)
+             state.foldBis.get).toList.mergeSort (· ≤ ·)) ro.1.bis xs bits hm)
       else (reg1, w, [], state)
     else (reg1, w, [], state)
     else (reg1, w, [], state)
@@ -1776,6 +1920,8 @@ def denseReencodeF (pw : PrimeWitness p) (b : DegreeBound) (reg : VarRegistry)
         arrBis := d.busInteractions.toArray
         foldCs := d.algebraicConstraints.zipIdx.foldl
           (fun s ci => if ci.1.hasConstFoldableNode then s.insert ci.2 else s) ∅
+        foldBis := Thunk.mk (fun _ => d.busInteractions.zipIdx.foldl
+          (fun s bi => if denseBiHasFold bi.1 then s.insert bi.2 else s) ∅)
         liveCs := (d.algebraicConstraints.filter (fun c => !denseIsZero c)).length
         bisN := d.busInteractions.length
         dWithin := false }
