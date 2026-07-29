@@ -1421,6 +1421,295 @@ theorem denseCheckReencodeVS_sound {w : DenseReencodeWork p}
   rw [hcontains] at this
   exact Bool.noConfusion this
 
+/-! ### The bus-side index invariant
+
+`denseWorkOut` rewrites the bus list only at the positions it is handed, so it needs those positions
+to cover everywhere `denseBIRewriteGate` could fire. `DenseBusIdxOk` is what supplies that: the
+`useBis` buckets list every position by each of its variables, and `foldBis` lists every position
+carrying a variable-free composite node. Both hold at the seed by construction and are maintained by
+the state update, which folds over the very list the splice consumed. -/
+
+/-- Insert-folding into a set never loses a member. -/
+theorem denseNatFold_mono (l : List Nat) :
+    ∀ (s : Std.HashSet Nat) (v : Nat), s.contains v = true →
+      (l.foldl (·.insert ·) s).contains v = true := by
+  intro s v
+  induction l generalizing s with
+  | nil => intro h; exact h
+  | cons a rest ih => intro h; exact ih _ (by simp [Std.HashSet.contains_insert, h])
+
+/-- A member of the folded list ends up in the set. -/
+theorem denseNatFold_mem (l : List Nat) :
+    ∀ (s : Std.HashSet Nat) (v : Nat), v ∈ l → (l.foldl (·.insert ·) s).contains v = true := by
+  intro s v
+  induction l generalizing s with
+  | nil => intro h; simp at h
+  | cons a rest ih =>
+      intro h
+      rcases List.mem_cons.1 h with rfl | h
+      · exact denseNatFold_mono rest _ v (by simp [Std.HashSet.contains_insert])
+      · exact ih _ h
+
+/-- `denseBuild_complete` in the `getElem?` form the invariant uses. -/
+theorem denseBuild_complete' {α : Type} (varsOf : α → List VarId) (items : List α) (i : Nat)
+    (a : α) (hi : items[i]? = some a) (v : VarId) (hv : v ∈ varsOf a) :
+    i ∈ (denseCovBuild varsOf items).buckets.getD v [] := by
+  obtain ⟨hlt, hget⟩ := List.getElem?_eq_some_iff.1 hi
+  subst hget
+  exact denseBuild_complete varsOf items i hlt v hv
+
+/-- The seed's fold-position scan lists every interaction carrying a variable-free composite node. -/
+theorem denseFoldBisSeed_complete (bis : List (BusInteraction (DenseExpr p))) :
+    ∀ (n : Nat) (s : Std.HashSet Nat) (k : Nat) (bi : BusInteraction (DenseExpr p)),
+      bis[k]? = some bi → denseBiHasFold bi = true →
+      ((bis.zipIdx n).foldl
+        (fun s x => if denseBiHasFold x.1 then s.insert x.2 else s) s).contains (n + k) = true := by
+  have hmono : ∀ (l : List (BusInteraction (DenseExpr p) × Nat)) (s : Std.HashSet Nat) (j : Nat),
+      s.contains j = true →
+      (l.foldl (fun s x => if denseBiHasFold x.1 then s.insert x.2 else s) s).contains j = true := by
+    intro l
+    induction l with
+    | nil => intro s j h; exact h
+    | cons a rest ih =>
+        intro s j h
+        refine ih _ j ?_
+        by_cases hf : denseBiHasFold a.1 = true
+        · simp [hf, Std.HashSet.contains_insert, h]
+        · simp [hf, h]
+  intro n s k bi
+  induction bis generalizing n s k with
+  | nil => intro h; simp at h
+  | cons a rest ih =>
+      intro hk hfold
+      cases k with
+      | zero =>
+          simp only [List.getElem?_cons_zero, Option.some.injEq] at hk
+          subst hk
+          simp only [List.zipIdx_cons, List.foldl_cons]
+          refine hmono _ _ _ ?_
+          simp [hfold, Std.HashSet.contains_insert]
+      | succ k =>
+          simp only [List.getElem?_cons_succ] at hk
+          simp only [List.zipIdx_cons, List.foldl_cons]
+          have := ih (n + 1) (if denseBiHasFold a then s.insert n else s) k hk hfold
+          have heq : n + 1 + k = n + (k + 1) := by omega
+          rwa [heq] at this
+
+/-- Every position of the system whose interaction is listed by its variables, and every position
+    carrying a variable-free composite node. -/
+def DenseBusIdxOk (state : DenseReencodeCacheState p) (w : DenseReencodeWork p) : Prop :=
+  (∀ (i : Nat) (bi : BusInteraction (DenseExpr p)), w.bis[i]? = some bi →
+      ∀ v ∈ denseBIVars bi, i ∈ state.useBis.buckets.getD v [])
+  ∧ (∀ (i : Nat) (bi : BusInteraction (DenseExpr p)), w.bis[i]? = some bi →
+      denseBiHasFold bi = true → state.foldBis.get.contains i = true)
+
+/-- The position list the step builds. -/
+def denseBusPosList (state : DenseReencodeCacheState p) (xs : List VarId) : List Nat :=
+  ((denseCandidates state.useBis xs).foldl (·.insert ·) state.foldBis.get).toList.mergeSort (· ≤ ·)
+
+theorem denseBusPosList_sorted (state : DenseReencodeCacheState p) (xs : List VarId) :
+    (denseBusPosList state xs).Pairwise (· ≤ ·) :=
+  List.pairwise_mergeSort' (fun a b => a ≤ b) _
+
+/-- The invariant makes the position list complete for the gate. -/
+theorem denseBusPosList_cover {state : DenseReencodeCacheState p} {w : DenseReencodeWork p}
+    (xs : List VarId) (hidx : DenseBusIdxOk state w) :
+    ∀ k bi, w.bis[k]? = some bi → denseBiGateFires xs bi = true → k ∈ denseBusPosList state xs := by
+  intro k bi hk hf
+  have hset : ((denseCandidates state.useBis xs).foldl (·.insert ·)
+      state.foldBis.get).contains k = true := by
+    have hvar : ∀ (e : DenseExpr p), e.sharesVarIn xs = true → (∀ v ∈ e.vars, v ∈ denseBIVars bi) →
+        ((denseCandidates state.useBis xs).foldl (·.insert ·) state.foldBis.get).contains k = true := by
+      intro e he hsub
+      obtain ⟨v, hv, hvxs⟩ := denseSharesVarIn_exists he
+      exact denseNatFold_mem _ _ k
+        (denseMem_candidates state.useBis xs v k hvxs (hidx.1 k bi hk v (hsub v hv)))
+    have hfold : denseBiHasFold bi = true →
+        ((denseCandidates state.useBis xs).foldl (·.insert ·) state.foldBis.get).contains k = true :=
+      fun h => denseNatFold_mono _ _ k (hidx.2 k bi hk h)
+    simp only [denseBiGateFires, Bool.or_eq_true, List.any_eq_true] at hf
+    rcases hf with (hm | hm) | ⟨e, he, hee⟩
+    · exact hvar bi.multiplicity hm (fun v hv => by
+        simp only [denseBIVars, List.mem_append]; exact Or.inl hv)
+    · exact hfold (by simp [denseBiHasFold, hm])
+    · rcases hee with h | h
+      · exact hvar e h (fun v hv => by
+          simp only [denseBIVars, List.mem_append, List.mem_flatMap]
+          exact Or.inr ⟨e, he, hv⟩)
+      · exact hfold (by
+          simp only [denseBiHasFold, Bool.or_eq_true, List.any_eq_true]
+          exact Or.inr ⟨e, he, h⟩)
+  rw [denseBusPosList, List.mem_mergeSort]
+  simpa [Std.HashSet.mem_toList] using hset
+
+/-- Bucket inserts never lose a member. -/
+theorem denseBucketFold_mono (vs : List VarId) (i : Nat) :
+    ∀ (m : Std.HashMap VarId (List Nat)) (v : VarId) (k : Nat), k ∈ m.getD v [] →
+      k ∈ (vs.foldl (fun m v => m.insert v (i :: m.getD v [])) m).getD v [] := by
+  intro m v k
+  induction vs generalizing m with
+  | nil => intro h; exact h
+  | cons a rest ih =>
+      intro h
+      refine ih _ ?_
+      by_cases hva : v = a
+      · subst hva
+        rw [Std.HashMap.getD_insert_self]
+        exact List.mem_cons_of_mem _ h
+      · have hne : (m.insert a (i :: m.getD a [])).getD v [] = m.getD v [] := by
+          rw [Std.HashMap.getD_insert]
+          rw [if_neg (show ¬((a == v) = true) by simpa using Ne.symm hva)]
+        rw [hne]; exact h
+
+/-- A variable of the inserted list gets the position. -/
+theorem denseBucketFold_mem (vs : List VarId) (i : Nat) :
+    ∀ (m : Std.HashMap VarId (List Nat)) (v : VarId), v ∈ vs →
+      i ∈ (vs.foldl (fun m v => m.insert v (i :: m.getD v [])) m).getD v [] := by
+  intro m v
+  induction vs generalizing m with
+  | nil => intro h; simp at h
+  | cons a rest ih =>
+      intro h
+      rcases List.mem_cons.1 h with rfl | h
+      · refine denseBucketFold_mono rest i _ _ i ?_
+        rw [Std.HashMap.getD_insert_self]
+        exact List.mem_cons_self ..
+      · exact ih _ h
+
+/-- Positions the fold does not visit keep their fold-set membership. -/
+theorem denseBusIdxFold_keep_of_not_mem (arrB : Array (BusInteraction (DenseExpr p))) :
+    ∀ (ps : List Nat) (acc : DenseCovIndex × Std.HashSet Nat) (i : Nat), i ∉ ps →
+      acc.2.contains i = true → (denseBusIdxFold arrB ps acc).2.contains i = true := by
+  intro ps
+  induction ps with
+  | nil => intro acc i _ h; rw [denseBusIdxFold]; exact h
+  | cons j rest ih =>
+      intro acc i hni h
+      have hij : i ≠ j := fun hh => hni (hh ▸ List.mem_cons_self ..)
+      rw [denseBusIdxFold]
+      split
+      · refine ih _ i (fun hmem => hni (List.mem_cons_of_mem _ hmem)) ?_
+        show (if denseBiHasFold _ then acc.2.insert j else acc.2.erase j).contains i = true
+        split
+        · simp [Std.HashSet.contains_insert, h]
+        · simp [Std.HashSet.contains_erase, h, Ne.symm hij]
+      · exact ih _ i (fun hmem => hni (List.mem_cons_of_mem _ hmem)) h
+
+/-- A position whose interaction carries a fold node keeps its membership through the fold: every
+    visit to it re-inserts it, since the decision is a function of the (unchanging) content. -/
+theorem denseBusIdxFold_keep_of_hasFold (arrB : Array (BusInteraction (DenseExpr p))) :
+    ∀ (ps : List Nat) (acc : DenseCovIndex × Std.HashSet Nat) (i : Nat) (h : i < arrB.size),
+      denseBiHasFold arrB[i] = true → acc.2.contains i = true →
+      (denseBusIdxFold arrB ps acc).2.contains i = true := by
+  intro ps
+  induction ps with
+  | nil => intro acc i _ _ h; rw [denseBusIdxFold]; exact h
+  | cons j rest ih =>
+      intro acc i hlt hfold h
+      rw [denseBusIdxFold]
+      split
+      · refine ih _ i hlt hfold ?_
+        show (if denseBiHasFold _ then acc.2.insert j else acc.2.erase j).contains i = true
+        by_cases hij : i = j
+        · subst hij; rw [if_pos hfold]; simp [Std.HashSet.contains_insert]
+        · split
+          · simp [Std.HashSet.contains_insert, h]
+          · simp [Std.HashSet.contains_erase, h, Ne.symm hij]
+      · exact ih _ i hlt hfold h
+
+/-- Visited in-range positions get their interaction's variables into the buckets. -/
+theorem denseBusIdxFold_buckets (arrB : Array (BusInteraction (DenseExpr p))) :
+    ∀ (ps : List Nat) (acc : DenseCovIndex × Std.HashSet Nat),
+      (∀ v k, k ∈ acc.1.buckets.getD v [] →
+        k ∈ (denseBusIdxFold arrB ps acc).1.buckets.getD v [])
+      ∧ (∀ i, i ∈ ps → ∀ (h : i < arrB.size), ∀ v ∈ denseBIVars arrB[i],
+          i ∈ (denseBusIdxFold arrB ps acc).1.buckets.getD v []) := by
+  intro ps
+  induction ps with
+  | nil =>
+      intro acc
+      exact ⟨fun v k h => by rw [denseBusIdxFold]; exact h, fun i h => absurd h (by simp)⟩
+  | cons j rest ih =>
+      intro acc
+      rw [denseBusIdxFold]
+      split
+      · next hj =>
+        obtain ⟨ih1, ih2⟩ := ih (⟨(HashedDedup.hashedDedup (hash ·)
+            (denseBIVars arrB[j])).foldl (fun m v => m.insert v (j :: m.getD v [])) acc.1.buckets,
+            acc.1.varless⟩,
+          if denseBiHasFold arrB[j] then acc.2.insert j else acc.2.erase j)
+        refine ⟨fun v k h => ih1 v k (denseBucketFold_mono _ _ _ v k h), ?_⟩
+        intro i hi h v hv
+        rcases List.mem_cons.1 hi with rfl | hi
+        · refine ih1 v i (denseBucketFold_mem _ _ _ v ?_)
+          rw [HashedDedup.hashedDedup_eq]
+          exact List.mem_dedup.2 (by simpa using hv)
+        · exact ih2 i hi h v hv
+      · next hj =>
+        obtain ⟨ih1, ih2⟩ := ih acc
+        refine ⟨ih1, ?_⟩
+        intro i hi h v hv
+        rcases List.mem_cons.1 hi with rfl | hi
+        · exact absurd h hj
+        · exact ih2 i hi h v hv
+
+/-- A visited in-range position carrying a fold node ends up in the fold set. -/
+theorem denseBusIdxFold_mem_of_hasFold (arrB : Array (BusInteraction (DenseExpr p))) :
+    ∀ (ps : List Nat) (acc : DenseCovIndex × Std.HashSet Nat) (i : Nat) (h : i < arrB.size),
+      i ∈ ps → denseBiHasFold arrB[i] = true →
+      (denseBusIdxFold arrB ps acc).2.contains i = true := by
+  intro ps
+  induction ps with
+  | nil => intro _ i _ hi _; exact absurd hi (by simp)
+  | cons j rest ih =>
+      intro acc i hlt hi hfold
+      rcases List.mem_cons.1 hi with rfl | hi
+      · rw [denseBusIdxFold, dif_pos hlt]
+        refine denseBusIdxFold_keep_of_hasFold arrB rest _ i hlt hfold ?_
+        show (if denseBiHasFold arrB[i] then acc.2.insert i else acc.2.erase i).contains i = true
+        rw [if_pos hfold]
+        simp [Std.HashSet.contains_insert]
+      · rw [denseBusIdxFold]
+        split
+        · exact ih _ i hlt hi hfold
+        · exact ih _ i hlt hi hfold
+
+/-- The index invariant survives an accept: the update folds over the positions the rewrite visited,
+    recording the new interactions' variables, and every other position kept its content. -/
+theorem denseBusIdxOk_update {state : DenseReencodeCacheState p} {w w' : DenseReencodeWork p}
+    {xs bits : List VarId} {hm : Std.HashMap VarId (DenseExpr p)}
+    (hidx : DenseBusIdxOk state w)
+    (hnew : ∀ i bi, w'.bis[i]? = some bi → i ∉ denseBusPosList state xs →
+      w.bis[i]? = some bi) :
+    DenseBusIdxOk
+      (denseReencodeStateUpdate state (denseBusPosList state xs) w'.bis xs bits hm) w' := by
+  set ps := denseBusPosList state xs with hps
+  have hproj : (denseReencodeStateUpdate state ps w'.bis xs bits hm).useBis
+      = (denseBusIdxFold w'.bis.toArray ps (state.useBis, state.foldBis.get)).1 := rfl
+  have hprojF : (denseReencodeStateUpdate state ps w'.bis xs bits hm).foldBis.get
+      = (denseBusIdxFold w'.bis.toArray ps (state.useBis, state.foldBis.get)).2 := rfl
+  obtain ⟨hb1, hb2⟩ :=
+    denseBusIdxFold_buckets w'.bis.toArray ps (state.useBis, state.foldBis.get)
+  constructor
+  · intro i bi hi v hv
+    obtain ⟨hlt', hget⟩ := List.getElem?_eq_some_iff.1 hi
+    have hlt : i < w'.bis.toArray.size := by simpa using hlt'
+    have hidx' : w'.bis.toArray[i] = bi := by simpa using hget
+    rw [hproj]
+    by_cases hmem : i ∈ ps
+    · exact hb2 i hmem hlt v (by rw [hidx']; exact hv)
+    · exact hb1 v i (hidx.1 i bi (hnew i bi hi hmem) v hv)
+  · intro i bi hi hfold
+    obtain ⟨hlt', hget⟩ := List.getElem?_eq_some_iff.1 hi
+    have hlt : i < w'.bis.toArray.size := by simpa using hlt'
+    have hidx' : w'.bis.toArray[i] = bi := by simpa using hget
+    rw [hprojF]
+    by_cases hmem : i ∈ ps
+    · exact denseBusIdxFold_mem_of_hasFold w'.bis.toArray ps _ i hlt hmem
+        (by rw [hidx']; exact hfold)
+    · exact denseBusIdxFold_keep_of_not_mem w'.bis.toArray ps _ i hmem
+        (hidx.2 i bi (hnew i bi hi hmem) hfold)
+
 set_option maxHeartbeats 1000000 in
 theorem denseWorkStep_correct [Fact p.Prime] (b : DegreeBound)
     (reg : VarRegistry) (w : DenseReencodeWork p) (state : DenseReencodeCacheState p)
@@ -1428,7 +1717,8 @@ theorem denseWorkStep_correct [Fact p.Prime] (b : DegreeBound)
     (hcov : (denseWorkView w).CoveredBy reg)
     (hpos : w.bounded = true → DenseWorkPosOk w.lastPos w.lastFold w.cs)
     (hbools : DenseWorkBoolsOk w.bitSet w.bools)
-    (hvs : DenseWorkVarsOk state.varSet w) :
+    (hvs : DenseWorkVarsOk state.varSet w)
+    (hidxB : DenseBusIdxOk state w) :
     reg.Extends (denseWorkStep b reg w state xs freshBase).1
     ∧ (∀ i, (denseWorkStep b reg w state xs freshBase).1.isInput i = reg.isInput i)
     ∧ (denseWorkView (denseWorkStep b reg w state xs freshBase).2.1).CoveredBy
@@ -1459,10 +1749,15 @@ theorem denseWorkStep_correct [Fact p.Prime] (b : DegreeBound)
   have hview : denseWorkView ro.1
       = (denseReencodeOut (denseWorkView w) xs bits hm).filterConstraints
           (fun c => !denseIsZero c) := by
-    have h := denseWorkOut_view b (denseWorkEnsureBounded w) xs bits hm
+    have h := denseWorkOut_view (usePosB := denseBusPosList state1 xs)
+        b (denseWorkEnsureBounded w) xs bits hm
       (denseWorkEnsureBounded_posOk hpos)
       (by rw [denseWorkEnsureBounded_bitSet, denseWorkEnsureBounded_bools]; exact hbools)
       (by rw [denseWorkEnsureBounded_bitSet]; exact hxsB')
+      (denseBusPosList_sorted state1 xs)
+      (by
+        intro k bi hk hf
+        exact denseBusPosList_cover xs hidxB k bi (by rwa [denseWorkEnsureBounded_bis] at hk) hf)
     rwa [denseWorkEnsureBounded_view] at h
   have hpolyVars := denseCheckReencode_polyVars (denseWorkView w) xs bits hm hchkView
   have hxsInput : ∀ x ∈ xs, reg1.isInput x = true := fun x hx => by
@@ -1520,7 +1815,8 @@ theorem denseWorkStep_inv (b : DegreeBound) (reg : VarRegistry) (w : DenseReenco
     (state : DenseReencodeCacheState p) (xs : List VarId) (freshBase : String)
     (hpos : w.bounded = true → DenseWorkPosOk w.lastPos w.lastFold w.cs)
     (hbools : DenseWorkBoolsOk w.bitSet w.bools)
-    (hvs : DenseWorkVarsOk state.varSet w) :
+    (hvs : DenseWorkVarsOk state.varSet w)
+    (hidxB : DenseBusIdxOk state w) :
     ((denseWorkStep b reg w state xs freshBase).2.1.bounded = true →
       DenseWorkPosOk (denseWorkStep b reg w state xs freshBase).2.1.lastPos
         (denseWorkStep b reg w state xs freshBase).2.1.lastFold
@@ -1528,13 +1824,15 @@ theorem denseWorkStep_inv (b : DegreeBound) (reg : VarRegistry) (w : DenseReenco
     ∧ DenseWorkBoolsOk (denseWorkStep b reg w state xs freshBase).2.1.bitSet
         (denseWorkStep b reg w state xs freshBase).2.1.bools
     ∧ DenseWorkVarsOk (denseWorkStep b reg w state xs freshBase).2.2.2.varSet
+        (denseWorkStep b reg w state xs freshBase).2.1
+    ∧ DenseBusIdxOk (denseWorkStep b reg w state xs freshBase).2.2.2
         (denseWorkStep b reg w state xs freshBase).2.1 := by
   fun_cases denseWorkStep b reg w state xs freshBase
-  all_goals try exact ⟨hpos, hbools, hvs⟩
+  all_goals try exact ⟨hpos, hbools, hvs, hidxB⟩
   rename_i hgate hbit hcoll reg1 bits hm rootCache hbeq state1 hbits hdpr hA hB hC hD ro hwd
   have hxsB' : ∀ x ∈ xs, w.bitSet.contains x = false := by simpa using hbit
   have hbitsB' : ∀ bb ∈ bits, w.bitSet.contains bb = false := by simpa using hbits
-  refine ⟨?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_⟩
   · intro _
     show DenseWorkPosOk _ _ _
     rw [densePosOk_from0]
@@ -1561,10 +1859,16 @@ theorem denseWorkStep_inv (b : DegreeBound) (reg : VarRegistry) (w : DenseReenco
     have hview : denseWorkView ro.1
         = (denseReencodeOut (denseWorkView w) xs bits hm).filterConstraints
             (fun c => !denseIsZero c) := by
-      have h := denseWorkOut_view b (denseWorkEnsureBounded w) xs bits hm
+      have h := denseWorkOut_view (usePosB := denseBusPosList state1 xs)
+          b (denseWorkEnsureBounded w) xs bits hm
         (denseWorkEnsureBounded_posOk hpos)
         (by rw [denseWorkEnsureBounded_bitSet, denseWorkEnsureBounded_bools]; exact hbools)
         (by rw [denseWorkEnsureBounded_bitSet]; exact hxsB')
+        (denseBusPosList_sorted state1 xs)
+        (by
+          intro k bi hk hf
+          exact denseBusPosList_cover (w := w) xs hidxB k bi
+            (by rwa [denseWorkEnsureBounded_bis] at hk) hf)
       rwa [denseWorkEnsureBounded_view] at h
     intro v hv
     show (bits.foldl (·.insert ·) state.varSet).contains v = true
@@ -1573,6 +1877,24 @@ theorem denseWorkStep_inv (b : DegreeBound) (reg : VarRegistry) (w : DenseReenco
         (denseFilterConstraints_occ_sub _ _ v hv) with h | h
     · exact denseBitSetFold_mono bits state.varSet v (hvs v h)
     · exact denseBitSetFold_mem bits state.varSet v h
+  · -- the bus index invariant survives an accept
+    have hcov : ∀ k bi, (denseWorkEnsureBounded w).bis[k]? = some bi →
+        denseBiGateFires xs bi = true → k ∈ denseBusPosList state1 xs := by
+      intro k bi hk hf
+      exact denseBusPosList_cover (w := w) xs hidxB k bi
+        (by rwa [denseWorkEnsureBounded_bis] at hk) hf
+    have hnew : ∀ i bi, ro.1.bis[i]? = some bi → i ∉ denseBusPosList state1 xs →
+        w.bis[i]? = some bi := by
+      intro i bi hi hni
+      have hro : ro.1.bis = (denseGateBisPos b.busInteractions xs bits (denseGroupSubst xs hm)
+          (denseAssignments (denseBitBox bits)) (denseBusPosList state1 xs) 0
+          (denseWorkEnsureBounded w).bis [] true).1 := rfl
+      rw [hro] at hi
+      have := denseGateBisPos_untouched b.busInteractions xs bits (denseGroupSubst xs hm)
+        (denseAssignments (denseBitBox bits)) (denseBusPosList state1 xs)
+        (denseWorkEnsureBounded w).bis (denseBusPosList_sorted state1 xs) hcov i bi hi hni
+      rwa [denseWorkEnsureBounded_bis] at this
+    exact denseBusIdxOk_update hidxB hnew
 
 set_option maxHeartbeats 1000000 in
 theorem denseWorkLoop_correct [Fact p.Prime] (b : DegreeBound) (bs : BusSemantics p) :
@@ -1582,6 +1904,7 @@ theorem denseWorkLoop_correct [Fact p.Prime] (b : DegreeBound) (bs : BusSemantic
       (w.bounded = true → DenseWorkPosOk w.lastPos w.lastFold w.cs) →
       DenseWorkBoolsOk w.bitSet w.bools →
       DenseWorkVarsOk state.varSet w →
+      DenseBusIdxOk state w →
       reg.Extends (denseWorkLoop b targets idx reg w state nc nb).1
       ∧ (∀ i, (denseWorkLoop b targets idx reg w state nc nb).1.isInput i = reg.isInput i)
       ∧ (denseWorkView (denseWorkLoop b targets idx reg w state nc nb).2.1).CoveredBy
@@ -1594,7 +1917,7 @@ theorem denseWorkLoop_correct [Fact p.Prime] (b : DegreeBound) (bs : BusSemantic
   intro targets
   induction targets with
   | nil =>
-      intro idx reg w state nc nb hcov _ _ _
+      intro idx reg w state nc nb hcov _ _ _ _
       show reg.Extends reg ∧ (∀ i, reg.isInput i = reg.isInput i)
         ∧ (denseWorkView w).CoveredBy reg
         ∧ DenseDerivations.CoveredBy reg ([] : DenseDerivations p)
@@ -1603,16 +1926,16 @@ theorem denseWorkLoop_correct [Fact p.Prime] (b : DegreeBound) (bs : BusSemantic
       exact ⟨VarRegistry.Extends.refl reg, fun _ => rfl, hcov,
         (by intro x hx; simp at hx), DensePassCorrect.refl reg.isInput (denseWorkView w) bs⟩
   | cons xs rest ih =>
-      intro idx reg w state nc nb hcov hpos hbools hvs
+      intro idx reg w state nc nb hcov hpos hbools hvs hidxB
       simp only [denseWorkLoop]
       rcases hstep : denseWorkStep b reg w state xs s!"rnc{nc}_{nb}_{idx}"
           with ⟨reg1, w1, derivs1, state1⟩
       have hsp := denseWorkStep_correct b reg w state xs s!"rnc{nc}_{nb}_{idx}" bs hcov hpos hbools
-        hvs
-      have hinv := denseWorkStep_inv b reg w state xs s!"rnc{nc}_{nb}_{idx}" hpos hbools hvs
+        hvs hidxB
+      have hinv := denseWorkStep_inv b reg w state xs s!"rnc{nc}_{nb}_{idx}" hpos hbools hvs hidxB
       simp only [hstep] at hsp hinv
       obtain ⟨hs_ext, hs_ii, hs_cov, hs_dcov, hs_correct⟩ := hsp
-      obtain ⟨hi_pos, hi_bools, hi_vs⟩ := hinv
+      obtain ⟨hi_pos, hi_bools, hi_vs, hi_idxB⟩ := hinv
       rcases hrec : denseWorkLoop b rest (idx + 1) reg1 w1 state1
           (denseWorkNameCountsS derivs1 w1 state1 nc nb).1
           (denseWorkNameCountsS derivs1 w1 state1 nc nb).2
@@ -1620,7 +1943,7 @@ theorem denseWorkLoop_correct [Fact p.Prime] (b : DegreeBound) (bs : BusSemantic
       have hih := ih (idx + 1) reg1 w1 state1
           (denseWorkNameCountsS derivs1 w1 state1 nc nb).1
           (denseWorkNameCountsS derivs1 w1 state1 nc nb).2
-          hs_cov hi_pos hi_bools hi_vs
+          hs_cov hi_pos hi_bools hi_vs hi_idxB
       simp only [hrec] at hih
       obtain ⟨hr_ext, hr_ii, hr_cov, hr_dcov, hr_correct⟩ := hih
       refine ⟨hs_ext.trans hr_ext, fun i => (hr_ii i).trans (hs_ii i), hr_cov, ?_, ?_⟩
@@ -1668,6 +1991,8 @@ theorem denseReencodeF_props (pw : PrimeWitness p) (b : DegreeBound) (reg : VarR
         arrBis := d.busInteractions.toArray
         foldCs := d.algebraicConstraints.zipIdx.foldl
           (fun s ci => if ci.1.hasConstFoldableNode then s.insert ci.2 else s) ∅
+        foldBis := Thunk.mk (fun _ => d.busInteractions.zipIdx.foldl
+          (fun s bi => if denseBiHasFold bi.1 then s.insert bi.2 else s) ∅)
         liveCs := (d.algebraicConstraints.filter (fun c => !denseIsZero c)).length
         bisN := d.busInteractions.length
         dWithin := false } with hst
@@ -1678,10 +2003,22 @@ theorem denseReencodeF_props (pw : PrimeWitness p) (b : DegreeBound) (reg : VarR
       rw [hst]
       show (Std.HashSet.ofList d.occ).contains v = true
       simpa [Std.HashSet.contains_ofList, List.contains_iff_mem] using hd
+    have hseedIdxB : DenseBusIdxOk st (denseWorkSeed d) := by
+      constructor
+      · intro i bi hi v hv
+        rw [hst]
+        show i ∈ (denseCovBuild denseBIVars d.busInteractions).buckets.getD v []
+        exact denseBuild_complete' denseBIVars d.busInteractions i bi (by simpa using hi) v hv
+      · intro i bi hi hfold
+        rw [hst]
+        show ((d.busInteractions.zipIdx).foldl
+          (fun s x => if denseBiHasFold x.1 then s.insert x.2 else s)
+          (∅ : Std.HashSet Nat)).contains i = true
+        simpa using denseFoldBisSeed_complete d.busInteractions 0 ∅ i bi (by simpa using hi) hfold
     obtain ⟨he, _, hc, hd, hcorr⟩ :=
       denseWorkLoop_correct b bs targets 0 reg (denseWorkSeed d) st
         (d.algebraicConstraints.filter (fun c => !denseIsZero c)).length d.busInteractions.length
-        hseedCov hseedPos hseedBools hseedVars
+        hseedCov hseedPos hseedBools hseedVars hseedIdxB
     refine ⟨he, hc, hd, ?_⟩
     -- the seed drops trivially-true constraints, itself a verified step
     have hpre : DensePassCorrect
