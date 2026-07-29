@@ -340,9 +340,10 @@ theorem denseFreshFused_eq (d : DenseConstraintSystem p) (bits : List VarId) :
     exact ⟨fun c hc b hb => (h b hb).1 c hc, fun bi hbi =>
       ⟨fun b hb => ((h b hb).2 bi hbi).1, fun e he b hb => ((h b hb).2 bi hbi).2 e he⟩⟩
 
-/-- `denseCheckReencode` with the covered set shared between the domain and soundness conjuncts
-    and the freshness conjunct decided in one system walk. -/
-def denseCheckReencodeFast (d : DenseConstraintSystem p) (xs bits : List VarId)
+/-- Every conjunct of the certificate except freshness. Split out so `denseWorkStep` can discharge
+    freshness from the threaded variable superset instead of scanning
+    (`denseFreshScan_of_notMemOcc`). -/
+def denseCheckReencodeNoFresh (d : DenseConstraintSystem p) (xs bits : List VarId)
     (hm : Std.HashMap VarId (DenseExpr p)) : Bool :=
   let es := denseCoveredCsOf d xs
   match denseGroupDoms es xs with
@@ -361,16 +362,36 @@ def denseCheckReencodeFast (d : DenseConstraintSystem p) (xs bits : List VarId)
         decide (((DenseExpr.var x).substF (denseGroupSubst xs hm)).evalFast (denseEnvOfFast aβ)
           = denseEnvOfFast s x)))) &&
     patts.all (fun aβ => es.all (fun c =>
-      decide ((c.substF (denseGroupSubst xs hm)).evalFast (denseEnvOfFast aβ) = 0))) &&
-    (d.algebraicConstraints.all (fun c => !c.mentionsAny (Std.HashSet.ofList bits)) &&
-      d.busInteractions.all (fun bi =>
-        !bi.multiplicity.mentionsAny (Std.HashSet.ofList bits) &&
-        bi.payload.all (fun e => !e.mentionsAny (Std.HashSet.ofList bits))))
+      decide ((c.substF (denseGroupSubst xs hm)).evalFast (denseEnvOfFast aβ) = 0)))
+
+/-- The freshness conjunct: no bit occurs anywhere in the system. -/
+def denseFreshScan (d : DenseConstraintSystem p) (bits : List VarId) : Bool :=
+  d.algebraicConstraints.all (fun c => !c.mentionsAny (Std.HashSet.ofList bits)) &&
+    d.busInteractions.all (fun bi =>
+      !bi.multiplicity.mentionsAny (Std.HashSet.ofList bits) &&
+      bi.payload.all (fun e => !e.mentionsAny (Std.HashSet.ofList bits)))
+
+def denseCheckReencodeFast (d : DenseConstraintSystem p) (xs bits : List VarId)
+    (hm : Std.HashMap VarId (DenseExpr p)) : Bool :=
+  denseCheckReencodeNoFresh d xs bits hm && denseFreshScan d bits
 
 @[csimp] theorem denseCheckReencode_eq_fast : @denseCheckReencode = @denseCheckReencodeFast := by
   funext q d xs bits hm
-  unfold denseCheckReencode denseCheckReencodeFast
+  unfold denseCheckReencode denseCheckReencodeFast denseCheckReencodeNoFresh denseFreshScan
   simp only [denseFreshFused_eq]
+  split
+  · rfl
+  · simp only [Bool.and_assoc]
+
+/-- The certificate from its two halves. -/
+theorem denseCheckReencode_of_parts (d : DenseConstraintSystem p) (xs bits : List VarId)
+    (hm : Std.HashMap VarId (DenseExpr p))
+    (h1 : denseCheckReencodeNoFresh d xs bits hm = true)
+    (h2 : denseFreshScan d bits = true) : denseCheckReencode d xs bits hm = true := by
+  have h : denseCheckReencode d xs bits hm = denseCheckReencodeFast d xs bits hm := by
+    simp only [denseCheckReencode_eq_fast]
+  rw [h]
+  simp only [denseCheckReencodeFast, h1, h2, Bool.and_self]
 
 /-! ## Derived-variable methods for the fresh bits
 
@@ -647,9 +668,33 @@ def denseIsZero : DenseExpr p → Bool
   | .const n => n == 0
   | _ => false
 
+/-- `denseIsZero` with the field zero as a parameter. The compiler floats the `0`'s whole
+    `ZMod.commRing` chain to the head of `denseIsZero`, *before* the constructor test, so a caller
+    scanning a list pays four dictionary constructions per item; binding the zero in the function
+    that contains the scan hoists it out of the loop. -/
+def denseIsZeroW (zero : ZMod p) : DenseExpr p → Bool
+  | .const n => n == zero
+  | _ => false
+
+theorem denseIsZeroW_zero : denseIsZeroW (0 : ZMod p) = denseIsZero (p := p) := by
+  funext e; cases e <;> rfl
+
 def denseWorkView (w : DenseReencodeWork p) : DenseConstraintSystem p :=
   { algebraicConstraints := w.cs.filter (fun c => !denseIsZero c) ++ w.bools,
     busInteractions := w.bis }
+
+/-- Boxed twin: `zero` must be a parameter of the function *containing* the scan. A `let` at the
+    head of `denseWorkViewFast` is floated back into the `filter` body by the compiler (verified in
+    the generated C), which is the whole cost being removed here. -/
+def denseWorkViewW (zero : ZMod p) (w : DenseReencodeWork p) : DenseConstraintSystem p :=
+  { algebraicConstraints := w.cs.filter (fun c => !denseIsZeroW zero c) ++ w.bools,
+    busInteractions := w.bis }
+
+def denseWorkViewFast (w : DenseReencodeWork p) : DenseConstraintSystem p := denseWorkViewW 0 w
+
+@[csimp] theorem denseWorkView_eq_fast : @denseWorkView = @denseWorkViewFast := by
+  funext p w
+  simp only [denseWorkView, denseWorkViewFast, denseWorkViewW, denseIsZeroW_zero]
 
 /-- One position's new content: the placeholder if the group covers it, else the gated rewrite. -/
 def denseTombify (xs bits : List VarId) (σfn : VarId → Option (DenseExpr p))
@@ -1514,6 +1559,12 @@ structure DenseReencodeCacheState (p : ℕ) where
   useBis : DenseCovIndex
   arrBis : Array (BusInteraction (DenseExpr p))
   foldCs : Std.HashSet Nat
+  /-- The number of non-tombstone entries of `w.cs`, and `w.bis.length`. Both feed the fresh-name
+      prefix only (`denseWorkNameCountsS`), which is why they live on the untrusted state: a wrong
+      count can cost a rejected candidate, never soundness. Maintained exactly — the state update
+      visits every position an accept can turn into `.const 0`. -/
+  liveCs : Nat
+  bisN : Nat
   /-- Whether `d` is *known* to be within the degree bound — the side condition that makes
       `denseReencodeOutOk`'s fused degree test agree with measuring the rewritten system outright
       (`denseReencodeOutOk_snd`). Starts `false`, so the first candidate to reach the gate measures
@@ -1522,6 +1573,22 @@ structure DenseReencodeCacheState (p : ℕ) where
       `d.withinDegreeB b`: that walk would be charged to every APC, including the ones where no
       candidate is ever accepted. -/
   dWithin : Bool
+
+/-! ### Freshness from the state's variable superset
+
+The certificate's freshness conjunct is its only `O(system)` one: it walks every constraint and
+every bus expression to check that no minted bit occurs there (measured at 66.6 % of the
+certificate, ~25 % of the pass, on sha256/apc_001). `state.varSet` starts as
+`Std.HashSet.ofList d.occ` and only ever *gains* the minted bits, so it over-approximates the live
+variables — and `bits.all (fun b => !varSet.contains b)` is therefore an `O(|bits|)` sufficient
+condition for freshness. Being sufficient rather than equivalent, it enters the proof as an
+implication (`denseCheckReencodeVS_sound`), not a `@[csimp]` equality; the invariant that licenses
+it is `DenseWorkVarsOk`, threaded through the step and the loop. -/
+
+/-- The checked certificate with freshness decided from `state.varSet` in `O(|bits|)`. -/
+def denseCheckReencodeVS (state : DenseReencodeCacheState p) (d : DenseConstraintSystem p)
+    (xs bits : List VarId) (hm : Std.HashMap VarId (DenseExpr p)) : Bool :=
+  bits.all (fun bb => !state.varSet.contains bb) && denseCheckReencodeNoFresh d xs bits hm
 
 /-- Apply an accepted rewrite to the threaded state in place, mirroring `denseReencodeOut` on the
     stable-position arrays: only positions holding a group variable (bucket candidates) or a
@@ -1538,12 +1605,14 @@ def denseReencodeStateUpdate (state : DenseReencodeCacheState p) (xs bits : List
     if h : i < st.arrCs.size then
       let c := st.arrCs[i]
       if denseCoveredBy xs c then
+        -- covered ⇒ `c.hasVar` ⇒ `c` was not a tombstone, so the live count drops by one
         { st with arrCs := st.arrCs.set i (.const 0), rootCache := st.rootCache.erase i,
-                  foldCs := st.foldCs.erase i }
+                  foldCs := st.foldCs.erase i, liveCs := st.liveCs - 1 }
       else if c.sharesVarIn xs || c.hasConstFoldableNode then
         let c' := denseGroupRewrite xs bits σfn patts c
         let vs := HashedDedup.hashedDedup (hash ·) c'.vars
         { st with
+          liveCs := if denseIsZero c' then st.liveCs - 1 else st.liveCs
           arrCs := st.arrCs.set i c'
           rootCache := st.rootCache.erase i
           csIdx := if vs.length ≤ 8 then bucketAdd st.csIdx vs i else st.csIdx
@@ -1570,7 +1639,9 @@ def denseReencodeStateUpdate (state : DenseReencodeCacheState p) (xs bits : List
                     (HashedDedup.hashedDedup (hash ·) (denseBIVars bi')) i }
       else st
     else st) st
-  { st with varSet := bits.foldl (·.insert ·) st.varSet, dWithin := true }
+  -- `varSet` is grown from the *input* state: the position folds above never touch it, and reading
+  -- it from `state` keeps `denseReencodeStateUpdate_varSet` a projection instead of a fold invariant.
+  { st with varSet := bits.foldl (·.insert ·) state.varSet, dWithin := true }
 
 theorem densePosOk_from0 {lp : Std.HashMap VarId Nat} {lf : Nat} {cs : List (DenseExpr p)} :
     DenseWorkPosOk lp lf cs ↔ DenseWorkPosOkFrom 0 lp lf cs := by
@@ -1611,6 +1682,14 @@ def denseWorkNameCounts (derivs : DenseDerivations p) (w : DenseReencodeWork p) 
   if derivs.isEmpty then (nc, nb)
   else ((w.cs.filter (fun c => !denseIsZero c)).length + w.bools.length, w.bis.length)
 
+/-- The same counts, served from the threaded state instead of re-walking the whole system on every
+    accept (`state.liveCs` mirrors `(w.cs.filter (!denseIsZero ·)).length`, `state.bisN` is
+    `w.bis.length`, which no accept changes). Names only need to be fresh, and freshness is checked
+    separately, so this is untrusted. -/
+def denseWorkNameCountsS (derivs : DenseDerivations p) (w : DenseReencodeWork p)
+    (state : DenseReencodeCacheState p) (nc nb : Nat) : Nat × Nat :=
+  if derivs.isEmpty then (nc, nb) else (state.liveCs + w.bools.length, state.bisN)
+
 /-- One checked re-encoding step. Mirrors the cached step, with two extra guards — no group variable
     and no freshly minted bit may be a bit minted earlier — which is what keeps the deferred
     booleanity constraints inert for this group (`denseBoolConstraint_inert`). Rejecting a candidate is
@@ -1636,7 +1715,8 @@ def denseWorkStep (b : DegreeBound) (reg : VarRegistry) (w : DenseReencodeWork p
     if xs.all (fun x => state.varSet.contains x) then
     if xs.all (fun x => decide (x ∉ bits)) then
     if bits.all (fun bb => decide ((reg1.resolve bb).powdrId? = none)) then
-    if denseCheckReencode { algebraicConstraints := w.cs, busInteractions := w.bis } xs bits hm then
+    if denseCheckReencodeVS state { algebraicConstraints := w.cs, busInteractions := w.bis }
+        xs bits hm then
       let ro := denseWorkOut b (denseWorkEnsureBounded w) xs bits hm
       if (if state.dWithin then ro.2 else (denseWorkView ro.1).withinDegreeB b) then
         (reg1, ro.1,
@@ -1656,7 +1736,7 @@ def denseWorkLoop (b : DegreeBound) :
   | [], _, reg, w, _, _, _ => (reg, w, [])
   | xs :: rest, idx, reg, w, state, nc, nb =>
     let (reg1, w1, derivs1, state1) := denseWorkStep b reg w state xs s!"rnc{nc}_{nb}_{idx}"
-    let (nc1, nb1) := denseWorkNameCounts derivs1 w1 nc nb
+    let (nc1, nb1) := denseWorkNameCountsS derivs1 w1 state1 nc nb
     let (reg2, w2, derivs2) := denseWorkLoop b rest (idx + 1) reg1 w1 state1 nc1 nb1
     (reg2, w2, derivs1 ++ derivs2)
 
@@ -1696,6 +1776,8 @@ def denseReencodeF (pw : PrimeWitness p) (b : DegreeBound) (reg : VarRegistry)
         arrBis := d.busInteractions.toArray
         foldCs := d.algebraicConstraints.zipIdx.foldl
           (fun s ci => if ci.1.hasConstFoldableNode then s.insert ci.2 else s) ∅
+        liveCs := (d.algebraicConstraints.filter (fun c => !denseIsZero c)).length
+        bisN := d.busInteractions.length
         dWithin := false }
       (d.algebraicConstraints.filter (fun c => !denseIsZero c)).length d.busInteractions.length
     (r.1, denseWorkView r.2.1, r.2.2)
