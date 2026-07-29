@@ -5361,4 +5361,15 @@ RESIDUAL for the next pass at this: the surviving 0.86 M certificate evaluations
 builds the whole `CommRing` chain before testing `terms.isEmpty`), the per-invocation index builds
 (5.4 % of the old pass), the per-drop `alive` array copy (2.1 %, all `lean_copy_expand_array`, ~8 GB of
 memcpy over 14 418 drops) and `denseInteractionBound`'s per-variable pattern rebuild (R13b).
-**Worked: yes (busPairCancel 0.33× on its worst case, −8.1 % end-to-end, output byte-identical; draft PR).**
+CI FOLLOW-UP: the effectiveness matrix's runtime row reported wasm-eth +20 %, SP1 rsp +67 %,
+openvm-eth +5 % (keccak −4 %, sha256 −6 %, SP1 keccak −7 %) — the parallel-harness artifact, measured
+twice. CI's serial `Runtime Bench` on the same runner: openvm-eth total **0.99×**, busPairCancel
+**0.83×**, every other pass 1.00× ± noise. Local serial interleaved re-run of the three flagged sets
+(300 cases, one process at a time): wall **118967 → 113145 ms (0.951×)**, busPairCancel
+**12749 → 7263 ms (0.570×)** — SP1/rsp 0.982× wall / 0.762× pass, openvm-eth 0.990× / 0.819×,
+wasm-eth 0.926× / 0.507×; all 23 cases with ≥ 50 ms of pass time improve (0.16×–0.97×), and the row's
+outliers are 8–80 ms cases carrying 0–5 ms of the pass (rsp: 28 cases >5 % slower, 30 >5 % faster).
+Peak RSS checked because the index is now stored as both lists and arrays, i.e. the one mechanism that
+could make a parallel-only regression real: wasm-eth apc_012 241.7 → 228.1 MB, openvm-eth apc_005
+111.8 → 112.4 MB.
+**Worked: yes (busPairCancel 0.33× on its worst case, corpus 0.570× on the pass, output byte-identical; draft PR #253).**

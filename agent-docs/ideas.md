@@ -540,10 +540,18 @@ the allocation traffic of their results. The `.fallback` row is **done (entry 15
   indexes are the pattern.
 - **Feeding whole regions into per-query justification arms**: 63 s/case for −3 interactions
   (entry 102). Use a position index or nothing.
-- CI notes (updated 2026-07-24): the effectiveness-matrix runtime row swung **+51 % → +15 % on
+- CI notes (updated 2026-07-29): the effectiveness-matrix runtime row swung **+51 % → +15 % on
   identical code** for openvm-eth while its own per-pass table showed ≤1.04× — treat the wall row
   as ±50 % noise on the small parallel sets and read the per-pass table instead; the serial
-  `Runtime Bench` workflow (dispatch-only, openvm sets only) is the real A/B. This container has
+  `Runtime Bench` workflow (dispatch-only, openvm sets only) is the real A/B. **Entry 153 re-confirmed
+  this quantitatively**: the row read wasm-eth +20 %, SP1 rsp +67 %, openvm-eth +5 % for a change that
+  the serial `Runtime Bench` on the same runner put at **0.99× total / 0.83× on the pass**, and that a
+  local serial interleaved re-run of all three sets (300 cases) put at **0.951× wall / 0.570× on the
+  pass**, with every case ≥ 50 ms of pass time improving. The row's per-case outliers are 8–80 ms
+  cases carrying 0–5 ms of the pass: on SP1 rsp, 28 cases came out >5 % slower and 30 >5 % faster.
+  `benchmark.py` runs cases with `--jobs = cpu_count`; the runtime it prints is scheduling, not work.
+  Peak RSS is worth one check when the row moves (entry 153: 241.7 → 228.1 MB on wasm-eth apc_012),
+  since memory pressure is the one mechanism that *would* make a parallel-only regression real. This container has
   ±15 % run-to-run variance; keccak numbers above were taken serially, and the per-cycle keccak
   run was inflated ~30 % by a concurrent gdb sampler — compare shapes, not absolutes, and let CI
   arbitrate.
