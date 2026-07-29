@@ -1337,13 +1337,98 @@ theorem denseFilterConstraints_coveredBy {d : DenseConstraintSystem p} {reg : Va
     (d.filterConstraints keep).CoveredBy reg :=
   ⟨fun e he => h.1 e (List.mem_of_mem_filter he), h.2⟩
 
+/-! ### The variable-superset invariant
+
+`denseWorkStep` decides bit freshness from `state.varSet` rather than scanning the system. What
+licenses that is `DenseWorkVarsOk`: every variable occurring in the working system is in `varSet`.
+The seed satisfies it by construction (`varSet = ofList d.occ`), and an accept preserves it because
+the rewritten system's variables are old variables or fresh bits
+(`denseReencodeOut_vars_subset`), and the fresh bits are exactly what the state update inserts. -/
+
+/-- Every variable of the working system is recorded in `vs`. -/
+def DenseWorkVarsOk (vs : Std.HashSet VarId) (w : DenseReencodeWork p) : Prop :=
+  ∀ v ∈ (denseWorkView w).occ, vs.contains v = true
+
+theorem denseIsZero_vars {c : DenseExpr p} (h : denseIsZero c = true) : c.vars = [] := by
+  cases c <;> simp_all [denseIsZero, DenseExpr.vars]
+
+/-- The raw working pieces have no variable the view lacks: the view only drops `.const 0`
+    tombstones, which carry none. -/
+theorem denseWorkRaw_occ_sub (w : DenseReencodeWork p) :
+    ∀ v ∈ ({ algebraicConstraints := w.cs,
+             busInteractions := w.bis } : DenseConstraintSystem p).occ,
+      v ∈ (denseWorkView w).occ := by
+  intro v hv
+  simp only [DenseConstraintSystem.occ, List.mem_append, List.mem_flatMap] at hv
+  rcases hv with ⟨c, hc, hcv⟩ | ⟨bi, hbi, hbiv⟩
+  · have hkeep : (!denseIsZero c) = true := by
+      cases hz : denseIsZero c with
+      | false => rfl
+      | true => rw [denseIsZero_vars hz] at hcv; simp at hcv
+    refine DenseConstraintSystem.mem_occ_of_constraint (c := c) ?_ hcv
+    show c ∈ w.cs.filter (fun c => !denseIsZero c) ++ w.bools
+    exact List.mem_append.2 (Or.inl (List.mem_filter.2 ⟨hc, hkeep⟩))
+  · exact DenseConstraintSystem.mem_occ_of_bi (bi := bi) hbi hbiv
+
+/-- Filtering constraints cannot introduce a variable. -/
+theorem denseFilterConstraints_occ_sub (d : DenseConstraintSystem p)
+    (keep : DenseExpr p → Bool) :
+    ∀ v ∈ (d.filterConstraints keep).occ, v ∈ d.occ := by
+  intro v hv
+  simp only [DenseConstraintSystem.occ, DenseConstraintSystem.filterConstraints,
+    List.mem_append, List.mem_flatMap] at hv
+  rcases hv with ⟨c, hc, hcv⟩ | ⟨bi, hbi, hbiv⟩
+  · exact DenseConstraintSystem.mem_occ_of_constraint (List.mem_of_mem_filter hc) hcv
+  · exact DenseConstraintSystem.mem_occ_of_bi hbi hbiv
+
+/-- Freshness holds for any bit the system does not mention. -/
+theorem denseFreshScan_of_notMemOcc (d : DenseConstraintSystem p) (bits : List VarId)
+    (h : ∀ b ∈ bits, b ∉ d.occ) : denseFreshScan d bits = true := by
+  have hb : ∀ (e : DenseExpr p), (∀ b ∈ bits, b ∉ e.vars) →
+      e.mentionsAny (Std.HashSet.ofList bits) = false := by
+    intro e he
+    exact (DenseExpr.mentionsAny_ofList_false_iff bits e).2 (fun b hbm =>
+      by
+        cases hm : e.mentions b with
+        | false => rfl
+        | true => exact absurd (DenseExpr.mentions_mem_vars hm) (he b hbm))
+  simp only [denseFreshScan, Bool.and_eq_true, List.all_eq_true, Bool.not_eq_true']
+  refine ⟨fun c hc => hb c (fun b hbm hv => h b hbm ?_), fun bi hbi => ⟨hb _ (fun b hbm hv =>
+    h b hbm ?_), fun e he => hb e (fun b hbm hv => h b hbm ?_)⟩⟩
+  · exact DenseConstraintSystem.mem_occ_of_constraint hc hv
+  · exact DenseConstraintSystem.mem_occ_of_bi hbi (by
+      simp only [denseBIVars, List.mem_append]; exact Or.inl hv)
+  · exact DenseConstraintSystem.mem_occ_of_bi hbi (by
+      simp only [denseBIVars, List.mem_append, List.mem_flatMap]
+      exact Or.inr ⟨e, he, hv⟩)
+
+/-- The step's certificate: the `varSet` test plus the remaining conjuncts give the full
+    certificate, on the strength of the invariant. -/
+theorem denseCheckReencodeVS_sound {w : DenseReencodeWork p}
+    {state : DenseReencodeCacheState p} {xs bits : List VarId}
+    {hm : Std.HashMap VarId (DenseExpr p)} (hvs : DenseWorkVarsOk state.varSet w)
+    (h : denseCheckReencodeVS state
+      { algebraicConstraints := w.cs, busInteractions := w.bis } xs bits hm = true) :
+    denseCheckReencode { algebraicConstraints := w.cs, busInteractions := w.bis } xs bits hm
+      = true := by
+  rw [denseCheckReencodeVS, Bool.and_eq_true] at h
+  obtain ⟨hnv, hnf⟩ := h
+  refine denseCheckReencode_of_parts _ xs bits hm hnf (denseFreshScan_of_notMemOcc _ bits ?_)
+  intro b hb hmem
+  have hcontains : state.varSet.contains b = true :=
+    hvs b (denseWorkRaw_occ_sub w b hmem)
+  have := List.all_eq_true.mp hnv b hb
+  rw [hcontains] at this
+  exact Bool.noConfusion this
+
 set_option maxHeartbeats 1000000 in
 theorem denseWorkStep_correct [Fact p.Prime] (b : DegreeBound)
     (reg : VarRegistry) (w : DenseReencodeWork p) (state : DenseReencodeCacheState p)
     (xs : List VarId) (freshBase : String) (bs : BusSemantics p)
     (hcov : (denseWorkView w).CoveredBy reg)
     (hpos : w.bounded = true → DenseWorkPosOk w.lastPos w.lastFold w.cs)
-    (hbools : DenseWorkBoolsOk w.bitSet w.bools) :
+    (hbools : DenseWorkBoolsOk w.bitSet w.bools)
+    (hvs : DenseWorkVarsOk state.varSet w) :
     reg.Extends (denseWorkStep b reg w state xs freshBase).1
     ∧ (∀ i, (denseWorkStep b reg w state xs freshBase).1.isInput i = reg.isInput i)
     ∧ (denseWorkView (denseWorkStep b reg w state xs freshBase).2.1).CoveredBy
@@ -1370,7 +1455,7 @@ theorem denseWorkStep_correct [Fact p.Prime] (b : DegreeBound)
   have hbitsB' : ∀ bb ∈ bits, w.bitSet.contains bb = false := by simpa using hbits
   have hchkView : denseCheckReencode (denseWorkView w) xs bits hm = true := by
     rw [denseWorkView_check hm hbools hxsB' hbitsB']
-    exact hD
+    exact denseCheckReencodeVS_sound hvs hD
   have hview : denseWorkView ro.1
       = (denseReencodeOut (denseWorkView w) xs bits hm).filterConstraints
           (fun c => !denseIsZero c) := by
@@ -1434,17 +1519,22 @@ theorem denseBitSetFold_mem (bits : List VarId) :
 theorem denseWorkStep_inv (b : DegreeBound) (reg : VarRegistry) (w : DenseReencodeWork p)
     (state : DenseReencodeCacheState p) (xs : List VarId) (freshBase : String)
     (hpos : w.bounded = true → DenseWorkPosOk w.lastPos w.lastFold w.cs)
-    (hbools : DenseWorkBoolsOk w.bitSet w.bools) :
+    (hbools : DenseWorkBoolsOk w.bitSet w.bools)
+    (hvs : DenseWorkVarsOk state.varSet w) :
     ((denseWorkStep b reg w state xs freshBase).2.1.bounded = true →
       DenseWorkPosOk (denseWorkStep b reg w state xs freshBase).2.1.lastPos
         (denseWorkStep b reg w state xs freshBase).2.1.lastFold
         (denseWorkStep b reg w state xs freshBase).2.1.cs)
     ∧ DenseWorkBoolsOk (denseWorkStep b reg w state xs freshBase).2.1.bitSet
-        (denseWorkStep b reg w state xs freshBase).2.1.bools := by
+        (denseWorkStep b reg w state xs freshBase).2.1.bools
+    ∧ DenseWorkVarsOk (denseWorkStep b reg w state xs freshBase).2.2.2.varSet
+        (denseWorkStep b reg w state xs freshBase).2.1 := by
   fun_cases denseWorkStep b reg w state xs freshBase
-  all_goals try exact ⟨hpos, hbools⟩
+  all_goals try exact ⟨hpos, hbools, hvs⟩
   rename_i hgate hbit hcoll reg1 bits hm rootCache hbeq state1 hbits hdpr hA hB hC hD ro hwd
-  refine ⟨?_, ?_⟩
+  have hxsB' : ∀ x ∈ xs, w.bitSet.contains x = false := by simpa using hbit
+  have hbitsB' : ∀ bb ∈ bits, w.bitSet.contains bb = false := by simpa using hbits
+  refine ⟨?_, ?_, ?_⟩
   · intro _
     show DenseWorkPosOk _ _ _
     rw [densePosOk_from0]
@@ -1462,6 +1552,27 @@ theorem denseWorkStep_inv (b : DegreeBound) (reg : VarRegistry) (w : DenseReenco
       exact ⟨bb, rfl, denseBitSetFold_mono bits w.bitSet bb hbb⟩
     · obtain ⟨bb, hbb, rfl⟩ := List.mem_map.1 hc
       exact ⟨bb, rfl, denseBitSetFold_mem bits w.bitSet bb hbb⟩
+  · -- the variable superset survives an accept: the rewritten system's variables are old ones or
+    -- fresh bits, and the fresh bits are exactly what the state update inserts
+    have hchkView : denseCheckReencode (denseWorkView w) xs bits hm = true := by
+      rw [denseWorkView_check hm hbools hxsB' hbitsB']
+      exact denseCheckReencodeVS_sound hvs hD
+    have hpolyVars := denseCheckReencode_polyVars (denseWorkView w) xs bits hm hchkView
+    have hview : denseWorkView ro.1
+        = (denseReencodeOut (denseWorkView w) xs bits hm).filterConstraints
+            (fun c => !denseIsZero c) := by
+      have h := denseWorkOut_view b (denseWorkEnsureBounded w) xs bits hm
+        (denseWorkEnsureBounded_posOk hpos)
+        (by rw [denseWorkEnsureBounded_bitSet, denseWorkEnsureBounded_bools]; exact hbools)
+        (by rw [denseWorkEnsureBounded_bitSet]; exact hxsB')
+      rwa [denseWorkEnsureBounded_view] at h
+    intro v hv
+    show (bits.foldl (·.insert ·) state.varSet).contains v = true
+    rw [hview] at hv
+    rcases denseReencodeOut_vars_subset (denseWorkView w) xs bits hm hpolyVars v
+        (denseFilterConstraints_occ_sub _ _ v hv) with h | h
+    · exact denseBitSetFold_mono bits state.varSet v (hvs v h)
+    · exact denseBitSetFold_mem bits state.varSet v h
 
 set_option maxHeartbeats 1000000 in
 theorem denseWorkLoop_correct [Fact p.Prime] (b : DegreeBound) (bs : BusSemantics p) :
@@ -1470,6 +1581,7 @@ theorem denseWorkLoop_correct [Fact p.Prime] (b : DegreeBound) (bs : BusSemantic
       (denseWorkView w).CoveredBy reg →
       (w.bounded = true → DenseWorkPosOk w.lastPos w.lastFold w.cs) →
       DenseWorkBoolsOk w.bitSet w.bools →
+      DenseWorkVarsOk state.varSet w →
       reg.Extends (denseWorkLoop b targets idx reg w state nc nb).1
       ∧ (∀ i, (denseWorkLoop b targets idx reg w state nc nb).1.isInput i = reg.isInput i)
       ∧ (denseWorkView (denseWorkLoop b targets idx reg w state nc nb).2.1).CoveredBy
@@ -1482,7 +1594,7 @@ theorem denseWorkLoop_correct [Fact p.Prime] (b : DegreeBound) (bs : BusSemantic
   intro targets
   induction targets with
   | nil =>
-      intro idx reg w state nc nb hcov _ _
+      intro idx reg w state nc nb hcov _ _ _
       show reg.Extends reg ∧ (∀ i, reg.isInput i = reg.isInput i)
         ∧ (denseWorkView w).CoveredBy reg
         ∧ DenseDerivations.CoveredBy reg ([] : DenseDerivations p)
@@ -1491,15 +1603,16 @@ theorem denseWorkLoop_correct [Fact p.Prime] (b : DegreeBound) (bs : BusSemantic
       exact ⟨VarRegistry.Extends.refl reg, fun _ => rfl, hcov,
         (by intro x hx; simp at hx), DensePassCorrect.refl reg.isInput (denseWorkView w) bs⟩
   | cons xs rest ih =>
-      intro idx reg w state nc nb hcov hpos hbools
+      intro idx reg w state nc nb hcov hpos hbools hvs
       simp only [denseWorkLoop]
       rcases hstep : denseWorkStep b reg w state xs s!"rnc{nc}_{nb}_{idx}"
           with ⟨reg1, w1, derivs1, state1⟩
       have hsp := denseWorkStep_correct b reg w state xs s!"rnc{nc}_{nb}_{idx}" bs hcov hpos hbools
-      have hinv := denseWorkStep_inv b reg w state xs s!"rnc{nc}_{nb}_{idx}" hpos hbools
+        hvs
+      have hinv := denseWorkStep_inv b reg w state xs s!"rnc{nc}_{nb}_{idx}" hpos hbools hvs
       simp only [hstep] at hsp hinv
       obtain ⟨hs_ext, hs_ii, hs_cov, hs_dcov, hs_correct⟩ := hsp
-      obtain ⟨hi_pos, hi_bools⟩ := hinv
+      obtain ⟨hi_pos, hi_bools, hi_vs⟩ := hinv
       rcases hrec : denseWorkLoop b rest (idx + 1) reg1 w1 state1
           (denseWorkNameCountsS derivs1 w1 state1 nc nb).1
           (denseWorkNameCountsS derivs1 w1 state1 nc nb).2
@@ -1507,7 +1620,7 @@ theorem denseWorkLoop_correct [Fact p.Prime] (b : DegreeBound) (bs : BusSemantic
       have hih := ih (idx + 1) reg1 w1 state1
           (denseWorkNameCountsS derivs1 w1 state1 nc nb).1
           (denseWorkNameCountsS derivs1 w1 state1 nc nb).2
-          hs_cov hi_pos hi_bools
+          hs_cov hi_pos hi_bools hi_vs
       simp only [hrec] at hih
       obtain ⟨hr_ext, hr_ii, hr_cov, hr_dcov, hr_correct⟩ := hih
       refine ⟨hs_ext.trans hr_ext, fun i => (hr_ii i).trans (hs_ii i), hr_cov, ?_, ?_⟩
@@ -1558,10 +1671,17 @@ theorem denseReencodeF_props (pw : PrimeWitness p) (b : DegreeBound) (reg : VarR
         liveCs := (d.algebraicConstraints.filter (fun c => !denseIsZero c)).length
         bisN := d.busInteractions.length
         dWithin := false } with hst
+    have hseedVars : DenseWorkVarsOk st.varSet (denseWorkSeed d) := by
+      intro v hv
+      rw [denseWorkSeed_view] at hv
+      have hd := denseFilterConstraints_occ_sub d (fun c => !denseIsZero c) v hv
+      rw [hst]
+      show (Std.HashSet.ofList d.occ).contains v = true
+      simpa [Std.HashSet.contains_ofList, List.contains_iff_mem] using hd
     obtain ⟨he, _, hc, hd, hcorr⟩ :=
       denseWorkLoop_correct b bs targets 0 reg (denseWorkSeed d) st
         (d.algebraicConstraints.filter (fun c => !denseIsZero c)).length d.busInteractions.length
-        hseedCov hseedPos hseedBools
+        hseedCov hseedPos hseedBools hseedVars
     refine ⟨he, hc, hd, ?_⟩
     -- the seed drops trivially-true constraints, itself a verified step
     have hpre : DensePassCorrect

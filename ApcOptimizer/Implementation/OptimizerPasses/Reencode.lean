@@ -340,9 +340,10 @@ theorem denseFreshFused_eq (d : DenseConstraintSystem p) (bits : List VarId) :
     exact ⟨fun c hc b hb => (h b hb).1 c hc, fun bi hbi =>
       ⟨fun b hb => ((h b hb).2 bi hbi).1, fun e he b hb => ((h b hb).2 bi hbi).2 e he⟩⟩
 
-/-- `denseCheckReencode` with the covered set shared between the domain and soundness conjuncts
-    and the freshness conjunct decided in one system walk. -/
-def denseCheckReencodeFast (d : DenseConstraintSystem p) (xs bits : List VarId)
+/-- Every conjunct of the certificate except freshness. Split out so `denseWorkStep` can discharge
+    freshness from the threaded variable superset instead of scanning
+    (`denseFreshScan_of_notMemOcc`). -/
+def denseCheckReencodeNoFresh (d : DenseConstraintSystem p) (xs bits : List VarId)
     (hm : Std.HashMap VarId (DenseExpr p)) : Bool :=
   let es := denseCoveredCsOf d xs
   match denseGroupDoms es xs with
@@ -361,16 +362,36 @@ def denseCheckReencodeFast (d : DenseConstraintSystem p) (xs bits : List VarId)
         decide (((DenseExpr.var x).substF (denseGroupSubst xs hm)).evalFast (denseEnvOfFast aβ)
           = denseEnvOfFast s x)))) &&
     patts.all (fun aβ => es.all (fun c =>
-      decide ((c.substF (denseGroupSubst xs hm)).evalFast (denseEnvOfFast aβ) = 0))) &&
-    (d.algebraicConstraints.all (fun c => !c.mentionsAny (Std.HashSet.ofList bits)) &&
-      d.busInteractions.all (fun bi =>
-        !bi.multiplicity.mentionsAny (Std.HashSet.ofList bits) &&
-        bi.payload.all (fun e => !e.mentionsAny (Std.HashSet.ofList bits))))
+      decide ((c.substF (denseGroupSubst xs hm)).evalFast (denseEnvOfFast aβ) = 0)))
+
+/-- The freshness conjunct: no bit occurs anywhere in the system. -/
+def denseFreshScan (d : DenseConstraintSystem p) (bits : List VarId) : Bool :=
+  d.algebraicConstraints.all (fun c => !c.mentionsAny (Std.HashSet.ofList bits)) &&
+    d.busInteractions.all (fun bi =>
+      !bi.multiplicity.mentionsAny (Std.HashSet.ofList bits) &&
+      bi.payload.all (fun e => !e.mentionsAny (Std.HashSet.ofList bits)))
+
+def denseCheckReencodeFast (d : DenseConstraintSystem p) (xs bits : List VarId)
+    (hm : Std.HashMap VarId (DenseExpr p)) : Bool :=
+  denseCheckReencodeNoFresh d xs bits hm && denseFreshScan d bits
 
 @[csimp] theorem denseCheckReencode_eq_fast : @denseCheckReencode = @denseCheckReencodeFast := by
   funext q d xs bits hm
-  unfold denseCheckReencode denseCheckReencodeFast
+  unfold denseCheckReencode denseCheckReencodeFast denseCheckReencodeNoFresh denseFreshScan
   simp only [denseFreshFused_eq]
+  split
+  · rfl
+  · simp only [Bool.and_assoc]
+
+/-- The certificate from its two halves. -/
+theorem denseCheckReencode_of_parts (d : DenseConstraintSystem p) (xs bits : List VarId)
+    (hm : Std.HashMap VarId (DenseExpr p))
+    (h1 : denseCheckReencodeNoFresh d xs bits hm = true)
+    (h2 : denseFreshScan d bits = true) : denseCheckReencode d xs bits hm = true := by
+  have h : denseCheckReencode d xs bits hm = denseCheckReencodeFast d xs bits hm := by
+    simp only [denseCheckReencode_eq_fast]
+  rw [h]
+  simp only [denseCheckReencodeFast, h1, h2, Bool.and_self]
 
 /-! ## Derived-variable methods for the fresh bits
 
@@ -1553,6 +1574,22 @@ structure DenseReencodeCacheState (p : ℕ) where
       candidate is ever accepted. -/
   dWithin : Bool
 
+/-! ### Freshness from the state's variable superset
+
+The certificate's freshness conjunct is its only `O(system)` one: it walks every constraint and
+every bus expression to check that no minted bit occurs there (measured at 66.6 % of the
+certificate, ~25 % of the pass, on sha256/apc_001). `state.varSet` starts as
+`Std.HashSet.ofList d.occ` and only ever *gains* the minted bits, so it over-approximates the live
+variables — and `bits.all (fun b => !varSet.contains b)` is therefore an `O(|bits|)` sufficient
+condition for freshness. Being sufficient rather than equivalent, it enters the proof as an
+implication (`denseCheckReencodeVS_sound`), not a `@[csimp]` equality; the invariant that licenses
+it is `DenseWorkVarsOk`, threaded through the step and the loop. -/
+
+/-- The checked certificate with freshness decided from `state.varSet` in `O(|bits|)`. -/
+def denseCheckReencodeVS (state : DenseReencodeCacheState p) (d : DenseConstraintSystem p)
+    (xs bits : List VarId) (hm : Std.HashMap VarId (DenseExpr p)) : Bool :=
+  bits.all (fun bb => !state.varSet.contains bb) && denseCheckReencodeNoFresh d xs bits hm
+
 /-- Apply an accepted rewrite to the threaded state in place, mirroring `denseReencodeOut` on the
     stable-position arrays: only positions holding a group variable (bucket candidates) or a
     variable-free composite node (`foldCs`) can change. The root cache keeps every untouched
@@ -1602,7 +1639,9 @@ def denseReencodeStateUpdate (state : DenseReencodeCacheState p) (xs bits : List
                     (HashedDedup.hashedDedup (hash ·) (denseBIVars bi')) i }
       else st
     else st) st
-  { st with varSet := bits.foldl (·.insert ·) st.varSet, dWithin := true }
+  -- `varSet` is grown from the *input* state: the position folds above never touch it, and reading
+  -- it from `state` keeps `denseReencodeStateUpdate_varSet` a projection instead of a fold invariant.
+  { st with varSet := bits.foldl (·.insert ·) state.varSet, dWithin := true }
 
 theorem densePosOk_from0 {lp : Std.HashMap VarId Nat} {lf : Nat} {cs : List (DenseExpr p)} :
     DenseWorkPosOk lp lf cs ↔ DenseWorkPosOkFrom 0 lp lf cs := by
@@ -1676,7 +1715,8 @@ def denseWorkStep (b : DegreeBound) (reg : VarRegistry) (w : DenseReencodeWork p
     if xs.all (fun x => state.varSet.contains x) then
     if xs.all (fun x => decide (x ∉ bits)) then
     if bits.all (fun bb => decide ((reg1.resolve bb).powdrId? = none)) then
-    if denseCheckReencode { algebraicConstraints := w.cs, busInteractions := w.bis } xs bits hm then
+    if denseCheckReencodeVS state { algebraicConstraints := w.cs, busInteractions := w.bis }
+        xs bits hm then
       let ro := denseWorkOut b (denseWorkEnsureBounded w) xs bits hm
       if (if state.dWithin then ro.2 else (denseWorkView ro.1).withinDegreeB b) then
         (reg1, ro.1,
