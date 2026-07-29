@@ -11,7 +11,8 @@ per pass across the whole set. Cases run *serially* so timings don't fight for c
 This measures runtime only; effectiveness is benchmark.py's job.
 
     Benchmarks/runtime_bench.py                 # all openvm-eth cases
-    Benchmarks/runtime_bench.py --vm sp1        # all rsp (SP1) cases
+    Benchmarks/runtime_bench.py sp1:rsp         # any set, as a <vm>:<set> token
+    Benchmarks/runtime_bench.py --vm sp1        # same, via the flag (default set for the VM)
     Benchmarks/runtime_bench.py --n 20          # top 20 by cost rank
     Benchmarks/runtime_bench.py --repeat 3      # best-of-3 per case (less noise)
     Benchmarks/runtime_bench.py --md bench.md   # also write a markdown summary
@@ -37,6 +38,44 @@ REPO = Path(__file__).resolve().parents[1]  # Benchmarks -> repo root
 # VM -> its benchmark directory under Benchmarks/ and its default (main) set.
 VM_DIR = {"openvm": "OpenVM", "sp1": "SP1"}
 DEFAULT_BENCHMARK = {"openvm": "openvm-eth", "sp1": "rsp"}
+
+
+
+def available_sets(repo):
+    """Every benchmark set in the corpus, as `<vm>:<set>` tokens."""
+    out = []
+    for vm, d in VM_DIR.items():
+        root = repo / "Benchmarks" / d
+        if root.is_dir():
+            out += [f"{vm}:{p.name}" for p in sorted(root.iterdir())
+                    if p.is_dir() and any(p.glob("apc_*_pc*.json.gz"))]
+    return out
+
+
+def resolve_set(repo, benchmark, vm):
+    """Resolve the set selector to `(vm, set, directory)`.
+
+    The selector is either a bare set name (interpreted under `vm`, which defaults to openvm) or a
+    `<vm>:<set>` token — the form `lean_action_ci.yml` uses — so every set in the corpus is
+    reachable through a single argument, e.g. through a workflow's `benchmark` input.
+    """
+    if benchmark and ":" in benchmark:
+        tok_vm, _, tok_set = benchmark.partition(":")
+        if tok_vm not in VM_DIR:
+            sys.exit(f"error: unknown VM {tok_vm!r} in {benchmark!r} "
+                     f"(known: {', '.join(sorted(VM_DIR))})")
+        if vm is not None and vm != tok_vm:
+            sys.exit(f"error: --vm {vm} contradicts {benchmark!r}")
+        vm, benchmark = tok_vm, tok_set or DEFAULT_BENCHMARK[tok_vm]
+    else:
+        vm = vm or "openvm"
+        benchmark = benchmark or DEFAULT_BENCHMARK[vm]
+    bench_dir = repo / "Benchmarks" / VM_DIR[vm] / benchmark
+    if not bench_dir.is_dir():
+        sys.exit(f"error: no benchmark set {vm}:{benchmark} under {bench_dir.parent} "
+                 f"(available: {', '.join(available_sets(repo)) or 'none found'})")
+    return vm, benchmark, bench_dir
+
 
 # `apc-optimizer run` total, e.g. "  (339 ms)".
 RUN_MS_RE = re.compile(r"^\s*\((\d+) ms\)\s*$", re.M)
@@ -90,13 +129,10 @@ def fmt_ratio(target, base):
 def bench(args):
     """Run the benchmark, returning {benchmark, repeat, run_ms, pass_ms, iters}."""
     repo = args.repo.resolve()
-    benchmark = args.benchmark or DEFAULT_BENCHMARK[args.vm]
-    bench_dir = repo / "Benchmarks" / VM_DIR[args.vm] / benchmark
-    if not bench_dir.is_dir():
-        sys.exit(f"error: no benchmark {benchmark!r} under {bench_dir.parent}")
+    vm, benchmark, bench_dir = resolve_set(repo, args.benchmark, args.vm)
     # The VM token is optional and defaults to openvm; omit it for openvm so the commands stay
     # compatible with older binaries (e.g. a latest-main baseline) that predate the token.
-    vm_tok = [] if args.vm == "openvm" else [args.vm]
+    vm_tok = [] if vm == "openvm" else [vm]
 
     binary = args.binary.resolve() if args.binary is not None else None
     os.chdir(repo)
@@ -128,13 +164,20 @@ def bench(args):
             pass_ms[name] = pass_ms.get(name, 0) + ms
         print(f"[{i + 1}/{len(cases)}] {case.name}: {fmt_ms(total)}, {its} iterations",
               file=sys.stderr)
-    return {"benchmark": benchmark, "repeat": args.repeat,
+    return {"benchmark": benchmark, "vm": vm, "repeat": args.repeat,
             "run_ms": run_ms, "pass_ms": pass_ms, "iters": iters}
 
 
 def summary_stats(run_ms):
     times = sorted(run_ms.values())
     return sum(times), sum(times) // len(times), int(statistics.median(times)), times[-1]
+
+
+def set_label(data):
+    """The set's display name, VM-qualified unless it is the default VM (`benchmark.py` names the
+    VM the same way, so OpenVM `keccak` and SP1 `keccak` never read alike)."""
+    vm = data.get("vm", "openvm")
+    return data["benchmark"] if vm == "openvm" else f"{vm}:{data['benchmark']}"
 
 
 def emit_md(data):
@@ -145,7 +188,7 @@ def emit_md(data):
     passes = sorted(pass_ms.items(), key=lambda kv: -kv[1])
 
     lines = []
-    lines.append(f"### Optimizer runtime — {data['benchmark']}, {len(run_ms)} cases"
+    lines.append(f"### Optimizer runtime — {set_label(data)}, {len(run_ms)} cases"
                  + (f", best of {data['repeat']}" if data["repeat"] > 1 else ""))
     lines.append("")
     lines.append("| total | mean | median | max |")
@@ -191,7 +234,7 @@ def emit_compare_md(base, target):
     tt, tmean, tmed, tmax = summary_stats(t_run)
 
     lines = []
-    lines.append(f"### Optimizer runtime — {target['benchmark']}, {len(common)} cases, "
+    lines.append(f"### Optimizer runtime — {set_label(target)}, {len(common)} cases, "
                  f"target vs baseline (same runner)"
                  + (f", best of {target['repeat']}" if target["repeat"] > 1 else ""))
     lines.append("")
@@ -256,11 +299,12 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("benchmark", nargs="?", default=None,
-                    help="benchmark name -- a subdirectory of Benchmarks/<VM>/ "
+                    help="benchmark set: a subdirectory of Benchmarks/<VM>/, or a <vm>:<set> "
+                         "token naming both (e.g. sp1:rsp) -- a subdirectory of Benchmarks/<VM>/ "
                          "(default: openvm-eth for openvm, rsp for sp1)")
-    ap.add_argument("--vm", choices=sorted(VM_DIR), default="openvm",
+    ap.add_argument("--vm", choices=sorted(VM_DIR), default=None,
                     help="VM whose benchmark set and fact-aware optimizer to use "
-                         "(default: openvm)")
+                         "(default: openvm, or the VM named by a <vm>:<set> benchmark token)")
     ap.add_argument("--n", type=int, default=None, metavar="N",
                     help="only the top N cases by cost rank (default: all)")
     ap.add_argument("--repeat", type=int, default=1,
