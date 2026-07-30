@@ -293,9 +293,16 @@ theorem denseAddrAffineNeqWith_eq (ops : DenseZModOps p) (shape : MemoryBusShape
 
 /-! ## The nonzero-witness (register-vs-RAM) address-disequality certificate -/
 
+def denseIsZeroLinImpl (l : DenseLinExpr p) : Bool :=
+  l.norm.terms.isEmpty && zmodIsZero l.norm.const
+
 /-- A dense linear form is identically zero (empty terms and zero constant after normalization). -/
 def denseIsZeroLin (l : DenseLinExpr p) : Bool :=
-  l.norm.terms.isEmpty && decide (l.norm.const = 0)
+  l.norm.terms.isEmpty && zmodIsZero l.norm.const
+
+@[csimp] theorem denseIsZeroLin_eq_impl : @denseIsZeroLin = @denseIsZeroLinImpl := by
+  funext q l
+  simp [denseIsZeroLin, denseIsZeroLinImpl]
 
 /-- Nonzero linear factors of a single reciprocal product `a * b + r` with `r` a nonzero constant:
     `a·b = −r ≠ 0`, so each factor that linearizes is a nonzero witness. -/

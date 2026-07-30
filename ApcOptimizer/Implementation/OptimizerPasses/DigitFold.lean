@@ -135,6 +135,19 @@ def denseVarSlot (i : VarId) : List (DenseExpr p) → Option Nat
   | [] => none
   | e :: rest => if denseIsVarOf i e then some 0 else (denseVarSlot i rest).map (· + 1)
 
+/-- `denseInteractionBound` with the `mval = 0` test taken on `ZMod.val`, which needs no
+    `CommRing (ZMod p)` dictionary. -/
+def denseInteractionBoundImpl (bs : BusSemantics p) (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) (i : VarId) : Option Nat :=
+  match bi.multiplicity.constValue? with
+  | none => none
+  | some mval =>
+    if mval.val = 0 then none
+    else
+      match denseVarSlot i bi.payload with
+      | none => none
+      | some slot => facts.slotBound bi.busId mval (bi.payload.map DenseExpr.constValue?) slot
+
 /-- One value bound for `i` from a constant-nonzero-multiplicity interaction carrying `.var i`
     in a fact-bounded raw payload slot. -/
 def denseInteractionBound (bs : BusSemantics p) (facts : BusFacts p bs)
@@ -147,6 +160,11 @@ def denseInteractionBound (bs : BusSemantics p) (facts : BusFacts p bs)
       match denseVarSlot i bi.payload with
       | none => none
       | some slot => facts.slotBound bi.busId mval (bi.payload.map DenseExpr.constValue?) slot
+
+@[csimp] theorem denseInteractionBound_eq_impl :
+    @denseInteractionBound = @denseInteractionBoundImpl := by
+  funext q bs facts bi i
+  simp [denseInteractionBound, denseInteractionBoundImpl]
 
 /-- Probe payload: constant slots at their constants, slot `i` at the candidate, others `0`. -/
 def denseProbeBase (payload : List (DenseExpr p)) (i : Nat) (v : ZMod p) : List (ZMod p) :=

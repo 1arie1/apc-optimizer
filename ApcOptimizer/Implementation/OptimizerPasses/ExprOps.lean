@@ -42,6 +42,16 @@ theorem DenseConstraintSystem.mapExpr_covered {reg : VarRegistry} {g : DenseExpr
 
 /-! ## Dense constant folding -/
 
+/-- No `CommRing (ZMod p)` reaches the entry: the sum is behind `zmodAdd` and the zero tests go
+    through `ZMod.val`. Lean floats an instance chain ahead of every branch test, so keeping the
+    arithmetic behind a call is what empties the entry. -/
+def DenseExpr.foldAddImpl (a b : DenseExpr p) : DenseExpr p :=
+  match a, b with
+  | .const m, .const n => .const (zmodAdd m n)
+  | .const m, b => if zmodIsZero m then b else .add (.const m) b
+  | a, .const n => if zmodIsZero n then a else .add a (.const n)
+  | a, b => .add a b
+
 /-- Smart addition on dense expressions. -/
 def DenseExpr.foldAdd (a b : DenseExpr p) : DenseExpr p :=
   match a, b with
@@ -50,6 +60,19 @@ def DenseExpr.foldAdd (a b : DenseExpr p) : DenseExpr p :=
   | a, .const n => if n = 0 then a else .add a (.const n)
   | a, b => .add a b
 
+@[csimp] theorem DenseExpr_foldAdd_eq_impl : @DenseExpr.foldAdd = @DenseExpr.foldAddImpl := by
+  funext q a b
+  simp [DenseExpr.foldAdd, DenseExpr.foldAddImpl]
+
+/-- As `foldAddImpl`; the annihilated result is returned as `.const m` rather than `.const 0`, which
+    is the same value on that branch and avoids needing the zero literal at all. -/
+def DenseExpr.foldMulImpl (a b : DenseExpr p) : DenseExpr p :=
+  match a, b with
+  | .const m, .const n => .const (zmodMul m n)
+  | .const m, b => if zmodIsZero m then .const m else if zmodIsOne m then b else .mul (.const m) b
+  | a, .const n => if zmodIsZero n then .const n else if zmodIsOne n then a else .mul a (.const n)
+  | a, b => .mul a b
+
 /-- Smart multiplication on dense expressions. -/
 def DenseExpr.foldMul (a b : DenseExpr p) : DenseExpr p :=
   match a, b with
@@ -57,6 +80,12 @@ def DenseExpr.foldMul (a b : DenseExpr p) : DenseExpr p :=
   | .const m, b => if m = 0 then .const 0 else if m = 1 then b else .mul (.const m) b
   | a, .const n => if n = 0 then .const 0 else if n = 1 then a else .mul a (.const n)
   | a, b => .mul a b
+
+@[csimp] theorem DenseExpr_foldMul_eq_impl : @DenseExpr.foldMul = @DenseExpr.foldMulImpl := by
+  funext q a b
+  unfold DenseExpr.foldMul DenseExpr.foldMulImpl
+  -- the annihilating branches return `.const m` for an `m` the guard has already forced to `0`
+  split <;> simp_all
 
 /-- Bottom-up constant folding: evaluates constant subexpressions and drops `+0`, `*1`, `*0`.
     E.g. `2 * 3 + x` folds to `6 + x`, and `1 * x + 0` to `x`. -/

@@ -13,6 +13,13 @@ variable {p : ℕ}
 
 /-! ## Part A: the entailed nonlinear substitution (dense) -/
 
+def denseIndicatorProdImpl (others : List VarId) (pt : List (VarId × ZMod p)) : DenseExpr p :=
+  others.foldl (fun acc v =>
+    if zmodIsOne (denseEnvOfFast pt v) then DenseExpr.mul acc (DenseExpr.var v)
+    else DenseExpr.mul acc (DenseExpr.add (DenseExpr.const (zmodOneP p))
+      (DenseExpr.mul (DenseExpr.const (zmodNegOneP p)) (DenseExpr.var v))))
+    (DenseExpr.const (zmodOneP p))
+
 /-- Boolean indicator product `∏ (v or 1−v)` selecting one point of the box. Heuristic data —
     the certificate validates its values pointwise, so the construction carries no proof. -/
 def denseIndicatorProd (others : List VarId) (pt : List (VarId × ZMod p)) : DenseExpr p :=
@@ -21,6 +28,17 @@ def denseIndicatorProd (others : List VarId) (pt : List (VarId × ZMod p)) : Den
     else DenseExpr.mul acc (DenseExpr.add (DenseExpr.const 1)
       (DenseExpr.mul (DenseExpr.const (-1)) (DenseExpr.var v)))) (DenseExpr.const 1)
 
+@[csimp] theorem denseIndicatorProd_eq_impl : @denseIndicatorProd = @denseIndicatorProdImpl := by
+  funext q others pt
+  simp [denseIndicatorProd, denseIndicatorProdImpl]
+
+def denseBuildEImpl (d : DenseFuData p) (vy : VarId) : DenseExpr p :=
+  let others := d.rxVars.eraseDups.filter (fun v => v != vy)
+  d.pts.foldl (fun acc ptb =>
+    if ptb.2 && zmodIsOne (denseEnvOfFast ptb.1 vy) then
+      DenseExpr.add acc (denseIndicatorProd others ptb.1)
+    else acc) (DenseExpr.const (zmodZeroP p))
+
 /-- Interpolate the target's value over the survivor-side flags from the compatible points. -/
 def denseBuildE (d : DenseFuData p) (vy : VarId) : DenseExpr p :=
   let others := d.rxVars.eraseDups.filter (fun v => v != vy)
@@ -28,6 +46,10 @@ def denseBuildE (d : DenseFuData p) (vy : VarId) : DenseExpr p :=
     if ptb.2 && (denseEnvOfFast ptb.1 vy == 1) then
       DenseExpr.add acc (denseIndicatorProd others ptb.1)
     else acc) (DenseExpr.const 0)
+
+@[csimp] theorem denseBuildE_eq_impl : @denseBuildE = @denseBuildEImpl := by
+  funext q d vy
+  simp [denseBuildE, denseBuildEImpl]
 
 /-- Per-target certificate: `vy` is a Y-side flag, the candidate solution `E` mentions neither
     `vy` nor anything outside the survivor's payload, and at every offset-compatible point the

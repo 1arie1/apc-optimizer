@@ -66,11 +66,21 @@ theorem denseSideEffects_dropPair_equiv (bs : BusSemantics p) (denv : VarId → 
   simp only [multiplicitySum_append, multiplicitySum, hmsgEq, hRm]
   split_ifs <;> ring
 
+def denseActiveStatefulMsgsImpl (bs : BusSemantics p) (denv : VarId → ZMod p)
+    (L : List (BusInteraction (DenseExpr p))) : List (BusInteraction (ZMod p)) :=
+  (L.map (fun bi => denseBIEval bi denv)).filter
+    (fun m => !zmodIsZero m.multiplicity && bs.isStateful m.busId)
+
 /-- The active, stateful evaluated messages of a raw dense interaction list. -/
 def denseActiveStatefulMsgs (bs : BusSemantics p) (denv : VarId → ZMod p)
     (L : List (BusInteraction (DenseExpr p))) : List (BusInteraction (ZMod p)) :=
   (L.map (fun bi => denseBIEval bi denv)).filter
     (fun m => decide (m.multiplicity ≠ 0) && bs.isStateful m.busId)
+
+@[csimp] theorem denseActiveStatefulMsgs_eq_impl :
+    @denseActiveStatefulMsgs = @denseActiveStatefulMsgsImpl := by
+  funext q bs denv L
+  simp [denseActiveStatefulMsgs, denseActiveStatefulMsgsImpl]
 
 theorem denseActiveStatefulMsgs_append (bs : BusSemantics p) (denv : VarId → ZMod p)
     (L1 L2 : List (BusInteraction (DenseExpr p))) :

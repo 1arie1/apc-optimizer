@@ -20,6 +20,14 @@ variable {p : ℕ}
 def denseSingleVarCs (all : List (DenseExpr p)) : List (DenseExpr p) :=
   all.filter (fun c => (HashedDedup.hashedEraseDups (hash ·) c.vars).length == 1)
 
+def denseBtCertImpl (singles : List (DenseExpr p)) (c : DenseExpr p) : Bool :=
+  2 ≤ c.vars.eraseDups.length &&
+  (let doms := c.vars.eraseDups.filterMap (fun v =>
+     (denseFindDomainAlg singles v).map (fun d => (v, d)))
+   decide (doms.map Prod.fst = c.vars.eraseDups) &&
+   decide ((doms.map (fun vd => vd.2.length)).prod ≤ 32) &&
+   (denseAssignments doms).all (fun pt => zmodIsZero (c.eval (denseEnvOfFast pt))))
+
 /-- Certificate: `c` mentions ≥ 2 distinct variables, every one carries a proven finite domain
     (from the single-variable constraints), the joint box is small, and `c` vanishes on all of it. -/
 def denseBtCert (singles : List (DenseExpr p)) (c : DenseExpr p) : Bool :=
@@ -30,6 +38,18 @@ def denseBtCert (singles : List (DenseExpr p)) (c : DenseExpr p) : Bool :=
    decide ((doms.map (fun vd => vd.2.length)).prod ≤ 32) &&
    (denseAssignments doms).all (fun pt => decide (c.eval (denseEnvOfFast pt) = 0)))
 
+@[csimp] theorem denseBtCert_eq_impl : @denseBtCert = @denseBtCertImpl := by
+  funext q singles c
+  simp [denseBtCert, denseBtCertImpl]
+
+def denseBtPreImpl (domOf : VarId → Option (List (ZMod p))) (c : DenseExpr p) : Bool :=
+  let vs := HashedDedup.hashedEraseDups (hash ·) c.vars
+  2 ≤ vs.length &&
+  (let doms := vs.filterMap (fun v => (domOf v).map (fun d => (v, d)))
+   decide (doms.map Prod.fst = vs) &&
+   decide ((doms.map (fun vd => vd.2.length)).prod ≤ 32) &&
+   (denseAssignments doms).all (fun pt => zmodIsZero (c.eval (denseEnvOfFast pt))))
+
 /-- A cheap prefilter over a precomputed domain lookup; accepted candidates re-run the real
     `denseBtCert`. -/
 def denseBtPre (domOf : VarId → Option (List (ZMod p))) (c : DenseExpr p) : Bool :=
@@ -39,6 +59,10 @@ def denseBtPre (domOf : VarId → Option (List (ZMod p))) (c : DenseExpr p) : Bo
    decide (doms.map Prod.fst = vs) &&
    decide ((doms.map (fun vd => vd.2.length)).prod ≤ 32) &&
    (denseAssignments doms).all (fun pt => decide (c.eval (denseEnvOfFast pt) = 0)))
+
+@[csimp] theorem denseBtPre_eq_impl : @denseBtPre = @denseBtPreImpl := by
+  funext q domOf c
+  simp [denseBtPre, denseBtPreImpl]
 
 /-- The replacement condition: the memoized prefilter gates the (expensive) certificate. -/
 def denseBtKeep (singles : List (DenseExpr p)) (domOf : VarId → Option (List (ZMod p)))

@@ -208,6 +208,14 @@ def denseInteractionSeedsGo (bs : BusSemantics p) (facts : BusFacts p bs)
     | some e, some B => denseSlotSeeds bnd B e
     | _, _ => [])
 
+def denseInteractionSeedsImpl (bs : BusSemantics p) (facts : BusFacts p bs)
+    (bnd : VarId → Option Nat) (bi : BusInteraction (DenseExpr p)) : List (DenseExpr p) :=
+  match bi.multiplicity.constValue? with
+  | none => []
+  | some mval =>
+    if zmodIsZero mval then []
+    else denseInteractionSeedsGo bs facts bnd bi mval (bi.payload.map DenseExpr.constValue?)
+
 /-- All seeds of one interaction: every payload slot with a `slotBound`. -/
 def denseInteractionSeeds (bs : BusSemantics p) (facts : BusFacts p bs)
     (bnd : VarId → Option Nat) (bi : BusInteraction (DenseExpr p)) : List (DenseExpr p) :=
@@ -216,6 +224,11 @@ def denseInteractionSeeds (bs : BusSemantics p) (facts : BusFacts p bs)
   | some mval =>
     if mval = 0 then []
     else denseInteractionSeedsGo bs facts bnd bi mval (bi.payload.map DenseExpr.constValue?)
+
+@[csimp] theorem denseInteractionSeeds_eq_impl :
+    @denseInteractionSeeds = @denseInteractionSeedsImpl := by
+  funext q bs facts bnd bi
+  simp [denseInteractionSeeds, denseInteractionSeedsImpl]
 
 /-- All seeds over the system: every bounded interaction slot, plus every algebraic constraint
     consumed as a bound-`1` slot. -/
