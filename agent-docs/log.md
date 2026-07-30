@@ -5562,3 +5562,88 @@ denominator shrank. **(c) Dropping the memo entirely** — attractive because it
 4 747 ms, because `denseFindDomainAlg` then re-runs per (constraint, variable) and `denseRootsIn`
 reallocates each domain list. Keep the memo and prove the invariant.
 **Worked: yes (flagFold 0.349x on its worst case, 0.928x end-to-end, output byte-identical; PR).**
+
+
+### 158. Runtime: `VarId.index`-keyed planning indexes in Gauss (0.86x on the pass, sha256)
+TARGETED the run's **top pass**: on merged main (`2979bfa`, i.e. after entry 157 shrank flagFold),
+sha256 `apc_001` spends **12 425 ms of 103 303 in `gauss` (12.0 %)**, ahead of rootPairUnify (9.0 s),
+busUnify (7.9 s) and reencode (7.6 s). Its two expensive invocations are cleanup cycles 0 and 1
+(3 543 + 6 108 ms = 79 % of the pass), both on the Markowitz path (199 740 / 146 363 constraints),
+and they eliminate 96 696 variables between them — so the lever is cost per elimination.
+**TIMED THE PHASES BEFORE PROFILING.** A throwaway `IO` probe (`gsPhases` in `Main.lean`, hooked
+where the pass runs, each phase forced with `IO.lazyPure`) split the pass's wall as
+**occ 417 / prot 65 / markowitzBuild 2 452 / markowitzLoop 6 043 / materialize 106 /
+substF+force 1 552 ms** summed over its 11 invocations, and a second instrumented copy of the loop
+counted, for cycle 1 alone: 52 194 adoptions, 185 635 rows refreshed, **257 515 rows re-keyed**,
+**307 948 stored solutions rewritten**, heap high-water 123 697 entries. The columns account for
+~87 % of the profiler's number; the rest is `guardDegree`'s degree walk plus the profiler's own
+`varCount` force, which are charged to the pass but are not gauss (R5 territory).
+MECHANISM. The LBR profile then put **19.0 % of the pass in per-variable index maintenance**
+(`rowDeps`/`pivotRows`/`degrees`) and **9.2 % in `DenseSparseSolved.insertAll`** (`revDeps`) — 85 % of
+gauss's whole hash traffic in those four indexes, with `AssocList.replace …insert` the single largest
+allocator caller (17.1 %) and `lean_copy_expand_array` at 5.7 % of the pass. Every update read
+`idx[x]?` and inserted the modified value back, so it paid the boxed `Hashable VarId` dispatch twice,
+an `AssocList.replace` on the bucket, **and a full copy of the inner `Std.HashSet`** — the map still
+holds a reference to the set that was just read out of it, so the insert cannot mutate in place.
+THE FIX keys all four by `VarId.index` in `Array`s and updates them with `Array.modify`, which hands
+the element over uniquely (the PR #206 mechanism). The three Markowitz arrays are sized once in
+`denseMarkowitzBuild` — it now builds `rows` first, then `n = 1 + max index`, which is safe because
+substitution only ever copies variables between rows, so no later index can exceed the system's
+maximum; `revDeps` has no natural pre-size at `DenseSparseSolved.empty` and grows by doubling
+(`denseArrEnsure`). Net **+4 lines** of runtime.
+PROOF SURFACE: **none.** Nothing in `Proofs/Gauss.lean` inspects the Markowitz state — the loop
+soundness proof only uses `denseMarkowitzPick_sound` on the row it re-substitutes from the *source*
+constraint, plus `insertAll_preserves` — so the entire scheduler is untrusted planning data. The
+`revDeps` half needed **two hypothesis statements** restated (`((dσ.revDeps[x]?).getD ∅)` →
+`(dσ.revDeps.getD x.index ∅)` in the two `htouched` hypotheses); their proof bodies only use
+`List.mem_filterMap` and are source-agnostic. No pass correctness theorem changes shape.
+WHY IT IS BYTE-IDENTICAL even though iteration order changes: `denseMarkowitzEntryBetter` is a total
+order whose last key (`generation`) is only ever reached between two entries of the *same* row (all
+earlier keys include `rowId`), and `denseMarkowitzRekey` visits each row at most once per adoption
+(`CollectIds` dedups), so generation numbers are order-independent; `degrees` stays exact because
+sub-then-add on a variable present in both the old and the new row is a no-op.
+NUMBERS. **CI serial `Runtime Bench`, sha256, both sides on one runner** (the authoritative A/B):
+gauss **13.1 → 11.3 s (0.86x)**, whole run 105.0 → 102.0 s (**0.97x**). No other pass column moves
+outside noise (worst 1.03x). Effectiveness matrix: **+0.000x on all three axes across all six sets,
+per-case circuit sizes identical** — the byte-identity claim, confirmed independently.
+   This 20-core box, serial and interleaved, reads the same change **twice as large on the pass**,
+and does so repeatably — four independent pairs: gauss 12 281 → 8 596, 12 425 → 8 676,
+12 157 → 8 571, 12 188 → 8 566 ms (**0.700–0.705x**, totals 0.960–0.968x). So the disagreement is not
+local noise: −3.7 s on the pass here against −1.8 s on CI, while the *end-to-end* deltas agree
+(−4.0 vs −3.0 s), and CI's *baseline* gauss (13.1 s) is close to this box's (12.2 s) while its
+*target* is not (11.3 vs 8.6 s). Unexplained; the mechanism is memory traffic (deleted
+inner-`HashSet` copies), which is exactly the kind of win that varies with the memory system, and
+entry 147's rule says believe `Runtime Bench`. **Quote 0.86x, the conservative one.**
+   OPENVM-ETH FULL CORPUS (100 cases, `profile`, interleaved per case, this box): total
+**24.22 → 24.21 s (1.000x)**, gauss 1.71 → 1.69 s (0.984x); of the 20 cases carrying ≥ 20 ms of
+gauss, median 1.000x, best 0.914x (`apc_071`), worst 1.047x, and **no case regresses by more than
+5 %**. Collateral columns are flat (reencode 1.006x, flagFold 1.009x, domainBatch 0.997x, busUnify
+0.995x). That is the expected shape: every gauss invocation on these small systems takes the
+source-order path (n < 8192), where only the `revDeps` half applies — the win is a Markowitz-path
+win, and it does not cost anything where the path is not taken. CI's openvm-eth per-pass table
+agrees (gauss 189 → 187 ms).
+   Other cases (local box, interleaved, gauss ms): keccak `apc_001` 805/855 → 661/688 (0.81x);
+wasm-eth `apc_006` 596/599 → 479/489 (0.81x); wasm-eth `apc_012` 1 096 → 915/919 (0.84x);
+openvm-eth `apc_037` 182/187 → 166/175 (0.94x — all nine of its gauss invocations take the
+source-order path, which only the `revDeps` half touches). CI's openvm-eth per-pass table agrees on
+that control: gauss 189 → 187 ms (0.99x). Split of the win locally: the three Markowitz indexes are
+0.78x, `revDeps` takes it to 0.70x (and is the only half that reaches the source-order path).
+VERIFIED: `opt-export` **byte-identical** on openvm-eth `apc_006` / `apc_100`, keccak `apc_001`,
+wasm-eth `apc_005` / `apc_012`, sha256 `apc_001` (5.76 MB), SP1 keccak `apc_001`, SP1 rsp `apc_001`;
+`lake build` clean, no warnings; `check-proof-integrity` passes (propext / Classical.choice /
+Quot.sound, no unused theorems).
+THIS IS R12's FIRST LANDED INSTANCE and it retires its "speculative, measure first" caveat. It is
+also the narrow slice of open draft **PR #193** ("Use exact array-backed state in Gauss", 2026-07-23),
+which bundled the same representation change with exact live reverse dependencies, streaming pivot
+selection, a specialized final substitution and dropping solution materialization — and measured a
+**regression** (3 954 vs 3 287 ms on wasm-eth `apc_037`). Representation-only, byte-identical, it is
+a 0.86x win: the lesson is the entry-153 one again — land the piece you can measure alone.
+WHERE THE PASS STANDS AFTER THIS (same LBR method, local box, gauss 8 634 ms — shares transfer,
+the ms do not): row substitution 17.8 %,
+`DenseGaussReduced.fromExpr` 16.9 % (all of `denseMarkowitzBuild` — it runs `denseLinearize`, then
+`normalize`, then `denseLinearize` again per constraint per invocation), heap pop 10.4 %, `substF`
+7.9 %, `refreshRow` 6.7 %, index maintenance 6.6 % (was 19.0), `denseMarkowitzPivots` 6.3 %,
+`denseLinSubst` 6.2 %, `occ` 5.4 %, rekey 4.3 %, `insertAll` 1.1 % (was 9.2). `hash/std` 15.7 →
+10.3 %, `lean_copy_expand_array` 5.7 → 0.5 %. The ranked residual is in `ideas.md`.
+**Worked: yes (gauss 0.86x on its worst case and 0.97x end-to-end on the CI serial bench,
+output byte-identical; PR #260).**

@@ -602,7 +602,7 @@ theorem denseSparseGaussLoop_sound (bs : BusSemantics p) (d : DenseConstraintSys
             intro z hz
             exact hcclosed z (denseReducedBest_terms c' occ prot x t hpick z hz)
           have htouched : ∀ y s, (y, s) ∈
-                ((dσ.revDeps[x]?).getD ∅).toList.filterMap (fun y =>
+                (dσ.revDeps.getD x.index ∅).toList.filterMap (fun y =>
                   (dσ.map[y]?).bind
                     (fun s => if s.mentions x then some (y, s) else none)) →
               dσ.fn y = some s := by
@@ -694,7 +694,7 @@ theorem denseSparseMarkowitzLoop_sound (bs : BusSemantics p) (d : DenseConstrain
                     exact hcclosed z
                       (denseMarkowitzPick_terms c' entry.pivot x t occ prot hpick z hz)
                   have htouched : ∀ y s, (y, s) ∈
-                        ((dσ.revDeps[x]?).getD ∅).toList.filterMap (fun y =>
+                        (dσ.revDeps.getD x.index ∅).toList.filterMap (fun y =>
                           (dσ.map[y]?).bind
                             (fun s => if s.mentions x then some (y, s) else none)) →
                       dσ.fn y = some s := by

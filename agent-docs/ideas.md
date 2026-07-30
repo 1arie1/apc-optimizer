@@ -376,6 +376,13 @@ index gate**  ·  mostly **done (entries 105/107/109/145)**:
      under the current substitution before adoption. Entry 134 keeps the exact source-order path
      below 8192 rows: the scheduler's fixed cost is not justified there, and changing the affine
      basis in nonlinear-connected components can worsen later syntactic cleanup.
+   - ~~gauss's per-variable scheduler indexes~~ **done (entry 158)**: `rowDeps`, `pivotRows`,
+     `degrees` and `DenseSparseSolved.revDeps` are `VarId.index`-keyed arrays updated with
+     `Array.modify`. **0.86x on the pass** (CI serial bench, sha256: 13.1 → 11.3 s; this container
+     reads 0.70x repeatably, 4/4 pairs — see the entry), byte-identical, zero proof work. It is a
+     **Markowitz-path win**: the openvm-eth corpus, whose gauss invocations are all source-order, is
+     a wash (100 cases, 1.000x total, 0.984x gauss, no case worse than 1.047x). See R12 and the
+     gauss residual below.
    - **Still open — component-aware Gauss scheduling**: source-order and Markowitz eliminate the
      same number of pivots on the affected SP1 shapes, but choose different bases where affine rows
      share variables with nonlinear constraints. Preserve source order only in those connected
@@ -480,12 +487,25 @@ rewrite the evaluator arms the same way (`Bool.decide_and` bridges proofs). Audi
 `decide (… ∧ …)` in per-point code (`denseScaledSlotBound`'s guard is a cheaper instance of the
 same pattern).
 
-**R12. Array-index the dense per-variable maps**  ·  *speculative, measure first*. Every
-`Std.HashMap`/`HashSet` operation dispatches `BEq`/`Hashable` through boxed closures
-(`lean_apply_1/2`, ~8 % whole-run). `VarId.index` is dense and bounded by the registry size, so
-the per-variable bucket maps (`DenseCovIndex.buckets`, `denseVarBucket`, `denseTouchedSet`) could
-be `Array (List Nat)` / bitsets keyed directly — no hashing, no dispatch. Wide but mechanical;
-worth a prototype on one index first.
+**R12. Array-index the dense per-variable maps**  ·  **no longer speculative — first instance landed
+(entry 158, gauss 0.86x, byte-identical, zero proof)**. Every `Std.HashMap`/`HashSet` operation
+dispatches `BEq`/`Hashable` through boxed closures (`lean_apply_1/2`, ~8 % whole-run), and a
+*nested* index (`m.insert x ((m[x]?).getD ∅ |>.insert e)`) additionally **copies the inner set on
+every update**, because the map still references the set that was just read out of it. `VarId.index`
+is dense and bounded by the registry, so such an index becomes an `Array` keyed by `.index`, updated
+with `Array.modify`, which hands the element over uniquely and mutates in place.
+   Entry 158 did gauss's four (`rowDeps`, `pivotRows`, `degrees`, `DenseSparseSolved.revDeps`): the
+   two mechanisms together were **28 % of that pass**, `hash/std` fell 15.7 → 10.3 % of it and
+   `lean_copy_expand_array` 5.7 → 0.5 %. Two lessons carry:
+   - **Pre-size or double.** Growing an index one variable at a time with `a ++ replicate k d` is
+     quadratic; size it once from a known bound (gauss takes `1 + max index` over the rows it just
+     built) or grow by doubling.
+   - **Check whether the index is planning data first.** Gauss's scheduler appears in no correctness
+     theorem, so the conversion needed *no* proof; only `revDeps`, which the entailment argument
+     mentions, cost two restated hypotheses.
+   Still open, same shape: `DenseCovIndex.buckets`, `denseVarBucket`, `denseTouchedSet`, and
+   `DenseSolved.revDeps` (domainBatch / flagUnify / fxSubst / rootPairUnify). Also `occ`
+   (`Std.HashMap VarId Nat`, threaded through four `csimp`'d descriptor twins — more edits, ~0.4 s).
 
 **R13. domainBatch is per-target *setup*-bound, not enumeration-bound** (measured 2026-07-28, LBR
 profiles over five OpenVM cases + SP1 keccak; entry 152). **The table below is CPU; for the wall,
@@ -548,6 +568,55 @@ the allocation traffic of their results. The `.fallback` row is **done (entry 15
      Preflight's `T.doms xs` is 6.8 % on sha256, all `Std.HashMap VarId` probes: the R12 array-indexed
      prototype belongs here first.
 
+### gauss residual after entry 158 (arrays for the scheduler indexes)  ·  *runtime, sha256*
+
+Measured on sha256 `apc_001` (gauss 11.3 s of 102.0 s on CI, 8 676 ms of 99 256 on this container —
+still the top pass either way), LBR shares of the post-entry-158 pass; the **shares** transfer
+between boxes, the ms estimates below are this container's. Ranked by size ÷ effort; **the whole Markowitz scheduler is planning data that
+appears in no correctness theorem, so 1–4 need no proof at all** — only value equality if the change
+is to stay byte-identical.
+
+1. **One walk in `DenseGaussReduced.fromExpr`** (16.9 % + 3.8 % = the whole of `denseMarkowitzBuild`,
+   ~1.8 s). It calls `denseLinearize e`; on failure `e.normalize` — a full tree rebuild — and
+   `denseLinearize` again, per constraint per invocation (11 of them). The retry can only succeed
+   where a *merged* linear form cancels to a constant (`denseLinearize`'s `mul` branch tests
+   `la.terms.isEmpty` on the **unmerged** list, so `(x - x) * y` fails before normalization and
+   linearizes after). `denseNormalizeResWith` (`Normalize.lean:665`) already carries each node's
+   linear form; a variant whose `mul` branch tests `la.norm.terms.isEmpty` answers both questions in
+   one walk. **Not obviously byte-identical** (term order after merging may differ) — count both
+   verdicts side by side over cycles 0–1 first. ~0.8–1.2 s.
+2. **`denseMarkowitzPivots` without its per-row `HashMap`** (6.3 %). It builds `denseCoeffIdx l.terms`
+   plus a `seen` set, but **every affine row in gauss is `norm`-alized** (`fromExpr`, `denseLinSubstF`,
+   `denseLinAdd`, `denseLinScale` and the fused walk all end in `.norm`), so each variable occurs once
+   with a nonzero coefficient: `coeff = t.2`, `count = 1`, `rhsNnz = terms.length - 1`, the `±1` and
+   unit descriptor lists are disjoint and the dedup is a no-op. One pass, no hash structure, gated on
+   `terms.length ≤ 32` with the current code above the gate (as `denseMergeTermsWith` does).
+   Byte-identical by construction, ~25 lines. ~0.3–0.5 s.
+3. **Delta index/degree updates in `denseMarkowitzRefreshRows`** (index 6.6 % + `refreshRow` 6.7 %).
+   It unindexes every variable of the old row and re-indexes every variable of the new one, when the
+   delta is "drop the pivot, add what the substituted row brought in" — ~1.4 M redundant index
+   operations per big invocation. Byte-identical (`degrees` is exact, so sub-then-add on a shared
+   variable is a no-op and `Nat` truncation cannot bite). ~0.3–0.6 s.
+4. **The rekey fan-out**: 257 515 re-keys for 52 194 adoptions in cycle 1, because `changed` includes
+   every variable of every rewritten stored solution (307 948 of them) although those only move the
+   *third* lexicographic key (`rewrite`). Dropping them would cut re-keys ~5× and with them the entry
+   allocations behind the `pop` phase (10.4 %, of which Batteries' heap code is only 2.1 % — the rest
+   is refcounting and allocating entry records). **Not byte-identical** → CI matrix. ~0.8 s.
+5. **Defer the back-substitution into stored solutions** (`denseLinSubst` 6.2 % + `insertAll` 1.1 % +
+   `adoptPairs`, and the fan-out grows with circuit size — the only idea here that changes gauss's
+   *exponent*). `denseMarkowitzAdoptPairs` eagerly rewrites every stored solution mentioning the new
+   pivot; a triangular store resolved once at `materialize` is `O(total)` instead of
+   `O(chain × total)`. Blocked on the loop needing a **fully resolved** σ for
+   `denseSparseSubstF dσ.fn c` (a triangular one would let pivots be chosen for already-solved
+   variables and leave them in the output), so it needs an on-demand memoized resolver — whose term
+   order differs from step-by-step rewriting, i.e. output changes and `insertAll_preserves`' argument
+   must be redone. Largest and riskiest; open it last.
+
+**Measured sub-bar / do not re-propose** (also in the dead-end list below): reusing
+`st.rows[rowId].reduced` instead of re-substituting the source constraint on selection is 2.2 % of the
+pass (~0.27 s) and would dissolve the pass's untrusted-metadata story; the `ZMod` angle is 1.3 % (both
+`Gauss.c` sweep hits are dead `csimp` originals); a different heap is worth 2.1 %.
+
 ### Runtime dead ends (measured; do not re-propose without new evidence)
 
 - **Indexing `densePdKeep`'s re-verification** (flagFold part C): `findIdx?` deep-equality scans and
@@ -576,6 +645,17 @@ the allocation traffic of their results. The `.fallback` row is **done (entry 15
   inside the 3 446-item variable-free tail; with the tail an O(1) seed there is nothing left to
   abort. Subsumed, not complementary.
 
+- **Adopting the Markowitz row's maintained `reduced` form instead of re-substituting the source
+  constraint** (gauss): the from-source `denseSparseSubstF dσ.fn c` on selection measures **134 ms
+  per big invocation, ~0.27 s over the sha256 run (2.2 % of the pass, entry 158)** — sub-bar, and it
+  is what makes every heap decision untrusted (the pass's soundness story is "re-solve from the
+  source under the current substitution before adopting"). Reusing the maintained row would move the
+  entailment obligation onto a per-row scheduler invariant for 2 % of the pass.
+- **Bundling gauss's array conversion with algorithm changes** (PR #193, 2026-07-23): exact live
+  reverse dependencies + streaming pivot selection + specialized final substitution + no solution
+  materialization, all at once, measured a **regression** (3 954 vs 3 287 ms on wasm-eth `apc_037`)
+  and never landed. The representation-only slice of the same idea is 0.86x (entry 158). Land the
+  piece you can measure alone.
 - **Whole-system content-hash gating of passes across cycles**: catches ~0 % — the fixpoint only
   retains cycles that changed something, so some pass always dirties the hash (#146 measurement).
   Only fine-grained dirtiness (R6) reaches the ~61 % no-op invocations.

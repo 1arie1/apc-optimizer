@@ -24,6 +24,16 @@ def DenseExpr.isVar : DenseExpr p → Bool
   | .var _ => true
   | _ => false
 
+/-- Grow `a` so `i` is in range, filling with `d`; doubling, so repeated growth stays amortized.
+
+The per-variable indexes below are `VarId.index`-keyed arrays rather than `Std.HashMap VarId _`
+because `Array.modify` hands the element to its update function uniquely: a nested
+`m.insert x ((m[x]?).getD ∅ |>.insert e)` instead copies the inner set on every update, the map
+still holding a reference to it. -/
+def denseArrEnsure {α : Type} (a : Array α) (i : Nat) (d : α) : Array α :=
+  if i < a.size then a
+  else a ++ Array.replicate (max (i + 1) (2 * a.size) - a.size) d
+
 /-- The occurrence-weighted duplication cost of pivoting on `v`, with a protection penalty. -/
 def denseGaussScore (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId) (v : VarId)
     (oc : Nat) : Nat :=
@@ -498,11 +508,11 @@ def denseReducedSubst (r : DenseGaussReduced p) (x : VarId)
 
 structure DenseSparseSolved (p : ℕ) where
   map : Std.HashMap VarId (DenseLinExpr p)
-  revDeps : Std.HashMap VarId (Std.HashSet VarId)
+  revDeps : Array (Std.HashSet VarId)
 
 namespace DenseSparseSolved
 
-def empty : DenseSparseSolved p := { map := ∅, revDeps := ∅ }
+def empty : DenseSparseSolved p := { map := ∅, revDeps := #[] }
 
 def fn (dσ : DenseSparseSolved p) : VarId → Option (DenseLinExpr p) := fun i => dσ.map[i]?
 
@@ -513,7 +523,8 @@ def insertAll (dσ : DenseSparseSolved p) :
       DenseSparseSolved.insertAll
         { map := dσ.map.insert x t
           revDeps := t.terms.foldl
-            (fun rd zc => rd.insert zc.1 (((rd[zc.1]?).getD ∅).insert x)) dσ.revDeps }
+            (fun rd zc => (denseArrEnsure rd zc.1.index ∅).modify zc.1.index (·.insert x))
+            dσ.revDeps }
         rest
 
 def materialize (dσ : DenseSparseSolved p) : DenseSolved p :=
@@ -574,7 +585,7 @@ def denseSparseGaussLoop (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId
       match denseReducedBest c' occ prot with
       | none => denseSparseGaussLoop occ prot rest dσ
       | some (x, t) =>
-          let touched := ((dσ.revDeps[x]?).getD ∅).toList.filterMap (fun y =>
+          let touched := (dσ.revDeps.getD x.index ∅).toList.filterMap (fun y =>
             (dσ.map[y]?).bind (fun s => if s.mentions x then some (y, s) else none))
           let pairs := touched.map (fun ys => (ys.1, denseLinSubst ys.2 x t)) ++ [(x, t)]
           denseSparseGaussLoop occ prot rest (dσ.insertAll pairs)
@@ -623,9 +634,9 @@ abbrev DenseMarkowitzHeap :=
 
 structure DenseMarkowitzState (p : ℕ) where
   rows : Array (DenseMarkowitzRow p)
-  degrees : Std.HashMap VarId Nat
-  rowDeps : Std.HashMap VarId (Std.HashSet Nat)
-  pivotRows : Std.HashMap VarId (Std.HashSet Nat)
+  degrees : Array Nat
+  rowDeps : Array (Std.HashSet Nat)
+  pivotRows : Array (Std.HashSet Nat)
   heap : DenseMarkowitzHeap
 
 def denseMarkowitzPivots (r : DenseGaussReduced p) (occ : Std.HashMap VarId Nat)
@@ -702,39 +713,35 @@ def denseMarkowitzRefreshRow (r : DenseMarkowitzRow p) (x : VarId) (t : DenseLin
     generation := r.generation + 1
     active := true }
 
-def denseMarkowitzDegreeAdd (m : Std.HashMap VarId Nat) (xs : List VarId) :
-    Std.HashMap VarId Nat :=
-  xs.foldl (fun m x => m.insert x (m.getD x 0 + 1)) m
+def denseMarkowitzDegreeAdd (m : Array Nat) (xs : List VarId) : Array Nat :=
+  xs.foldl (fun m x => (denseArrEnsure m x.index 0).modify x.index (· + 1)) m
 
-def denseMarkowitzDegreeSub (m : Std.HashMap VarId Nat) (xs : List VarId) :
-    Std.HashMap VarId Nat :=
-  xs.foldl (fun m x => m.insert x (m.getD x 0 - 1)) m
+def denseMarkowitzDegreeSub (m : Array Nat) (xs : List VarId) : Array Nat :=
+  xs.foldl (fun m x => (denseArrEnsure m x.index 0).modify x.index (· - 1)) m
 
-def denseMarkowitzIndexRow (idx : Std.HashMap VarId (Std.HashSet Nat))
-    (rowId : Nat) (xs : List VarId) : Std.HashMap VarId (Std.HashSet Nat) :=
-  xs.foldl (fun idx x => idx.insert x (((idx[x]?).getD ∅).insert rowId)) idx
+def denseMarkowitzIndexRow (idx : Array (Std.HashSet Nat))
+    (rowId : Nat) (xs : List VarId) : Array (Std.HashSet Nat) :=
+  xs.foldl (fun idx x => (denseArrEnsure idx x.index ∅).modify x.index (·.insert rowId)) idx
 
-def denseMarkowitzUnindexRow (idx : Std.HashMap VarId (Std.HashSet Nat))
-    (rowId : Nat) (xs : List VarId) : Std.HashMap VarId (Std.HashSet Nat) :=
-  xs.foldl (fun idx x => idx.insert x (((idx[x]?).getD ∅).erase rowId)) idx
+def denseMarkowitzUnindexRow (idx : Array (Std.HashSet Nat))
+    (rowId : Nat) (xs : List VarId) : Array (Std.HashSet Nat) :=
+  xs.foldl (fun idx x => (denseArrEnsure idx x.index ∅).modify x.index (·.erase rowId)) idx
 
-def denseMarkowitzIndexPivots (idx : Std.HashMap VarId (Std.HashSet Nat))
-    (rowId : Nat) (pivots : List DenseMarkowitzPivot) :
-    Std.HashMap VarId (Std.HashSet Nat) :=
+def denseMarkowitzIndexPivots (idx : Array (Std.HashSet Nat))
+    (rowId : Nat) (pivots : List DenseMarkowitzPivot) : Array (Std.HashSet Nat) :=
   pivots.foldl
-    (fun idx q => idx.insert q.var (((idx[q.var]?).getD ∅).insert rowId)) idx
+    (fun idx q => (denseArrEnsure idx q.var.index ∅).modify q.var.index (·.insert rowId)) idx
 
-def denseMarkowitzUnindexPivots (idx : Std.HashMap VarId (Std.HashSet Nat))
-    (rowId : Nat) (pivots : List DenseMarkowitzPivot) :
-    Std.HashMap VarId (Std.HashSet Nat) :=
+def denseMarkowitzUnindexPivots (idx : Array (Std.HashSet Nat))
+    (rowId : Nat) (pivots : List DenseMarkowitzPivot) : Array (Std.HashSet Nat) :=
   pivots.foldl
-    (fun idx q => idx.insert q.var (((idx[q.var]?).getD ∅).erase rowId)) idx
+    (fun idx q => (denseArrEnsure idx q.var.index ∅).modify q.var.index (·.erase rowId)) idx
 
 def denseMarkowitzEntryOf (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId)
     (dσ : DenseSparseSolved p) (st : DenseMarkowitzState p) (rowId : Nat)
     (r : DenseMarkowitzRow p) (q : DenseMarkowitzPivot) : DenseMarkowitzEntry :=
-  let solvedDegree := ((dσ.revDeps[q.var]?).getD ∅).size
-  let activeDegree := st.degrees.getD q.var 1
+  let solvedDegree := (dσ.revDeps.getD q.var.index ∅).size
+  let activeDegree := st.degrees.getD q.var.index 1
   { isProtected := if prot.contains q.var then 1 else 0
     fill := q.rhsNnz * (activeDegree - 1)
     rewrite := q.rhsNnz * solvedDegree
@@ -768,20 +775,22 @@ def denseMarkowitzPushRow (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarI
 
 def denseMarkowitzBuild (constraints : List (DenseExpr p))
     (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId) : DenseMarkowitzState p :=
+  let rows := constraints.foldl (fun rs c => rs.push (denseMarkowitzRow rs.size c occ prot))
+    (#[] : Array (DenseMarkowitzRow p))
+  -- The per-variable indexes are `VarId.index`-keyed arrays, sized once: substitution only ever
+  -- copies variables between rows, so no index can exceed the system's maximum.
+  let n := rows.foldl (fun m r => r.vars.foldl (fun m x => max m (x.index + 1)) m) 0
   let base : DenseMarkowitzState p :=
-    { rows := #[]
-      degrees := ∅
-      rowDeps := ∅
-      pivotRows := ∅
+    { rows
+      degrees := Array.replicate n 0
+      rowDeps := Array.replicate n ∅
+      pivotRows := Array.replicate n ∅
       heap := ∅ }
-  let indexed := constraints.foldl (fun st c =>
-    let rowId := st.rows.size
-    let r := denseMarkowitzRow rowId c occ prot
+  let indexed := rows.foldl (fun st r =>
     { st with
-      rows := st.rows.push r
       degrees := denseMarkowitzDegreeAdd st.degrees r.vars
-      rowDeps := denseMarkowitzIndexRow st.rowDeps rowId r.vars
-      pivotRows := denseMarkowitzIndexPivots st.pivotRows rowId r.pivots }) base
+      rowDeps := denseMarkowitzIndexRow st.rowDeps r.rowId r.vars
+      pivotRows := denseMarkowitzIndexPivots st.pivotRows r.rowId r.pivots }) base
   indexed.rows.foldl (fun st r =>
     match denseMarkowitzBestEntry? occ prot DenseSparseSolved.empty st r.rowId r with
     | none => st
@@ -806,10 +815,10 @@ def denseMarkowitzPopValid : Nat → DenseMarkowitzState p →
           if denseMarkowitzEntryValid st entry then some (entry, st)
           else denseMarkowitzPopValid fuel st
 
-def denseMarkowitzCollectIds (idx : Std.HashMap VarId (Std.HashSet Nat))
+def denseMarkowitzCollectIds (idx : Array (Std.HashSet Nat))
     (xs : Std.HashSet VarId) : Std.HashSet Nat :=
   xs.toList.foldl (fun out x =>
-    ((idx[x]?).getD ∅).toList.foldl (fun out rowId => out.insert rowId) out) ∅
+    (idx.getD x.index ∅).toList.foldl (fun out rowId => out.insert rowId) out) ∅
 
 def denseMarkowitzRekey (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId)
     (dσ : DenseSparseSolved p) (changed : Std.HashSet VarId) (st : DenseMarkowitzState p) :
@@ -820,7 +829,7 @@ def denseMarkowitzRekey (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId)
 def denseMarkowitzRefreshRows (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId)
     (x : VarId) (t : DenseLinExpr p) (st : DenseMarkowitzState p) :
     DenseMarkowitzState p × Std.HashSet VarId :=
-  let rowIds := ((st.rowDeps[x]?).getD ∅).toList
+  let rowIds := (st.rowDeps.getD x.index ∅).toList
   rowIds.foldl (fun (st, changed) rowId =>
     match st.rows[rowId]? with
     | none => (st, changed)
@@ -855,7 +864,7 @@ def denseMarkowitzDeactivate (rowId : Nat) (st : DenseMarkowitzState p) :
 
 def denseMarkowitzAdoptPairs (dσ : DenseSparseSolved p) (x : VarId) (t : DenseLinExpr p) :
     List (VarId × DenseLinExpr p) :=
-  let touched := ((dσ.revDeps[x]?).getD ∅).toList.filterMap (fun y =>
+  let touched := (dσ.revDeps.getD x.index ∅).toList.filterMap (fun y =>
     (dσ.map[y]?).bind (fun s => if s.mentions x then some (y, s) else none))
   touched.map (fun ys => (ys.1, denseLinSubst ys.2 x t)) ++ [(x, t)]
 
