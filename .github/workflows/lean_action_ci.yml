@@ -32,73 +32,119 @@ jobs:
           retention-days: 30
 
   # Effectiveness over the full OpenVM (openvm-eth, wasm-eth) and SP1 (rsp) sets plus the keccak and
-  # sha256 stress sets. The matrix crosses side (this PR vs the latest main build) with a benchmark
-  # group, so each cell is its own runner: circuit sizes are deterministic, so the sides needn't
-  # share a runner, and splitting the 100-case wasm-eth set into its own group keeps it off the
-  # openvm-eth critical path. `report` merges every cell. benchmark.py also captures a rough total
-  # runtime, used for the report-only runtime row.
+  # sha256 stress sets. One cell per benchmark group, and each cell benches **both sides itself** --
+  # this PR's binary then the latest main build, back to back on the same runner.
+  #
+  # Circuit sizes are deterministic, so for effectiveness the sides needn't share a runner. But
+  # benchmark.py also reports each side's wall time, and the report assembles those into the runtime
+  # row: measured on two different instances of the same spec that comparison is meaningless, and it
+  # has already misled us -- a change that a same-runner bench put at 0.86x on sha256 showed up here
+  # as -2%. Groups still fan out across runners, which is where the parallelism belongs; only the
+  # baseline/PR pair is forced onto one machine.
   effectiveness:
     if: github.event_name == 'pull_request'
     needs: build
     runs-on: warp-ubuntu-2404-x64-32x
-    # 30 min: enough for the sha256 stress case (~170k vars, ~20 min for one optimizer run).
-    timeout-minutes: 30
+    # Per group, since a cell now runs its sets twice. Measured: the sha256 cell is ~170 s for one
+    # side, the others under a minute -- so this is headroom for the stress case growing, not a
+    # current requirement.
+    timeout-minutes: ${{ matrix.group.timeout }}
     strategy:
       fail-fast: false
       matrix:
-        side: [pr, main]
-        # `key` names the artifact; `sets` is the space-separated list of `<vm>:<set>` tokens this
+        # `key` names the artifacts; `sets` is the space-separated list of `<vm>:<set>` tokens this
         # cell runs (vm picks the Benchmarks/<VM>/ dir + fact-aware backend: openvm -> BabyBear,
         # sp1 -> KoalaBear). Tiny sets ride along with a full one rather than paying for their own
         # runner: the OpenVM and SP1 keccak stress sets sit with openvm-eth; the full 200-case SP1
-        # rsp set pairs with wasm-eth. The sha256 stress case (~20 min for one run) gets its own
-        # group so it doesn't push another cell past the timeout. Per-cell JSON/MD are keyed by a
-        # unique label (sp1 sets get an `sp1-` prefix) so the two `keccak` sets don't collide.
+        # rsp set pairs with wasm-eth. The sha256 stress case gets its own group so its runtime does
+        # not push another cell's timeout. Per-cell JSON/MD are keyed by a unique label (sp1 sets get
+        # an `sp1-` prefix) so the two `keccak` sets don't collide.
         group:
-          - { key: openvm, sets: "openvm:openvm-eth openvm:keccak sp1:keccak" }
-          - { key: wasm, sets: "openvm:wasm-eth sp1:rsp" }
-          - { key: sha, sets: "openvm:sha256" }
+          - { key: openvm, sets: "openvm:openvm-eth openvm:keccak sp1:keccak", timeout: 30 }
+          - { key: wasm, sets: "openvm:wasm-eth sp1:rsp", timeout: 30 }
+          - { key: sha, sets: "openvm:sha256", timeout: 45 }
     permissions:
       contents: read
       actions: read
     steps:
       - uses: actions/checkout@v4
       - name: PR binary
-        if: matrix.side == 'pr'
         uses: actions/download-artifact@v4
         with:
           name: apc-optimizer-bin
-          path: bin
+          path: bin-pr
       - name: Latest-main binary
-        if: matrix.side == 'main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           run_id=$(gh run list --workflow "Lean Action CI" --branch main --status success \
             --limit 1 --json databaseId -q '.[0].databaseId // empty')
           if [ -n "$run_id" ]; then
-            gh run download "$run_id" -n apc-optimizer-bin -D bin || true
+            gh run download "$run_id" -n apc-optimizer-bin -D bin-main || true
           fi
-          [ -f bin/apc-optimizer ] || echo "no latest-main binary; PR-only report"
-      - name: Effectiveness (${{ matrix.group.sets }})
+          if [ ! -f bin-main/apc-optimizer ]; then echo "no latest-main binary; PR-only report"; fi
+      - name: Effectiveness, both sides (${{ matrix.group.sets }})
+        env:
+          SETS: ${{ matrix.group.sets }}
         run: |
-          [ -f bin/apc-optimizer ] || { echo "no binary for side '${{ matrix.side }}'"; exit 0; }
-          chmod +x bin/apc-optimizer
-          for token in ${{ matrix.group.sets }}; do
+          chmod +x bin-pr/apc-optimizer
+          if [ -f bin-main/apc-optimizer ]; then chmod +x bin-main/apc-optimizer; fi
+          mkdir -p "$GITHUB_WORKSPACE/out-pr" "$GITHUB_WORKSPACE/out-main"
+          # Warm the page cache before timing anything. Whichever side ran first would otherwise pay
+          # to page in its own 123 MB binary and the inputs, which on a short set is larger than the
+          # difference being measured -- measured locally, that cost alone turned a real 0.64x on
+          # sp1:keccak into a reported +42%, i.e. it inverted the sign. Ordering cannot fix a
+          # first-run penalty this size; only paying it before the clock starts can.
+          for token in $SETS; do
             vm=${token%%:*}; bset=${token#*:}
-            # Non-openvm sets get a `<vm>-` label prefix so SP1 keccak doesn't overwrite OpenVM's;
-            # openvm keeps the bare label the report assembler expects.
-            label=$bset
-            if [ "$vm" != openvm ]; then label="$vm-$bset"; fi
-            python3 Benchmarks/benchmark.py "$bset" --vm "$vm" --binary bin/apc-optimizer \
-              --json "$label.json" --md "$label.md"
+            case "$vm" in openvm) d=OpenVM ;; sp1) d=SP1 ;; *) continue ;; esac
+            cat "Benchmarks/$d/$bset"/*.json.gz > /dev/null 2>&1 || true
           done
+          for side in pr main; do
+            if [ -f "bin-$side/apc-optimizer" ]; then
+              cat "bin-$side/apc-optimizer" > /dev/null 2>&1 || true
+            fi
+          done
+          # One definition of the per-side run, so the label rule (which `report` depends on) is not
+          # duplicated. `|| return 1` is explicit because `set -e` is suspended inside a function
+          # called on the left of `||`.
+          run_side() {
+            side="$1"
+            bin="$PWD/bin-$side/apc-optimizer"
+            [ -f "$bin" ] || { echo "no $side binary; nothing to bench"; return 0; }
+            for token in $SETS; do
+              vm=${token%%:*}; bset=${token#*:}
+              # Non-openvm sets get a `<vm>-` label prefix so SP1 keccak doesn't overwrite OpenVM's;
+              # openvm keeps the bare label the report assembler expects.
+              label=$bset
+              if [ "$vm" != openvm ]; then label="$vm-$bset"; fi
+              # Absolute output paths: benchmark.py chdirs to the repo, so a relative --json would
+              # resolve against that rather than against this step's cwd.
+              python3 Benchmarks/benchmark.py "$bset" --vm "$vm" --binary "$bin" \
+                --json "$GITHUB_WORKSPACE/out-$side/$label.json" \
+                --md "$GITHUB_WORKSPACE/out-$side/$label.md" || return 1
+            done
+          }
+          rc=0
+          run_side pr || rc=$?
+          # The baseline is an older main build, so it can fail on inputs this checkout added. That
+          # must not discard the PR-side results: the per-side matrix cells used to fail
+          # independently, and `report` falls back to PR-only markdown when a baseline is missing.
+          run_side main || echo "::warning::baseline bench failed; reporting PR-side results only"
+          exit "$rc"
+      # Two artifacts per cell, named exactly as the per-side cells used to be, so `report` still
+      # merges `eff-pr-*` into pr/ and `eff-main-*` into main/ with no change.
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: eff-${{ matrix.side }}-${{ matrix.group.key }}
-          path: |
-            *.json
-            *.md
+          name: eff-pr-${{ matrix.group.key }}
+          path: out-pr
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eff-main-${{ matrix.group.key }}
+          path: out-main
           if-no-files-found: ignore
 
   # Runtime detail, essentially the old quick-bench: the top-10 openvm-eth cases run sequentially
@@ -154,8 +200,8 @@ jobs:
       pull-requests: write
     steps:
       - uses: actions/checkout@v4
-      # One artifact per (side, group) cell; merge each side's cells back into one dir so the
-      # assemble step still reads pr/$set.json and main/$set.json regardless of grouping.
+      # Two artifacts per group cell (both sides, benched on that cell's runner); merge each side's
+      # cells back into one dir so the assemble step still reads pr/$set.json and main/$set.json.
       - uses: actions/download-artifact@v4
         with: { pattern: eff-pr-*, path: pr, merge-multiple: true }
       - uses: actions/download-artifact@v4
@@ -206,6 +252,7 @@ jobs:
             openvm-eth + wasm-eth + keccak + sha256 + sp1/rsp + sp1/keccak, PR `${{ steps.base.outputs.psha }}`
             ${{ steps.base.outputs.sha && format('vs main `{0}`', steps.base.outputs.sha)
                  || '(no main baseline binary)' }}.
-            Effectiveness is exact; the runtime row and detail are report-only. Full runtime detail:
-            `gh workflow run "Runtime Bench" -f pr=${{ github.event.number }}`.
+            Effectiveness is exact. Each set's two sides are benched back to back on one runner, so
+            the runtime row is comparable -- but coarse: benchmark.py runs cases in parallel. For
+            per-pass detail: `gh workflow run "Runtime Bench" -f pr=${{ github.event.number }}`.
           token: ${{ github.token }}
