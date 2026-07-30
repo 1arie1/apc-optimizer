@@ -194,9 +194,14 @@ these need no new proof.
      `denseFindDomainAlg` is served from a `denseVarBucket` over the single-variable constraints
      (uncapped, order-preserving → identical first match), threaded as a *value* — a lookup closure
      in the thunk payload re-ran the whole index build per query (13× regression, see the entry).
-     busPairCancel 90 → 50 s. `flagUnify`, `flagFoldDrops`, `boxRewrite`, `fxSubst` and
-     `rootPairUnify` still call `denseFindDomainAlg` on whole lists; same fix applies if they show
-     up in a profile (flagFold 15 s and rootPairUnify 13 s are the candidates).
+     busPairCancel 90 → 50 s. ~~`flagFoldDrops`~~ **done (entry 157)**: its box-tautology
+     certificate re-derived the domains from the unbucketed single-variable list per candidate —
+     9.2 s of a 13.7 s pass on sha256 `apc_001` — while the bucket built in the same function served
+     only the prefilter in front of it. `flagUnify`, `boxRewrite`, `fxSubst` and `rootPairUnify`
+     still call `denseFindDomainAlg` on whole lists; same fix applies if they show up in a profile
+     (rootPairUnify 9 s is the candidate, and `boxRewrite`'s `denseBrRw`/`denseBrCert` call it up to
+     three times per variable — 0.7 s on sha256, but 32 % of openvm-eth `apc_067`'s flagFold in one
+     cycle).
    - `busPairCancel`: ~~`liveArr` materialization per candidate~~ **done (#210)** — see R8.
      The O(B²) *certificate* scans remain (R8 design (b)); in coda mode the `addrHash`
      bucket is O(B) per hot address — add a position cursor. ~~`dropWits` from-0 array scan per
@@ -545,6 +550,21 @@ the allocation traffic of their results. The `.fallback` row is **done (entry 15
 
 ### Runtime dead ends (measured; do not re-propose without new evidence)
 
+- **Indexing `densePdKeep`'s re-verification** (flagFold part C): `findIdx?` deep-equality scans and
+  `List.take` prefixes replaced by a `densePdValHash` position index over an array — **0.98x on
+  flagFold, sub-bar** (entry 157). The cost it targets is real (866 ms on sha256 `apc_001`, 574 of it
+  in cycle 8 across 268 proposed value buckets, and `nverd = 0` everywhere, so it is all
+  false-positive rejection) but only ~a third is recoverable this way. Worth ~11.5 % of the
+  *post*-entry-157 pass when bundled with the prologue item below; not on its own.
+- **flagFold's `boxTautoDrop` prologue, standalone**: an allocation-free capped distinct-variable
+  walk replacing `hashedEraseDups`'s per-constraint `Std.HashMap`, a nested fold replacing the
+  710 146-element `flatMap DenseExpr.vars`, and a cache seeded only from queryable constraints —
+  **0.93x, sub-bar** (entry 157). ~1.1 s together, each piece 0.2-0.35 s.
+- **Dropping flagFold's domain memo** in favour of per-query bucket lookups: **regression**, 4 970 vs
+  4 747 ms (entry 157). It would delete the one non-trivial proof obligation of that entry, but
+  `denseFindDomainAlg` then re-runs per (constraint, variable) and `denseRootsIn` reallocates each
+  domain list. An index is not a substitute for a memo when the query *count* is the problem.
+
 - **Retiring domainBatch's task fan-out** (`parallel := false`): 0.96× sha256 / 0.91× keccak against
   the pre-entry-155 baseline, but **+700 ms on top of entry 155** (measured twice) and a wash on
   keccak. The fan-out loses only on cycle 0 — whose work entry 155 deleted — and wins on the
@@ -652,10 +672,19 @@ the allocation traffic of their results. The `.fallback` row is **done (entry 15
   measured (entry 152)**: gathers are 4.6 % of the pass at sha scale and target dedup 0.4 %; the
   per-target cost that follows them is the survivor *compile* (56 %), not the gather or the scan.
   See R13.
-- **flagFold cycle 0 (24 s, zero effect)**: NOT the domain lookups (bucketing them changed
-  nothing). Suspect `denseFuCandidates`' per-interaction `O.vars.eraseDups × splitAt` on large
-  first-slot payloads, or the per-matched-pair box evaluation in `denseFuPairData?`. Sample the
-  window before building anything.
+- ~~**flagFold cycle 0 (24 s, zero effect)**: NOT the domain lookups (bucketing them changed
+  nothing). Suspect `denseFuCandidates`' per-interaction `O.vars.eraseDups × splitAt`~~ — **both
+  halves wrong, measured (entry 157)**. It *was* the domain lookups: `denseBtPre` and `denseBtCert`
+  are the same predicate over different domain sources, and the earlier session bucketed the
+  prefilter while the certificate kept scanning all 23 489 single-variable constraints per queried
+  variable. Fixed, 0.349x on the pass. And `denseFuCandidates` is **166 ms of the whole sha256 run**
+  (50 ms in cycle 0): the per-variable `splitAt` really does allocate a full copy of the slot-0
+  payload just to test `R.vars.isEmpty`, and a coefficient-plus-`hasVar` twin would avoid it, but
+  `fxSubst`'s entire real cost is ~0.85 s and `denseFuPairData?` never fires on this APC
+  (`solved = 0` on every invocation). Sub-bar; do not build it without a case where `fxSubst`
+  dominates.
+  **The lesson worth keeping: when two functions compute the same predicate, an index wired into
+  one of them buys nothing.** Check which one the hot path calls.
 
 ### domainBatch residual after entry 151 (byte-operand domains)  ·  *runtime, sp1*  ·  medium value
 Entry 151 BISECTED domainBatch (the ideas' "58% is the domain-table build/cache" guess was WRONG — the

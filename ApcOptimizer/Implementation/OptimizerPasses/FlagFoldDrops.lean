@@ -20,61 +20,43 @@ variable {p : ℕ}
 def denseSingleVarCs (all : List (DenseExpr p)) : List (DenseExpr p) :=
   all.filter (fun c => (HashedDedup.hashedEraseDups (hash ·) c.vars).length == 1)
 
-def denseBtCertImpl (singles : List (DenseExpr p)) (c : DenseExpr p) : Bool :=
-  2 ≤ c.vars.eraseDups.length &&
-  (let doms := c.vars.eraseDups.filterMap (fun v =>
-     (denseFindDomainAlg singles v).map (fun d => (v, d)))
-   decide (doms.map Prod.fst = c.vars.eraseDups) &&
+def denseBtCertImpl (domOf : VarId → Option (List (ZMod p))) (c : DenseExpr p) : Bool :=
+  let vs := HashedDedup.hashedEraseDups (hash ·) c.vars
+  2 ≤ vs.length &&
+  (let doms := vs.filterMap (fun v => (domOf v).map (fun d => (v, d)))
+   decide (doms.map Prod.fst = vs) &&
    decide ((doms.map (fun vd => vd.2.length)).prod ≤ 32) &&
    (denseAssignments doms).all (fun pt => zmodIsZero (c.eval (denseEnvOfFast pt))))
 
-/-- Certificate: `c` mentions ≥ 2 distinct variables, every one carries a proven finite domain
-    (from the single-variable constraints), the joint box is small, and `c` vanishes on all of it. -/
-def denseBtCert (singles : List (DenseExpr p)) (c : DenseExpr p) : Bool :=
-  2 ≤ c.vars.eraseDups.length &&
-  (let doms := c.vars.eraseDups.filterMap (fun v =>
-     (denseFindDomainAlg singles v).map (fun d => (v, d)))
-   decide (doms.map Prod.fst = c.vars.eraseDups) &&
+/-- Certificate: `c` mentions ≥ 2 distinct variables, `domOf` reports a finite domain for every
+    one of them, the joint box is small, and `c` vanishes on all of it. `domOf` is untrusted here —
+    soundness comes from the caller's justification of the domains it reports
+    (`boxTautoReplace_denseCorrect`'s `hdomOf`). -/
+def denseBtCert (domOf : VarId → Option (List (ZMod p))) (c : DenseExpr p) : Bool :=
+  let vs := HashedDedup.hashedEraseDups (hash ·) c.vars
+  2 ≤ vs.length &&
+  (let doms := vs.filterMap (fun v => (domOf v).map (fun d => (v, d)))
+   decide (doms.map Prod.fst = vs) &&
    decide ((doms.map (fun vd => vd.2.length)).prod ≤ 32) &&
    (denseAssignments doms).all (fun pt => decide (c.eval (denseEnvOfFast pt) = 0)))
 
 @[csimp] theorem denseBtCert_eq_impl : @denseBtCert = @denseBtCertImpl := by
-  funext q singles c
-  simp [denseBtCert, denseBtCertImpl]
-
-def denseBtPreImpl (domOf : VarId → Option (List (ZMod p))) (c : DenseExpr p) : Bool :=
-  let vs := HashedDedup.hashedEraseDups (hash ·) c.vars
-  2 ≤ vs.length &&
-  (let doms := vs.filterMap (fun v => (domOf v).map (fun d => (v, d)))
-   decide (doms.map Prod.fst = vs) &&
-   decide ((doms.map (fun vd => vd.2.length)).prod ≤ 32) &&
-   (denseAssignments doms).all (fun pt => zmodIsZero (c.eval (denseEnvOfFast pt))))
-
-/-- A cheap prefilter over a precomputed domain lookup; accepted candidates re-run the real
-    `denseBtCert`. -/
-def denseBtPre (domOf : VarId → Option (List (ZMod p))) (c : DenseExpr p) : Bool :=
-  let vs := HashedDedup.hashedEraseDups (hash ·) c.vars
-  2 ≤ vs.length &&
-  (let doms := vs.filterMap (fun v => (domOf v).map (fun d => (v, d)))
-   decide (doms.map Prod.fst = vs) &&
-   decide ((doms.map (fun vd => vd.2.length)).prod ≤ 32) &&
-   (denseAssignments doms).all (fun pt => decide (c.eval (denseEnvOfFast pt) = 0)))
-
-@[csimp] theorem denseBtPre_eq_impl : @denseBtPre = @denseBtPreImpl := by
   funext q domOf c
-  simp [denseBtPre, denseBtPreImpl]
-
-/-- The replacement condition: the memoized prefilter gates the (expensive) certificate. -/
-def denseBtKeep (singles : List (DenseExpr p)) (domOf : VarId → Option (List (ZMod p)))
-    (c : DenseExpr p) : Bool :=
-  denseBtPre domOf c && denseBtCert singles c
+  simp [denseBtCert, denseBtCertImpl]
 
 /-- Replace certified box tautologies by the trivial constraint `0`. -/
 def DenseConstraintSystem.boxTautoReplaceWith (d : DenseConstraintSystem p)
-    (singles : List (DenseExpr p)) (domOf : VarId → Option (List (ZMod p))) :
-    DenseConstraintSystem p :=
+    (domOf : VarId → Option (List (ZMod p))) : DenseConstraintSystem p :=
   { d with algebraicConstraints := d.algebraicConstraints.map (fun c =>
-      if denseBtKeep singles domOf c then DenseExpr.const 0 else c) }
+      if denseBtCert domOf c then DenseExpr.const 0 else c) }
+
+/-- Memo table for the per-variable domain lookups, first occurrence winning. Every entry is the
+    bucket's own `denseFindDomainAlg` verdict (`denseBtDomCache_sound`), which is what justifies the
+    domains `denseBtCert` then reads. -/
+def denseBtDomCache (domIdx : Std.HashMap VarId (List (DenseExpr p))) (vs : List VarId) :
+    Std.HashMap VarId (Option (List (ZMod p))) :=
+  vs.foldl (fun m v => if m.contains v then m
+    else m.insert v (denseFindDomainAlg (denseVarBucketLookup domIdx v) v)) ∅
 
 /-- Box-tautology drop (part B): a multi-variable constraint that vanishes at every point of its
     variables' proven finite-domain box is replaced by the literal `0`. E.g. with `x, y ∈ {0,1}`
@@ -83,19 +65,12 @@ def DenseConstraintSystem.boxTautoReplaceWith (d : DenseConstraintSystem p)
 def denseBoxTautoDropF (pw : PrimeWitness p) (_bs : BusSemantics p)
     (d : DenseConstraintSystem p) : DenseConstraintSystem p :=
   if pw.isPrime = true then
-    let singles := denseSingleVarCs d.algebraicConstraints
-    -- Bucket single-variable constraints by their one variable, so `denseFindDomainAlg` scans only
-    -- that variable's bucket (same domain, no O(#singles) walk per variable).
-    let singlesBy : Std.HashMap VarId (List (DenseExpr p)) :=
-      singles.reverse.foldl (fun m c =>
-        match HashedDedup.hashedEraseDups (hash ·) c.vars with
-        | [v] => m.insert v (c :: m.getD v [])
-        | _ => m) ∅
-    let cache : Std.HashMap VarId (Option (List (ZMod p))) :=
-      (d.algebraicConstraints.flatMap DenseExpr.vars).foldl
-        (fun m v => if m.contains v then m
-         else m.insert v (denseFindDomainAlg (singlesBy.getD v []) v)) ∅
-    d.boxTautoReplaceWith singles (fun v => cache.getD v none)
+    -- The certificate's domains come from this memo, so each variable's domain is derived once
+    -- per invocation, from its own bucket, rather than per candidate constraint from the whole
+    -- single-variable list. `denseBtDomCache_sound` is what makes the memo trustworthy.
+    let domIdx := denseVarBucket DenseExpr.vars (denseSingleVarCs d.algebraicConstraints)
+    let cache := denseBtDomCache domIdx (d.algebraicConstraints.flatMap DenseExpr.vars)
+    d.boxTautoReplaceWith (fun v => cache.getD v none)
   else d
 
 /-! ## Part C: pointwise-duplicate stateless check removal (dense) -/

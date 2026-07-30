@@ -5500,3 +5500,65 @@ in the plan buys the least. **(b) `zmodIsNegOne`** (`c.val == p - 1`, sound for 
 Its only site was `Affine.trySolve`, which needs the ring for `⁻¹` and `scale` regardless, so
 converting one test would not empty its entry.
 **Worked: yes (0.68–0.90x per corpus, output byte-identical; draft PR).**
+
+### 157. Runtime: flagFold's box-tautology certificate reads the domain memo (0.35x on the pass, sha256)
+TARGETED the corpus's — and now the run's — **top pass**: on merged main, sha256 `apc_001` spends
+**13 739 ms of 110 403 in `flagFold` (12.4 %)**, ahead of gauss (12.1 s) and reencode (7.4 s).
+It reached the top only because entries 153/155/156 shrank everything around it.
+**TIMED THE PHASES BEFORE PROFILING**, which is the only reason this was found. `flagFold` is a
+composite of four sub-passes (`FlagFold.lean`) and the profiler reports only the composite; a
+throwaway `IO` probe (`ffPhases` in `Main.lean`, hooked where the pass runs, each phase forced with
+`IO.lazyPure`) split its wall as **fxSubst 1120 / boxRewrite 918 / boxTautoDrop 10 578 /
+pointwiseDupDrop 2449 ms** — and inside `boxTautoDrop`: singles 215, `singlesBy` 44, `flatMap vars`
+190, cache 347, `denseBtPre` 332, **`denseBtCert` 9 200**, all but 4 ms of it in cleanup cycle 0.
+MECHANISM. `denseBtPre` and `denseBtCert` computed the **same predicate**; only the domain source
+differed. `denseBtPre` read a per-variable memo; `denseBtCert singles c` called
+`denseFindDomainAlg singles v` per variable, **linearly scanning all 23 489 single-variable
+constraints** with `DenseExpr.mentions` on each — ~2.7e8 tree walks for 9 072 candidates. And
+`npre = ncert = 9 072`: every constraint the prefilter admitted also passed the certificate, so the
+whole 9.2 s re-derived a verdict already reached. The bucketing added in the entry-148 session
+(`singlesBy` + `cache`) was wired into the **prefilter only**, so it never removed the scan it was
+built to remove.
+THIS RETIRES A RECORDED DEAD END. `ideas.md` said *"flagFold cycle 0 (24 s, zero effect): NOT the
+domain lookups (bucketing them changed nothing)"*. It is the domain lookups; the earlier measurement
+bucketed the wrong one of two structurally identical tests. Re-measured with a named mechanism, as
+the re-proposal rule requires.
+THE FIX deletes `denseBtCert`/`denseBtCertImpl`/`denseBtKeep` and promotes the memo-reading test to
+*be* the certificate (renamed `denseBtPre` → `denseBtCert`, which is what it now is — nothing sits
+behind it). `denseBoxTautoDropF` builds `domIdx := denseVarBucket DenseExpr.vars (denseSingleVarCs …)`
+— the same helper part C already uses, so `denseVarBucket_mem` applies unchanged — and
+`denseBtDomCache` memoizes `denseFindDomainAlg (bucket v) v` per variable, first occurrence winning.
+Each variable's domain is derived once per invocation from a 1-3 item bucket instead of once per
+candidate constraint from the whole list. Net **−22 lines of runtime**.
+PROOF (all under `Implementation/`, no pass correctness theorem changes shape). `domOf` is untrusted:
+`boxTautoReplace_denseCorrect` takes two new hypotheses — `hidx` (the bucket lies inside
+`denseSingleVarCs`, from `denseVarBucket_mem`) and `hdomOf` (every reported domain is that bucket's
+`denseFindDomainAlg` verdict, from the new `denseBtDomCache_sound`) — and feeds
+`denseFindDomainAlg_sound` the bucket rather than the whole list. That is entry 143's shape, not a
+"bucketed = unbucketed" equality: soundness only needs *every constraint in the list handed to
+`denseFindDomainAlg`* to vanish, which holds for any sublist of the system. `denseBtDomCacheGo_sound`
+is the one genuinely new argument — a `foldl` invariant ("every key the accumulator reports maps to
+its bucket's verdict") over `Std.HashMap.getElem?_insert`. **+53 lines of proof, −34 deleted.**
+NUMBERS (this 20-core box, serial, interleaved; flagFold ms, then case total): sha256 `apc_001`
+**13 739 → 4 795 (0.349x)**, total 110 403 → 102 502 (**0.928x**); keccak `apc_001` 563 → 480
+(0.85x), total 8 857 → 8 628; openvm-eth `apc_067` 173 → 169 (0.98x); wasm-eth `apc_012` 471 → 478
+(1.01x). No other pass column moves outside noise. The win is concentrated where the
+single-variable list is long — keccak's is 812 candidates against sha's 9 072.
+VERIFIED: `opt-export` **byte-identical** on sha256 `apc_001` (5.76 MB), OpenVM keccak, openvm-eth
+`apc_006` / `apc_100`, wasm-eth `apc_005` / `apc_012`; `lake build` clean, no warnings;
+`check-proof-integrity` passes (propext / Classical.choice / Quot.sound, no unused theorems).
+THREE ALSO-RANS, all measured (unproven implementations, interleaved) and all rejected.
+**(a) Indexing `densePdKeep`'s re-verification** (`findIdx?` deep-equality scans + `List.take`
+prefixes replaced by a `densePdValHash` position index over an array): 14 057 vs 14 365 ms,
+**0.98x — sub-bar**. The 866 ms the probe measured there is real (574 ms in cycle 8 alone, 268
+proposed value buckets) and `nverd = 0` on every invocation, so it is all spent rejecting false
+positives — but indexing recovers only a third of it. **(b) The `boxTautoDrop` prologue bundle**
+(allocation-free capped distinct-variable walk replacing `hashedEraseDups`'s per-constraint
+`Std.HashMap`, nested fold replacing the 710 146-element `flatMap DenseExpr.vars`, cache seeded only
+from queryable constraints): 13 418 ms, **0.93x — sub-bar**. Stacked on this entry (a)+(b) are worth
+545 ms of a 4 747 ms pass (11.5 % of the *post*-entry pass), so they only pay as a bundle after the
+denominator shrank. **(c) Dropping the memo entirely** — attractive because it deletes
+`denseBtDomCacheGo_sound`, the one non-trivial obligation here — is a **regression**: 4 970 vs
+4 747 ms, because `denseFindDomainAlg` then re-runs per (constraint, variable) and `denseRootsIn`
+reallocates each domain list. Keep the memo and prove the invariant.
+**Worked: yes (flagFold 0.349x on its worst case, 0.928x end-to-end, output byte-identical; PR).**
