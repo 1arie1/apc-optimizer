@@ -383,12 +383,22 @@ structure DenseConstraintCovIndex where
   inactiveVarlessCount : Nat
   activeVarless : Array Nat
 
+/-- The variable-free usable interactions' contribution to a gather, which is the same for every
+    target: their count, their `informative`/`domainRedundant` folds, and the constant value of
+    their obligations (`constOk`, false as soon as one of them is violated). -/
+structure DenseBusVarlessSummary (p : ℕ) where
+  count : Nat
+  informative : Bool
+  allDomainRedundant : Bool
+  constOk : Bool
+
 /-- The per-target index bundle (plain data; correctness via correspondence). -/
 structure DenseForcedIdx (p : ℕ) where
   csIdx : DenseConstraintCovIndex
   arrCs : Array (DenseConstraintPlan p)
   bisIdx : DenseArrayCovIndex
   arrBis : Array (DenseBusPlan p)
+  busVarless : DenseBusVarlessSummary p
 
 /-- The dense domain-table `doms` list has keys `xs`. -/
 theorem DenseDomainTable.doms_fst (T : DenseDomainTable p) :

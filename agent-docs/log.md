@@ -5375,3 +5375,71 @@ Peak RSS checked because the index is now stored as both lists and arrays, i.e. 
 could make a parallel-only regression real: wasm-eth apc_012 241.7 → 228.1 MB, openvm-eth apc_005
 111.8 → 112.4 MB.
 **Worked: yes (busPairCancel 0.33× on its worst case, corpus 0.570× on the pass, output byte-identical; draft PR #253).**
+
+### 155. Runtime: domainBatch summarizes the variable-free bus tail once per invocation (0.49x on sha256)
+TARGETED the corpus's top pass (`ranked_passes.md`: domainBatch 35.6 s / 12.2 %, 18.6 s of 171 s on
+sha256 `apc_001`). **Timed the phases before profiling**, and the two instruments disagreed hard.
+`perf` puts 70 % of the pass's CPU in `denseCompileCBiPredsV` (R13(a), the per-target bus
+classification) — but an `IO` probe on the system the pass actually receives puts the *wall* at
+**70 % serial**: `denseAddConstraintDoms` 1341 ms, `denseAddBusDoms` 702, `denseAddByteDoms` 158,
+`denseConstraintPlansV` 1952, `denseBusPlansV` 1215, index+targets 593, `denseDedupTargetsV` 854,
+**preflight (the gathers) 6184**, fan-out 3450, σ-apply + degree guard + forcing 2183. The pass's
+in-pass sample share is 34.9 % of the run against 12.1 % of wall, so every share in R13 is CPU
+divided over the fan-out's threads.
+COUNTED the funnel on cycle 0 (199 740 constraints): 283 304 targets → 190 243 unique → 66 062 reach
+the gathers → 26 082 plans → **2 592 scans enumerating 7 776 points in total**. And every scan job
+gathers **exactly 3 446 interactions** — the *variable-free* ones. `denseGatherBusesV` ends every
+gather with `denseGatherBusArrayV … fidx.bisIdx.varless`, and a variable-free plan satisfies
+`denseVarsInListF xs []` for every target, so the tail is walked per target: **3 446 × 66 062 =
+228 M gather steps (5.4 s serial)**, then **8.93 M per-target classifications** and **26.8 M
+per-point predicate evaluations** — all recomputing a value that does not depend on the target.
+Entry 130 fixed exactly this shape for the *inactive variable-free constraints*
+(`inactiveVarlessCount`) and left the bus array behind.
+THE FIX is a per-invocation `DenseBusVarlessSummary` in `DenseForcedIdx` (count, informative,
+allDomainRedundant, constOk). `denseGatherBusesV` seeds its accumulator from it instead of folding
+the array, so the gather walks only the anchor buckets of `xs` (8.4 positions per target here); the
+tail's obligations are folded once into `constOk`, and `denseRunForcedScanV` short-circuits to
+"every key is 0" when it is `false` — which is what the per-point predicate did anyway, since a
+variable-free item compiles to an `IExpr` with no `.ix` node and so evaluates the same at every
+point. The counts stay in the gather, so the work gate, the `informative` gate and the
+`.done` shortcut all decide identically (dropping them from `bis.count` would let more targets
+through `maxEnumWork` — an effectiveness change, the trap entry 152 flagged for
+`denseBiInformative`).
+PROOF (all under `Implementation/`): `constOk = true` is sound for free — it only removes
+obligations from the scan, which can add survivors and so shrink the forced set. Only `false` needs
+an argument, and it gets the entry-90 treatment: `denseVarlessBiOkV` **re-checks `denseBIVars` at
+use**, so only a genuinely variable-free interaction can report `false`, and such an interaction is
+violated by every environment. `denseVarlessBiOkV_of_sat` reuses `denseCompiledSurvV_eq` +
+`denseSurvivesAllMV_restriction` at `keys = []`, `denseBusVarlessSummaryV_constOk` folds it over the
+index array, and `denseForcedOverV_entails` takes the summary's verdict as one new hypothesis,
+discharged at the `denseDomainBatchσV_entailed` call site from `hsat.2` exactly as `hbis` is. The
+gather's own lemmas (`denseGatherBusesV_interactions_mem` and the plan-membership chain) needed
+**no change**: dropping items only shrinks the gathered list, which the untrusted-index shape
+already allows.
+NUMBERS (this 20-core box, serial, interleaved; domainBatch ms, then case total): sha256 `apc_001`
+**18 068 → 8 939 (0.495×)**, total 148 551 → 137 848 (**0.928×**); keccak `apc_001` 1348 → 1128
+(0.84×), total 12 134 → 11 795; wasm-eth `apc_063` 1568 → 1413 (0.90×); wasm-eth `apc_012`
+1523 → 1432 (0.94×); openvm-eth `apc_071` 563 → 468 (0.83×); wasm-eth `apc_005` 35 → 30 (0.86×);
+SP1 keccak 1017 → 929 (0.91×). No other pass column moves outside noise (29 columns ≥ 800 ms on
+sha256, all 0.96–1.04×).
+VERIFIED: `opt-export` **byte-identical** on sha256 `apc_001` (5.76 MB), OpenVM keccak, openvm-eth
+`apc_006` / `apc_100`, wasm-eth `apc_005` / `apc_012` and SP1 keccak; keccak `run` counts identical
+(2021 / 186 / 1748); `lake build` clean, no warnings; `check-proof-integrity` passes (axioms
+propext / Classical.choice / Quot.sound, no unused theorems).
+TWO ALSO-RANS, both measured and both rejected. **(a) Retiring the task fan-out**
+(`parallel := false`, three one-token edits — `denseCollectForcedV_eq_serial` already proves both
+branches equal for any `parallel`): 0.96× on sha256 and 0.91× on keccak *against the old baseline*,
+because 64 chunks of ≤ 61 ms lose to spawn/join (measured in the probe: 2992 ms parallel against
+2179 ms for the same chunks run one at a time on cycle 0). But stacked on this entry it is **+700 ms
+worse on sha256 in both reps** and a wash on keccak: the fan-out loses only on cycle 0, whose work
+was 96 % the variable-free tail, and wins on the box-heavy tail cycles (cycle 5: 182 ms parallel vs
+919 ms serial). Keep the fan-out; the open lever there is `DenseForcedScanV.work`, which models
+`boxSize × items` and ignores the boxSize-independent per-item compile term (and appears in no
+soundness lemma, so re-weighting it is proof-free). **(b) Entry 154's work-gated gathers**
+(`denseCapStep`, PR #250) stacked on this entry: 8944 vs 8983 ms on sha256, ≤ 1 % on six other
+cases, both signs — noise. Its 0.81× came from the cap aborting *inside* the 3 446-item tail; with
+the tail an O(1) seed the cap has only the 8.4 bucket positions left to abort. **Entry 154 is
+subsumed, not complementary** — it would pay again only where one target's bucket hits run into the
+thousands.
+**Worked: yes (domainBatch 0.495× on its worst case, 0.83–0.94× on every other representative,
+output byte-identical; draft PR).**

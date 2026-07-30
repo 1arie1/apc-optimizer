@@ -471,7 +471,10 @@ be `Array (List Nat)` / bitsets keyed directly — no hashing, no dispatch. Wide
 worth a prototype on one index first.
 
 **R13. domainBatch is per-target *setup*-bound, not enumeration-bound** (measured 2026-07-28, LBR
-profiles over five OpenVM cases + SP1 keccak; entry 152). Phase shares of in-pass samples:
+profiles over five OpenVM cases + SP1 keccak; entry 152). **The table below is CPU; for the wall,
+see entry 155's `IO` phase timers** — the pass is 70 % serial and its largest single item, the
+variable-free bus tail in the gathers, does not appear here at all (it is spread across the
+`denseCompileCBiPredsV` and gather rows). Phase shares of in-pass samples:
 
 | phase | sha256 apc_001 | keccak | SP1 keccak | eth apc_071 | wasm apc_005 |
 |---|---:|---:|---:|---:|---:|
@@ -485,18 +488,13 @@ profiles over five OpenVM cases + SP1 keccak; entry 152). Phase shares of in-pas
 Pass-only cost classes on sha256: 32.5 % closure-apply + 25 % refcount — `BusFacts` closure calls and
 the allocation traffic of their results. The `.fallback` row is **done (entry 152)**. Open, in order:
 
-   - **(a) Hoist the target-independent bus classification.** `denseCompiledSurvV` runs
-     `denseCompileCBiPredV facts keys bi` per gathered interaction *per target*, and everything it
-     does except `denseCompileE keys <slot>` depends on `bi` alone (`neverViolates`, `varRangeBus`,
-     `tupleRangeBus`, `byteXorSpec`, `spec.decode`, `rangeCheckAt` + its pattern, `constValue?`).
-     Inside that phase the keys-dependent `denseCompileEs` is only 11 %; the rest is
-     `lean_apply_1` (57 %) + `lean_dec_ref_cold` (27 %). Two tiers: a per-`busId` fact-answer cache
-     threaded as a *value* (entry 143's lesson — never a closure in a thunk payload), with a
-     `denseVarBucket_mem`-shaped membership lemma, ~60–100 lines and ≈ 45 % of the phase; or the
-     complete version, a keys-free `DenseBiPredShape` stored in `DenseBusPlan` (built once per
-     invocation) plus `denseCompileShape keys mult shape = denseCompileCBiPredV facts keys bi`, whose
-     hypothesis discharges through the existing `denseGatherBusesV_plan_mem`, ~200–350 lines.
-     Expect pass ≈ 0.55× on sha256/keccak.
+   - ~~**(a) Hoist the target-independent bus classification.**~~ **retired as a wall lever
+     (entry 155)**. The 56–70 % is CPU *inside the fan-out*, which is 18 % of the pass's wall — and
+     the hoist was built once and measured **1.01–1.04×**, because it drains parallel slack and
+     moves the residue into the serial prologue. Entry 155 then deleted 8.93 M of the 9.07 M
+     per-target classifications on sha256 by other means (the variable-free tail was 3 446 of the
+     3 446 interactions each scan job compiled), so what is left to hoist is ~1 % of the pass. Keep
+     it only as a CPU/CI-throughput item, and **time the phases before believing any share here**.
    - **(b) One constant pattern per interaction.** `denseInteractionBound` rebuilds
      `bi.payload.map DenseExpr.constValue?` per *queried variable*, and `denseAddBusVars` /
      `denseBiInformative` compute the same bound twice per variable. `denseInteractionBoundPat`
@@ -519,6 +517,12 @@ the allocation traffic of their results. The `.fallback` row is **done (entry 15
      unchanged — but keep the `maxEnumWork`/`boxSize` gates on the *full* product or effectiveness
      moves. ~250–400 lines; **measure first** with a box-shape/point counter (entry 151 built one):
      if the wide boxes are single-variable, neither pays.
+   - ~~**Per-target walk of the variable-free bus tail**~~ **done (entry 155)**: `denseGatherBusesV`
+     folded `bisIdx.varless` into every target (3 446 interactions × 66 062 targets = 228 M gather
+     steps on sha256 cycle 0, plus 8.93 M compiles and 26.8 M per-point evaluations of a
+     point-independent value). A per-invocation `DenseBusVarlessSummary` seeds the gather instead;
+     domainBatch **0.495×** on sha256 `apc_001`, 0.83–0.94× on every other representative, output
+     byte-identical. The constraint side's `activeVarless` is ~2 items here and was left alone.
    - **(e) Cheap micros.** `BusMap` is an assoc-list lookup closure (`toBusMap`) queried per point and
      per fact call — 1–2 % of the run, and substituting an array-backed lookup at the `Main.lean` /
      `Ffi.lean` boundary needs **no proof** (every theorem is ∀ busMap). `DenseForcedScanV.work` (the
@@ -528,6 +532,17 @@ the allocation traffic of their results. The `.fallback` row is **done (entry 15
      prototype belongs here first.
 
 ### Runtime dead ends (measured; do not re-propose without new evidence)
+
+- **Retiring domainBatch's task fan-out** (`parallel := false`): 0.96× sha256 / 0.91× keccak against
+  the pre-entry-155 baseline, but **+700 ms on top of entry 155** (measured twice) and a wash on
+  keccak. The fan-out loses only on cycle 0 — whose work entry 155 deleted — and wins on the
+  box-heavy tail cycles (cycle 5: 182 ms parallel vs 919 ms serial). The live lever is
+  `DenseForcedScanV.work`, which models `boxSize × items` and ignores the boxSize-independent
+  per-item compile term; it appears in no soundness lemma, so re-weighting it is proof-free.
+- **Entry 154's work-gated gathers (`denseCapStep`, PR #250) on top of entry 155**: 8944 vs 8983 ms
+  on sha256 and ≤ 1 % on six other cases, both signs — noise. Its 0.81× came from the cap aborting
+  inside the 3 446-item variable-free tail; with the tail an O(1) seed there is nothing left to
+  abort. Subsumed, not complementary.
 
 - **Whole-system content-hash gating of passes across cycles**: catches ~0 % — the fixpoint only
   retains cycles that changed something, so some pass always dirties the hash (#146 measurement).

@@ -459,11 +459,13 @@ def denseGatherBusArrayV (arr : Array (DenseBusPlan p)) (xs : List VarId)
     (positions : Array Nat) (acc : DenseBusGatherV p) : DenseBusGatherV p :=
   positions.foldl (denseGatherBusAtV arr xs) acc
 
+/-- Seeded from the per-invocation variable-free summary, so the gather walks only the anchor
+    buckets of `xs`; a variable-free plan passes `denseVarsInListF xs []` for every target, so its
+    contribution to all four fields is target-independent (`denseBusVarlessSummaryV`). -/
 def denseGatherBusesV (fidx : DenseForcedIdx p) (xs : List VarId) : DenseBusGatherV p :=
-  let acc := xs.foldl (fun acc v =>
+  xs.foldl (fun acc v =>
     denseGatherBusArrayV fidx.arrBis xs (fidx.bisIdx.buckets.getD v #[]) acc)
-    ⟨0, false, true, []⟩
-  denseGatherBusArrayV fidx.arrBis xs fidx.bisIdx.varless acc
+    ⟨fidx.busVarless.count, fidx.busVarless.informative, fidx.busVarless.allDomainRedundant, []⟩
 
 structure DenseForcedScanV (p : ℕ) where
   keys : List VarId
@@ -471,6 +473,9 @@ structure DenseForcedScanV (p : ℕ) where
   active : List (DenseExpr p)
   interactions : List (BusInteraction (DenseExpr p))
   work : Nat
+  /-- The variable-free interactions' constant verdict (`DenseBusVarlessSummary.constOk`); `false`
+      leaves the box with no survivor, which is what a per-point `false` predicate yields. -/
+  constOk : Bool
 
 inductive DenseForcedPlanV (p : ℕ) where
   | done (forced : List (VarId × ZMod p))
@@ -507,12 +512,15 @@ def denseForcedPreflightV (T : DenseDomainTable p) (fidx : DenseForcedIdx p)
             doms,
             active := cs.active,
             interactions := bis.interactions,
-            work := boxSize * (cs.active.length + bis.count + keys.length) })
+            work := boxSize * (cs.active.length + bis.count + keys.length),
+            constOk := fidx.busVarless.constOk })
       else none
     else none
 
 def denseRunForcedScanV (bs : BusSemantics p) (facts : BusFacts p bs)
     (job : DenseForcedScanV p) : List (VarId × ZMod p) :=
+  if !job.constOk then job.keys.map (fun x => (x, (0 : ZMod p)))
+  else
   let survC := denseCompiledSurvV bs facts job.active job.interactions job.keys
   match denseScanBoxV survC.run job.doms with
   | none => job.keys.map (fun x => (x, (0 : ZMod p)))
@@ -645,12 +653,41 @@ def denseConstraintCovIndexV (cs : List (DenseConstraintPlan p)) : DenseConstrai
     inactiveVarlessCount := summary.1,
     activeVarless := summary.2 }
 
-def denseForcedIdxV (cs : List (DenseConstraintPlan p)) (bis : List (DenseBusPlan p)) :
-    DenseForcedIdx p :=
+/-- One variable-free interaction's verdict: the survivor predicate of the singleton system, on the
+    empty key list and the empty point. A variable-free expression compiles with no `.ix` node, so
+    this is the value the per-target scan would evaluate at every point.
+
+    The `denseBIVars` guard is the re-check-at-use: only a genuinely variable-free interaction may
+    report `false`, which is the direction that forces constants
+    (`denseBusVarlessSummaryV_constOk`, `denseForcedOverV_entails`). -/
+def denseVarlessBiOkV (bs : BusSemantics p) (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) : Bool :=
+  !(denseBIVars bi).isEmpty || (denseCompiledSurvV bs facts [] [bi] []).run []
+
+/-- Fold the variable-free usable interactions once per invocation: their contribution to a gather
+    is the same for every target (`denseGatherBusesV`). -/
+def denseBusVarlessSummaryV (bs : BusSemantics p) (facts : BusFacts p bs)
+    (varless : Array Nat) (arr : Array (DenseBusPlan p)) : DenseBusVarlessSummary p :=
+  varless.foldl (init := ⟨0, false, true, true⟩) fun s i =>
+    if h : i < arr.size then
+      let plan := arr[i]
+      if plan.usable then
+        { count := s.count + 1,
+          informative := s.informative || plan.informative,
+          allDomainRedundant := s.allDomainRedundant && plan.domainRedundant,
+          constOk := s.constOk && denseVarlessBiOkV bs facts plan.interaction }
+      else s
+    else s
+
+def denseForcedIdxV (bs : BusSemantics p) (facts : BusFacts p bs)
+    (cs : List (DenseConstraintPlan p)) (bis : List (DenseBusPlan p)) : DenseForcedIdx p :=
+  let bisIdx := denseFreezeCovIndex (denseAnchorCovBuild (fun bi => bi.vars) bis)
+  let arrBis := bis.toArray
   { csIdx := denseConstraintCovIndexV cs,
     arrCs := cs.toArray,
-    bisIdx := denseFreezeCovIndex (denseAnchorCovBuild (fun bi => bi.vars) bis),
-    arrBis := bis.toArray }
+    bisIdx,
+    arrBis,
+    busVarless := denseBusVarlessSummaryV bs facts bisIdx.varless arrBis }
 
 /-- Is `op` a recognized byte-relation selector for `spec`? Every such op guarantees both operands
     are below `spec.bound` (`BusFacts.byteXorSpec_sound` / `byteBoolSound`). -/
@@ -741,7 +778,7 @@ def denseDomainBatchσV (bs : BusSemantics p) (facts : BusFacts p bs)
   let csPlans := denseConstraintPlansV T d.algebraicConstraints
   let busPlans := denseBusPlansV bs facts T d.busInteractions
   let targets := densePlanTargetsV csPlans busPlans
-  let fidx := denseForcedIdxV csPlans busPlans
+  let fidx := denseForcedIdxV bs facts csPlans busPlans
   -- Fan out only at keccak/SHA scale; below it the sequential fold avoids spawn overhead.
   denseCollectForcedV bs facts T fidx (8192 ≤ d.algebraicConstraints.length) targets ∅
     DenseSolved.empty
