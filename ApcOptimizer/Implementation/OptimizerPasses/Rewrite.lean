@@ -36,9 +36,18 @@ theorem DenseConstraintSystem.filterBus_covered {reg : VarRegistry}
 
 /-! ## Small dense expression predicates -/
 
+def DenseExpr.isConstZeroImpl : DenseExpr p → Bool
+  | .const n => zmodIsZero n
+  | _ => false
+
 /-- Is the dense expression the literal constant `0`? -/
 def DenseExpr.isConstZero : DenseExpr p → Bool
-  | .const n => decide (n = 0)
+  | .const n => zmodIsZero n
   | _ => false
+
+@[csimp] theorem DenseExpr_isConstZero_eq_impl :
+    @DenseExpr.isConstZero = @DenseExpr.isConstZeroImpl := by
+  funext q e
+  simp [DenseExpr.isConstZero, DenseExpr.isConstZeroImpl]
 
 end ApcOptimizer.Dense

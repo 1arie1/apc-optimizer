@@ -140,6 +140,21 @@ def denseAffineJustified (bound : Nat) (bnd : VarId → Option Nat) (e : DenseEx
 
 /-! ## Basis justification -/
 
+def denseFormBoundAtImpl {bs : BusSemantics p} (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) (i : Nat) : Option (DenseLinExpr p × Nat) :=
+  match bi.multiplicity.constValue? with
+  | none => none
+  | some mval =>
+    if zmodIsZero mval then none
+    else
+      match bi.payload[i]?,
+            facts.slotBound bi.busId mval (bi.payload.map DenseExpr.constValue?) i with
+      | some e, some B =>
+        match denseLinearize e with
+        | some L => some (L.norm, B)
+        | none => none
+      | _, _ => none
+
 /-- The linearized (merged) form and bound of payload slot `i` of `bi`, when the multiplicity is
     a nonzero constant and the slot carries a `slotBound`. -/
 def denseFormBoundAt {bs : BusSemantics p} (facts : BusFacts p bs)
@@ -156,6 +171,10 @@ def denseFormBoundAt {bs : BusSemantics p} (facts : BusFacts p bs)
         | some L => some (L.norm, B)
         | none => none
       | _, _ => none
+
+@[csimp] theorem denseFormBoundAt_eq_impl : @denseFormBoundAt = @denseFormBoundAtImpl := by
+  funext q bs facts bi i
+  simp [denseFormBoundAt, denseFormBoundAtImpl]
 
 /-- Fuel-bounded basis reduction: is `L`'s value provably `< bound − used` via per-variable bounds
     (finish arm) after subtracting integer multiples of range-checked slot forms from `fwits`? -/

@@ -102,13 +102,13 @@ def denseSeqzMatchMarkerSum : DenseExpr p → Option (VarId × VarId × VarId ×
 
 /-- Match `-1 + x` (a variable), returning `x`. -/
 def denseSeqzMatchNegVar : DenseExpr p → Option VarId
-  | .add (.const c) (.var x) => if c = (-1 : ZMod p) then some x else none
+  | .add (.const c) (.var x) => if c = (zmodNegOneP p) then some x else none
   | _ => none
 
 /-- Match constraint E11 `s0 · ((-1 + a0)·(K + R))`, returning `(a0, K, R)`. -/
 def denseSeqzMatchE11 (s0 : DenseExpr p) : DenseExpr p → Option (VarId × ZMod p × VarId)
   | .mul lhs (.mul (.add (.const c) (.var a0)) (.add (.const k) (.var r))) =>
-      if lhs = s0 ∧ c = (-1 : ZMod p) then some (a0, k, r) else none
+      if lhs = s0 ∧ c = (zmodNegOneP p) then some (a0, k, r) else none
   | _ => none
 
 /-- Match a prefix constraint `prefixE · (aᵢ · KR)`, returning `aᵢ`. -/

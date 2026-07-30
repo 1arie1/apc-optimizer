@@ -60,7 +60,7 @@ def denseMonoExpr (mc : List VarId × ZMod p) : DenseExpr p :=
 
 /-- Rebuild an expression from monomials (dropping zero coefficients). -/
 def denseExprOfPoly (ms : List (List VarId × ZMod p)) : DenseExpr p :=
-  match ms.filter (fun mc => !(mc.2 == 0)) with
+  match ms.filter (fun mc => !(zmodIsZero mc.2)) with
   | [] => DenseExpr.const 0
   | mc :: rest => rest.foldl (fun acc mc' => DenseExpr.add acc (denseMonoExpr mc')) (denseMonoExpr mc)
 

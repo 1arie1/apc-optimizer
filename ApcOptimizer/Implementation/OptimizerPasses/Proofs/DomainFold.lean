@@ -91,7 +91,8 @@ theorem denseGroupSurvivorsEV_eq (es : List (DenseExpr p)) (xs : List VarId)
       show denseSurvZeroCWV denseZModOps (fun v => decide (v = denseZModOps.zero)) ces a
         = es.all (fun c => decide (c.eval (denseEnvOfKeysV xs a) = 0))
       unfold denseSurvZeroCWV
-      exact denseCompileEs_allV denseZModOps _ (fun _ => rfl) xs a es ces hce
+      exact denseCompileEs_allV denseZModOps (fun v => decide (v = denseZModOps.zero))
+        (fun _ => by simp [denseZModOps]) xs a es ces hce
 
 theorem mem_denseGroupSurvivorsEV (es : List (DenseExpr p)) (xs : List VarId)
     (domVals : List (List (ZMod p))) (pt : List (ZMod p)) (hmem : pt ∈ denseAssignmentsV domVals)

@@ -15,8 +15,15 @@ variable {p : ℕ}
 
 /-! ## Address/equality helpers -/
 
+def denseEqExprImpl (e2 e1 : DenseExpr p) : DenseExpr p :=
+  .add e2 (.mul (.const (zmodNegOneP p)) e1)
+
 /-- `e₂ - e₁` as a dense expression. -/
 def denseEqExpr (e2 e1 : DenseExpr p) : DenseExpr p := .add e2 (.mul (.const (-1)) e1)
+
+@[csimp] theorem denseEqExpr_eq_impl : @denseEqExpr = @denseEqExprImpl := by
+  funext q e2 e1
+  simp [denseEqExpr, denseEqExprImpl]
 
 def denseMultConst (bi : BusInteraction (DenseExpr p)) : Option (ZMod p) :=
   bi.multiplicity.constValue?

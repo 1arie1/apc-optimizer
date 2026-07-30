@@ -56,6 +56,17 @@ def denseRangeEq? (one : Bool) (bs : BusSemantics p) (facts : BusFacts p bs)
     else none
   | _ => none
 
+def denseBoolCheckImpl? {bs : BusSemantics p} (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) : Option (DenseExpr p) :=
+  match facts.rangeCheckAt bi.busId (bi.payload.map DenseExpr.constValue?) with
+  | some (valSlot, bound) =>
+    if (match bi.multiplicity with | .const c => zmodIsOne c | _ => false) && bound == 2 then
+      match bi.payload[valSlot]? with
+      | some (DenseExpr.var x) => some (denseBoolC (DenseExpr.var x))
+      | _ => none
+    else none
+  | none => none
+
 /-- The booleanity `x·(x−1)` of a width-1 (`bound = 2`) check whose value slot is a bare variable
     `x`. -/
 def denseBoolCheck? {bs : BusSemantics p} (facts : BusFacts p bs)
@@ -68,5 +79,14 @@ def denseBoolCheck? {bs : BusSemantics p} (facts : BusFacts p bs)
       | _ => none
     else none
   | none => none
+
+@[csimp] theorem denseBoolCheck_q_eq_impl : @denseBoolCheck? = @denseBoolCheckImpl? := by
+  funext q bs facts bi
+  unfold denseBoolCheck? denseBoolCheckImpl?
+  cases facts.rangeCheckAt bi.busId (bi.payload.map DenseExpr.constValue?) with
+  | none => rfl
+  | some vb =>
+    obtain ⟨valSlot, bound⟩ := vb
+    cases bi.multiplicity <;> simp
 
 end ApcOptimizer.Dense

@@ -20,6 +20,18 @@ namespace ApcOptimizer.Dense
 
 variable {p : ℕ}
 
+def denseInteractionBoundPatImpl (bs : BusSemantics p) (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) (mval? : Option (ZMod p))
+    (pat : List (Option (ZMod p))) (i : VarId) : Option Nat :=
+  match mval? with
+  | none => none
+  | some mval =>
+    if zmodIsZero mval then none
+    else
+      match denseVarSlot i bi.payload with
+      | none => none
+      | some slot => facts.slotBound bi.busId mval pat slot
+
 /-- `denseInteractionBound` with the multiplicity constant and constant-payload pattern hoisted out
     of the caller's per-payload-variable loop (they are per-interaction values). Definitionally the
     same function at the canonical arguments (`denseInteractionBoundPat_eq`). -/
@@ -34,6 +46,11 @@ def denseInteractionBoundPat (bs : BusSemantics p) (facts : BusFacts p bs)
       match denseVarSlot i bi.payload with
       | none => none
       | some slot => facts.slotBound bi.busId mval pat slot
+
+@[csimp] theorem denseInteractionBoundPat_eq_impl :
+    @denseInteractionBoundPat = @denseInteractionBoundPatImpl := by
+  funext q bs facts bi m pat i
+  simp [denseInteractionBoundPat, denseInteractionBoundPatImpl]
 
 /-- Candidate positions of bound-deriving interactions, per variable (ascending), built once per
     invocation. Untrusted — `denseDropWitsIdxGo` re-checks liveness, the dropped pair, and the bound

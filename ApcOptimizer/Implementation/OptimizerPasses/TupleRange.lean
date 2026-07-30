@@ -34,6 +34,16 @@ def denseMatchByteSingle (bs : BusSemantics p) (facts : BusFacts p bs)
     | _ => none
   else none
 
+def denseMatchRangeCheckImpl (bs : BusSemantics p) (facts : BusFacts p bs) (s2 : Nat)
+    (bi : BusInteraction (DenseExpr p)) : Option (DenseExpr p × ZMod p) :=
+  if facts.varRangeBus bi.busId then
+    match bi.multiplicity, bi.payload with
+    | .const c, [y, .const b] =>
+        if zmodIsOne c && decide (b.val ≤ 17) && decide (2 ^ b.val = s2)
+        then some (y, b) else none
+    | _, _ => none
+  else none
+
 /-- If `bi` is a range check `[y, b]` (multiplicity `1`, constant supported width, exact size
     `2 ^ b = s2`) on a `varRangeBus`, return `(y, b)`. -/
 def denseMatchRangeCheck (bs : BusSemantics p) (facts : BusFacts p bs) (s2 : Nat)
@@ -45,6 +55,11 @@ def denseMatchRangeCheck (bs : BusSemantics p) (facts : BusFacts p bs) (s2 : Nat
         then some (y, b) else none
     | _, _ => none
   else none
+
+@[csimp] theorem denseMatchRangeCheck_eq_impl :
+    @denseMatchRangeCheck = @denseMatchRangeCheckImpl := by
+  funext q bs facts s2 bi
+  simp [denseMatchRangeCheck, denseMatchRangeCheckImpl]
 
 /-- The declared tuple buses with a byte-sized first slot, probed over a bounded id range (the
     target bus typically carries no interaction in the input circuit, so its id cannot be read off

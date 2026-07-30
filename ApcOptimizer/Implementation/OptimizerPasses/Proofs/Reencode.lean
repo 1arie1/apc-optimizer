@@ -77,7 +77,8 @@ theorem DenseExpr.evalWith_eq (add mul : ZMod p → ZMod p → ZMod p)
 
 theorem DenseExpr.evalFast_eq (e : DenseExpr p) (denv : VarId → ZMod p) :
     e.evalFast denv = e.eval denv :=
-  DenseExpr.evalWith_eq _ _ (fun _ _ => rfl) (fun _ _ => rfl) denv e
+  DenseExpr.evalWith_eq zmodAdd zmodMul (fun _ _ => zmodAdd_eq _ _) (fun _ _ => zmodMul_eq _ _)
+    denv e
 
 theorem denseBoolConstraint_eval_of_bool (b : VarId) (denv : VarId → ZMod p)
     (h : denv b = 0 ∨ denv b = 1) : (denseBoolConstraint b).eval denv = 0 := by

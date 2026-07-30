@@ -23,10 +23,35 @@ variable {p : ℕ}
 Unlike `denseLinearize`, the remainder may be nonlinear, so this succeeds where the affine machinery
 gives up. -/
 
+def DenseExpr.splitAtImpl (x : VarId) : DenseExpr p → Option (ZMod p × DenseExpr p)
+  | .const n => some (zmodZeroP p, .const n)
+  | .var y =>
+      if y = x then some (zmodOneP p, .const (zmodZeroP p))
+      else some (zmodZeroP p, .var y)
+  | .add a b =>
+      match a.splitAtImpl x, b.splitAtImpl x with
+      | some (ca, ra), some (cb, rb) => some (zmodAdd ca cb, .add ra rb)
+      | _, _ => none
+  | .mul a b =>
+      if a.mentions x || b.mentions x then
+        match a.constValue? with
+        | some k =>
+            match b.splitAtImpl x with
+            | some (cb, rb) => some (zmodMul k cb, .mul a rb)
+            | none => none
+        | none =>
+            match b.constValue? with
+            | some k =>
+                match a.splitAtImpl x with
+                | some (ca, ra) => some (zmodMul k ca, .mul ra b)
+                | none => none
+            | none => none
+      else some (zmodZeroP p, .mul a b)
+
 /-- Decompose `e` as `k·x + r`: `k` a field constant, `r` not mentioning `x` (by construction). -/
 def DenseExpr.splitAt (x : VarId) : DenseExpr p → Option (ZMod p × DenseExpr p)
   | .const n => some (0, .const n)
-  | .var y => if y = x then some (1, .const 0) else some (0, .var y)
+  | .var y => if y = x then some (1, .const (zmodZeroP p)) else some (0, .var y)
   | .add a b =>
       match a.splitAt x, b.splitAt x with
       | some (ca, ra), some (cb, rb) => some (ca + cb, .add ra rb)
@@ -46,6 +71,15 @@ def DenseExpr.splitAt (x : VarId) : DenseExpr p → Option (ZMod p × DenseExpr 
                 | none => none
             | none => none
       else some (0, .mul a b)
+
+@[csimp] theorem DenseExpr_splitAt_eq_impl : @DenseExpr.splitAt = @DenseExpr.splitAtImpl := by
+  funext q x e
+  induction e with
+  | const n => simp [DenseExpr.splitAt, DenseExpr.splitAtImpl]
+  | var y => by_cases h : y = x <;> simp [DenseExpr.splitAt, DenseExpr.splitAtImpl, h]
+  | add a b iha ihb => simp only [DenseExpr.splitAt, DenseExpr.splitAtImpl, iha, ihb, zmodAdd_eq]
+  | mul a b iha ihb =>
+      simp only [DenseExpr.splitAt, DenseExpr.splitAtImpl, iha, ihb, zmodMul_eq, zmodZeroP_eq]
 
 /-! ## Bounds through scaled range checks
 

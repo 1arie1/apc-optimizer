@@ -1488,8 +1488,8 @@ theorem denseCompiledSurvV_eq (bs : BusSemantics p) (facts : BusFacts p bs)
     | some preds =>
       change denseSurvivesAllCWV denseZModOps (fun v => decide (v = denseZModOps.zero))
           facts ces preds pt = denseSurvivesAllMV facts es bis keys pt
-      exact denseSurvivesAllCWV_eq denseZModOps _ (fun _ => rfl)
-        bs facts es bis keys ces preds pt hce hcb
+      exact denseSurvivesAllCWV_eq denseZModOps (fun v => decide (v = denseZModOps.zero))
+        (fun _ => by simp [denseZModOps]) bs facts es bis keys ces preds pt hce hcb
 
 /-- The restriction of a satisfying `denv` survives the covered-item predicate (value-only). -/
 theorem denseSurvivesAllMV_restriction {bs : BusSemantics p} (facts : BusFacts p bs)
