@@ -164,7 +164,7 @@ Remaining per-pass: **reencode 96 s, busUnify 40 s, busPairCancel 40 s, gauss 36
 20 s (parallel), bytePack 17 s, flagFold 15 s, normalize1 14 s, rootPairUnify 13 s, carryBranch
 13 s**; the tail below that is ~60 s over 25 passes. Cycles 0–2 are still ~78 % of the total.
 Whole-run perf: ~25 % `lean_dec_ref_cold` + ~17 % allocator + ~8 % `lean_apply_1` — the budget is
-still memory traffic, not arithmetic; the `ZMod.commRing` rebuild chain (R9) is ~5 %.
+still memory traffic, not arithmetic; the `ZMod.commRing` rebuild chain is gone (R9, entry 156).
 **reencode is again the top pass (96 s)** and its cost is now diffuse: `denseLookupIx` +
 `denseAssignments` (the survivor enumeration) ~1.6 % of CPU, `DenseExpr.vars`/`hashedDedup` ~2 %
 (per-target `c.vars.eraseDups` gates and the per-accept `denseBuildPruned`), `denseGroupRewrite` +
@@ -423,9 +423,9 @@ Design (b) (a maintained per-address-key `pending` bit with recompute-on-drop) i
 invalidation, and a value-identical transformation of the existing fold.
    **What is left in the pass (6.4 s on sha256 `apc_001`, measured post-153)**, in order:
    the surviving certificate evaluations — `denseAddrNonzeroNeqP` is allocation- and
-   `ZMod`-dictionary-bound (R9; `denseIsZeroLin` derives the whole `CommRing` chain *before* testing
-   `terms.isEmpty`, and `denseDiffSumP` rebuilds it per subset, 4 subsets per compared pair on a
-   two-slot address); the per-invocation index builds (`denseRecvIndexAll`, `denseKeyIdxBuild`,
+   allocation-bound (`denseIsZeroLin`'s zero test is dictionary-free since entry 156, but
+   `denseDiffSumP` still rebuilds the chain per subset, 4 subsets per compared pair on a
+   two-slot address — R9b); the per-invocation index builds (`denseRecvIndexAll`, `denseKeyIdxBuild`,
    `denseBuildBoundIdx`/`FormIdx`, 5.4 % of the pre-153 pass); the per-drop `alive` copy (below);
    and `denseInteractionBound`'s per-variable pattern rebuild (R13b).
 
@@ -434,16 +434,28 @@ variable; `addVarsFast` + `@[csimp] addVars_eq_fast` hoists them. The `@[csimp]`
 zero-proof-churn way to swap an implementation — prefer it over threading a fast path through the
 proofs. Same shape may still apply to `denseDeepEnumDoms`/`denseRootsIn`-style per-variable loops.
 
-**R9. Stop rebuilding `ZMod.commRing` per helper call**  ·  *horizontal, medium value / medium
-effort*. Any helper doing `ZMod` arithmetic without a threaded `DenseZModOps` re-materializes the
-whole Mathlib `CommRing` structure (plus 3–4 hierarchy projections) **per call** — visible as
-`lp_mathlib_ZMod_commRing` + projections at ~3 % (sha) to ~10 % (ecrecover) of whole-run CPU
-*before* counting their allocator/dec_ref share; the generated C shows the rebuild at every entry
-(e.g. `denseRootsOfTerms`). Hot chain: `denseLinearize`, `DenseLinExpr.norm/scale/coeff/others`,
-`denseTwoRootOf?`, `DenseExpr.fold`, `denseRootsIn`, `denseBitCM` — called per constraint per
-cycle by the TwoRootMap/AddrCerts/candidate builders of busUnify/busPairCancel/rootPairUnify.
-Thread `ops` through `@[csimp]` fast twins (the gauss entries 118–119 pattern; rootPairUnify's
-remaining 33 s is mostly this).
+**R9 (done, entry 156).** The `ZMod.commRing` rebuild measured **17.7 % of the run** on sha256
+`apc_001`, not the ~3–5 % recorded here. Fixed by primitives that case on `p` directly
+(`zmodAddP`/`zmodZeroP`/`zmodIsZero`/… in `Encoding.lean`), a `denseZModOps` built from them (which
+cheapens all 34 `…With ops` twins at once), and `@[csimp]` twins at the live sites: **0.68–0.90×
+per corpus**. Three things worth carrying forward:
+
+- **Reachability before conversion.** 149 of 288 chain-building functions in the IR are already
+  `csimp`'d away and unreachable; a C sweep alone cannot tell. `gauss` looked like the biggest
+  target and was already ops-threaded.
+- **Definitional equality is the limit.** A site whose surrounding `@[csimp]`/`…With_eq` proof is
+  `rfl` cannot take a primitive (`zmodZeroP p` is not definitionally `0`). Converting *every*
+  remaining live site measured **+0.4 %** for ~25 broken proofs — not worth it.
+- **Where a twin already exists, edit only the twin**; the in-place edit costs proof work and buys
+  no runtime.
+
+**R9b. What is left, and why it is expensive.** `rootPairUnify` (8.9 s on sha256) barely moved
+(0.99×): its live chain-builders are `denseRpCheckPair`/`denseRpCheckPairIdx`/`denseScaledSlotBound`,
+all reverted above for the definitional-equality reason. Same for `HintCollapse`, `SeqzCollapse`,
+`ByteCheckPack` and `BoxRewrite`. Landing these means restating the affected `…With_eq` bridges to
+rewrite through `zmodZeroP_eq`/`zmodOneP_eq` rather than `rfl` — mechanical, but ~25 proof sites for
+a few percent. Note also `Affine.trySolve`/`trySolveUnit` and `denseScaledSlotBound` need the ring
+for `⁻¹`/`scale` regardless, so converting only their guards would not empty their entries.
 
 **R10. busUnify symbolic-window sweep at SHA scale**  ·  *52 s on sha256_big*. `denseSweepGo`
 tests every symbolic-address message against every open window: `constOpen.toList` is rebuilt per

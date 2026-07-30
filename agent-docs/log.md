@@ -5443,3 +5443,60 @@ subsumed, not complementary** — it would pay again only where one target's buc
 thousands.
 **Worked: yes (domainBatch 0.495× on its worst case, 0.83–0.94× on every other representative,
 output byte-identical; draft PR).**
+
+### 156. Runtime: dictionary-free `ZMod` primitives (0.68–0.90x per corpus, sha256 0.79x)
+TARGETED R9, which sized the `ZMod.commRing` rebuild at "~3–5 % (sha) to ~10 % (ecrecover)". That
+estimate was **3–4× stale**: on merged main the chain is **17.7 % of the run** on sha256 `apc_001`
+(LBR, 44 325 samples — leaf is a Mathlib instance/projection 5.7 %, plus allocator/refcounter whose
+immediate caller is one of those 12.1 %). Everything around it had been optimized away since R9 was
+written. `nat/bignum` is **0.2 %** of the run: the field *arithmetic* is free (BabyBear values are
+tagged immediates), what costs is building the structures that describe it.
+MECHANISM. `p` is a runtime value, so `ZMod p`'s `CommRing` is never a closed term Lean can lift
+into a `lean_once_cell`. Worse, Lean **floats the construction ahead of every branch test**:
+`DenseExpr.foldAdd`'s C built five `lp_mathlib_` calls before `lean_obj_tag(a)`, so the common
+`a, b => .add a b` arm — which touches no field element — paid the whole chain and then `dec_ref`'d
+it. `ZMod.commRing` mirrors `ZMod`'s own `Nat.casesOn` split, so each operation *is* the `Int`/`Fin`
+primitive underneath; casing on `p` directly (the shape `ZMod.val` uses) gets it with no dictionary.
+THREE STEPS, each measured before the next. (1) `denseInteractionBound`'s `mval = 0` on `ZMod.val`:
+0.967× on sha256 — predicted ~2 %, and *not* diffuse as first read, it is almost entirely one pass
+(`subsumedRange` **5646 → 0.276×**, invisible until the harness tracked all 42 pass columns rather
+than 16). (2) The literal-comparison sites: 0.894×. (3) `denseZModOps` built from primitives —
+one definition, and all 34 existing `…With ops` twins get cheap at ~30 call sites with no call-site
+edits — plus the live arithmetic sites: 0.79×.
+THE BIGGEST SINGLE WIN was not in R9's list. `DenseExpr.eval` is live and rebuilt the chain **at
+every node**, while its ops-threaded twin `DenseExpr.evalWith` sits in `Reencode.lean` used by
+`reencode` alone — and being downstream of `Encoding.lean` it could never have been wired by
+`@[csimp]` (entry 149's rule). Declaring the `csimp` beside `eval` in `Encoding.lean` reaches all
+41 call sites, including `denseBIEval` and every enumeration pass.
+REACHABILITY FIRST, and it changed the plan twice. A call-graph walk from the entry point showed
+**149 of 288 chain-building functions are unreachable** — already `csimp`'d away. So `gauss`
+(13.3 s, 0.99×) is *not* an opportunity: `denseSparseSubstF`/`Fused` are already ops-threaded, only
+two spec loops remain live. Converting what a C sweep finds would have wasted over half the effort.
+THE TAIL IS NOT WORTH IT — measured, not guessed. Converting *every* live site adds **0.4 %** over
+the above and breaks ~25 proofs. The rule: a site whose surrounding `@[csimp]`/`…With_eq` proof
+asserts *definitional* equality (`rfl`) cannot take a primitive, since `zmodZeroP p` is not
+definitionally `0`. That is what reverted `Reencode.denseBitBoxFast`, `Gauss.densePm1DescWith_eq`,
+`BusUnify.denseMemEqConstraints_eq_fast`, `denseEnvOfKeysV` (11 sites in `Proofs/DomainBatch`) and
+eight other files. Corollary worth keeping: **where a twin already exists, edit only the twin** —
+the in-place edit adds proof cost for no extra runtime.
+NUMBERS (this 20-core box, serial; vs clean `origin/main` 0a5c983). Full corpora: openvm-eth
+98.2 → 87.9 s (**0.90×**, median 0.73×); wasm-eth 61.8 → 47.8 s (**0.77×**); sp1:rsp 10.2 → 6.85 s
+(**0.68×**). Cases: sha256 `apc_001` 137.7 → 109.4 s (**0.79×**), wasm-eth `apc_012` 15.2 → 11.9
+(0.78×), keccak `apc_001` 11.6 → 8.34 (0.72×), openvm-eth `apc_006` 1.51 → 1.02 (0.68×). No
+regression in the slowest ten of any corpus (worst 0.94×). Passes on sha256: constFold0/1/2
+0.52–0.58×, subsumedRange 0.28×, trivialConstr 0.57×, degenRange 0.64×, normalize1/2 0.63–0.68×,
+busUnify 0.68×, intervalForce 0.73×, flagUnify 0.75×, digitFold 0.70×, domainBatch 0.82×.
+PROOF SURFACE: **9 bridge lemmas** in `Encoding.lean` (seven by `cases p <;> rfl`, since the ring
+operations *are* the primitives; `zmodIsZero_eq` off `ZMod.val_eq_zero`, which needs no `NeZero`;
+`zmodIsOne_eq` off `ZMod.val_injective` + `val_one_eq_one_mod` with the `p = 0` case split out) plus
+**21 `@[csimp]` twins**, and **4 lines** of downstream repair — an `_` that used to unify with `0`
+and now needs `denseZModOps.zero` named. No pass correctness theorem changes shape.
+VERIFIED: `run` output byte-identical to main on openvm-eth `apc_006`, wasm-eth `apc_012`, keccak
+`apc_001`; `lake build` clean, no warnings; `check-proof-integrity` passes (propext /
+Classical.choice / Quot.sound, no unused theorems); every `csimp` confirmed live in the C (scan (b)).
+TWO REJECTED. **(a) R9's step 4** (thread one `ops` from the pipeline entry): its premise is gone —
+building the record is now 2 closures + 3 calls + a ctor with no Mathlib in it, so the widest change
+in the plan buys the least. **(b) `zmodIsNegOne`** (`c.val == p - 1`, sound for `p ≠ 0`): deleted.
+Its only site was `Affine.trySolve`, which needs the ring for `⁻¹` and `scale` regardless, so
+converting one test would not empty its entry.
+**Worked: yes (0.68–0.90x per corpus, output byte-identical; draft PR).**
