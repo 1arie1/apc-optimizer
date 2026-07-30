@@ -23,6 +23,7 @@ import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DegenRange
 import ApcOptimizer.Implementation.OptimizerPasses.IdentitySubst
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.IdentitySubst
 import ApcOptimizer.Implementation.OptimizerPasses.DenseUmbrella
+import ApcOptimizer.Implementation.OptimizerPasses.HashedDedup
 
 set_option autoImplicit false
 
@@ -168,11 +169,25 @@ def Derivations.safeMethod (ds : Derivations p) (inputVars : List Variable) (v :
   | some cm => if ∀ x ∈ cm.vars, x ∈ inputVars then cm else .const 0
   | none => .const 0
 
-/-- Keep one structurally safe derivation for each no-ID output variable. -/
+/-- `Derivations.safeMethod` with both of its scans served from indexes: `methods` is `ds` keyed by
+    derived variable, `inputs` holds the input variables (`safeMethodIdx_eq`). -/
+def Derivations.safeMethodIdx (methods : Std.HashMap Variable (ComputationMethod p))
+    (inputs : Std.HashSet Variable) (v : Variable) : ComputationMethod p :=
+  match methods[v]? with
+  | some cm => if cm.vars.all (fun x => inputs.contains x) then cm else .const 0
+  | none => .const 0
+
+/-- Keep one structurally safe derivation for each no-ID output variable.
+
+    Both `Circuit.vars` lists count variable *occurrences*, so every scan here is indexed:
+    `methodFor` walks all of `ds` on each lookup, and the input-variable test would rescan
+    `inputVars` per referenced variable. `forOutput_eq` is the index-free reading. -/
 def Derivations.forOutput (ds : Derivations p) (inputVars outputVars : List Variable) :
     Derivations p :=
-  (outputVars.filter (fun v => v.powdrId?.isNone)).eraseDups.map
-    (fun v => (v, ds.safeMethod inputVars v))
+  let methods := Std.HashMap.ofList ds
+  let inputs := Std.HashSet.ofList inputVars
+  (HashedDedup.hashedEraseDups hash (outputVars.filter (fun v => v.powdrId?.isNone))).map
+    (fun v => (v, Derivations.safeMethodIdx methods inputs v))
 
 /-- The fact-aware circuit optimizer: given proven `BusFacts` (which fixes the implicit `bs`), run
     the pipeline and return the output system with the `Derivations` for its new variables. -/
@@ -245,10 +260,48 @@ theorem Derivations.methodFor_map_same (vs : List Variable)
         · have hvu : ¬v = u := fun h => huv h.symm
           simp [hvrest, huv, hvu]
 
+/-- `methodFor` is `findSomeRev?` with a keyed probe — the shape `Std.HashMap`'s `insertMany` lookup
+    lemma reports, so the two agree in `getElem?_ofList`. -/
+theorem Derivations.methodFor_eq_findSomeRev? (ds : Derivations p) (v : Variable) :
+    ds.findSomeRev? (fun ⟨u, cm⟩ => if u == v then some cm else none) = ds.methodFor v := by
+  induction ds with
+  | nil => rfl
+  | cons d rest ih =>
+      obtain ⟨u, cm⟩ := d
+      rw [List.findSomeRev?, ih, Derivations.methodFor]
+      cases Derivations.methodFor rest v with
+      | some later => rfl
+      | none => simp
+
+/-- Keying `ds` by variable preserves `methodFor`: `insertMany` keeps the last binding for a
+    duplicated key, and so does `methodFor`. -/
+theorem Derivations.getElem?_ofList (ds : Derivations p) (v : Variable) :
+    (Std.HashMap.ofList ds)[v]? = ds.methodFor v := by
+  rw [Std.HashMap.ofList_eq_insertMany_empty, Std.HashMap.getElem?_insertMany_list,
+    Std.HashMap.getElem?_empty, Derivations.methodFor_eq_findSomeRev?]
+  cases ds.methodFor v <;> rfl
+
+theorem Derivations.safeMethodIdx_eq (ds : Derivations p) (inputVars : List Variable)
+    (v : Variable) :
+    Derivations.safeMethodIdx (Std.HashMap.ofList ds) (Std.HashSet.ofList inputVars) v
+      = ds.safeMethod inputVars v := by
+  rw [Derivations.safeMethodIdx, Derivations.safeMethod, Derivations.getElem?_ofList]
+  cases ds.methodFor v with
+  | none => rfl
+  | some cm =>
+      exact if_congr (by simp [List.all_eq_true, Std.HashSet.contains_ofList]) rfl rfl
+
+theorem Derivations.forOutput_eq (ds : Derivations p) (inputVars outputVars : List Variable) :
+    ds.forOutput inputVars outputVars
+      = (outputVars.filter (fun v => v.powdrId?.isNone)).eraseDups.map
+          (fun v => (v, ds.safeMethod inputVars v)) := by
+  simp only [Derivations.forOutput, HashedDedup.hashedEraseDups_eq]
+  exact List.map_congr_left fun v _ => by rw [Derivations.safeMethodIdx_eq]
+
 theorem Derivations.forOutput_methodFor {ds : Derivations p} {inputVars outputVars : List Variable}
     {v : Variable} (hv : v ∈ outputVars) (hpw : v.powdrId? = none) :
     (ds.forOutput inputVars outputVars).methodFor v = some (ds.safeMethod inputVars v) := by
-  unfold Derivations.forOutput
+  rw [Derivations.forOutput_eq]
   rw [Derivations.methodFor_map_same, if_pos]
   simp [hv, hpw]
 
@@ -288,7 +341,7 @@ theorem optimizerWithBusFacts_correct {bs : BusSemantics p} (b : DegreeBound) (f
     change d ∈ (pipeline b cs bs facts).derivs.forOutput cs.vars
       (pipeline b cs bs facts).out.vars at hd
     change d.1 ∈ (pipeline b cs bs facts).out.vars
-    rw [Derivations.forOutput, List.mem_map] at hd
+    rw [Derivations.forOutput_eq, List.mem_map] at hd
     obtain ⟨v, hv, rfl⟩ := hd
     exact List.mem_of_mem_filter (List.mem_eraseDups.mp hv)
   · -- Every output variable is either reused from the input or has a safe method.
