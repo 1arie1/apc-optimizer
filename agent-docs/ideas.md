@@ -612,6 +612,11 @@ is to stay byte-identical.
    order differs from step-by-step rewriting, i.e. output changes and `insertAll_preserves`' argument
    must be redone. Largest and riskiest; open it last.
 
+**Bigger than all of the above, and closed**: `dedup` placed right after gauss is 0.888x end-to-end
+on sha256 (gauss 0.75x) because gauss creates 35 155 duplicate constraints that survive thirteen more
+passes — blocked on +64 variables on SP1 keccak, and the cleanup order is deliberately not changed
+(entry 159). The order-preserving residue of that idea is per-pass candidate-set dedup.
+
 **Measured sub-bar / do not re-propose** (also in the dead-end list below): reusing
 `st.rows[rowId].reduced` instead of re-substituting the source constraint on selection is 2.2 % of the
 pass (~0.27 s) and would dissolve the pass's untrusted-metadata story; the `ZMod` angle is 1.3 % (both
@@ -656,6 +661,17 @@ pass (~0.27 s) and would dissolve the pass's untrusted-metadata story; the `ZMod
   materialization, all at once, measured a **regression** (3 954 vs 3 287 ms on wasm-eth `apc_037`)
   and never landed. The representation-only slice of the same idea is 0.86x (entry 158). Land the
   piece you can measure alone.
+- **Reordering `dedup` in the cleanup cycle** (entry 159, measured on all six sets): `dedup` **first**
+  is a dead end (sha256 sizes identical, runtime 1.012x — it dedups a bigger system every cycle for
+  nothing). `dedup` **immediately after gauss** is the largest end-to-end lever measured to date
+  (sha256 98 721 → 87 642 ms, **0.888x**; gauss 0.75x, reencode 0.78x, flagFold 0.72x) because gauss
+  itself creates 35 155 duplicate constraints that currently survive thirteen more passes — but it
+  costs **+64 variables on SP1 keccak** (also +2 on wasm-eth `apc_037`, +4 bus on sha256), which the
+  lexicographic rule forbids. Not an early fixpoint stop: same iteration count, ahead early, stalls
+  at a worse fixpoint. A size-gated variant was considered and **not pursued — the cleanup order is
+  deliberately left alone.** Do not re-run the experiment; the patch and numbers are in entry 159.
+  **The transferable part**: those 35 155 duplicates are real work for every pass between gauss and
+  dedup, and a pass-local dedup of a pass's *own* candidate set is the order-preserving version.
 - **Whole-system content-hash gating of passes across cycles**: catches ~0 % — the fixpoint only
   retains cycles that changed something, so some pass always dirties the hash (#146 measurement).
   Only fine-grained dirtiness (R6) reaches the ~61 % no-op invocations.

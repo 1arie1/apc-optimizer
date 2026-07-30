@@ -5647,3 +5647,47 @@ the ms do not): row substitution 17.8 %,
 10.3 %, `lean_copy_expand_array` 5.7 → 0.5 %. The ranked residual is in `ideas.md`.
 **Worked: yes (gauss 0.86x on its worst case and 0.97x end-to-end on the CI serial bench,
 output byte-identical; PR #260).**
+
+
+### 159. Runtime: where `dedup` sits in the cleanup cycle (measured; the order stays)
+WHY THIS WAS TRIED. After entry 158 the gauss residual is all constant factors (biggest single item:
+`DenseGaussReduced.fromExpr`, 16.9 % of the pass), so the search moved to a structural lever. The
+`profile -v` size column shows one: in cleanup cycle 0 on sha256 `apc_001` the constraint count sits
+at **199 740 through gauss and thirteen more passes** (11 180 ms of that cycle) and then `dedup`
+drops it to **99 832**. Every pass in between pays for constraints that are about to vanish.
+QUESTION 1 — are they duplicates in gauss's *input*? **No.** `dedup` moved to the front of the
+cleanup list removes only **10 895 of 199 740 (5.5 %)**. **35 155 more appear the instant gauss
+finishes** (it eliminates 44 502 variables, so distinct constraints collapse onto each other), and
+the remainder are created by the passes after gauss. **Gauss is the duplicate factory**, which is
+why dedup sits where it does — but it sits thirteen passes too late.
+EXPERIMENT A — `dedup` first in `cleanupPasses`: sha256 final sizes **identical** on all three axes,
+runtime **99 929 vs 98 721 ms (1.012x)**. It pays to dedup a bigger system every cycle and gets
+nothing back. **Dead end.**
+EXPERIMENT B — `dedup` immediately after `gauss`: cycle 0 ends at 120 942 constraints instead of
+146 363, cycle 1 at 61 598 instead of 87 000, and sha256 `apc_001` goes **98 721 → 87 642 ms
+(0.888x, −11.1 s)** — gauss 8 588 → 6 472 (0.75x), reencode 7 908 → 6 155 (0.78x), flagFold
+4 777 → 3 439 (0.72x), domainBatch 0.88x, normalize1 0.85x, busPairCancel 0.91x; only rootPairUnify
+regresses (8 973 → 9 735, 1.08x). **That is the largest end-to-end runtime lever measured in this
+session** — an order of magnitude more than the whole remaining in-pass gauss residual.
+EFFECTIVENESS KILLS IT (local per-case `run` over all six sets, 304 cases): openvm-eth 100/100
+identical, OpenVM keccak identical, SP1 rsp 100/100 identical, sha256 **+4 bus**, wasm-eth
+`apc_037_pc0x090F14` **+2 vars / +3 bus**, SP1 keccak **+64 vars / +128 bus / +28 constraints**.
+Variables are the primary axis, so this is a hard block, not a trade.
+MECHANISM — **not** an early fixpoint stop. Both variants run the same 5 cleanup iterations on SP1
+keccak, and the reordered one is *ahead* early (cycle 1: 4 312 vs 5 273 vars) before **stalling at a
+worse fixpoint** (2 837 vs 2 773 vars). Collapsing duplicates early starves a later pass of a
+pattern it needs; the greedy cascade then never recovers those 64 variables.
+CONSIDERED AND NOT PURSUED: a size-gated early dedup (both regressing cases are small — SP1 keccak
+parses 13 099 constraints, wasm-eth `apc_037` 17 380 — while the win lives in 146k–200k-constraint
+cycles, so a ≥ 100 000 gate would fire only on sha256's first two cycles and leave 302 of 304 cases
+bit-identical by construction). **The cleanup order is deliberately left alone**: it is a
+fixpoint-trajectory change whose payoff is real but whose blast radius is the entire pipeline, and a
+threshold that fires on exactly the one case everybody profiles is not a property worth owning.
+Recorded here so the trade is known and the experiment is not repeated.
+WHAT IT IMPLIES FOR OTHER PASSES. The 11.1 s is not a dedup win, it is a *system-size* win: every
+pass between gauss and dedup runs on ~35 k constraints that are exact duplicates of each other. Any
+pass in that window whose cost is superlinear in the system (reencode's per-accept whole-system
+rewrite, domainBatch's gathers, flagFold's single-variable list) is paying for them, and a pass-local
+dedup of *its own* candidate set is a legitimate, order-preserving version of the same idea.
+**Worked: no (dedup-first is a dead end; dedup-after-gauss is a 0.888x runtime win blocked on
++64 variables, and the order stays as it is).**
