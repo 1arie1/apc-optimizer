@@ -15,6 +15,109 @@ namespace ApcOptimizer.Dense
 
 variable {p : ℕ}
 
+/-! ## Dictionary-free field access
+
+`p` is a runtime value, so `ZMod p`'s `CommRing` instance is never a closed term: a function that
+merely *mentions* `0` or `1` rebuilds `ZMod.commRing p` plus 3–5 projections at its own entry, and
+Lean floats that construction ahead of every branch test.
+
+`ZMod.commRing` mirrors `ZMod`'s own `Nat.casesOn` split (`Mathlib/Data/ZMod/Defs.lean`), so every
+operation *is* the corresponding `Int`/`Fin` primitive underneath — reaching it through the instance
+is what costs. Casing on `p` directly, in the shape `ZMod.val` itself uses, gets the primitive with
+no dictionary. Likewise `ZMod.val` is a bare `Fin.val` / `Int.natAbs` projection, so a test routed
+through it builds nothing. -/
+
+def zmodAddP : ∀ {p : ℕ}, ZMod p → ZMod p → ZMod p
+  | 0 => Int.add
+  | _ + 1 => Fin.add
+
+def zmodMulP : ∀ {p : ℕ}, ZMod p → ZMod p → ZMod p
+  | 0 => Int.mul
+  | _ + 1 => Fin.mul
+
+def zmodZeroP : ∀ (p : ℕ), ZMod p
+  | 0 => (0 : ℤ)
+  | n + 1 => (⟨0, Nat.succ_pos n⟩ : Fin (n + 1))
+
+def zmodOneP : ∀ (p : ℕ), ZMod p
+  | 0 => (1 : ℤ)
+  | n + 1 => (⟨1 % (n + 1), Nat.mod_lt _ (Nat.succ_pos n)⟩ : Fin (n + 1))
+
+/-- `-1`, i.e. `p - 1`; at `p = 1` that is `0`, which is correct in the trivial ring. -/
+def zmodNegOneP : ∀ (p : ℕ), ZMod p
+  | 0 => (-1 : ℤ)
+  | n + 1 => (⟨n, Nat.lt_succ_self n⟩ : Fin (n + 1))
+
+/-- `c = 0`, dictionary-free: `val` sends `0` to `0` and nothing else, at every `p`
+    (`ZMod.val_eq_zero`). -/
+def zmodIsZero (c : ZMod p) : Bool := c.val == 0
+
+/-- `c = 1` at `p = 0`, where `val = Int.natAbs` identifies `1` with `-1`. Kept in its own function
+    so its dictionary stays off `zmodIsOne`'s entry; unreachable at runtime (`p` is a prime). -/
+def zmodIsOneSlow (c : ZMod p) : Bool := decide (c = 1)
+
+/-- `c = 1`, dictionary-free for `p ≠ 0`: `(1 : ZMod p).val = 1 % p` (`ZMod.val_one_eq_one_mod`). -/
+def zmodIsOne (c : ZMod p) : Bool :=
+  if p = 0 then zmodIsOneSlow c else c.val == 1 % p
+
+
+/-- `a + b` behind a call, so a caller's constant/constant branch does not pull the `CommRing` chain
+    to every entry to that caller. -/
+def zmodAdd (a b : ZMod p) : ZMod p := zmodAddP a b
+
+/-- `a * b` behind a call; see `zmodAdd`. -/
+def zmodMul (a b : ZMod p) : ZMod p := zmodMulP a b
+
+/-! ### Bridge lemmas
+
+These are the whole proof surface of the change: each primitive is `@[simp]`-normalized back to the
+`ZMod` operation it implements, so proofs that reason about the definitions never see the primitive.
+The `…P` value lemmas are the same five obligations as `denseZModOps`' `_eq` fields. -/
+
+@[simp] theorem zmodIsZero_eq (c : ZMod p) : zmodIsZero c = decide (c = 0) := by
+  unfold zmodIsZero
+  by_cases h : c = 0
+  · simp [h]
+  · simp [h, (ZMod.val_eq_zero c).not.2 h]
+
+/-- `ZMod.commRing`'s operations are the `Int`/`Fin` ones by definition, so each primitive matches
+    its ring operation by cases on `p`. -/
+@[simp] theorem zmodAddP_eq (a b : ZMod p) : zmodAddP a b = a + b := by
+  cases p with | zero => rfl | succ n => rfl
+
+@[simp] theorem zmodMulP_eq (a b : ZMod p) : zmodMulP a b = a * b := by
+  cases p with | zero => rfl | succ n => rfl
+
+@[simp] theorem zmodZeroP_eq : zmodZeroP p = 0 := by
+  cases p with | zero => rfl | succ n => rfl
+
+@[simp] theorem zmodOneP_eq : zmodOneP p = 1 := by
+  cases p with | zero => rfl | succ n => rfl
+
+@[simp] theorem zmodNegOneP_eq : zmodNegOneP p = -1 := by
+  cases p with
+  | zero => rfl
+  | succ n =>
+    refine ZMod.val_injective (n + 1) ?_
+    rw [ZMod.val_neg_one]
+    rfl
+
+@[simp] theorem zmodAdd_eq (a b : ZMod p) : zmodAdd a b = a + b := zmodAddP_eq a b
+@[simp] theorem zmodMul_eq (a b : ZMod p) : zmodMul a b = a * b := zmodMulP_eq a b
+
+/-- `val` is injective for `p ≠ 0`, which is what makes the `= 1` / `= -1` tests sound; at `p = 0`
+    (`val = Int.natAbs`, which merges `1` and `-1`) the slow path is taken instead. -/
+@[simp] theorem zmodIsOne_eq (c : ZMod p) : zmodIsOne c = decide (c = 1) := by
+  unfold zmodIsOne
+  cases p with
+  | zero => simp [zmodIsOneSlow]
+  | succ n =>
+    have hone : (1 : ZMod (n + 1)).val = 1 % (n + 1) := ZMod.val_one_eq_one_mod (n + 1)
+    simp only [Nat.succ_ne_zero, if_false]
+    by_cases h : c = 1
+    · simp [h, hone]
+    · simpa [h] using fun hv => h (ZMod.val_injective (n + 1) (by rw [hv, hone]))
+
 /-! ## Dense types -/
 
 /-- A dense arithmetic expression: the spec `Expression` with `VarId` leaves. -/
@@ -53,17 +156,19 @@ structure DenseZModOps (p : ℕ) where
   one_eq : one = 1
   negOne_eq : negOne = -1
 
+/-- Every field is a primitive, so constructing the record builds no `CommRing (ZMod p)` dictionary
+    — which is what makes each `…With ops` twin cheap. -/
 def denseZModOps : DenseZModOps p where
-  add := (inferInstance : Add (ZMod p)).add
-  mul := (inferInstance : Mul (ZMod p)).mul
-  zero := 0
-  one := 1
-  negOne := -1
-  add_eq := fun _ _ => rfl
-  mul_eq := fun _ _ => rfl
-  zero_eq := rfl
-  one_eq := rfl
-  negOne_eq := rfl
+  add := zmodAddP
+  mul := zmodMulP
+  zero := zmodZeroP p
+  one := zmodOneP p
+  negOne := zmodNegOneP p
+  add_eq := zmodAddP_eq
+  mul_eq := zmodMulP_eq
+  zero_eq := zmodZeroP_eq
+  one_eq := zmodOneP_eq
+  negOne_eq := zmodNegOneP_eq
 
 /-! ## Dense expression operations (runtime; specified against decode below) -/
 
@@ -74,12 +179,34 @@ def DenseExpr.degree : DenseExpr p → Nat
   | .add a b => max a.degree b.degree
   | .mul a b => a.degree + b.degree
 
+/-- `eval` mentions `+`/`*`, so it derived the whole `CommRing` chain at *every node*. This twin
+    routes both through the primitives; the `@[csimp]` below lives here, in the earliest dense
+    module, so it fires for every pass. -/
+
+def DenseExpr.evalImpl (e : DenseExpr p) (denv : VarId → ZMod p) : ZMod p :=
+  match e with
+  | .const n => n
+  | .var i => denv i
+  | .add a b => zmodAddP (a.evalImpl denv) (b.evalImpl denv)
+  | .mul a b => zmodMulP (a.evalImpl denv) (b.evalImpl denv)
+
 def DenseExpr.eval (e : DenseExpr p) (denv : VarId → ZMod p) : ZMod p :=
   match e with
   | .const n => n
   | .var i => denv i
   | .add a b => a.eval denv + b.eval denv
   | .mul a b => a.eval denv * b.eval denv
+
+theorem DenseExpr.evalImpl_eq (e : DenseExpr p) (denv : VarId → ZMod p) :
+    e.evalImpl denv = e.eval denv := by
+  induction e with
+  | const n => rfl
+  | var i => rfl
+  | add a b iha ihb => rw [DenseExpr.evalImpl, DenseExpr.eval, zmodAddP_eq, iha, ihb]
+  | mul a b iha ihb => rw [DenseExpr.evalImpl, DenseExpr.eval, zmodMulP_eq, iha, ihb]
+
+@[csimp] theorem DenseExpr.eval_eq_evalImpl : @DenseExpr.eval = @DenseExpr.evalImpl := by
+  funext q e denv; exact (DenseExpr.evalImpl_eq e denv).symm
 
 /-- The `VarId`s occurring in a dense expression, in left-to-right order. -/
 def DenseExpr.vars : DenseExpr p → List VarId
