@@ -617,11 +617,20 @@ def DenseNormRes.expr : DenseNormRes p → DenseExpr p
   | .lin l => l.norm.toExpr
   | .opq e => e
 
+def DenseNormRes.lin?Impl : DenseNormRes p → Option (DenseLinExpr p)
+  | .var x => some ⟨zmodZeroP p, [(x, zmodOneP p)]⟩
+  | .lin l => some l
+  | .opq _ => none
+
 /-- The linear form of a deferred result — the `.2` of `denseNormalizeFused`. -/
 def DenseNormRes.lin? : DenseNormRes p → Option (DenseLinExpr p)
   | .var x => some ⟨0, [(x, 1)]⟩
   | .lin l => some l
   | .opq _ => none
+
+@[csimp] theorem DenseNormRes_lin_q_eq_impl : @DenseNormRes.lin? = @DenseNormRes.lin?Impl := by
+  funext q r
+  simp [DenseNormRes.lin?, DenseNormRes.lin?Impl]
 
 def denseNormalizeFusedFast : DenseExpr p → DenseNormRes p
   | .const n => .lin ⟨n, []⟩

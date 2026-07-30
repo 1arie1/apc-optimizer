@@ -155,10 +155,11 @@ theorem denseEnvOfW_eq (pt : List (VarId × ZMod p)) (y : VarId) :
       simp only [denseEnvOfW, denseEnvOfFast, ih]
 
 def denseEnvOfFastFast (pt : List (VarId × ZMod p)) (y : VarId) : ZMod p :=
-  denseEnvOfW 0 pt y
+  denseEnvOfW (zmodZeroP p) pt y
 
 @[csimp] theorem denseEnvOfFast_eq_fast : @denseEnvOfFast = @denseEnvOfFastFast := by
   funext p pt y
+  rw [denseEnvOfFastFast, zmodZeroP_eq]
   exact (denseEnvOfW_eq pt y).symm
 
 def denseContainsFast (xs : List VarId) (y : VarId) : Bool :=

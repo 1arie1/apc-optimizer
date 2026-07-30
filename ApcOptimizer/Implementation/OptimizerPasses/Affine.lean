@@ -21,8 +21,15 @@ structure DenseLinExpr (p : ℕ) where
 def DenseLinExpr.eval (l : DenseLinExpr p) (denv : VarId → ZMod p) : ZMod p :=
   l.const + (l.terms.map (fun t => t.2 * denv t.1)).sum
 
+def DenseLinExpr.addImpl (a b : DenseLinExpr p) : DenseLinExpr p :=
+  ⟨zmodAdd a.const b.const, a.terms ++ b.terms⟩
+
 def DenseLinExpr.add (a b : DenseLinExpr p) : DenseLinExpr p :=
   ⟨a.const + b.const, a.terms ++ b.terms⟩
+
+@[csimp] theorem DenseLinExpr_add_eq_impl : @DenseLinExpr.add = @DenseLinExpr.addImpl := by
+  funext q a b
+  simp [DenseLinExpr.add, DenseLinExpr.addImpl]
 
 def DenseLinExpr.scale (k : ZMod p) (a : DenseLinExpr p) : DenseLinExpr p :=
   ⟨k * a.const, a.terms.map (fun t => (t.1, k * t.2))⟩

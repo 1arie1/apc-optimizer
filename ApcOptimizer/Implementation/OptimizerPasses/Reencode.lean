@@ -28,9 +28,7 @@ def DenseExpr.evalWith (add mul : ZMod p → ZMod p → ZMod p) (denv : VarId �
 
 /-- `DenseExpr.eval`, deriving the field operations once per call instead of per node. -/
 def DenseExpr.evalFast (e : DenseExpr p) (denv : VarId → ZMod p) : ZMod p :=
-  let addI : Add (ZMod p) := inferInstance
-  let mulI : Mul (ZMod p) := inferInstance
-  e.evalWith addI.add mulI.mul denv
+  e.evalWith zmodAdd zmodMul denv
 
 /-- `b · (b − 1)`. -/
 def denseBoolConstraint (b : VarId) : DenseExpr p :=
@@ -770,9 +768,24 @@ structure DenseReencodeWork (p : ℕ) where
       variable fold per cleanup cycle for a bound it never consults. -/
   bounded : Bool
 
+def denseIsZeroImpl : DenseExpr p → Bool
+  | .const n => zmodIsZero n
+  | _ => false
+
 def denseIsZero : DenseExpr p → Bool
   | .const n => n == 0
   | _ => false
+
+@[csimp] theorem denseIsZero_eq_impl : @denseIsZero = @denseIsZeroImpl := by
+  funext q e
+  cases e with
+  | const n =>
+      show (n == 0) = zmodIsZero n
+      simp only [zmodIsZero_eq]
+      rfl
+  | var _ => rfl
+  | add _ _ => rfl
+  | mul _ _ => rfl
 
 /-- `denseIsZero` with the field zero as a parameter. The compiler floats the `0`'s whole
     `ZMod.commRing` chain to the head of `denseIsZero`, *before* the constructor test, so a caller
@@ -839,7 +852,8 @@ def denseWorkSpliceCs (dmax : Nat) (xs bits : List VarId) (σfn : VarId → Opti
   | i, c :: rest, acc, lp, lf, ok =>
       if maxPos < i then (acc.reverse ++ (c :: rest), lp, lf, ok)
       else if denseCoveredBy xs c then
-        denseWorkSpliceCs dmax xs bits σfn patts maxPos (i + 1) rest ((.const 0) :: acc) lp lf ok
+        denseWorkSpliceCs dmax xs bits σfn patts maxPos (i + 1) rest
+          ((.const 0) :: acc) lp lf ok
       else if c.sharesVarIn xs || c.hasConstFoldableNode then
         let c' := denseGroupRewrite xs bits σfn patts c
         let lp' := c'.vars.foldl (fun m v => m.insert v (max (m.getD v 0) i)) lp
@@ -1751,7 +1765,8 @@ def denseReencodeStateUpdate (state : DenseReencodeCacheState p) (usePosB : List
       let c := st.arrCs[i]
       if denseCoveredBy xs c then
         -- covered ⇒ `c.hasVar` ⇒ `c` was not a tombstone, so the live count drops by one
-        { st with arrCs := st.arrCs.set i (.const 0), rootCache := st.rootCache.erase i,
+        { st with arrCs := st.arrCs.set i (.const 0),
+                  rootCache := st.rootCache.erase i,
                   foldCs := st.foldCs.erase i, liveCs := st.liveCs - 1 }
       else if c.sharesVarIn xs || c.hasConstFoldableNode then
         let c' := denseGroupRewrite xs bits σfn patts c
