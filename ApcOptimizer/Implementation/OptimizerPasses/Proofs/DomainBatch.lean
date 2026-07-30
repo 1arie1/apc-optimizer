@@ -1770,9 +1770,9 @@ theorem denseGatherBusesV_interactions_mem (fidx : DenseForcedIdx p) (xs : List 
       fidx.arrBis[i].interaction = bi ∧ fidx.arrBis[i].usable = true ∧
         denseVarsInListF xs fidx.arrBis[i].vars = true := by
   rw [denseGatherBusesV] at hbi
-  apply denseGatherBusArrayV_interactions_mem fidx.arrBis xs fidx.bisIdx.varless _
-    (denseGatherBusBucketsV_interactions_mem fidx.arrBis fidx.bisIdx xs xs
-      ⟨0, false, true, []⟩ (by simp)) bi hbi
+  exact denseGatherBusBucketsV_interactions_mem fidx.arrBis fidx.bisIdx xs xs
+    ⟨fidx.busVarless.count, fidx.busVarless.informative, fidx.busVarless.allDomainRedundant, []⟩
+    (by simp) bi hbi
 
 theorem denseGatherBusesV_plan_mem (fidx : DenseForcedIdx p) (plans : List (DenseBusPlan p))
     (harr : fidx.arrBis = plans.toArray) (xs : List VarId)
@@ -1789,11 +1789,70 @@ theorem denseGatherBusesV_plan_mem (fidx : DenseForcedIdx p) (plans : List (Dens
   exact ⟨plan, hmem, by simpa [plan] using hbi', by simpa [plan] using husable,
     by simpa [plan] using hvars⟩
 
+/-! ### The variable-free summary's verdict
+
+`constOk = true` is sound for free — it only drops obligations from the scan, which can add
+survivors and so shrink the forced set. What needs an argument is `false`, which forces every key:
+`denseVarlessBiOkV` reports `false` only for an interaction that is genuinely variable-free (its own
+`denseBIVars` re-check) and whose obligation fails on the empty point, and such an interaction is
+violated by *every* environment — so under a satisfying `denv` the summary is `true`. -/
+
+theorem denseVarlessBiOkV_of_sat (bs : BusSemantics p) (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) (denv : VarId → ZMod p)
+    (hsat : (denseBIEval bi denv).multiplicity ≠ 0 → bs.accepts (denseBIEval bi denv)) :
+    denseVarlessBiOkV bs facts bi = true := by
+  unfold denseVarlessBiOkV
+  by_cases hvars : (denseBIVars bi).isEmpty = true
+  · have hnil : denseBIVars bi = [] := List.isEmpty_iff.mp hvars
+    have hrestr := denseSurvivesAllMV_restriction facts [] [bi] [] denv
+      (by intro e he; simp at he)
+      (by intro b hb; cases List.mem_singleton.mp hb; exact hsat)
+      (by intro e he; simp at he)
+      (by intro b hb i hi; cases List.mem_singleton.mp hb; rw [hnil] at hi; simp at hi)
+    rw [Bool.or_eq_true]
+    exact Or.inr (by rw [denseCompiledSurvV_eq]; simpa using hrestr)
+  · simp [hvars]
+
+theorem denseBusVarlessSummaryV_constOk (bs : BusSemantics p) (facts : BusFacts p bs)
+    (varless : Array Nat) (arr : Array (DenseBusPlan p)) (denv : VarId → ZMod p)
+    (hsat : ∀ plan ∈ arr, (denseBIEval plan.interaction denv).multiplicity ≠ 0 →
+      bs.accepts (denseBIEval plan.interaction denv)) :
+    (denseBusVarlessSummaryV bs facts varless arr).constOk = true := by
+  unfold denseBusVarlessSummaryV
+  rw [← Array.foldl_toList]
+  suffices h : ∀ (l : List Nat) (s : DenseBusVarlessSummary p), s.constOk = true →
+      (l.foldl (fun s i =>
+        if h : i < arr.size then
+          if arr[i].usable then
+            { count := s.count + 1,
+              informative := s.informative || arr[i].informative,
+              allDomainRedundant := s.allDomainRedundant && arr[i].domainRedundant,
+              constOk := s.constOk && denseVarlessBiOkV bs facts arr[i].interaction }
+          else s
+        else s) s).constOk = true from h varless.toList ⟨0, false, true, true⟩ rfl
+  intro l
+  induction l with
+  | nil => intro s hs; exact hs
+  | cons i rest ih =>
+      intro s hs
+      refine ih _ ?_
+      by_cases hi : i < arr.size
+      · by_cases hu : arr[i].usable = true
+        · simp only [hi, ↓reduceDIte, hu, ↓reduceIte, hs, Bool.true_and]
+          exact denseVarlessBiOkV_of_sat bs facts arr[i].interaction denv
+            (hsat arr[i] (Array.getElem_mem hi))
+        · simp only [hi, ↓reduceDIte, hu, Bool.false_eq_true, ↓reduceIte]; exact hs
+      · simp only [hi, ↓reduceDIte]; exact hs
+
 /-- **Value-only `forcedOver` entailment.** Every forced pair `(x, c)` is entailed by `denv`, given
-    the domain table is sound at `denv` and the covered items evaluate/oblige correctly. -/
+    the domain table is sound at `denv` and the covered items evaluate/oblige correctly. The
+    variable-free summary must read `constOk` (`denseBusVarlessSummaryV_constOk`); `false` short-
+    circuits the scan to "every key is 0", which is only entailed because it cannot happen under a
+    satisfying `denv`. -/
 theorem denseForcedOverV_entails (bs : BusSemantics p) (facts : BusFacts p bs)
     (T : DenseDomainTable p) (fidx : DenseForcedIdx p) (xs : List VarId) (denv : VarId → ZMod p)
     (hTs : DenseTableSoundAt denv T)
+    (hconstOk : fidx.busVarless.constOk = true)
     (hes : ∀ e ∈ (denseGatherConstraintsV fidx xs).active,
       e.eval denv = 0 ∧ ∀ i ∈ e.vars, i ∈ xs)
     (hbis : ∀ bi ∈ (denseGatherBusesV fidx xs).interactions,
@@ -1833,7 +1892,8 @@ theorem denseForcedOverV_entails (bs : BusSemantics p) (facts : BusFacts p bs)
           intro f hf
           have hf' : f ∈ ((fdoms.map Prod.fst).zip cands).filterMap
               (fun xc => xc.2.map (fun c => (xc.1, c))) := by
-            simpa only [denseRunForcedPlanV, denseRunForcedScanV, hscan] using hf
+            simpa only [denseRunForcedPlanV, denseRunForcedScanV, hconstOk, Bool.not_true,
+              Bool.false_eq_true, if_false, hscan] using hf
           obtain ⟨n, hn1, hn2⟩ := mem_zip_filterMap (fdoms.map Prod.fst) cands f hf'
           have hforce := denseScanBoxV_forces _ _ cands hscan n f.2 hn2 _ hinbox hsurv
           rw [List.getElem?_map, hn1] at hforce
@@ -2070,7 +2130,7 @@ def dbTargets (bs : BusSemantics p) (facts : BusFacts p bs)
 /-- The inverted index built by `denseDomainBatchσV`. -/
 def dbFidx (bs : BusSemantics p) (facts : BusFacts p bs) (d : DenseConstraintSystem p) :
     DenseForcedIdx p :=
-  denseForcedIdxV (dbConstraintPlans bs facts d) (dbBusPlans bs facts d)
+  denseForcedIdxV bs facts (dbConstraintPlans bs facts d) (dbBusPlans bs facts d)
 
 theorem denseDomainBatchσV_eq (bs : BusSemantics p) (facts : BusFacts p bs)
     (d : DenseConstraintSystem p) :
@@ -2091,8 +2151,13 @@ theorem denseDomainBatchσV_entailed [Fact p.Prime] [NeZero p]
   case hforced =>
     intro xs f hf denv hsat
     refine denseForcedOverV_entails bs facts (dbT bs facts d) (dbFidx bs facts d) xs denv
-      ?_ ?_ ?_ f hf
+      ?_ ?_ ?_ ?_ f hf
     · exact dbT_soundAt bs facts d denv hsat
+    · refine denseBusVarlessSummaryV_constOk bs facts _ _ denv (fun plan hplan => ?_)
+      have hmem : plan ∈ dbBusPlans bs facts d := by simpa using hplan
+      rw [dbBusPlans, denseBusPlansV] at hmem
+      obtain ⟨bi0, hbi0, rfl⟩ := List.mem_map.mp hmem
+      exact hsat.2 bi0 hbi0
     · intro e he
       obtain ⟨plan, hplan, hpe, hpvars, _⟩ := denseGatherConstraintsV_plan_mem
         (dbFidx bs facts d) (dbConstraintPlans bs facts d) rfl xs he
