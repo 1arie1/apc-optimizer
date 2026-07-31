@@ -5,8 +5,22 @@ import Batteries.Data.BinaryHeap
 
 set_option autoImplicit false
 
-/-! # Dense Gauss elimination: pivot scoring, the loop, the transform.
-Correctness and the wired `denseGaussElimPass` live in `Proofs/Gauss.lean`. -/
+/-! # Dense Gauss elimination
+
+The affine substitution layer (`denseLinSubstF`, `denseSparseSolveAt`), then the sparse engine built
+on it. Correctness and the wired `denseGaussElimFPass` live in `Proofs/Gauss.lean`.
+
+Each algebraic constraint is walked **once** into either a sparse affine row or a *blocked* verdict
+carrying the variables to watch (`gEval`); a blocked constraint is re-walked only when one of those
+variables is solved, which is the only way its first surviving variable×variable product can
+collapse. Rows are developed against the solution map when the scheduler reaches them, never
+re-derived from the source expression. Every per-variable index is a `VarId.index`-keyed array.
+
+Two schedulers, on the `denseMarkowitzMinRows` gate: source order below it (the SP1 `rsp` shapes need
+that basis), shortest-row-first above it (in source order a substitution chain there inflates a
+stored solution to hundreds of terms before it cancels back down).
+
+`DenseSolved` is the plain solution map the domain / flag / fx / rootPair passes share. -/
 
 namespace ApcOptimizer.Dense
 
@@ -33,146 +47,6 @@ still holding a reference to it. -/
 def denseArrEnsure {α : Type} (a : Array α) (i : Nat) (d : α) : Array α :=
   if i < a.size then a
   else a ++ Array.replicate (max (i + 1) (2 * a.size) - a.size) d
-
-/-- The occurrence-weighted duplication cost of pivoting on `v`, with a protection penalty. -/
-def denseGaussScore (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId) (v : VarId)
-    (oc : Nat) : Nat :=
-  let base := (occ.getD v 1 - 1) * (1 + oc)
-  if prot.contains v then base + 1000000 else base
-
-/-- One index step: add `t`'s coefficient and one occurrence to `t.1`'s entry (0 if absent). -/
-def denseIdxStep (m : Std.HashMap VarId (ZMod p × Nat)) (t : VarId × ZMod p) :
-    Std.HashMap VarId (ZMod p × Nat) :=
-  m.insert t.1 (((m[t.1]?).getD (0, 0)).1 + t.2, ((m[t.1]?).getD (0, 0)).2 + 1)
-
-/-- The coefficient/occurrence index of a term list. -/
-def denseCoeffIdx (terms : List (VarId × ZMod p)) : Std.HashMap VarId (ZMod p × Nat) :=
-  terms.foldl denseIdxStep ∅
-
-/-! ## Descriptors -/
-
-/-- `±1`-pivot descriptor: `some (v, score)` exactly when `l.trySolve v` succeeds. -/
-def densePm1Desc (idx : Std.HashMap VarId (ZMod p × Nat)) (total : Nat)
-    (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId) (v : VarId) :
-    Option (VarId × Nat) :=
-  if ((idx[v]?).getD (0, 0)).1 = 1 ∨ ((idx[v]?).getD (0, 0)).1 = -1 then
-    some (v, denseGaussScore occ prot v (total - ((idx[v]?).getD (0, 0)).2))
-  else none
-
-/-- Unit-pivot descriptor: `some (v, score)` exactly when `l.trySolve v` fails but
-    `l.trySolveUnit v` succeeds. -/
-def denseUnitDesc (idx : Std.HashMap VarId (ZMod p × Nat)) (total : Nat)
-    (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId) (v : VarId) :
-    Option (VarId × Nat) :=
-  if ¬(((idx[v]?).getD (0, 0)).1 = 1 ∨ ((idx[v]?).getD (0, 0)).1 = -1)
-      ∧ ((idx[v]?).getD (0, 0)).1 * (((idx[v]?).getD (0, 0)).1)⁻¹ = 1 then
-    some (v, denseGaussScore occ prot v (total - ((idx[v]?).getD (0, 0)).2))
-  else none
-
-/-- All pivot descriptors, `±1` first (matching the order of `densePm1PivotsOf ++
-    denseUnitPivotsOf`). -/
-def densePivotDescs (l : DenseLinExpr p) (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId) :
-    List (VarId × Nat) :=
-  let idx := denseCoeffIdx l.terms
-  let total := l.terms.length
-  (l.terms.map Prod.fst).filterMap (densePm1Desc idx total occ prot)
-    ++ (l.terms.map Prod.fst).filterMap (denseUnitDesc idx total occ prot)
-
-/-! ## Boxed runtime twins -/
-
-def denseIdxStepWith (ops : DenseZModOps p) (m : Std.HashMap VarId (ZMod p × Nat))
-    (t : VarId × ZMod p) : Std.HashMap VarId (ZMod p × Nat) :=
-  let old := (m[t.1]?).getD (ops.zero, 0)
-  m.insert t.1 (ops.add old.1 t.2, old.2 + 1)
-
-def denseCoeffIdxWith (ops : DenseZModOps p) :
-    List (VarId × ZMod p) → Std.HashMap VarId (ZMod p × Nat) →
-      Std.HashMap VarId (ZMod p × Nat)
-  | [], m => m
-  | t :: rest, m => denseCoeffIdxWith ops rest (denseIdxStepWith ops m t)
-
-def denseCoeffIdxFast (terms : List (VarId × ZMod p)) : Std.HashMap VarId (ZMod p × Nat) :=
-  let ops : DenseZModOps p := denseZModOps
-  denseCoeffIdxWith ops terms ∅
-
-theorem denseIdxStepWith_eq (ops : DenseZModOps p) (m : Std.HashMap VarId (ZMod p × Nat))
-    (t : VarId × ZMod p) : denseIdxStepWith ops m t = denseIdxStep m t := by
-  simp only [denseIdxStepWith, denseIdxStep, ops.zero_eq, ops.add_eq]
-
-theorem denseCoeffIdxWith_eq (ops : DenseZModOps p) (terms : List (VarId × ZMod p))
-    (m : Std.HashMap VarId (ZMod p × Nat)) :
-    denseCoeffIdxWith ops terms m = terms.foldl denseIdxStep m := by
-  induction terms generalizing m with
-  | nil => rfl
-  | cons t rest ih =>
-    rw [denseCoeffIdxWith, denseIdxStepWith_eq, List.foldl_cons, ih]
-
-@[csimp] theorem denseCoeffIdx_eq_fast : @denseCoeffIdx = @denseCoeffIdxFast := by
-  funext p terms
-  simp only [denseCoeffIdx, denseCoeffIdxFast, denseCoeffIdxWith_eq]
-
-def densePm1DescWith (ops : DenseZModOps p) (idx : Std.HashMap VarId (ZMod p × Nat))
-    (total : Nat) (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId) (v : VarId) :
-    Option (VarId × Nat) :=
-  let cv := (idx[v]?).getD (ops.zero, 0)
-  if cv.1 = ops.one ∨ cv.1 = ops.negOne then
-    some (v, denseGaussScore occ prot v (total - cv.2))
-  else none
-
-def denseUnitDescWith (ops : DenseZModOps p) (idx : Std.HashMap VarId (ZMod p × Nat))
-    (total : Nat) (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId) (v : VarId) :
-    Option (VarId × Nat) :=
-  let cv := (idx[v]?).getD (ops.zero, 0)
-  if ¬(cv.1 = ops.one ∨ cv.1 = ops.negOne) ∧
-      ops.mul cv.1 cv.1⁻¹ = ops.one then
-    some (v, denseGaussScore occ prot v (total - cv.2))
-  else none
-
-def densePivotDescsWith (ops : DenseZModOps p) (l : DenseLinExpr p)
-    (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId) : List (VarId × Nat) :=
-  let idx := denseCoeffIdxWith ops l.terms ∅
-  let total := l.terms.length
-  (l.terms.map Prod.fst).filterMap (densePm1DescWith ops idx total occ prot) ++
-    (l.terms.map Prod.fst).filterMap (denseUnitDescWith ops idx total occ prot)
-
-def densePivotDescsFast (l : DenseLinExpr p) (occ : Std.HashMap VarId Nat)
-    (prot : Std.HashSet VarId) : List (VarId × Nat) :=
-  let ops : DenseZModOps p := denseZModOps
-  densePivotDescsWith ops l occ prot
-
-theorem densePm1DescWith_eq (ops : DenseZModOps p) (idx : Std.HashMap VarId (ZMod p × Nat))
-    (total : Nat) (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId) (v : VarId) :
-    densePm1DescWith ops idx total occ prot v = densePm1Desc idx total occ prot v := by
-  simp only [densePm1DescWith, densePm1Desc, ops.zero_eq, ops.one_eq, ops.negOne_eq]
-
-theorem denseUnitDescWith_eq (ops : DenseZModOps p) (idx : Std.HashMap VarId (ZMod p × Nat))
-    (total : Nat) (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId) (v : VarId) :
-    denseUnitDescWith ops idx total occ prot v = denseUnitDesc idx total occ prot v := by
-  simp only [denseUnitDescWith, denseUnitDesc, ops.zero_eq, ops.one_eq, ops.negOne_eq, ops.mul_eq]
-
-theorem densePivotDescsWith_eq (ops : DenseZModOps p) (l : DenseLinExpr p)
-    (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId) :
-    densePivotDescsWith ops l occ prot = densePivotDescs l occ prot := by
-  unfold densePivotDescsWith densePivotDescs denseCoeffIdx
-  rw [denseCoeffIdxWith_eq]
-  simp only [densePm1DescWith_eq, denseUnitDescWith_eq]
-
-@[csimp] theorem densePivotDescs_eq_fast : @densePivotDescs = @densePivotDescsFast := by
-  funext p l occ prot
-  exact (densePivotDescsWith_eq denseZModOps l occ prot).symm
-
-/-- Occurrence counts of every variable across the dense system (one traversal). -/
-def denseOccurrenceMap (d : DenseConstraintSystem p) : Std.HashMap VarId Nat :=
-  let addE := fun (m : Std.HashMap VarId Nat) (e : DenseExpr p) =>
-    e.foldVars (fun m x => m.insert x (m.getD x 0 + 1)) m
-  let m := d.algebraicConstraints.foldl addE ∅
-  d.busInteractions.foldl (fun m bi => bi.payload.foldl addE (addE m bi.multiplicity)) m
-
-/-- Variables occurring as a *raw* payload slot of a stateless interaction. -/
-def denseProtectedVars (d : DenseConstraintSystem p) (bs : BusSemantics p) : Std.HashSet VarId :=
-  d.busInteractions.foldl (init := ∅) fun s bi =>
-    if bs.isStateful bi.busId then s
-    else bi.payload.foldl (fun s e => match e with | .var x => s.insert x | _ => s) s
 
 /-- A plain (proof-free) solution map keyed by `VarId`; correctness is established by the
     correctness proof (`Proofs/Gauss.lean`), not carried as a structure invariant. -/
@@ -210,13 +84,7 @@ theorem insertAll_map :
 
 end DenseSolved
 
-/-! ## Dynamic sparse scheduling -/
-
-def DenseExpr.uniqueVars (e : DenseExpr p) : List VarId :=
-  let st := e.foldVars (fun (out, seen) x =>
-    if seen.contains x then (out, seen) else (x :: out, seen.insert x))
-    (([], ∅) : List VarId × Std.HashSet VarId)
-  st.1.reverse
+/-! ## Sparse affine substitution -/
 
 /-- Substitute sparse affine rows into an affine row, preserving first-occurrence term order. -/
 def denseLinSubstF (l : DenseLinExpr p) (σ : VarId → Option (DenseLinExpr p)) :
@@ -235,9 +103,6 @@ def denseLinSubstF (l : DenseLinExpr p) (σ : VarId → Option (DenseLinExpr p))
 def denseLinSubst (l : DenseLinExpr p) (x : VarId) (t : DenseLinExpr p) : DenseLinExpr p :=
   denseLinSubstF l (fun y => if y = x then some t else none)
 
-def denseLinAdd (a b : DenseLinExpr p) : DenseLinExpr p :=
-  (a.add b).norm
-
 def denseLinScale (k : ZMod p) (l : DenseLinExpr p) : DenseLinExpr p :=
   (l.scale k).norm
 
@@ -254,285 +119,21 @@ def denseLinSubstFWith (ops : DenseZModOps p) (l : DenseLinExpr p)
     | none => [yc])
   (DenseLinExpr.mk const terms).normWith ops
 
-def denseLinSubstFFast (l : DenseLinExpr p) (σ : VarId → Option (DenseLinExpr p)) :
-    DenseLinExpr p :=
-  denseLinSubstFWith denseZModOps l σ
-
 theorem denseLinSubstFWith_eq (ops : DenseZModOps p) (l : DenseLinExpr p)
     (σ : VarId → Option (DenseLinExpr p)) : denseLinSubstFWith ops l σ = denseLinSubstF l σ := by
   simp only [denseLinSubstFWith, denseLinSubstF, DenseLinExpr.normWith_eq, ops.add_eq, ops.mul_eq,
     denseScaleTermsWith_eq]
 
-@[csimp] theorem denseLinSubstF_eq_fast : @denseLinSubstF = @denseLinSubstFFast := by
-  funext p l σ
-  exact (denseLinSubstFWith_eq denseZModOps l σ).symm
-
-def denseLinAddWith (ops : DenseZModOps p) (a b : DenseLinExpr p) : DenseLinExpr p :=
-  (a.addWith ops b).normWith ops
-
-def denseLinAddFast (a b : DenseLinExpr p) : DenseLinExpr p :=
-  denseLinAddWith denseZModOps a b
-
-theorem denseLinAddWith_eq (ops : DenseZModOps p) (a b : DenseLinExpr p) :
-    denseLinAddWith ops a b = denseLinAdd a b := by
-  simp only [denseLinAddWith, denseLinAdd, DenseLinExpr.addWith_eq, DenseLinExpr.normWith_eq]
-
-@[csimp] theorem denseLinAdd_eq_fast : @denseLinAdd = @denseLinAddFast := by
-  funext p a b
-  exact (denseLinAddWith_eq denseZModOps a b).symm
-
 def denseLinScaleWith (ops : DenseZModOps p) (k : ZMod p) (l : DenseLinExpr p) : DenseLinExpr p :=
   (l.scaleWith ops k).normWith ops
-
-def denseLinScaleFast (k : ZMod p) (l : DenseLinExpr p) : DenseLinExpr p :=
-  denseLinScaleWith denseZModOps k l
 
 theorem denseLinScaleWith_eq (ops : DenseZModOps p) (k : ZMod p) (l : DenseLinExpr p) :
     denseLinScaleWith ops k l = denseLinScale k l := by
   simp only [denseLinScaleWith, denseLinScale, DenseLinExpr.scaleWith_eq, DenseLinExpr.normWith_eq]
 
-@[csimp] theorem denseLinScale_eq_fast : @denseLinScale = @denseLinScaleFast := by
-  funext p k l
-  exact (denseLinScaleWith_eq denseZModOps k l).symm
-
 def DenseLinExpr.mentions (l : DenseLinExpr p) (x : VarId) : Bool :=
   l.terms.any (fun yc => yc.1 = x)
 
-inductive DenseGaussReduced (p : ℕ) where
-  | affine (row : DenseLinExpr p)
-  | nonlinear (expr : DenseExpr p)
-
-namespace DenseGaussReduced
-
-def toExpr : DenseGaussReduced p → DenseExpr p
-  | .affine row => row.toExpr
-  | .nonlinear expr => expr
-
-def vars : DenseGaussReduced p → List VarId
-  | .affine row => row.terms.map Prod.fst
-  | .nonlinear expr => expr.uniqueVars
-
-def fromExpr (e : DenseExpr p) : DenseGaussReduced p :=
-  match denseLinearize e with
-  | some row => .affine row.norm
-  | none =>
-      let normalized := e.normalize
-      match denseLinearize normalized with
-      | some row => .affine row.norm
-      | none => .nonlinear normalized
-
-end DenseGaussReduced
-
-def denseReducedAdd (ra rb : DenseGaussReduced p) : DenseGaussReduced p :=
-  match ra, rb with
-  | .affine la, .affine lb => .affine (denseLinAdd la lb)
-  | _, _ => .nonlinear (.add ra.toExpr rb.toExpr)
-
-def denseReducedMul (ra rb : DenseGaussReduced p) : DenseGaussReduced p :=
-  match ra, rb with
-  | .affine la, .affine lb =>
-      if la.terms.isEmpty then .affine (denseLinScale la.const lb)
-      else if lb.terms.isEmpty then .affine (denseLinScale lb.const la)
-      else .nonlinear (.mul la.toExpr lb.toExpr)
-  | _, _ => .nonlinear (.mul ra.toExpr rb.toExpr)
-
-/-- Simultaneous sparse substitution and affine normalization, retaining expressions only for
-    genuinely nonlinear subtrees. -/
-def denseSparseSubstF (σ : VarId → Option (DenseLinExpr p)) : DenseExpr p → DenseGaussReduced p
-  | .const n => .affine ⟨n, []⟩
-  | .var x =>
-      match σ x with
-      | some row => .affine row
-      | none => .affine ⟨0, [(x, 1)]⟩
-  | e@(.add a b) =>
-      match denseLinearize e with
-      | some row => .affine (denseLinSubstF row σ)
-      | none =>
-          let ra := denseSparseSubstF σ a
-          let rb := denseSparseSubstF σ b
-          denseReducedAdd ra rb
-  | e@(.mul a b) =>
-      match denseLinearize e with
-      | some row => .affine (denseLinSubstF row σ)
-      | none =>
-          let ra := denseSparseSubstF σ a
-          let rb := denseSparseSubstF σ b
-          denseReducedMul ra rb
-
-/-! ## Fused substitution walk (runtime `@[csimp]` replacement for `denseSparseSubstF`)
-
-`denseSparseSubstF` re-runs `denseLinearize` over the whole node at every node of the nonlinear
-spine, and substitutes into every affine node whose parent then re-substitutes the merged row —
-both quadratic in the size of a constraint. The fused walk carries each node's linear form up
-(`lin?`, provably `denseLinearize`) and leaves the substitution undeveloped (`lin`) while a parent
-can still absorb it. -/
-
-inductive DenseSubstRes (p : ℕ) where
-  | pre (r : DenseGaussReduced p) (l : DenseLinExpr p)
-  | lin (l : DenseLinExpr p)
-  | opq (r : DenseGaussReduced p)
-
-def DenseSubstRes.reduced (σ : VarId → Option (DenseLinExpr p)) :
-    DenseSubstRes p → DenseGaussReduced p
-  | .pre r _ => r
-  | .lin l => .affine (denseLinSubstF l σ)
-  | .opq r => r
-
-def DenseSubstRes.lin? : DenseSubstRes p → Option (DenseLinExpr p)
-  | .pre _ l => some l
-  | .lin l => some l
-  | .opq _ => none
-
-def denseSparseSubstFused (σ : VarId → Option (DenseLinExpr p)) :
-    DenseExpr p → DenseSubstRes p
-  | .const n => .pre (.affine ⟨n, []⟩) ⟨n, []⟩
-  | .var x =>
-      .pre (match σ x with | some row => .affine row | none => .affine ⟨0, [(x, 1)]⟩)
-        ⟨0, [(x, 1)]⟩
-  | .add a b =>
-      let ra := denseSparseSubstFused σ a
-      let rb := denseSparseSubstFused σ b
-      match ra.lin?, rb.lin? with
-      | some la, some lb => .lin (la.add lb)
-      | _, _ => .opq (denseReducedAdd (ra.reduced σ) (rb.reduced σ))
-  | .mul a b =>
-      let ra := denseSparseSubstFused σ a
-      let rb := denseSparseSubstFused σ b
-      match ra.lin?, rb.lin? with
-      | some la, some lb =>
-          if la.terms.isEmpty then .lin (lb.scale la.const)
-          else if lb.terms.isEmpty then .lin (la.scale lb.const)
-          else .opq (denseReducedMul (ra.reduced σ) (rb.reduced σ))
-      | _, _ => .opq (denseReducedMul (ra.reduced σ) (rb.reduced σ))
-
-/-- Boxed twin of the fused walk. Its `var` leaf builds `⟨0, [(x, 1)]⟩`, so without a shared
-    `DenseZModOps p` every variable occurrence of every constraint costs two instance chains. -/
-def denseSparseSubstFusedWith (ops : DenseZModOps p) (σ : VarId → Option (DenseLinExpr p)) :
-    DenseExpr p → DenseSubstRes p
-  | .const n => .pre (.affine ⟨n, []⟩) ⟨n, []⟩
-  | .var x =>
-      .pre (match σ x with | some row => .affine row | none => .affine ⟨ops.zero, [(x, ops.one)]⟩)
-        ⟨ops.zero, [(x, ops.one)]⟩
-  | .add a b =>
-      let ra := denseSparseSubstFusedWith ops σ a
-      let rb := denseSparseSubstFusedWith ops σ b
-      match ra.lin?, rb.lin? with
-      | some la, some lb => .lin (la.addWith ops lb)
-      | _, _ => .opq (denseReducedAdd (ra.reduced σ) (rb.reduced σ))
-  | .mul a b =>
-      let ra := denseSparseSubstFusedWith ops σ a
-      let rb := denseSparseSubstFusedWith ops σ b
-      match ra.lin?, rb.lin? with
-      | some la, some lb =>
-          if la.terms.isEmpty then .lin (lb.scaleWith ops la.const)
-          else if lb.terms.isEmpty then .lin (la.scaleWith ops lb.const)
-          else .opq (denseReducedMul (ra.reduced σ) (rb.reduced σ))
-      | _, _ => .opq (denseReducedMul (ra.reduced σ) (rb.reduced σ))
-
-theorem denseSparseSubstFusedWith_eq (ops : DenseZModOps p) (σ : VarId → Option (DenseLinExpr p))
-    (e : DenseExpr p) : denseSparseSubstFusedWith ops σ e = denseSparseSubstFused σ e := by
-  induction e with
-  | const n => rfl
-  | var x =>
-      simp only [denseSparseSubstFusedWith, denseSparseSubstFused, ops.zero_eq, ops.one_eq]
-  | add a b iha ihb =>
-      simp only [denseSparseSubstFusedWith, denseSparseSubstFused, iha, ihb,
-        DenseLinExpr.addWith_eq]
-  | mul a b iha ihb =>
-      simp only [denseSparseSubstFusedWith, denseSparseSubstFused, iha, ihb,
-        DenseLinExpr.scaleWith_eq]
-
-def denseSparseSubstFusedFast (σ : VarId → Option (DenseLinExpr p)) (e : DenseExpr p) :
-    DenseSubstRes p :=
-  denseSparseSubstFusedWith denseZModOps σ e
-
-@[csimp] theorem denseSparseSubstFused_eq_fast :
-    @denseSparseSubstFused = @denseSparseSubstFusedFast := by
-  funext p σ e
-  exact (denseSparseSubstFusedWith_eq denseZModOps σ e).symm
-
-def denseSparseSubstFFast (σ : VarId → Option (DenseLinExpr p)) (e : DenseExpr p) :
-    DenseGaussReduced p :=
-  (denseSparseSubstFused σ e).reduced σ
-
-theorem denseSparseSubstFused_lin (σ : VarId → Option (DenseLinExpr p)) (e : DenseExpr p) :
-    (denseSparseSubstFused σ e).lin? = denseLinearize e := by
-  induction e with
-  | const n => rfl
-  | var x => rfl
-  | add a b iha ihb =>
-      rw [denseSparseSubstFused, denseLinearize]
-      rw [show (denseSparseSubstFused σ a).lin? = denseLinearize a from iha] at *
-      cases denseLinearize a <;> cases hb : (denseSparseSubstFused σ b).lin? <;>
-        rw [hb] at ihb <;> simp [DenseSubstRes.lin?, ← ihb]
-  | mul a b iha ihb =>
-      rw [denseSparseSubstFused, denseLinearize]
-      rw [show (denseSparseSubstFused σ a).lin? = denseLinearize a from iha] at *
-      cases denseLinearize a <;> cases hb : (denseSparseSubstFused σ b).lin? <;>
-        rw [hb] at ihb <;>
-        simp only [← ihb] <;> first | rfl | (split_ifs <;> rfl)
-
-theorem denseSparseSubstFused_reduced (σ : VarId → Option (DenseLinExpr p)) (e : DenseExpr p) :
-    (denseSparseSubstFused σ e).reduced σ = denseSparseSubstF σ e := by
-  induction e with
-  | const n => rfl
-  | var x => rfl
-  | add a b iha ihb =>
-      rw [denseSparseSubstFused, denseSparseSubstF, denseLinearize,
-        denseSparseSubstFused_lin σ a, denseSparseSubstFused_lin σ b]
-      simp only [DenseSubstRes.reduced] at iha ihb ⊢
-      cases denseLinearize a <;> cases denseLinearize b <;>
-        first | rfl | rw [iha, ihb]
-  | mul a b iha ihb =>
-      rw [denseSparseSubstFused, denseSparseSubstF, denseLinearize,
-        denseSparseSubstFused_lin σ a, denseSparseSubstFused_lin σ b]
-      simp only [DenseSubstRes.reduced] at iha ihb ⊢
-      cases hla : denseLinearize a with
-      | none => rw [iha, ihb]
-      | some la =>
-        cases hlb : denseLinearize b with
-        | none => rw [iha, ihb]
-        | some lb =>
-          dsimp only
-          split_ifs <;> first | rfl | rw [iha, ihb]
-
-@[csimp] theorem denseSparseSubstF_eq_fast : @denseSparseSubstF = @denseSparseSubstFFast := by
-  funext p σ e
-  exact (denseSparseSubstFused_reduced σ e).symm
-
-def denseReducedSubst (r : DenseGaussReduced p) (x : VarId)
-    (t : DenseLinExpr p) : DenseGaussReduced p :=
-  match r with
-  | .affine row => .affine (denseLinSubst row x t)
-  | .nonlinear expr => denseSparseSubstF (fun y => if y = x then some t else none) expr
-
-structure DenseSparseSolved (p : ℕ) where
-  map : Std.HashMap VarId (DenseLinExpr p)
-  revDeps : Array (Std.HashSet VarId)
-
-namespace DenseSparseSolved
-
-def empty : DenseSparseSolved p := { map := ∅, revDeps := #[] }
-
-def fn (dσ : DenseSparseSolved p) : VarId → Option (DenseLinExpr p) := fun i => dσ.map[i]?
-
-def insertAll (dσ : DenseSparseSolved p) :
-    List (VarId × DenseLinExpr p) → DenseSparseSolved p
-  | [] => dσ
-  | (x, t) :: rest =>
-      DenseSparseSolved.insertAll
-        { map := dσ.map.insert x t
-          revDeps := t.terms.foldl
-            (fun rd zc => (denseArrEnsure rd zc.1.index ∅).modify zc.1.index (·.insert x))
-            dσ.revDeps }
-        rest
-
-def materialize (dσ : DenseSparseSolved p) : DenseSolved p :=
-  let map := dσ.map.toList.foldl
-    (fun out xt => out.insert xt.1 xt.2.toExpr) (∅ : Std.HashMap VarId (DenseExpr p))
-  { map, revDeps := ∅ }
-
-end DenseSparseSolved
 
 def denseSparseSolveAt (l : DenseLinExpr p) (x : VarId) :
     Option (VarId × DenseLinExpr p) :=
@@ -552,407 +153,496 @@ def denseSparseSolveAtWith (ops : DenseZModOps p) (l : DenseLinExpr p) (x : VarI
     some (x, denseLinScaleWith ops (ops.mul ops.negOne c⁻¹) (l.others x))
   else none
 
-def denseSparseSolveAtFast (l : DenseLinExpr p) (x : VarId) : Option (VarId × DenseLinExpr p) :=
-  denseSparseSolveAtWith denseZModOps l x
-
 theorem denseSparseSolveAtWith_eq (ops : DenseZModOps p) (l : DenseLinExpr p) (x : VarId) :
     denseSparseSolveAtWith ops l x = denseSparseSolveAt l x := by
   simp only [denseSparseSolveAtWith, denseSparseSolveAt, DenseLinExpr.coeff,
     denseCoeffSumWith_eq, denseLinScaleWith_eq, ops.one_eq, ops.negOne_eq, ops.mul_eq,
     ← neg_eq_neg_one_mul]
 
-@[csimp] theorem denseSparseSolveAt_eq_fast : @denseSparseSolveAt = @denseSparseSolveAtFast := by
-  funext p l x
-  exact (denseSparseSolveAtWith_eq denseZModOps l x).symm
-
-def denseSparseBest (l : DenseLinExpr p) (occ : Std.HashMap VarId Nat)
-    (prot : Std.HashSet VarId) : Option (VarId × DenseLinExpr p) :=
-  match (densePivotDescs l occ prot).argmin Prod.snd with
-  | none => none
-  | some (x, _) => denseSparseSolveAt l x
-
-def denseReducedBest (r : DenseGaussReduced p) (occ : Std.HashMap VarId Nat)
-    (prot : Std.HashSet VarId) : Option (VarId × DenseLinExpr p) :=
-  match r with
-  | .affine row => denseSparseBest row occ prot
-  | .nonlinear _ => none
-
-def denseSparseGaussLoop (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId) :
-    List (DenseExpr p) → DenseSparseSolved p → DenseSparseSolved p
-  | [], dσ => dσ
-  | c :: rest, dσ =>
-      let c' := denseSparseSubstF dσ.fn c
-      match denseReducedBest c' occ prot with
-      | none => denseSparseGaussLoop occ prot rest dσ
-      | some (x, t) =>
-          let touched := (dσ.revDeps.getD x.index ∅).toList.filterMap (fun y =>
-            (dσ.map[y]?).bind (fun s => if s.mentions x then some (y, s) else none))
-          let pairs := touched.map (fun ys => (ys.1, denseLinSubst ys.2 x t)) ++ [(x, t)]
-          denseSparseGaussLoop occ prot rest (dσ.insertAll pairs)
-
-structure DenseMarkowitzPivot where
-  var : VarId
-  rhsNnz : Nat
-
-structure DenseMarkowitzRow (p : ℕ) where
-  rowId : Nat
-  reduced : DenseGaussReduced p
-  vars : List VarId
-  pivots : List DenseMarkowitzPivot
-  generation : Nat
-  active : Bool
-
-structure DenseMarkowitzEntry where
-  isProtected : Nat
-  fill : Nat
-  rewrite : Nat
-  localScore : Nat
-  rowId : Nat
-  pivot : VarId
-  generation : Nat
-
-def denseMarkowitzEntryBetter (a b : DenseMarkowitzEntry) : Bool :=
-  if a.isProtected < b.isProtected then true
-  else if b.isProtected < a.isProtected then false
-  else if a.fill < b.fill then true
-  else if b.fill < a.fill then false
-  else if a.rewrite < b.rewrite then true
-  else if b.rewrite < a.rewrite then false
-  else if a.localScore < b.localScore then true
-  else if b.localScore < a.localScore then false
-  else if a.rowId < b.rowId then true
-  else if b.rowId < a.rowId then false
-  else if a.pivot.index < b.pivot.index then true
-  else if b.pivot.index < a.pivot.index then false
-  else a.generation < b.generation
-
-def denseMarkowitzHeapLt (a b : DenseMarkowitzEntry) : Bool :=
-  denseMarkowitzEntryBetter b a
-
-abbrev DenseMarkowitzHeap :=
-  Batteries.BinaryHeap DenseMarkowitzEntry denseMarkowitzHeapLt
-
-structure DenseMarkowitzState (p : ℕ) where
-  rows : Array (DenseMarkowitzRow p)
-  degrees : Array Nat
-  rowDeps : Array (Std.HashSet Nat)
-  pivotRows : Array (Std.HashSet Nat)
-  heap : DenseMarkowitzHeap
-
-def denseMarkowitzPivots (r : DenseGaussReduced p) (occ : Std.HashMap VarId Nat)
-    (prot : Std.HashSet VarId) : List DenseMarkowitzPivot :=
-  match r with
-  | .nonlinear _ => []
-  | .affine l =>
-      let idx := denseCoeffIdx l.terms
-      let vars := l.terms.map Prod.fst
-      let descs := vars.filterMap (densePm1Desc idx l.terms.length occ prot) ++
-        vars.filterMap (denseUnitDesc idx l.terms.length occ prot)
-      let out := descs.foldl (fun (out, seen) (x, _) =>
-        if seen.contains x then (out, seen)
-        else
-          let cv := (idx[x]?).getD (0, 0)
-          ({ var := x, rhsNnz := l.terms.length - cv.2 } :: out, seen.insert x))
-        (([], ∅) : List DenseMarkowitzPivot × Std.HashSet VarId)
-      out.1.reverse
-
-/-- Boxed twin of `denseMarkowitzPivots`. The body re-inlines `densePivotDescs` rather than calling
-    it, so that function's `@[csimp]` does not reach the two descriptor scans here. -/
-def denseMarkowitzPivotsWith (ops : DenseZModOps p) (r : DenseGaussReduced p)
-    (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId) : List DenseMarkowitzPivot :=
-  match r with
-  | .nonlinear _ => []
-  | .affine l =>
-      let idx := denseCoeffIdxWith ops l.terms ∅
-      let vars := l.terms.map Prod.fst
-      let descs := vars.filterMap (densePm1DescWith ops idx l.terms.length occ prot) ++
-        vars.filterMap (denseUnitDescWith ops idx l.terms.length occ prot)
-      let out := descs.foldl (fun (out, seen) (x, _) =>
-        if seen.contains x then (out, seen)
-        else
-          let cv := (idx[x]?).getD (ops.zero, 0)
-          ({ var := x, rhsNnz := l.terms.length - cv.2 } :: out, seen.insert x))
-        (([], ∅) : List DenseMarkowitzPivot × Std.HashSet VarId)
-      out.1.reverse
-
-def denseMarkowitzPivotsFast (r : DenseGaussReduced p) (occ : Std.HashMap VarId Nat)
-    (prot : Std.HashSet VarId) : List DenseMarkowitzPivot :=
-  denseMarkowitzPivotsWith denseZModOps r occ prot
-
-theorem denseMarkowitzPivotsWith_eq (ops : DenseZModOps p) (r : DenseGaussReduced p)
-    (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId) :
-    denseMarkowitzPivotsWith ops r occ prot = denseMarkowitzPivots r occ prot := by
-  cases r with
-  | nonlinear _ => rfl
-  | affine l =>
-      simp only [denseMarkowitzPivotsWith, denseMarkowitzPivots, denseCoeffIdx,
-        denseCoeffIdxWith_eq, densePm1DescWith_eq, denseUnitDescWith_eq, ops.zero_eq]
-
-@[csimp] theorem denseMarkowitzPivots_eq_fast :
-    @denseMarkowitzPivots = @denseMarkowitzPivotsFast := by
-  funext p r occ prot
-  exact (denseMarkowitzPivotsWith_eq denseZModOps r occ prot).symm
-
-def denseMarkowitzRow (rowId : Nat) (e : DenseExpr p) (occ : Std.HashMap VarId Nat)
-    (prot : Std.HashSet VarId) (generation : Nat := 0) : DenseMarkowitzRow p :=
-  let reduced := DenseGaussReduced.fromExpr e
-  { rowId
-    reduced
-    vars := reduced.vars
-    pivots := denseMarkowitzPivots reduced occ prot
-    generation
-    active := true }
-
-def denseMarkowitzRefreshRow (r : DenseMarkowitzRow p) (x : VarId) (t : DenseLinExpr p)
-    (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId) : DenseMarkowitzRow p :=
-  let reduced := denseReducedSubst r.reduced x t
-  { rowId := r.rowId
-    reduced
-    vars := reduced.vars
-    pivots := denseMarkowitzPivots reduced occ prot
-    generation := r.generation + 1
-    active := true }
-
-def denseMarkowitzDegreeAdd (m : Array Nat) (xs : List VarId) : Array Nat :=
-  xs.foldl (fun m x => (denseArrEnsure m x.index 0).modify x.index (· + 1)) m
-
-def denseMarkowitzDegreeSub (m : Array Nat) (xs : List VarId) : Array Nat :=
-  xs.foldl (fun m x => (denseArrEnsure m x.index 0).modify x.index (· - 1)) m
-
-def denseMarkowitzIndexRow (idx : Array (Std.HashSet Nat))
-    (rowId : Nat) (xs : List VarId) : Array (Std.HashSet Nat) :=
-  xs.foldl (fun idx x => (denseArrEnsure idx x.index ∅).modify x.index (·.insert rowId)) idx
-
-def denseMarkowitzUnindexRow (idx : Array (Std.HashSet Nat))
-    (rowId : Nat) (xs : List VarId) : Array (Std.HashSet Nat) :=
-  xs.foldl (fun idx x => (denseArrEnsure idx x.index ∅).modify x.index (·.erase rowId)) idx
-
-def denseMarkowitzIndexPivots (idx : Array (Std.HashSet Nat))
-    (rowId : Nat) (pivots : List DenseMarkowitzPivot) : Array (Std.HashSet Nat) :=
-  pivots.foldl
-    (fun idx q => (denseArrEnsure idx q.var.index ∅).modify q.var.index (·.insert rowId)) idx
-
-def denseMarkowitzUnindexPivots (idx : Array (Std.HashSet Nat))
-    (rowId : Nat) (pivots : List DenseMarkowitzPivot) : Array (Std.HashSet Nat) :=
-  pivots.foldl
-    (fun idx q => (denseArrEnsure idx q.var.index ∅).modify q.var.index (·.erase rowId)) idx
-
-def denseMarkowitzEntryOf (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId)
-    (dσ : DenseSparseSolved p) (st : DenseMarkowitzState p) (rowId : Nat)
-    (r : DenseMarkowitzRow p) (q : DenseMarkowitzPivot) : DenseMarkowitzEntry :=
-  let solvedDegree := (dσ.revDeps.getD q.var.index ∅).size
-  let activeDegree := st.degrees.getD q.var.index 1
-  { isProtected := if prot.contains q.var then 1 else 0
-    fill := q.rhsNnz * (activeDegree - 1)
-    rewrite := q.rhsNnz * solvedDegree
-    localScore := denseGaussScore occ prot q.var q.rhsNnz
-    rowId
-    pivot := q.var
-    generation := r.generation }
-
-def denseMarkowitzBestEntry? (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId)
-    (dσ : DenseSparseSolved p) (st : DenseMarkowitzState p) (rowId : Nat)
-    (r : DenseMarkowitzRow p) : Option DenseMarkowitzEntry :=
-  r.pivots.foldl (fun best q =>
-    let entry := denseMarkowitzEntryOf occ prot dσ st rowId r q
-    match best with
-    | none => some entry
-    | some old => if denseMarkowitzEntryBetter entry old then some entry else best) none
-
-def denseMarkowitzPushRow (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId)
-    (dσ : DenseSparseSolved p) (st : DenseMarkowitzState p) (rowId : Nat) :
-    DenseMarkowitzState p :=
-  match st.rows[rowId]? with
-  | none => st
-  | some r =>
-      if !r.active then st
-      else
-        let r' := { r with generation := r.generation + 1 }
-        let st' := { st with rows := st.rows.setIfInBounds rowId r' }
-        match denseMarkowitzBestEntry? occ prot dσ st' rowId r' with
-        | none => st'
-        | some entry => { st' with heap := st'.heap.insert entry }
-
-def denseMarkowitzBuild (constraints : List (DenseExpr p))
-    (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId) : DenseMarkowitzState p :=
-  let rows := constraints.foldl (fun rs c => rs.push (denseMarkowitzRow rs.size c occ prot))
-    (#[] : Array (DenseMarkowitzRow p))
-  -- The per-variable indexes are `VarId.index`-keyed arrays, sized once: substitution only ever
-  -- copies variables between rows, so no index can exceed the system's maximum.
-  let n := rows.foldl (fun m r => r.vars.foldl (fun m x => max m (x.index + 1)) m) 0
-  let base : DenseMarkowitzState p :=
-    { rows
-      degrees := Array.replicate n 0
-      rowDeps := Array.replicate n ∅
-      pivotRows := Array.replicate n ∅
-      heap := ∅ }
-  let indexed := rows.foldl (fun st r =>
-    { st with
-      degrees := denseMarkowitzDegreeAdd st.degrees r.vars
-      rowDeps := denseMarkowitzIndexRow st.rowDeps r.rowId r.vars
-      pivotRows := denseMarkowitzIndexPivots st.pivotRows r.rowId r.pivots }) base
-  indexed.rows.foldl (fun st r =>
-    match denseMarkowitzBestEntry? occ prot DenseSparseSolved.empty st r.rowId r with
-    | none => st
-    | some entry => { st with heap := st.heap.insert entry }) indexed
-
-def denseMarkowitzEntryValid (st : DenseMarkowitzState p)
-    (entry : DenseMarkowitzEntry) : Bool :=
-  match st.rows[entry.rowId]? with
-  | none => false
-  | some r =>
-      r.active && r.generation == entry.generation
-
-def denseMarkowitzPopValid : Nat → DenseMarkowitzState p →
-    Option (DenseMarkowitzEntry × DenseMarkowitzState p)
-  | 0, _ => none
-  | fuel + 1, st =>
-      let (entry?, heap) := st.heap.extractMax
-      let st := { st with heap }
-      match entry? with
-      | none => none
-      | some entry =>
-          if denseMarkowitzEntryValid st entry then some (entry, st)
-          else denseMarkowitzPopValid fuel st
-
-def denseMarkowitzCollectIds (idx : Array (Std.HashSet Nat))
-    (xs : Std.HashSet VarId) : Std.HashSet Nat :=
-  xs.toList.foldl (fun out x =>
-    (idx.getD x.index ∅).toList.foldl (fun out rowId => out.insert rowId) out) ∅
-
-def denseMarkowitzRekey (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId)
-    (dσ : DenseSparseSolved p) (changed : Std.HashSet VarId) (st : DenseMarkowitzState p) :
-    DenseMarkowitzState p :=
-  (denseMarkowitzCollectIds st.pivotRows changed).toList.foldl
-    (denseMarkowitzPushRow occ prot dσ) st
-
-def denseMarkowitzRefreshRows (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId)
-    (x : VarId) (t : DenseLinExpr p) (st : DenseMarkowitzState p) :
-    DenseMarkowitzState p × Std.HashSet VarId :=
-  let rowIds := (st.rowDeps.getD x.index ∅).toList
-  rowIds.foldl (fun (st, changed) rowId =>
-    match st.rows[rowId]? with
-    | none => (st, changed)
-    | some r =>
-        if !r.active || !r.vars.contains x then (st, changed)
-        else
-          let r' := denseMarkowitzRefreshRow r x t occ prot
-          let changed := (r.vars ++ r'.vars).foldl (fun s y => s.insert y) changed
-          ({ st with
-              rows := st.rows.setIfInBounds rowId r'
-              degrees := denseMarkowitzDegreeAdd
-                (denseMarkowitzDegreeSub st.degrees r.vars) r'.vars
-              rowDeps := denseMarkowitzIndexRow
-                (denseMarkowitzUnindexRow st.rowDeps rowId r.vars) rowId r'.vars
-              pivotRows := denseMarkowitzIndexPivots
-                (denseMarkowitzUnindexPivots st.pivotRows rowId r.pivots) rowId r'.pivots },
-            changed)) (st, ∅)
-
-def denseMarkowitzDeactivate (rowId : Nat) (st : DenseMarkowitzState p) :
-    DenseMarkowitzState p × Std.HashSet VarId :=
-  match st.rows[rowId]? with
-  | none => (st, ∅)
-  | some r =>
-      let changed := r.vars.foldl (fun s x => s.insert x) ∅
-      ({ st with
-          rows := st.rows.setIfInBounds rowId
-            { r with active := false, generation := r.generation + 1 }
-          degrees := denseMarkowitzDegreeSub st.degrees r.vars
-          rowDeps := denseMarkowitzUnindexRow st.rowDeps rowId r.vars
-          pivotRows := denseMarkowitzUnindexPivots st.pivotRows rowId r.pivots },
-        changed)
-
-def denseMarkowitzAdoptPairs (dσ : DenseSparseSolved p) (x : VarId) (t : DenseLinExpr p) :
-    List (VarId × DenseLinExpr p) :=
-  let touched := (dσ.revDeps.getD x.index ∅).toList.filterMap (fun y =>
-    (dσ.map[y]?).bind (fun s => if s.mentions x then some (y, s) else none))
-  touched.map (fun ys => (ys.1, denseLinSubst ys.2 x t)) ++ [(x, t)]
-
-def denseMarkowitzAdopt (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId)
-    (entry : DenseMarkowitzEntry) (x : VarId) (t : DenseLinExpr p)
-    (pairs : List (VarId × DenseLinExpr p)) (st : DenseMarkowitzState p)
-    (dσ : DenseSparseSolved p) : DenseMarkowitzState p :=
-  let (st, selectedVars) := denseMarkowitzDeactivate entry.rowId st
-  let (st, rowVars) := denseMarkowitzRefreshRows occ prot x t st
-  let changed := pairs.foldl (fun changed yt =>
-    yt.2.terms.foldl (fun changed yc => changed.insert yc.1) changed) (selectedVars ∪ rowVars)
-  denseMarkowitzRekey occ prot dσ changed st
-
-def denseMarkowitzPick (r : DenseGaussReduced p) (x : VarId) (occ : Std.HashMap VarId Nat)
-    (prot : Std.HashSet VarId) : Option (VarId × DenseLinExpr p) :=
-  let hinted := match r with
-    | .affine l => denseSparseSolveAt l x
-    | .nonlinear _ => none
-  match hinted with
-  | some xt => some xt
-  | none => denseReducedBest r occ prot
-
-def denseMarkowitzLoop (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId)
-    (sources : Array (DenseExpr p)) : Nat → DenseMarkowitzState p →
-      DenseSparseSolved p → DenseSparseSolved p
-  | 0, _, dσ => dσ
-  | fuel + 1, st, dσ =>
-      match denseMarkowitzPopValid (st.heap.size + 1) st with
-      | none => dσ
-      | some (entry, st) =>
-          match sources[entry.rowId]? with
-          | none => denseMarkowitzLoop occ prot sources fuel
-              (denseMarkowitzDeactivate entry.rowId st).1 dσ
-          | some c =>
-              let c' := denseSparseSubstF dσ.fn c
-              match denseMarkowitzPick c' entry.pivot occ prot with
-              | none => denseMarkowitzLoop occ prot sources fuel
-                  (denseMarkowitzDeactivate entry.rowId st).1 dσ
-              | some (x, t) =>
-                  let pairs := denseMarkowitzAdoptPairs dσ x t
-                  let dσ := dσ.insertAll pairs
-                  let st := denseMarkowitzAdopt occ prot entry x t pairs st dσ
-                  denseMarkowitzLoop occ prot sources fuel
-                    st dσ
-
-def denseMarkowitzSchedule (constraints : List (DenseExpr p)) (occ : Std.HashMap VarId Nat)
-    (prot : Std.HashSet VarId) : DenseSparseSolved p :=
-  let sources := constraints.toArray
-  let st := denseMarkowitzBuild constraints occ prot
-  denseMarkowitzLoop occ prot sources sources.size st DenseSparseSolved.empty
-
-def denseSourceOrderSchedule (constraints : List (DenseExpr p))
-    (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId) : DenseSparseSolved p :=
-  let first := denseSparseGaussLoop occ prot constraints DenseSparseSolved.empty
-  if first.map.isEmpty then first else denseSparseGaussLoop occ prot constraints first
-
-def denseMarkowitzMinRows : Nat := 8192
-
-def denseGaussSchedule (constraints : List (DenseExpr p))
-    (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId) : DenseSolved p :=
-  (if constraints.length < denseMarkowitzMinRows
-    then denseSourceOrderSchedule constraints occ prot
-    else denseMarkowitzSchedule constraints occ prot).materialize
-
+/-- Every variable of `l.others v` is a variable of `l`; consumed by `denseSparseSolveAt_terms`. -/
 theorem DenseLinExpr.others_terms_fst_mem (l : DenseLinExpr p) (v : VarId) (x : VarId)
     (h : x ∈ (l.others v).terms.map Prod.fst) : x ∈ l.terms.map Prod.fst := by
   simp only [DenseLinExpr.others, List.mem_map] at h ⊢
   obtain ⟨tt, htt, rfl⟩ := h
   exact ⟨tt, List.mem_of_mem_filter htt, rfl⟩
 
+/-- Above this many constraints the fill-aware scheduler takes over from source order. Below it the
+    SP1 `rsp` shapes need the source-order basis: the fill-aware one there costs 8 of its 100 cases
+    +88 variables (`agent-docs/log.md` entry 160). -/
+def denseMarkowitzMinRows : Nat := 8192
+
+/-! ## The substituted-evaluation walk -/
+
+/-- Substituted evaluation of a subtree: a constant, an affine form (terms not yet merged), or
+    blocked by a surviving variable×variable product, carrying the variables to watch. -/
+inductive GRes (p : ℕ) where
+  | cst (c : ZMod p)
+  | lin (l : DenseLinExpr p)
+  | blk (ws : List VarId)
+
+/-- The solution map as a lookup function; `VarId.index`-keyed, so no hashing. -/
+def gSolFn (sol : Array (Option (DenseLinExpr p))) : VarId → Option (DenseLinExpr p) :=
+  fun i => (sol[i.index]?).getD none
+
+def gAddRes (ops : DenseZModOps p) : GRes p → GRes p → GRes p
+  | .blk w, _ => .blk w
+  | _, .blk w => .blk w
+  | .cst c1, .cst c2 => .cst (ops.add c1 c2)
+  | .cst c1, .lin l2 => .lin ⟨ops.add c1 l2.const, l2.terms⟩
+  | .lin l1, .cst c2 => .lin ⟨ops.add l1.const c2, l1.terms⟩
+  | .lin l1, .lin l2 => .lin (l1.addWith ops l2)
+
+/-- A product is affine exactly when one side's *merged* substituted form is constant; otherwise the
+    node blocks, and the merged sides' variables are what can unblock it. -/
+def gMulRes (ops : DenseZModOps p) : GRes p → GRes p → GRes p
+  | .blk w, _ => .blk w
+  | _, .blk w => .blk w
+  | .cst c1, .cst c2 => .cst (ops.mul c1 c2)
+  | .cst c1, .lin l2 => .lin (l2.scaleWith ops c1)
+  | .lin l1, .cst c2 => .lin (l1.scaleWith ops c2)
+  | .lin l1, .lin l2 =>
+      let n1 := l1.normWith ops
+      if n1.terms.isEmpty then .lin (l2.scaleWith ops n1.const)
+      else
+        let n2 := l2.normWith ops
+        if n2.terms.isEmpty then .lin (n1.scaleWith ops n2.const)
+        else .blk (n1.terms.map Prod.fst ++ n2.terms.map Prod.fst)
+
+/-- Walk `e` under the solution map. Blocking propagates unconditionally through `add` and `mul`, so
+    the walk stops at the first surviving product and allocates nothing on that path. -/
+def gEval (ops : DenseZModOps p) (sol : Array (Option (DenseLinExpr p))) :
+    DenseExpr p → GRes p
+  | .const n => .cst n
+  | .var x =>
+      match gSolFn sol x with
+      | some t => .lin t
+      | none => .lin ⟨ops.zero, [(x, ops.one)]⟩
+  | .add a b =>
+      match gEval ops sol a with
+      | .blk w => .blk w
+      | ra => gAddRes ops ra (gEval ops sol b)
+  | .mul a b =>
+      match gEval ops sol a with
+      | .blk w => .blk w
+      | ra => gMulRes ops ra (gEval ops sol b)
+
+/-- The walk's verdict at a constraint root: a merged row, or the variables to watch. -/
+inductive GTop (p : ℕ) where
+  | row (l : DenseLinExpr p)
+  | blocked (ws : List VarId)
+
+def gRoot (ops : DenseZModOps p) (sol : Array (Option (DenseLinExpr p))) (e : DenseExpr p) :
+    GTop p :=
+  match gEval ops sol e with
+  | .cst c => .row ⟨c, []⟩
+  | .lin l => .row (l.normWith ops)
+  | .blk ws => .blocked ws
+
+/-! ## Pivot selection
+
+`denseGaussScore` on a merged row is `(occ[v] - 1) * |terms|`, plus `1000000` when protected, since
+every variable of a merged row occurs exactly once. So the choice is: smallest score, `±1`
+coefficients before other units, earliest term — one scan, with `occ`/`prot` as arrays. -/
+
+def gScore (occ : Array Nat) (prot : Array Bool) (v : VarId) (n : Nat) : Nat :=
+  let base := ((occ[v.index]?).getD 1 - 1) * n
+  if (prot[v.index]?).getD false then base + 1000000 else base
+
+def gIsPm1 (ops : DenseZModOps p) (c : ZMod p) : Bool :=
+  zmodIsOne c || zmodIsOne (ops.mul ops.negOne c)
+
+/-- Best candidate by `(score, ±1 first, position)`, skipping `banned` variables. -/
+def gBestGo (ops : DenseZModOps p) (occ : Array Nat) (prot : Array Bool) (n : Nat)
+    (banned : List VarId) : List (VarId × ZMod p) → Option (VarId × Nat × Bool) → Option VarId
+  | [], best => best.map (·.1)
+  | (v, c) :: rest, best =>
+      if banned.contains v then gBestGo ops occ prot n banned rest best
+      else
+        let s := gScore occ prot v n
+        let pm1 := gIsPm1 ops c
+        match best with
+        | none => gBestGo ops occ prot n banned rest (some (v, s, pm1))
+        | some (bv, bs, bpm1) =>
+            if s < bs || (s == bs && pm1 && !bpm1) then
+              gBestGo ops occ prot n banned rest (some (v, s, pm1))
+            else gBestGo ops occ prot n banned rest (some (bv, bs, bpm1))
+
+/-- Pick the best pivot and solve for it, skipping candidates whose coefficient is not a unit (only
+    reachable on a non-prime modulus — `denseSparseSolveAt` decides). -/
+def gPick (ops : DenseZModOps p) (occ : Array Nat) (prot : Array Bool) (l : DenseLinExpr p) :
+    Nat → List VarId → Option (VarId × DenseLinExpr p)
+  | 0, _ => none
+  | fuel + 1, banned =>
+      match gBestGo ops occ prot l.terms.length banned l.terms none with
+      | none => none
+      | some x =>
+          match denseSparseSolveAtWith ops l x with
+          | some xt => some xt
+          | none => gPick ops occ prot l fuel (x :: banned)
+
+/-! ## Engine state
+
+`rows` and `sol` carry the entailment invariant (`Proofs/Gauss.lean`); everything else is
+scheduling data that occurs in no theorem — a stale entry costs time, never soundness. -/
+
+structure GSt (p : ℕ) where
+  /-- Pending row per constraint slot, developed against `sol` when the scheduler reaches it. -/
+  rows : Array (DenseLinExpr p)
+  /-- `0` blocked · `1` pending affine row · `2` used or dead. -/
+  status : Array UInt8
+  /-- The solution map, kept fully back-substituted. -/
+  sol : Array (Option (DenseLinExpr p))
+  /-- Variable → solved variables whose row mentions it (stale-tolerant, re-checked at use). -/
+  solRev : Array (Array VarId)
+  /-- Variable → blocked constraints to re-walk when it is solved. -/
+  watch : Array (Array Nat)
+  woken : Array Bool
+  /-- Adoption order; the domain of the solution map. -/
+  order : Array VarId
+
+def GSt.empty (nc nv : Nat) : GSt p :=
+  { rows := Array.replicate nc ⟨zmodZeroP p, []⟩
+    status := Array.replicate nc 0
+    sol := Array.replicate nv none
+    solRev := Array.replicate nv #[]
+    watch := Array.replicate nv #[]
+    woken := Array.replicate nc false
+    order := #[] }
+
+/-- Substitute `x := t` into one stored solution. -/
+def gSubst1 (ops : DenseZModOps p) (s : DenseLinExpr p) (x : VarId) (t : DenseLinExpr p) :
+    DenseLinExpr p :=
+  denseLinSubstFWith ops s (fun z => if z = x then some t else none)
+
+def gAddRev (t : DenseLinExpr p) (y : VarId) (solRev : Array (Array VarId)) :
+    Array (Array VarId) :=
+  t.terms.foldl (fun rd zc => (denseArrEnsure rd zc.1.index #[]).modify zc.1.index (·.push y))
+    solRev
+
+def gWatchOne (i : Nat) (w : Array (Array Nat)) (v : VarId) : Array (Array Nat) :=
+  (denseArrEnsure w v.index #[]).modify v.index (·.push i)
+
+/-! ### Field updates
+
+Each helper destructures the state before writing, so the array being written is uniquely owned.
+`{ S with f := g S.f }` instead leaves `S.f` shared and copies the whole array — measured at 7× on
+keccak when `gAdopt` did it to `watch`. -/
+
+def GSt.setStatus (S : GSt p) (i : Nat) (v : UInt8) : GSt p :=
+  let ⟨rows, status, sol, solRev, watch, woken, order⟩ := S
+  { rows := rows, status := status.setIfInBounds i v, sol := sol, solRev := solRev,
+    watch := watch, woken := woken, order := order }
+
+def GSt.setRow (S : GSt p) (i : Nat) (l : DenseLinExpr p) : GSt p :=
+  let ⟨rows, status, sol, solRev, watch, woken, order⟩ := S
+  { rows := rows.setIfInBounds i l, status := status, sol := sol, solRev := solRev,
+    watch := watch, woken := woken, order := order }
+
+def GSt.setPending (S : GSt p) (i : Nat) (l : DenseLinExpr p) : GSt p :=
+  let ⟨rows, status, sol, solRev, watch, woken, order⟩ := S
+  { rows := rows.setIfInBounds i l, status := status.setIfInBounds i 1, sol := sol,
+    solRev := solRev, watch := watch, woken := woken, order := order }
+
+def GSt.clearWoken (S : GSt p) (i : Nat) : GSt p :=
+  let ⟨rows, status, sol, solRev, watch, woken, order⟩ := S
+  { rows := rows, status := status, sol := sol, solRev := solRev, watch := watch,
+    woken := woken.setIfInBounds i false, order := order }
+
+def GSt.addWatch (S : GSt p) (i : Nat) (ws : List VarId) : GSt p :=
+  let ⟨rows, status, sol, solRev, watch, woken, order⟩ := S
+  { rows := rows, status := status, sol := sol, solRev := solRev,
+    watch := ws.foldl (gWatchOne i) watch, woken := woken, order := order }
+
+def GSt.setSol (S : GSt p) (y : VarId) (v : Option (DenseLinExpr p)) : GSt p :=
+  let ⟨rows, status, sol, solRev, watch, woken, order⟩ := S
+  { rows := rows, status := status, sol := sol.setIfInBounds y.index v, solRev := solRev,
+    watch := watch, woken := woken, order := order }
+
+/-- Record that the variables of `t` are now mentioned by `y`'s stored solution. -/
+def GSt.pushRev (S : GSt p) (t : DenseLinExpr p) (y : VarId) : GSt p :=
+  let ⟨rows, status, sol, solRev, watch, woken, order⟩ := S
+  { rows := rows, status := status, sol := sol, solRev := gAddRev t y solRev,
+    watch := watch, woken := woken, order := order }
+
+def GSt.clearRev (S : GSt p) (x : VarId) : GSt p :=
+  let ⟨rows, status, sol, solRev, watch, woken, order⟩ := S
+  { rows := rows, status := status, sol := sol, solRev := solRev.setIfInBounds x.index #[],
+    watch := watch, woken := woken, order := order }
+
+/-- Wake every constraint watching `x`, and drop its watch list. -/
+def GSt.fireWatch (S : GSt p) (x : VarId) : GSt p :=
+  let ⟨rows, status, sol, solRev, watch, woken, order⟩ := S
+  let ws := (watch[x.index]?).getD #[]
+  { rows := rows, status := status, sol := sol, solRev := solRev,
+    watch := watch.setIfInBounds x.index #[],
+    woken := ws.foldl (fun w c => w.setIfInBounds c true) woken, order := order }
+
+def GSt.pushOrder (S : GSt p) (x : VarId) : GSt p :=
+  let ⟨rows, status, sol, solRev, watch, woken, order⟩ := S
+  { rows := rows, status := status, sol := sol, solRev := solRev, watch := watch,
+    woken := woken, order := order.push x }
+
+/-- Develop `x := t` into the stored solutions listed in `ys`, keeping the map back-substituted. -/
+def gRewriteStored (ops : DenseZModOps p) (x : VarId) (t : DenseLinExpr p) (ys : Array VarId) :
+    Nat → GSt p → GSt p
+  | 0, S => S
+  | k + 1, S =>
+      match ys[ys.size - (k + 1)]? with
+      | none => gRewriteStored ops x t ys k S
+      | some y =>
+          match gSolFn S.sol y with
+          | some s =>
+              if s.mentions x then
+                gRewriteStored ops x t ys k
+                  ((S.setSol y (some (gSubst1 ops s x t))).pushRev t y)
+              else gRewriteStored ops x t ys k S
+          | none => gRewriteStored ops x t ys k S
+
+/-- Adopt `x := t`, solved from constraint `i`: keep the stored solutions back-substituted, record
+    the solution, and wake the constraints watching `x`. Pending rows are untouched — they are
+    developed when the scheduler reaches them. -/
+def gAdopt (ops : DenseZModOps p) (S : GSt p) (i : Nat) (x : VarId) (t : DenseLinExpr p) : GSt p :=
+  -- Every field is read out once and then updated through a destructuring helper: reading a field
+  -- twice inside one record update leaves it shared, and the write copies the whole array
+  -- (measured: 7× on keccak).
+  let ys := ((S.solRev[x.index]?).getD #[])
+  let S := gRewriteStored ops x t ys ys.size (S.clearRev x)
+  (((((S.setSol x (some t)).pushRev t x).fireWatch x).pushOrder x).setStatus i 2)
+
+/-- Develop a pending row against the solution map. A row mentioning no solved variable is returned
+    as it stands, which is the common case and costs no allocation. -/
+def gDevelop (ops : DenseZModOps p) (sol : Array (Option (DenseLinExpr p))) (r : DenseLinExpr p) :
+    DenseLinExpr p :=
+  if r.terms.any (fun t => (gSolFn sol t.1).isSome) then denseLinSubstFWith ops r (gSolFn sol)
+  else r
+
+/-! ## Visiting a constraint -/
+
+/-- Take the pivot of a developed row, or retire the slot. -/
+def gTake (ops : DenseZModOps p) (occ : Array Nat) (prot : Array Bool) (S : GSt p) (i : Nat)
+    (l : DenseLinExpr p) : GSt p :=
+  if l.terms.isEmpty then S.setStatus i 2
+  else
+    match gPick ops occ prot l (l.terms.length + 1) [] with
+    | none => S.setPending i l
+    | some (x, t) => gAdopt ops S i x t
+
+/-- Visit constraint `i`: develop its pending row and pivot, or — if a watched variable was solved
+    since the last look — re-walk it from the source expression. -/
+def gVisit (ops : DenseZModOps p) (occ : Array Nat) (prot : Array Bool)
+    (cs : Array (DenseExpr p)) (S : GSt p) (i : Nat) : GSt p :=
+  let st := (S.status[i]?).getD 2
+  if st == 1 then
+    match S.rows[i]? with
+    | none => S
+    | some r => gTake ops occ prot S i (gDevelop ops S.sol r)
+  else if st == 0 && (S.woken[i]?).getD false then
+    let S := S.clearWoken i
+    match cs[i]? with
+    | none => S
+    | some c =>
+        match gRoot ops S.sol c with
+        | .blocked ws => S.addWatch i ws
+        | .row l => gTake ops occ prot S i l
+  else S
+
+/-- One walk per constraint: a pending row, or a watch registration. -/
+def gBuildGo (ops : DenseZModOps p) (cs : Array (DenseExpr p)) : Nat → GSt p → GSt p
+  | 0, S => S
+  | k + 1, S =>
+      let i := cs.size - (k + 1)
+      gBuildGo ops cs k <|
+        match cs[i]? with
+        | none => S
+        | some c =>
+            match gRoot ops S.sol c with
+            | .row l => if l.terms.isEmpty then S.setStatus i 2 else S.setPending i l
+            | .blocked ws => S.addWatch i ws
+
+def gBuild (ops : DenseZModOps p) (cs : Array (DenseExpr p)) (nv : Nat) : GSt p :=
+  gBuildGo ops cs cs.size (GSt.empty cs.size nv)
+
+/-! ## Source-order scheduling (below the gate) -/
+
+def gSweepGo (ops : DenseZModOps p) (occ : Array Nat) (prot : Array Bool)
+    (cs : Array (DenseExpr p)) : Nat → GSt p → GSt p
+  | 0, S => S
+  | k + 1, S => gSweepGo ops occ prot cs k (gVisit ops occ prot cs S (cs.size - (k + 1)))
+
+/-- Two source-order sweeps: every constraint once, then the woken ones. -/
+def gRun (ops : DenseZModOps p) (occ : Array Nat) (prot : Array Bool)
+    (cs : Array (DenseExpr p)) (nv : Nat) : GSt p :=
+  gSweepGo ops occ prot cs cs.size (gSweepGo ops occ prot cs cs.size (gBuild ops cs nv))
+
+/-! ## Fill-aware scheduling (above the gate)
+
+Rows are held in buckets by their last known term count; a row whose developed form outgrew its
+bucket is re-filed rather than pivoted, so the key needs no eager maintenance. FIFO within a bucket,
+so source order breaks ties. -/
+
+def gMaxBucket : Nat := 16
+
+structure GQueue where
+  buckets : Array (Array Nat)
+  heads : Array Nat
+
+def GQueue.empty : GQueue :=
+  { buckets := Array.replicate (gMaxBucket + 1) #[], heads := Array.replicate (gMaxBucket + 1) 0 }
+
+def GQueue.push (q : GQueue) (n : Nat) (i : Nat) : GQueue :=
+  let ⟨buckets, heads⟩ := q
+  { buckets := buckets.modify (min n gMaxBucket) (·.push i), heads := heads }
+
+/-- Smallest bucket with an unconsumed entry. -/
+def GQueue.next (q : GQueue) : Nat → Option Nat
+  | 0 => none
+  | k + 1 =>
+      let b := gMaxBucket + 1 - (k + 1)
+      if 0 < b && (q.heads[b]?).getD 0 < ((q.buckets[b]?).getD #[]).size then some b
+      else q.next k
+
+def GQueue.pop (q : GQueue) (b : Nat) : Option Nat × GQueue :=
+  let ⟨buckets, heads⟩ := q
+  let h := (heads[b]?).getD 0
+  let i? := ((buckets[b]?).getD #[])[h]?
+  (i?, { buckets := buckets, heads := heads.setIfInBounds b (h + 1) })
+
+/-- Seed the queue from the pending rows, in source order. -/
+def gSeedGo (S : GSt p) : Nat → GQueue → GQueue
+  | 0, q => q
+  | k + 1, q =>
+      let i := S.status.size - (k + 1)
+      gSeedGo S k <|
+        if (S.status[i]?).getD 2 == 1 then
+          match S.rows[i]? with
+          | some l => q.push l.terms.length i
+          | none => q
+        else q
+
+/-- Handle the popped row `i`: develop it, then re-file it (it outgrew bucket `b`), retire it, or
+    pivot on it. -/
+def gDrainAt (ops : DenseZModOps p) (occ : Array Nat) (prot : Array Bool) (S : GSt p)
+    (q : GQueue) (prog : Bool) (b i : Nat) : GSt p × GQueue × Bool :=
+  if (S.status[i]?).getD 2 != 1 then (S, q, prog)
+  else
+    match S.rows[i]? with
+    | none => (S, q, prog)
+    | some r =>
+        let l := gDevelop ops S.sol r
+        if l.terms.isEmpty then (S.setStatus i 2, q, prog)
+        else if min l.terms.length gMaxBucket > b then
+          (S.setRow i l, q.push l.terms.length i, prog)
+        else
+          let S := gTake ops occ prot S i l
+          -- Progress is read back off `status` (`gTake` retires slot `i` exactly when it pivots)
+          -- rather than compared against `S.order.size` taken before the call: holding a reference
+          -- to `order` across `gTake` makes `gAdopt`'s `pushOrder` copy the whole array, so every
+          -- adoption costs O(|order|) — 34% of the pass on sha256.
+          let adopted := (S.status[i]?).getD 1 == 2
+          (S, q, prog || adopted)
+
+/-- One queue step: pop the shortest pending row and handle it. -/
+def gDrainStep (ops : DenseZModOps p) (occ : Array Nat) (prot : Array Bool) (S : GSt p)
+    (q : GQueue) (prog : Bool) : GSt p × GQueue × Bool :=
+  match q.next (gMaxBucket + 1) with
+  | none => (S, q, prog)
+  | some b =>
+      match q.pop b with
+      | (none, q) => (S, q, prog)
+      | (some i, q) => gDrainAt ops occ prot S q prog b i
+
+/-- Drain the queue, smallest bucket first. -/
+def gDrainGo (ops : DenseZModOps p) (occ : Array Nat) (prot : Array Bool) :
+    Nat → GSt p → GQueue → Bool → GSt p × GQueue × Bool
+  | 0, S, q, prog => (S, q, prog)
+  | fuel + 1, S, q, prog =>
+      match q.next (gMaxBucket + 1) with
+      | none => (S, q, prog)
+      | some _ =>
+          match gDrainStep ops occ prot S q prog with
+          | (S, q, prog) => gDrainGo ops occ prot fuel S q prog
+
+/-- Re-walk the constraints woken since the last round, queueing the ones that turned affine. -/
+def gWakeGo (ops : DenseZModOps p) (cs : Array (DenseExpr p)) :
+    Nat → GSt p → GQueue → Bool → GSt p × GQueue × Bool
+  | 0, S, q, prog => (S, q, prog)
+  | k + 1, S, q, prog =>
+      let i := cs.size - (k + 1)
+      if (S.status[i]?).getD 2 == 0 && (S.woken[i]?).getD false then
+        let S := S.clearWoken i
+        match cs[i]? with
+        | none => gWakeGo ops cs k S q prog
+        | some c =>
+            match gRoot ops S.sol c with
+            | .blocked ws => gWakeGo ops cs k (S.addWatch i ws) q prog
+            | .row l =>
+                if l.terms.isEmpty then gWakeGo ops cs k (S.setStatus i 2) q prog
+                else gWakeGo ops cs k (S.setPending i l) (q.push l.terms.length i) true
+      else gWakeGo ops cs k S q prog
+
+def gRoundsGo (ops : DenseZModOps p) (occ : Array Nat) (prot : Array Bool)
+    (cs : Array (DenseExpr p)) : Nat → GSt p → GQueue → GSt p
+  | 0, S, _ => S
+  | round + 1, S, q =>
+      match gDrainGo ops occ prot ((gMaxBucket + 2) * cs.size + 8) S q false with
+      | (S, q, _) =>
+        match gWakeGo ops cs cs.size S q false with
+        | (S, q, prog) => if prog then gRoundsGo ops occ prot cs round S q else S
+
+def gRunFill (ops : DenseZModOps p) (occ : Array Nat) (prot : Array Bool)
+    (cs : Array (DenseExpr p)) (nv : Nat) : GSt p :=
+  let S := gBuild ops cs nv
+  gRoundsGo ops occ prot cs (cs.size + 1) S (gSeedGo S S.status.size GQueue.empty)
+
+/-! ## Prologue and output -/
+
+def gOccAdd (m : Array Nat) (e : DenseExpr p) : Array Nat :=
+  e.foldVars (fun m x => (denseArrEnsure m x.index 0).modify x.index (· + 1)) m
+
+/-- `denseOccurrenceMap` and `denseProtectedVars` as `VarId.index`-keyed arrays. Both are scoring
+    inputs only: they occur in no theorem. -/
+def gPrepare (bs : BusSemantics p) (d : DenseConstraintSystem p) : Array Nat × Array Bool :=
+  let occ := d.busInteractions.foldl
+    (fun m bi => bi.payload.foldl gOccAdd (gOccAdd m bi.multiplicity))
+    (d.algebraicConstraints.foldl gOccAdd #[])
+  let prot := d.busInteractions.foldl (init := Array.replicate occ.size false) fun s bi =>
+    if bs.isStateful bi.busId then s
+    else bi.payload.foldl
+      (fun s e => match e with | .var x => s.setIfInBounds x.index true | _ => s) s
+  (occ, prot)
+
+/-- The solution map as a `VarId.index`-keyed array of dense expressions. -/
+def gOutGo (S : GSt p) : Nat → Array (Option (DenseExpr p)) → Array (Option (DenseExpr p))
+  | 0, out => out
+  | k + 1, out =>
+      gOutGo S k <|
+        match S.order[S.order.size - (k + 1)]? with
+        | none => out
+        | some x =>
+            match gSolFn S.sol x with
+            | some l => out.setIfInBounds x.index (some l.toExpr)
+            | none => out
+
+def gOutFn (out : Array (Option (DenseExpr p))) : VarId → Option (DenseExpr p) :=
+  fun i => (out[i.index]?).getD none
+
+/-- Solve the system: the prologue, then whichever scheduler the gate selects. -/
+def gSolveSystem (bs : BusSemantics p) (d : DenseConstraintSystem p) : GSt p :=
+  let ops : DenseZModOps p := denseZModOps
+  let cs := d.algebraicConstraints.toArray
+  match gPrepare bs d with
+  | (occ, prot) =>
+      if cs.size < denseMarkowitzMinRows then gRun ops occ prot cs occ.size
+      else gRunFill ops occ prot cs occ.size
+
+/-- The solution map as a `VarId.index`-keyed array; `sol` was sized to the variable bound. -/
+def gOutOf (S : GSt p) : Array (Option (DenseExpr p)) :=
+  gOutGo S S.order.size (Array.replicate S.sol.size none)
+
 /-- Batch linear (Gauss) elimination. From a constraint like `x - 2*y - 3 = 0` it derives the
-    assignment `x := 2*y + 3`, choosing pivots globally by dynamic Markowitz fill cost on large
-    systems and preserving source order on smaller systems. -/
-def denseGaussElim (bs : BusSemantics p) (d : DenseConstraintSystem p) : DenseConstraintSystem p :=
-  let occ := denseOccurrenceMap d
-  let prot := denseProtectedVars d bs
-  let solved := denseGaussSchedule d.algebraicConstraints occ prot
-  if solved.map.isEmpty then d else d.substF solved.fn
-
-/-- `denseGaussElim` as an explicit `if` (the `let` zeta-reduces). -/
-theorem denseGaussElim_eq (bs : BusSemantics p) (d : DenseConstraintSystem p) :
-    denseGaussElim bs d =
-      if (denseGaussSchedule d.algebraicConstraints
-          (denseOccurrenceMap d) (denseProtectedVars d bs)).map.isEmpty
-      then d
-      else d.substF (denseGaussSchedule d.algebraicConstraints
-          (denseOccurrenceMap d) (denseProtectedVars d bs)).fn := rfl
-
-/-! `denseGaussElimPass` (the wired pass) is built and proved in `Proofs/Gauss.lean`. -/
+    assignment `x := 2*y + 3`, choosing pivots by occurrence-weighted duplication cost. -/
+def denseGaussElimF (bs : BusSemantics p) (d : DenseConstraintSystem p) : DenseConstraintSystem p :=
+  let S := gSolveSystem bs d
+  if S.order.isEmpty then d else d.substF (gOutFn (gOutOf S))
 
 end ApcOptimizer.Dense
