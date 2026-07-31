@@ -4,10 +4,19 @@ import ApcOptimizer.Implementation.OptimizerPasses.Proofs.FlagUnify
 
 set_option autoImplicit false
 
-/-! # Correctness for the dense Gauss-elimination pass.
-Substitution-shaped: correctness rides on `DenseConstraintSystem.substF_denseCorrect`
-(`Proofs/DomainBatch.lean`), fed the final solution map's entailment and occurrence closure, both
-established by `denseSparseMarkowitzLoop_sound`. -/
+/-! # Correctness for the dense Gauss-elimination pass
+
+Substitution-shaped, like every solver pass: correctness rides on
+`DenseConstraintSystem.substF_denseCorrect`, fed the final solution map's *entailment* and
+*occurrence closure*. Those two facts are all the spec asks for, so the scheduler — buckets, watch
+lists, `occ`/`prot`, `status`, `woken` — appears nowhere below: a wrong entry costs elimination
+opportunities, never soundness.
+
+Part one is the affine layer: substituting a solution map into a row preserves its value and
+introduces no variable, and solving an entailed row for a unit-coefficient variable yields an
+entailed assignment. Part two carries two invariants through the engine (`GInv`) — every pending row
+is entailed and occurrence-closed, every stored solution is an entailed assignment with the same
+closure — of which `gAdopt` is the only step that touches either. -/
 
 namespace ApcOptimizer.Dense
 
@@ -96,268 +105,10 @@ theorem denseLinSubstF_terms_closed (l : DenseLinExpr p)
       subst zc
       exact hzc ▸ hσ yc.1 row hrow rc.1 (List.mem_map.2 ⟨rc, hrc, rfl⟩)
 
-theorem denseLinAdd_eval (a b : DenseLinExpr p) (denv : VarId → ZMod p) :
-    (denseLinAdd a b).eval denv = a.eval denv + b.eval denv := by
-  rw [denseLinAdd, DenseLinExpr.norm_eval, DenseLinExpr.add_eval]
-
 theorem denseLinScale_eval (k : ZMod p) (l : DenseLinExpr p) (denv : VarId → ZMod p) :
     (denseLinScale k l).eval denv = k * l.eval denv := by
   rw [denseLinScale, DenseLinExpr.norm_eval, DenseLinExpr.scale_eval]
 
-theorem denseLinAdd_toExpr_eval (a b : DenseLinExpr p) (denv : VarId → ZMod p) :
-    (denseLinAdd a b).toExpr.eval denv = a.toExpr.eval denv + b.toExpr.eval denv := by
-  simp only [DenseLinExpr.toExpr_eval, denseLinAdd_eval]
-
-theorem denseLinScale_toExpr_eval (k : ZMod p) (l : DenseLinExpr p)
-    (denv : VarId → ZMod p) :
-    (denseLinScale k l).toExpr.eval denv = k * l.toExpr.eval denv := by
-  simp only [DenseLinExpr.toExpr_eval, denseLinScale_eval]
-
-theorem denseLinAdd_terms_closed (a b : DenseLinExpr p) (S : VarId → Prop)
-    (ha : ∀ z ∈ a.terms.map Prod.fst, S z)
-    (hb : ∀ z ∈ b.terms.map Prod.fst, S z) :
-    ∀ z ∈ (denseLinAdd a b).terms.map Prod.fst, S z := by
-  intro z hz
-  have hz' := DenseLinExpr.norm_terms_fst (a.add b) z hz
-  simp only [DenseLinExpr.add, List.map_append, List.mem_append] at hz'
-  exact hz'.elim (ha z) (hb z)
-
-theorem denseLinScale_terms_closed (k : ZMod p) (l : DenseLinExpr p) (S : VarId → Prop)
-    (hl : ∀ z ∈ l.terms.map Prod.fst, S z) :
-    ∀ z ∈ (denseLinScale k l).terms.map Prod.fst, S z := by
-  intro z hz
-  have hz' := DenseLinExpr.norm_terms_fst (l.scale k) z hz
-  rw [DenseLinExpr.scale_terms_fst] at hz'
-  exact hl z hz'
-
-theorem denseSparseMulReduced_eval (ra rb : DenseGaussReduced p) (denv : VarId → ZMod p) :
-    (denseReducedMul ra rb).toExpr.eval denv
-      = ra.toExpr.eval denv * rb.toExpr.eval denv := by
-  cases ra with
-  | nonlinear ea =>
-      cases rb <;> simp [denseReducedMul, DenseGaussReduced.toExpr, DenseExpr.eval]
-  | affine la =>
-      cases rb with
-      | nonlinear eb => simp [denseReducedMul, DenseGaussReduced.toExpr, DenseExpr.eval]
-      | affine lb =>
-          simp only [denseReducedMul, DenseGaussReduced.toExpr]
-          by_cases ha : la.terms.isEmpty
-          · rw [if_pos ha]
-            simp only [denseLinScale_toExpr_eval]
-            rw [DenseLinExpr.toExpr_eval la]
-            simp [DenseLinExpr.eval, List.isEmpty_iff.1 ha]
-          · rw [if_neg ha]
-            by_cases hb : lb.terms.isEmpty
-            · rw [if_pos hb]
-              simp only [denseLinScale_toExpr_eval]
-              rw [DenseLinExpr.toExpr_eval lb]
-              simp [DenseLinExpr.eval, List.isEmpty_iff.1 hb, mul_comm]
-            · rw [if_neg hb]
-              rfl
-
-theorem denseSparseSubstF_eval (σ : VarId → Option (DenseLinExpr p)) (e : DenseExpr p)
-    (denv : VarId → ZMod p) (hσ : ∀ i row, σ i = some row → denv i = row.eval denv) :
-    (denseSparseSubstF σ e).toExpr.eval denv = e.eval denv := by
-  have henv : denseLinEnv σ denv = denv := by
-    funext i
-    cases hi : σ i with
-    | none => simp [denseLinEnv, hi]
-    | some row => simp [denseLinEnv, hi, hσ i row hi]
-  induction e with
-  | const n => rfl
-  | var i =>
-      simp only [denseSparseSubstF]
-      cases hi : σ i with
-      | none =>
-          simp only [DenseGaussReduced.toExpr, DenseExpr.eval]
-          rw [DenseLinExpr.toExpr_eval]
-          simp [DenseLinExpr.eval]
-      | some row =>
-          simp only [DenseGaussReduced.toExpr, DenseExpr.eval]
-          rw [DenseLinExpr.toExpr_eval, ← hσ i row hi]
-  | add a b iha ihb =>
-      simp only [denseSparseSubstF]
-      cases hlin : denseLinearize (.add a b) with
-      | some row =>
-          simp only [DenseGaussReduced.toExpr]
-          rw [DenseLinExpr.toExpr_eval, denseLinSubstF_eval, henv,
-            ← denseLinearize_eval (.add a b) row hlin]
-      | none =>
-          cases ha : denseSparseSubstF σ a <;>
-            cases hb : denseSparseSubstF σ b <;>
-            simp_all [denseReducedAdd, DenseGaussReduced.toExpr, DenseExpr.eval,
-              denseLinAdd_toExpr_eval]
-  | mul a b iha ihb =>
-      simp only [denseSparseSubstF]
-      cases hlin : denseLinearize (.mul a b) with
-      | some row =>
-          simp only [DenseGaussReduced.toExpr]
-          rw [DenseLinExpr.toExpr_eval, denseLinSubstF_eval, henv,
-            ← denseLinearize_eval (.mul a b) row hlin]
-      | none =>
-          have hm := denseSparseMulReduced_eval
-            (denseSparseSubstF σ a) (denseSparseSubstF σ b) denv
-          rw [iha, ihb] at hm
-          simpa only [DenseExpr.eval] using hm
-
-def DenseGaussReduced.support : DenseGaussReduced p → List VarId
-  | .affine row => row.terms.map Prod.fst
-  | .nonlinear expr => expr.vars
-
-def DenseGaussReduced.Closed (r : DenseGaussReduced p) (S : VarId → Prop) : Prop :=
-  ∀ z ∈ r.support, S z
-
-theorem denseSparseAddReduced_closed (ra rb : DenseGaussReduced p) (S : VarId → Prop)
-    (ha : ra.Closed S) (hb : rb.Closed S) :
-    (denseReducedAdd ra rb).Closed S := by
-  revert ha hb
-  cases ra with
-  | affine la =>
-      cases rb with
-      | affine lb =>
-          intro ha hb
-          simp only [denseReducedAdd, DenseGaussReduced.Closed,
-            DenseGaussReduced.support] at ha hb ⊢
-          exact denseLinAdd_terms_closed la lb S ha hb
-      | nonlinear eb =>
-          intro ha hb
-          simp only [denseReducedAdd, DenseGaussReduced.Closed, DenseGaussReduced.support,
-            DenseGaussReduced.toExpr] at ha hb ⊢
-          intro z hz
-          simp only [DenseExpr.vars, List.mem_append] at hz
-          rcases hz with hz | hz
-          · exact DenseLinExpr.toExpr_vars la z hz |> ha z
-          · exact hb z hz
-  | nonlinear ea =>
-      cases rb with
-      | affine lb =>
-          intro ha hb
-          simp only [denseReducedAdd, DenseGaussReduced.Closed, DenseGaussReduced.support,
-            DenseGaussReduced.toExpr] at ha hb ⊢
-          intro z hz
-          simp only [DenseExpr.vars, List.mem_append] at hz
-          rcases hz with hz | hz
-          · exact ha z hz
-          · exact DenseLinExpr.toExpr_vars lb z hz |> hb z
-      | nonlinear eb =>
-          intro ha hb
-          simp only [denseReducedAdd, DenseGaussReduced.Closed, DenseGaussReduced.support,
-            DenseGaussReduced.toExpr] at ha hb ⊢
-          intro z hz
-          simp only [DenseExpr.vars, List.mem_append] at hz
-          rcases hz with hz | hz
-          · exact ha z hz
-          · exact hb z hz
-
-theorem denseSparseMulReduced_closed (ra rb : DenseGaussReduced p) (S : VarId → Prop)
-    (ha : ra.Closed S) (hb : rb.Closed S) :
-    (denseReducedMul ra rb).Closed S := by
-  revert ha hb
-  cases ra with
-  | affine la =>
-      cases rb with
-      | affine lb =>
-          intro ha hb
-          simp only [denseReducedMul, DenseGaussReduced.Closed,
-            DenseGaussReduced.support] at ha hb ⊢
-          by_cases hla : la.terms.isEmpty
-          · rw [if_pos hla]
-            exact denseLinScale_terms_closed la.const lb S hb
-          · rw [if_neg hla]
-            by_cases hlb : lb.terms.isEmpty
-            · rw [if_pos hlb]
-              exact denseLinScale_terms_closed lb.const la S ha
-            · rw [if_neg hlb]
-              intro z hz
-              simp only [DenseExpr.vars, List.mem_append] at hz
-              rcases hz with hz | hz
-              · exact DenseLinExpr.toExpr_vars la z hz |> ha z
-              · exact DenseLinExpr.toExpr_vars lb z hz |> hb z
-      | nonlinear eb =>
-          intro ha hb
-          simp only [denseReducedMul, DenseGaussReduced.Closed, DenseGaussReduced.support,
-            DenseGaussReduced.toExpr] at ha hb ⊢
-          intro z hz
-          simp only [DenseExpr.vars, List.mem_append] at hz
-          rcases hz with hz | hz
-          · exact DenseLinExpr.toExpr_vars la z hz |> ha z
-          · exact hb z hz
-  | nonlinear ea =>
-      cases rb with
-      | affine lb =>
-          intro ha hb
-          simp only [denseReducedMul, DenseGaussReduced.Closed, DenseGaussReduced.support,
-            DenseGaussReduced.toExpr] at ha hb ⊢
-          intro z hz
-          simp only [DenseExpr.vars, List.mem_append] at hz
-          rcases hz with hz | hz
-          · exact ha z hz
-          · exact DenseLinExpr.toExpr_vars lb z hz |> hb z
-      | nonlinear eb =>
-          intro ha hb
-          simp only [denseReducedMul, DenseGaussReduced.Closed, DenseGaussReduced.support,
-            DenseGaussReduced.toExpr] at ha hb ⊢
-          intro z hz
-          simp only [DenseExpr.vars, List.mem_append] at hz
-          rcases hz with hz | hz
-          · exact ha z hz
-          · exact hb z hz
-
-theorem denseSparseSubstF_closed (σ : VarId → Option (DenseLinExpr p)) (e : DenseExpr p)
-    (S : VarId → Prop) (he : ∀ z ∈ e.vars, S z)
-    (hσ : ∀ i row, σ i = some row → ∀ z ∈ row.terms.map Prod.fst, S z) :
-    (denseSparseSubstF σ e).Closed S := by
-  induction e with
-  | const n =>
-      simp [denseSparseSubstF, DenseGaussReduced.Closed, DenseGaussReduced.support]
-  | var i =>
-      simp only [denseSparseSubstF]
-      cases hi : σ i with
-      | none =>
-          simp only [DenseGaussReduced.Closed, DenseGaussReduced.support,
-            List.map_singleton, List.mem_singleton]
-          intro z hz
-          subst z
-          exact he i (by simp [DenseExpr.vars])
-      | some row =>
-          simp only [DenseGaussReduced.Closed, DenseGaussReduced.support]
-          exact hσ i row hi
-  | add a b iha ihb =>
-      simp only [denseSparseSubstF]
-      cases hlin : denseLinearize (.add a b) with
-      | some row =>
-          simp only [DenseGaussReduced.Closed, DenseGaussReduced.support]
-          apply denseLinSubstF_terms_closed row σ S
-          · intro z hz
-            exact he z (denseLinearize_mem_vars (.add a b) row hlin z hz)
-          · exact hσ
-      | none =>
-          have hea : ∀ z ∈ a.vars, S z :=
-            fun z hz => he z (by simp [DenseExpr.vars, hz])
-          have heb : ∀ z ∈ b.vars, S z :=
-            fun z hz => he z (by simp [DenseExpr.vars, hz])
-          have ha := iha hea
-          have hb := ihb heb
-          exact denseSparseAddReduced_closed
-            (denseSparseSubstF σ a) (denseSparseSubstF σ b) S ha hb
-  | mul a b iha ihb =>
-      simp only [denseSparseSubstF]
-      cases hlin : denseLinearize (.mul a b) with
-      | some row =>
-          simp only [DenseGaussReduced.Closed, DenseGaussReduced.support]
-          apply denseLinSubstF_terms_closed row σ S
-          · intro z hz
-            exact he z (denseLinearize_mem_vars (.mul a b) row hlin z hz)
-          · exact hσ
-      | none =>
-          have hea : ∀ z ∈ a.vars, S z :=
-            fun z hz => he z (by simp [DenseExpr.vars, hz])
-          have heb : ∀ z ∈ b.vars, S z :=
-            fun z hz => he z (by simp [DenseExpr.vars, hz])
-          have ha := iha hea
-          have hb := ihb heb
-          exact denseSparseMulReduced_closed
-            (denseSparseSubstF σ a) (denseSparseSubstF σ b) S ha hb
 
 theorem denseLinSubst_eval (s : DenseLinExpr p) (x : VarId) (t : DenseLinExpr p)
     (denv : VarId → ZMod p) (hx : denv x = t.eval denv) :
@@ -433,462 +184,1024 @@ theorem denseSparseSolveAt_terms (l : DenseLinExpr p) (x y : VarId)
     rw [DenseLinExpr.scale_terms_fst] at hz'
     exact l.others_terms_fst_mem x z hz'
 
-theorem denseSparseBest_sound (l : DenseLinExpr p) (occ : Std.HashMap VarId Nat)
-    (prot : Std.HashSet VarId) (y : VarId) (t : DenseLinExpr p)
-    (h : denseSparseBest l occ prot = some (y, t))
-    (denv : VarId → ZMod p) (hl : l.eval denv = 0) :
-    denv y = t.eval denv := by
-  unfold denseSparseBest at h
-  cases hm : (densePivotDescs l occ prot).argmin Prod.snd with
-  | none => simp [hm] at h
-  | some q =>
-      simp only [hm] at h
-      exact denseSparseSolveAt_sound l q.1 y t h denv hl
+/-! ## The three predicates -/
 
-theorem denseSparseBest_terms (l : DenseLinExpr p) (occ : Std.HashMap VarId Nat)
-    (prot : Std.HashSet VarId) (y : VarId) (t : DenseLinExpr p)
-    (h : denseSparseBest l occ prot = some (y, t)) :
-    ∀ z ∈ t.terms.map Prod.fst, z ∈ l.terms.map Prod.fst := by
-  unfold denseSparseBest at h
-  cases hm : (densePivotDescs l occ prot).argmin Prod.snd with
-  | none => simp [hm] at h
-  | some q =>
-      simp only [hm] at h
-      exact denseSparseSolveAt_terms l q.1 y t h
+/-- `l` vanishes on every satisfying assignment. -/
+def GEnt (bs : BusSemantics p) (d : DenseConstraintSystem p) (l : DenseLinExpr p) : Prop :=
+  ∀ denv, d.satisfies bs denv → l.eval denv = 0
 
-theorem denseReducedBest_sound (r : DenseGaussReduced p) (occ : Std.HashMap VarId Nat)
-    (prot : Std.HashSet VarId) (y : VarId) (t : DenseLinExpr p)
-    (h : denseReducedBest r occ prot = some (y, t))
-    (denv : VarId → ZMod p) (hr : r.toExpr.eval denv = 0) :
-    denv y = t.eval denv := by
-  cases r with
-  | nonlinear e => simp [denseReducedBest] at h
-  | affine l =>
-      exact denseSparseBest_sound l occ prot y t h denv
-        (by simpa [DenseGaussReduced.toExpr, DenseLinExpr.toExpr_eval] using hr)
+/-- `x` equals `t` on every satisfying assignment. -/
+def GAsg (bs : BusSemantics p) (d : DenseConstraintSystem p) (x : VarId) (t : DenseLinExpr p) :
+    Prop :=
+  ∀ denv, d.satisfies bs denv → denv x = t.eval denv
 
-theorem denseReducedBest_terms (r : DenseGaussReduced p) (occ : Std.HashMap VarId Nat)
-    (prot : Std.HashSet VarId) (y : VarId) (t : DenseLinExpr p)
-    (h : denseReducedBest r occ prot = some (y, t)) :
-    ∀ z ∈ t.terms.map Prod.fst, z ∈ r.support := by
-  cases r with
-  | nonlinear e => simp [denseReducedBest] at h
-  | affine l => exact denseSparseBest_terms l occ prot y t h
+/-- Every variable of `l` occurs in the system. -/
+def GCl (d : DenseConstraintSystem p) (l : DenseLinExpr p) : Prop :=
+  ∀ z ∈ l.terms.map Prod.fst, z ∈ d.occ
 
-theorem denseMarkowitzPick_sound (r : DenseGaussReduced p) (hint y : VarId)
-    (t : DenseLinExpr p) (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId)
-    (h : denseMarkowitzPick r hint occ prot = some (y, t))
-    (denv : VarId → ZMod p) (hr : r.toExpr.eval denv = 0) :
-    denv y = t.eval denv := by
-  unfold denseMarkowitzPick at h
-  cases r with
-  | nonlinear e =>
-      simp only at h
-      exact denseReducedBest_sound (.nonlinear e) occ prot y t h denv hr
-  | affine l =>
-      cases hs : denseSparseSolveAt l hint with
-      | none =>
-          simp only [hs] at h
-          exact denseReducedBest_sound (.affine l) occ prot y t h denv hr
-      | some q =>
-          have hq : q = (y, t) := Option.some.inj (by simpa [hs] using h)
-          rw [hq] at hs
-          exact denseSparseSolveAt_sound l hint y t hs denv
-            (by simpa [DenseGaussReduced.toExpr, DenseLinExpr.toExpr_eval] using hr)
+theorem GCl_nil (d : DenseConstraintSystem p) (c : ZMod p) : GCl d ⟨c, []⟩ := by
+  intro z hz; simp at hz
 
-theorem denseMarkowitzPick_terms (r : DenseGaussReduced p) (hint y : VarId)
-    (t : DenseLinExpr p) (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId)
-    (h : denseMarkowitzPick r hint occ prot = some (y, t)) :
-    ∀ z ∈ t.terms.map Prod.fst, z ∈ r.support := by
-  unfold denseMarkowitzPick at h
-  cases r with
-  | nonlinear e =>
-      simp only at h
-      exact denseReducedBest_terms (.nonlinear e) occ prot y t h
-  | affine l =>
-      cases hs : denseSparseSolveAt l hint with
-      | none =>
-          simp only [hs] at h
-          exact denseReducedBest_terms (.affine l) occ prot y t h
-      | some q =>
-          have hq : q = (y, t) := Option.some.inj (by simpa [hs] using h)
-          rw [hq] at hs
-          exact denseSparseSolveAt_terms l hint y t hs
+/-! ## The walk
 
-theorem DenseSparseSolved.insertAll_map :
-    ∀ (pairs : List (VarId × DenseLinExpr p)) (dσ : DenseSparseSolved p),
-      (dσ.insertAll pairs).map =
-        pairs.foldl (fun m pr => m.insert pr.1 pr.2) dσ.map := by
-  intro pairs
-  induction pairs with
-  | nil => intro dσ; rfl
-  | cons hd tl ih =>
-      intro dσ
-      obtain ⟨x, t⟩ := hd
-      simp only [DenseSparseSolved.insertAll, List.foldl_cons]
-      rw [ih]
+`GRes.toLin` is the affine form a walk result stands for; `blk` stands for none, which is what makes
+the blocked case vacuous in every lemma below. -/
 
-theorem sparseFoldlInsert_preserves {Q : VarId → DenseLinExpr p → Prop} :
-    ∀ (pairs : List (VarId × DenseLinExpr p))
-      (m : Std.HashMap VarId (DenseLinExpr p)),
-      (∀ i t, m[i]? = some t → Q i t) → (∀ pr ∈ pairs, Q pr.1 pr.2) →
-      ∀ i t, (pairs.foldl (fun out pr => out.insert pr.1 pr.2) m)[i]? = some t →
-        Q i t := by
-  intro pairs
-  induction pairs with
-  | nil => intro m hm _ i t ht; exact hm i t ht
-  | cons hd rest ih =>
-      intro m hm hpairs i t ht
-      obtain ⟨x, t0⟩ := hd
-      simp only [List.foldl_cons] at ht
-      refine ih (m.insert x t0) ?_
-        (fun pr hpr => hpairs pr (List.mem_cons_of_mem _ hpr)) i t ht
-      intro j s hjs
-      rw [Std.HashMap.getElem?_insert] at hjs
-      split_ifs at hjs with hjx
-      · simp only [Option.some.injEq] at hjs
-        have hj : x = j := by simpa using hjx
-        rw [← hjs, ← hj]
-        exact hpairs (x, t0) (List.mem_cons_self ..)
-      · exact hm j s hjs
+def GRes.toLin : GRes p → Option (DenseLinExpr p)
+  | .cst c => some ⟨c, []⟩
+  | .lin l => some l
+  | .blk _ => none
 
-theorem DenseSparseSolved.insertAll_preserves {Q : VarId → DenseLinExpr p → Prop}
-    (pairs : List (VarId × DenseLinExpr p)) (dσ : DenseSparseSolved p)
-    (hσ : ∀ i t, dσ.fn i = some t → Q i t)
-    (hpairs : ∀ pr ∈ pairs, Q pr.1 pr.2) :
-    ∀ i t, (dσ.insertAll pairs).fn i = some t → Q i t := by
-  intro i t ht
-  simp only [DenseSparseSolved.fn, DenseSparseSolved.insertAll_map] at ht
-  exact sparseFoldlInsert_preserves pairs dσ.map hσ hpairs i t ht
+theorem gAddRes_eval (ops : DenseZModOps p) (ra rb : GRes p) (l : DenseLinExpr p)
+    (h : (gAddRes ops ra rb).toLin = some l) :
+    ∃ la lb, ra.toLin = some la ∧ rb.toLin = some lb ∧
+      ∀ denv, l.eval denv = la.eval denv + lb.eval denv := by
+  cases ra with
+  | blk w => simp [gAddRes, GRes.toLin] at h
+  | cst c1 =>
+      cases rb with
+      | blk w => simp [gAddRes, GRes.toLin] at h
+      | cst c2 =>
+          simp only [gAddRes, GRes.toLin, Option.some.injEq] at h
+          subst h
+          exact ⟨⟨c1, []⟩, ⟨c2, []⟩, rfl, rfl, by intro denv; simp [DenseLinExpr.eval, ops.add_eq]⟩
+      | lin l2 =>
+          simp only [gAddRes, GRes.toLin, Option.some.injEq] at h
+          subst h
+          refine ⟨⟨c1, []⟩, l2, rfl, rfl, ?_⟩
+          intro denv
+          simp only [DenseLinExpr.eval, ops.add_eq, List.map_nil, List.sum_nil, add_zero]
+          ring
+  | lin l1 =>
+      cases rb with
+      | blk w => simp [gAddRes, GRes.toLin] at h
+      | cst c2 =>
+          simp only [gAddRes, GRes.toLin, Option.some.injEq] at h
+          subst h
+          refine ⟨l1, ⟨c2, []⟩, rfl, rfl, ?_⟩
+          intro denv
+          simp only [DenseLinExpr.eval, ops.add_eq, List.map_nil, List.sum_nil, add_zero]
+          ring
+      | lin l2 =>
+          simp only [gAddRes, GRes.toLin, Option.some.injEq] at h
+          subst h
+          refine ⟨l1, l2, rfl, rfl, ?_⟩
+          intro denv
+          rw [DenseLinExpr.addWith_eq, DenseLinExpr.add_eval]
 
-theorem denseSparseGaussLoop_sound (bs : BusSemantics p) (d : DenseConstraintSystem p)
-    (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId) :
-    ∀ (pending : List (DenseExpr p)) (dσ : DenseSparseSolved p),
-      (∀ c ∈ pending, c ∈ d.algebraicConstraints) →
-      (∀ denv, d.satisfies bs denv → ∀ i t,
-        dσ.fn i = some t → denv i = t.eval denv) →
-      (∀ i t, dσ.fn i = some t → ∀ z ∈ t.terms.map Prod.fst, z ∈ d.occ) →
-      (∀ denv, d.satisfies bs denv → ∀ i t,
-          (denseSparseGaussLoop occ prot pending dσ).fn i = some t →
-          denv i = t.eval denv) ∧
-      (∀ i t, (denseSparseGaussLoop occ prot pending dσ).fn i = some t →
-          ∀ z ∈ t.terms.map Prod.fst, z ∈ d.occ) := by
-  intro pending
-  induction pending with
-  | nil => intro dσ _ hσs hσv; exact ⟨hσs, hσv⟩
-  | cons c rest ih =>
-      intro dσ hpend hσs hσv
-      have hcmem : c ∈ d.algebraicConstraints := hpend c (List.mem_cons_self ..)
-      have hrest : ∀ c' ∈ rest, c' ∈ d.algebraicConstraints :=
-        fun c' h' => hpend c' (List.mem_cons_of_mem _ h')
-      let c' := denseSparseSubstF dσ.fn c
-      cases hpick : denseReducedBest (denseSparseSubstF dσ.fn c) occ prot with
-      | none =>
-          simp only [denseSparseGaussLoop, hpick]
-          exact ih dσ hrest hσs hσv
-      | some xt =>
-          obtain ⟨x, t⟩ := xt
-          have hcclosed : c'.Closed (· ∈ d.occ) := by
-            apply denseSparseSubstF_closed dσ.fn c
-            · intro z hz
-              exact DenseConstraintSystem.mem_occ_of_constraint hcmem hz
-            · exact hσv
-          have hx : ∀ denv, d.satisfies bs denv → denv x = t.eval denv := by
-            intro denv hsat
-            apply denseReducedBest_sound c' occ prot x t hpick denv
-            rw [denseSparseSubstF_eval dσ.fn c denv (hσs denv hsat)]
-            exact hsat.1 c hcmem
-          have htocc : ∀ z ∈ t.terms.map Prod.fst, z ∈ d.occ := by
+theorem gAddRes_terms (ops : DenseZModOps p) (ra rb : GRes p) (l la lb : DenseLinExpr p)
+    (h : (gAddRes ops ra rb).toLin = some l)
+    (hla : ra.toLin = some la) (hlb : rb.toLin = some lb) :
+    ∀ z ∈ l.terms.map Prod.fst,
+      z ∈ la.terms.map Prod.fst ∨ z ∈ lb.terms.map Prod.fst := by
+  cases ra with
+  | blk w => simp [gAddRes, GRes.toLin] at h
+  | cst c1 =>
+      cases rb with
+      | blk w => simp [gAddRes, GRes.toLin] at h
+      | cst c2 =>
+          simp only [gAddRes, GRes.toLin, Option.some.injEq] at h hla hlb
+          subst h; intro z hz; simp at hz
+      | lin l2 =>
+          simp only [gAddRes, GRes.toLin, Option.some.injEq] at h hla hlb
+          subst h; subst hlb; intro z hz; exact Or.inr hz
+  | lin l1 =>
+      cases rb with
+      | blk w => simp [gAddRes, GRes.toLin] at h
+      | cst c2 =>
+          simp only [gAddRes, GRes.toLin, Option.some.injEq] at h hla hlb
+          subst h; subst hla; intro z hz; exact Or.inl hz
+      | lin l2 =>
+          simp only [gAddRes, GRes.toLin, Option.some.injEq] at h hla hlb
+          subst h; subst hla; subst hlb
+          intro z hz
+          rw [DenseLinExpr.addWith_eq] at hz
+          simpa [DenseLinExpr.add, List.map_append] using hz
+
+theorem gMulRes_eval (ops : DenseZModOps p) (ra rb : GRes p) (l : DenseLinExpr p)
+    (h : (gMulRes ops ra rb).toLin = some l) :
+    ∃ la lb, ra.toLin = some la ∧ rb.toLin = some lb ∧
+      ∀ denv, l.eval denv = la.eval denv * lb.eval denv := by
+  cases ra with
+  | blk w => simp [gMulRes, GRes.toLin] at h
+  | cst c1 =>
+      cases rb with
+      | blk w => simp [gMulRes, GRes.toLin] at h
+      | cst c2 =>
+          simp only [gMulRes, GRes.toLin, Option.some.injEq] at h
+          subst h
+          exact ⟨⟨c1, []⟩, ⟨c2, []⟩, rfl, rfl, by intro denv; simp [DenseLinExpr.eval, ops.mul_eq]⟩
+      | lin l2 =>
+          simp only [gMulRes, GRes.toLin, Option.some.injEq] at h
+          subst h
+          refine ⟨⟨c1, []⟩, l2, rfl, rfl, ?_⟩
+          intro denv
+          rw [DenseLinExpr.scaleWith_eq, DenseLinExpr.scale_eval]
+          simp only [DenseLinExpr.eval, List.map_nil, List.sum_nil, add_zero]
+  | lin l1 =>
+      cases rb with
+      | blk w => simp [gMulRes, GRes.toLin] at h
+      | cst c2 =>
+          simp only [gMulRes, GRes.toLin, Option.some.injEq] at h
+          subst h
+          refine ⟨l1, ⟨c2, []⟩, rfl, rfl, ?_⟩
+          intro denv
+          rw [DenseLinExpr.scaleWith_eq, DenseLinExpr.scale_eval]
+          simp only [DenseLinExpr.eval, List.map_nil, List.sum_nil, add_zero]
+          ring
+      | lin l2 =>
+          refine ⟨l1, l2, rfl, rfl, ?_⟩
+          simp only [gMulRes] at h
+          by_cases h1 : (l1.normWith ops).terms.isEmpty
+          · rw [if_pos h1] at h
+            simp only [GRes.toLin, Option.some.injEq] at h
+            subst h
+            intro denv
+            rw [DenseLinExpr.scaleWith_eq, DenseLinExpr.scale_eval]
+            have hn : (l1.normWith ops).terms = [] := List.isEmpty_iff.1 (by simpa using h1)
+            have hc : (l1.normWith ops).eval denv = (l1.normWith ops).const := by
+              simp only [DenseLinExpr.eval, hn, List.map_nil, List.sum_nil, add_zero]
+            have hq : (l1.normWith ops).eval denv = l1.eval denv := by
+              rw [DenseLinExpr.normWith_eq, DenseLinExpr.norm_eval]
+            rw [← hq, hc]
+          · rw [if_neg h1] at h
+            by_cases h2 : (l2.normWith ops).terms.isEmpty
+            · rw [if_pos h2] at h
+              simp only [GRes.toLin, Option.some.injEq] at h
+              subst h
+              intro denv
+              rw [DenseLinExpr.scaleWith_eq, DenseLinExpr.scale_eval]
+              have hn : (l2.normWith ops).terms = [] := List.isEmpty_iff.1 (by simpa using h2)
+              have hc : (l2.normWith ops).eval denv = (l2.normWith ops).const := by
+                simp only [DenseLinExpr.eval, hn, List.map_nil, List.sum_nil, add_zero]
+              have hq : (l2.normWith ops).eval denv = l2.eval denv := by
+                rw [DenseLinExpr.normWith_eq, DenseLinExpr.norm_eval]
+              have e1 : (l1.normWith ops).eval denv = l1.eval denv := by
+                rw [DenseLinExpr.normWith_eq, DenseLinExpr.norm_eval]
+              rw [e1, ← hq, hc, mul_comm]
+            · rw [if_neg h2] at h
+              simp [GRes.toLin] at h
+
+theorem gMulRes_terms (ops : DenseZModOps p) (ra rb : GRes p) (l la lb : DenseLinExpr p)
+    (h : (gMulRes ops ra rb).toLin = some l)
+    (hla : ra.toLin = some la) (hlb : rb.toLin = some lb) :
+    ∀ z ∈ l.terms.map Prod.fst,
+      z ∈ la.terms.map Prod.fst ∨ z ∈ lb.terms.map Prod.fst := by
+  cases ra with
+  | blk w => simp [gMulRes, GRes.toLin] at h
+  | cst c1 =>
+      cases rb with
+      | blk w => simp [gMulRes, GRes.toLin] at h
+      | cst c2 =>
+          simp only [gMulRes, GRes.toLin, Option.some.injEq] at h
+          subst h; intro z hz; simp at hz
+      | lin l2 =>
+          simp only [gMulRes, GRes.toLin, Option.some.injEq] at h hlb
+          subst h; subst hlb
+          intro z hz
+          rw [DenseLinExpr.scaleWith_eq, DenseLinExpr.scale_terms_fst] at hz
+          exact Or.inr hz
+  | lin l1 =>
+      cases rb with
+      | blk w => simp [gMulRes, GRes.toLin] at h
+      | cst c2 =>
+          simp only [gMulRes, GRes.toLin, Option.some.injEq] at h hla
+          subst h; subst hla
+          intro z hz
+          rw [DenseLinExpr.scaleWith_eq, DenseLinExpr.scale_terms_fst] at hz
+          exact Or.inl hz
+      | lin l2 =>
+          simp only [GRes.toLin, Option.some.injEq] at hla hlb
+          subst hla; subst hlb
+          simp only [gMulRes] at h
+          by_cases h1 : (l1.normWith ops).terms.isEmpty
+          · rw [if_pos h1] at h
+            simp only [GRes.toLin, Option.some.injEq] at h
+            subst h
             intro z hz
-            exact hcclosed z (denseReducedBest_terms c' occ prot x t hpick z hz)
-          have htouched : ∀ y s, (y, s) ∈
-                (dσ.revDeps.getD x.index ∅).toList.filterMap (fun y =>
-                  (dσ.map[y]?).bind
-                    (fun s => if s.mentions x then some (y, s) else none)) →
-              dσ.fn y = some s := by
-            intro y s hys
-            obtain ⟨_, _, hy'⟩ := List.mem_filterMap.1 hys
-            obtain ⟨s', hs', hif⟩ := Option.bind_eq_some_iff.1 hy'
-            by_cases hm : s'.mentions x
-            · rw [if_pos hm] at hif
-              simp only [Option.some.injEq, Prod.mk.injEq] at hif
-              obtain ⟨rfl, rfl⟩ := hif
-              exact hs'
-            · rw [if_neg hm] at hif
-              exact absurd hif (by simp)
-          simp only [denseSparseGaussLoop, hpick]
-          refine ih _ hrest ?_ ?_
-          · intro denv hsat
-            refine DenseSparseSolved.insertAll_preserves _ dσ (hσs denv hsat) ?_
-            intro pr hpr
-            rcases List.mem_append.1 hpr with hin | hin
-            · obtain ⟨⟨y, s⟩, hys, rfl⟩ := List.mem_map.1 hin
-              have hmemys : dσ.fn y = some s := htouched y s hys
-              have hy : denv y = s.eval denv := hσs denv hsat y s hmemys
-              exact hy.trans (denseLinSubst_eval s x t denv (hx denv hsat)).symm
-            · rw [List.mem_singleton] at hin
-              subst hin
-              exact hx denv hsat
-          · refine DenseSparseSolved.insertAll_preserves _ dσ hσv ?_
-            intro pr hpr
-            rcases List.mem_append.1 hpr with hin | hin
-            · obtain ⟨⟨y, s⟩, hys, rfl⟩ := List.mem_map.1 hin
-              have hmemys : dσ.fn y = some s := htouched y s hys
-              exact denseLinSubst_terms_closed s x t (· ∈ d.occ)
-                (hσv y s hmemys) htocc
-            · rw [List.mem_singleton] at hin
-              subst hin
-              exact htocc
+            rw [DenseLinExpr.scaleWith_eq, DenseLinExpr.scale_terms_fst] at hz
+            exact Or.inr hz
+          · rw [if_neg h1] at h
+            by_cases h2 : (l2.normWith ops).terms.isEmpty
+            · rw [if_pos h2] at h
+              simp only [GRes.toLin, Option.some.injEq] at h
+              subst h
+              intro z hz
+              rw [DenseLinExpr.scaleWith_eq, DenseLinExpr.scale_terms_fst,
+                DenseLinExpr.normWith_eq] at hz
+              exact Or.inl (DenseLinExpr.norm_terms_fst l1 z hz)
+            · rw [if_neg h2] at h
+              simp [GRes.toLin] at h
 
-theorem denseSparseMarkowitzLoop_sound (bs : BusSemantics p) (d : DenseConstraintSystem p)
-    (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId)
-    (sources : Array (DenseExpr p))
-    (hsrc : ∀ (i : Nat) (c : DenseExpr p),
-      sources[i]? = some c → c ∈ d.algebraicConstraints) :
-    ∀ (fuel : Nat) (st : DenseMarkowitzState p) (dσ : DenseSparseSolved p),
-      (∀ denv, d.satisfies bs denv → ∀ i t,
-        dσ.fn i = some t → denv i = t.eval denv) →
-      (∀ i t, dσ.fn i = some t → ∀ z ∈ t.terms.map Prod.fst, z ∈ d.occ) →
-      (∀ denv, d.satisfies bs denv → ∀ i t,
-          (denseMarkowitzLoop occ prot sources fuel st dσ).fn i = some t →
-          denv i = t.eval denv) ∧
-      (∀ i t, (denseMarkowitzLoop occ prot sources fuel st dσ).fn i = some t →
-          ∀ z ∈ t.terms.map Prod.fst, z ∈ d.occ) := by
+/-- The walk is eval-preserving: whenever it produces an affine form, that form agrees with the
+    expression on every assignment the stored solutions are true of. -/
+theorem gEval_eval (ops : DenseZModOps p) (sol : Array (Option (DenseLinExpr p)))
+    (denv : VarId → ZMod p)
+    (hσ : ∀ i t, gSolFn sol i = some t → denv i = t.eval denv) :
+    ∀ (e : DenseExpr p) (l : DenseLinExpr p), (gEval ops sol e).toLin = some l →
+      e.eval denv = l.eval denv := by
+  intro e
+  induction e with
+  | const n =>
+      intro l h
+      simp only [gEval, GRes.toLin, Option.some.injEq] at h
+      subst h
+      simp [DenseExpr.eval, DenseLinExpr.eval]
+  | var x =>
+      intro l h
+      simp only [gEval] at h
+      cases hx : gSolFn sol x with
+      | none =>
+          rw [hx] at h
+          simp only [GRes.toLin, Option.some.injEq] at h
+          subst h
+          simp [DenseExpr.eval, DenseLinExpr.eval, ops.zero_eq, ops.one_eq]
+      | some t =>
+          rw [hx] at h
+          simp only [GRes.toLin, Option.some.injEq] at h
+          subst h
+          exact hσ x t hx
+  | add a b iha ihb =>
+      intro l h
+      simp only [gEval] at h
+      cases ha : gEval ops sol a with
+      | blk w => rw [ha] at h; simp [GRes.toLin] at h
+      | cst c1 =>
+          rw [ha] at h
+          obtain ⟨la, lb, hla, hlb, hev⟩ := gAddRes_eval ops _ _ l h
+          rw [DenseExpr.eval, iha la (by rw [ha]; exact hla), ihb lb hlb, hev]
+      | lin l1 =>
+          rw [ha] at h
+          obtain ⟨la, lb, hla, hlb, hev⟩ := gAddRes_eval ops _ _ l h
+          rw [DenseExpr.eval, iha la (by rw [ha]; exact hla), ihb lb hlb, hev]
+  | mul a b iha ihb =>
+      intro l h
+      simp only [gEval] at h
+      cases ha : gEval ops sol a with
+      | blk w => rw [ha] at h; simp [GRes.toLin] at h
+      | cst c1 =>
+          rw [ha] at h
+          obtain ⟨la, lb, hla, hlb, hev⟩ := gMulRes_eval ops _ _ l h
+          rw [DenseExpr.eval, iha la (by rw [ha]; exact hla), ihb lb hlb, hev]
+      | lin l1 =>
+          rw [ha] at h
+          obtain ⟨la, lb, hla, hlb, hev⟩ := gMulRes_eval ops _ _ l h
+          rw [DenseExpr.eval, iha la (by rw [ha]; exact hla), ihb lb hlb, hev]
+
+/-- The walk introduces no variable: every term variable of the result comes from the expression or
+    from a stored solution. -/
+theorem gEval_terms (ops : DenseZModOps p) (sol : Array (Option (DenseLinExpr p)))
+    (S : VarId → Prop) (hσ : ∀ i t, gSolFn sol i = some t → ∀ z ∈ t.terms.map Prod.fst, S z) :
+    ∀ (e : DenseExpr p) (l : DenseLinExpr p), (gEval ops sol e).toLin = some l →
+      (∀ z ∈ e.vars, S z) → ∀ z ∈ l.terms.map Prod.fst, S z := by
+  intro e
+  induction e with
+  | const n =>
+      intro l h _
+      simp only [gEval, GRes.toLin, Option.some.injEq] at h
+      subst h; intro z hz; simp at hz
+  | var x =>
+      intro l h he
+      simp only [gEval] at h
+      cases hx : gSolFn sol x with
+      | none =>
+          rw [hx] at h
+          simp only [GRes.toLin, Option.some.injEq] at h
+          subst h
+          intro z hz
+          simp only [List.map_cons, List.map_nil, List.mem_singleton] at hz
+          rw [hz]
+          exact he x (by simp [DenseExpr.vars])
+      | some t =>
+          rw [hx] at h
+          simp only [GRes.toLin, Option.some.injEq] at h
+          subst h
+          exact hσ x t hx
+  | add a b iha ihb =>
+      intro l h he
+      have hea : ∀ z ∈ a.vars, S z := fun z hz => he z (by simp [DenseExpr.vars, hz])
+      have heb : ∀ z ∈ b.vars, S z := fun z hz => he z (by simp [DenseExpr.vars, hz])
+      simp only [gEval] at h
+      cases ha : gEval ops sol a with
+      | blk w => rw [ha] at h; simp [GRes.toLin] at h
+      | cst c1 =>
+          rw [ha] at h
+          obtain ⟨la, lb, hla, hlb, _⟩ := gAddRes_eval ops _ _ l h
+          intro z hz
+          rcases gAddRes_terms ops _ _ l la lb h hla hlb z hz with hz' | hz'
+          · exact iha la (by rw [ha]; exact hla) hea z hz'
+          · exact ihb lb hlb heb z hz'
+      | lin l1 =>
+          rw [ha] at h
+          obtain ⟨la, lb, hla, hlb, _⟩ := gAddRes_eval ops _ _ l h
+          intro z hz
+          rcases gAddRes_terms ops _ _ l la lb h hla hlb z hz with hz' | hz'
+          · exact iha la (by rw [ha]; exact hla) hea z hz'
+          · exact ihb lb hlb heb z hz'
+  | mul a b iha ihb =>
+      intro l h he
+      have hea : ∀ z ∈ a.vars, S z := fun z hz => he z (by simp [DenseExpr.vars, hz])
+      have heb : ∀ z ∈ b.vars, S z := fun z hz => he z (by simp [DenseExpr.vars, hz])
+      simp only [gEval] at h
+      cases ha : gEval ops sol a with
+      | blk w => rw [ha] at h; simp [GRes.toLin] at h
+      | cst c1 =>
+          rw [ha] at h
+          obtain ⟨la, lb, hla, hlb, _⟩ := gMulRes_eval ops _ _ l h
+          intro z hz
+          rcases gMulRes_terms ops _ _ l la lb h hla hlb z hz with hz' | hz'
+          · exact iha la (by rw [ha]; exact hla) hea z hz'
+          · exact ihb lb hlb heb z hz'
+      | lin l1 =>
+          rw [ha] at h
+          obtain ⟨la, lb, hla, hlb, _⟩ := gMulRes_eval ops _ _ l h
+          intro z hz
+          rcases gMulRes_terms ops _ _ l la lb h hla hlb z hz with hz' | hz'
+          · exact iha la (by rw [ha]; exact hla) hea z hz'
+          · exact ihb lb hlb heb z hz'
+
+/-- `gRoot`'s row agrees with the constraint on every assignment the stored solutions are true of. -/
+theorem gRoot_eval (ops : DenseZModOps p) (sol : Array (Option (DenseLinExpr p)))
+    (denv : VarId → ZMod p) (hσ : ∀ i t, gSolFn sol i = some t → denv i = t.eval denv)
+    (e : DenseExpr p) (l : DenseLinExpr p) (h : gRoot ops sol e = .row l) :
+    e.eval denv = l.eval denv := by
+  simp only [gRoot] at h
+  cases he : gEval ops sol e with
+  | cst c =>
+      rw [he] at h
+      simp only [GTop.row.injEq] at h
+      subst h
+      exact gEval_eval ops sol denv hσ e _ (by rw [he]; rfl)
+  | lin l1 =>
+      rw [he] at h
+      simp only [GTop.row.injEq] at h
+      subst h
+      rw [gEval_eval ops sol denv hσ e l1 (by rw [he]; rfl), DenseLinExpr.normWith_eq,
+        DenseLinExpr.norm_eval]
+  | blk w => rw [he] at h; simp at h
+
+/-- `gRoot`'s row introduces no variable. -/
+theorem gRoot_terms (ops : DenseZModOps p) (sol : Array (Option (DenseLinExpr p)))
+    (S : VarId → Prop) (hσ : ∀ i t, gSolFn sol i = some t → ∀ z ∈ t.terms.map Prod.fst, S z)
+    (e : DenseExpr p) (l : DenseLinExpr p) (h : gRoot ops sol e = .row l)
+    (he : ∀ z ∈ e.vars, S z) : ∀ z ∈ l.terms.map Prod.fst, S z := by
+  simp only [gRoot] at h
+  cases hev : gEval ops sol e with
+  | cst c =>
+      rw [hev] at h
+      simp only [GTop.row.injEq] at h
+      subst h
+      intro z hz; simp at hz
+  | lin l1 =>
+      rw [hev] at h
+      simp only [GTop.row.injEq] at h
+      subst h
+      intro z hz
+      rw [DenseLinExpr.normWith_eq] at hz
+      exact gEval_terms ops sol S hσ e l1 (by rw [hev]; rfl) he z
+        (DenseLinExpr.norm_terms_fst l1 z hz)
+  | blk w => rw [hev] at h; simp at h
+
+
+/-! ## Array-index plumbing
+
+Both invariants are stated over `getElem?`, so each write needs only "the entry is the new value, or
+the one that was there before". -/
+
+theorem gSolFn_set (sol : Array (Option (DenseLinExpr p))) (i : Nat) (v : Option (DenseLinExpr p))
+    (x : VarId) :
+    (i = x.index ∧ gSolFn (sol.setIfInBounds i v) x = v) ∨
+      gSolFn (sol.setIfInBounds i v) x = gSolFn sol x := by
+  unfold gSolFn
+  by_cases hx : i = x.index
+  · subst hx
+    by_cases hi : x.index < sol.size
+    · exact Or.inl ⟨rfl, by simp [hi]⟩
+    · exact Or.inr (by
+        simp [hi])
+  · right; simp [hx]
+
+theorem gRows_set (rows : Array (DenseLinExpr p)) (i : Nat) (l : DenseLinExpr p) (j : Nat)
+    (l' : DenseLinExpr p) (h : (rows.setIfInBounds i l)[j]? = some l') :
+    l' = l ∨ rows[j]? = some l' := by
+  by_cases hj : i = j
+  · subst hj
+    by_cases hi : i < rows.size
+    · rw [show (rows.setIfInBounds i l)[i]? = some l by
+        simp [hi]] at h
+      exact Or.inl (Option.some.inj h).symm
+    · rw [show (rows.setIfInBounds i l)[i]? = rows[i]? by
+        simp [hi]] at h
+      exact Or.inr h
+  · rw [show (rows.setIfInBounds i l)[j]? = rows[j]? by
+      simp [hj]] at h
+    exact Or.inr h
+
+theorem gRows_replicate (n : Nat) (c : ZMod p) (j : Nat) (l : DenseLinExpr p)
+    (h : (Array.replicate n (⟨c, []⟩ : DenseLinExpr p))[j]? = some l) : l = ⟨c, []⟩ := by
+  by_cases hj : j < n
+  · rw [show (Array.replicate n (⟨c, []⟩ : DenseLinExpr p))[j]? = some ⟨c, []⟩ by
+      simp [hj]] at h
+    exact (Option.some.inj h).symm
+  · rw [show (Array.replicate n (⟨c, []⟩ : DenseLinExpr p))[j]? = none by
+      simp [hj]] at h
+    exact absurd h (by simp)
+
+/-! ## The engine invariant -/
+
+/-- Pending rows are entailed and occurrence-closed; stored solutions are entailed assignments with
+    the same closure. Nothing else about the state is claimed. -/
+structure GInv (bs : BusSemantics p) (d : DenseConstraintSystem p) (S : GSt p) : Prop where
+  rows : ∀ (i : Nat) (l : DenseLinExpr p), S.rows[i]? = some l → GEnt bs d l ∧ GCl d l
+  sol : ∀ (x : VarId) (t : DenseLinExpr p), gSolFn S.sol x = some t → GAsg bs d x t ∧ GCl d t
+
+/-! ### Scheduling-only writes
+
+`setStatus`, `setWoken` and `addWatch` rebuild the record without touching `rows` or `sol`, so they
+preserve the invariant by projection. -/
+
+@[simp] theorem setStatus_rows (S : GSt p) (i : Nat) (v : UInt8) :
+    (S.setStatus i v).rows = S.rows := by cases S; rfl
+@[simp] theorem setStatus_sol (S : GSt p) (i : Nat) (v : UInt8) :
+    (S.setStatus i v).sol = S.sol := by cases S; rfl
+@[simp] theorem clearWoken_rows (S : GSt p) (i : Nat) : (S.clearWoken i).rows = S.rows := by
+  cases S; rfl
+@[simp] theorem clearWoken_sol (S : GSt p) (i : Nat) : (S.clearWoken i).sol = S.sol := by
+  cases S; rfl
+@[simp] theorem addWatch_rows (S : GSt p) (i : Nat) (ws : List VarId) :
+    (S.addWatch i ws).rows = S.rows := by cases S; rfl
+@[simp] theorem addWatch_sol (S : GSt p) (i : Nat) (ws : List VarId) :
+    (S.addWatch i ws).sol = S.sol := by cases S; rfl
+@[simp] theorem setRow_sol (S : GSt p) (i : Nat) (l : DenseLinExpr p) :
+    (S.setRow i l).sol = S.sol := by cases S; rfl
+@[simp] theorem setRow_rows (S : GSt p) (i : Nat) (l : DenseLinExpr p) :
+    (S.setRow i l).rows = S.rows.setIfInBounds i l := by cases S; rfl
+@[simp] theorem setPending_sol (S : GSt p) (i : Nat) (l : DenseLinExpr p) :
+    (S.setPending i l).sol = S.sol := by cases S; rfl
+@[simp] theorem setPending_rows (S : GSt p) (i : Nat) (l : DenseLinExpr p) :
+    (S.setPending i l).rows = S.rows.setIfInBounds i l := by cases S; rfl
+
+theorem GInv.setStatus {bs : BusSemantics p} {d : DenseConstraintSystem p} {S : GSt p}
+    (h : GInv bs d S) (i : Nat) (v : UInt8) : GInv bs d (S.setStatus i v) :=
+  ⟨by simpa using h.rows, by simpa using h.sol⟩
+
+theorem GInv.clearWoken {bs : BusSemantics p} {d : DenseConstraintSystem p} {S : GSt p}
+    (h : GInv bs d S) (i : Nat) : GInv bs d (S.clearWoken i) :=
+  ⟨by simpa using h.rows, by simpa using h.sol⟩
+
+theorem GInv.addWatch {bs : BusSemantics p} {d : DenseConstraintSystem p} {S : GSt p}
+    (h : GInv bs d S) (i : Nat) (ws : List VarId) : GInv bs d (S.addWatch i ws) :=
+  ⟨by simpa using h.rows, by simpa using h.sol⟩
+
+theorem GInv.setRow {bs : BusSemantics p} {d : DenseConstraintSystem p} {S : GSt p}
+    (h : GInv bs d S) (i : Nat) (l : DenseLinExpr p) (hl : GEnt bs d l ∧ GCl d l) :
+    GInv bs d (S.setRow i l) := by
+  refine ⟨?_, by simpa using h.sol⟩
+  intro j l' hj
+  rw [setRow_rows] at hj
+  rcases gRows_set S.rows i l j l' hj with rfl | hj'
+  · exact hl
+  · exact h.rows j l' hj'
+
+theorem GInv.setPending {bs : BusSemantics p} {d : DenseConstraintSystem p} {S : GSt p}
+    (h : GInv bs d S) (i : Nat) (l : DenseLinExpr p) (hl : GEnt bs d l ∧ GCl d l) :
+    GInv bs d (S.setPending i l) := by
+  refine ⟨?_, by simpa using h.sol⟩
+  intro j l' hj
+  rw [setPending_rows] at hj
+  rcases gRows_set S.rows i l j l' hj with rfl | hj'
+  · exact hl
+  · exact h.rows j l' hj'
+
+
+/-! ### Solution-map writes -/
+
+@[simp] theorem setSol_rows (S : GSt p) (y : VarId) (v : Option (DenseLinExpr p)) :
+    (S.setSol y v).rows = S.rows := by cases S; rfl
+@[simp] theorem setSol_sol (S : GSt p) (y : VarId) (v : Option (DenseLinExpr p)) :
+    (S.setSol y v).sol = S.sol.setIfInBounds y.index v := by cases S; rfl
+@[simp] theorem pushRev_rows (S : GSt p) (t : DenseLinExpr p) (y : VarId) :
+    (S.pushRev t y).rows = S.rows := by cases S; rfl
+@[simp] theorem pushRev_sol (S : GSt p) (t : DenseLinExpr p) (y : VarId) :
+    (S.pushRev t y).sol = S.sol := by cases S; rfl
+@[simp] theorem clearRev_rows (S : GSt p) (x : VarId) : (S.clearRev x).rows = S.rows := by
+  cases S; rfl
+@[simp] theorem clearRev_sol (S : GSt p) (x : VarId) : (S.clearRev x).sol = S.sol := by
+  cases S; rfl
+@[simp] theorem fireWatch_rows (S : GSt p) (x : VarId) : (S.fireWatch x).rows = S.rows := by
+  cases S; rfl
+@[simp] theorem fireWatch_sol (S : GSt p) (x : VarId) : (S.fireWatch x).sol = S.sol := by
+  cases S; rfl
+@[simp] theorem pushOrder_rows (S : GSt p) (x : VarId) : (S.pushOrder x).rows = S.rows := by
+  cases S; rfl
+@[simp] theorem pushOrder_sol (S : GSt p) (x : VarId) : (S.pushOrder x).sol = S.sol := by
+  cases S; rfl
+
+theorem GInv.pushRev {bs : BusSemantics p} {d : DenseConstraintSystem p} {S : GSt p}
+    (h : GInv bs d S) (t : DenseLinExpr p) (y : VarId) : GInv bs d (S.pushRev t y) :=
+  ⟨by simpa using h.rows, by simpa using h.sol⟩
+
+theorem GInv.clearRev {bs : BusSemantics p} {d : DenseConstraintSystem p} {S : GSt p}
+    (h : GInv bs d S) (x : VarId) : GInv bs d (S.clearRev x) :=
+  ⟨by simpa using h.rows, by simpa using h.sol⟩
+
+theorem GInv.fireWatch {bs : BusSemantics p} {d : DenseConstraintSystem p} {S : GSt p}
+    (h : GInv bs d S) (x : VarId) : GInv bs d (S.fireWatch x) :=
+  ⟨by simpa using h.rows, by simpa using h.sol⟩
+
+theorem GInv.pushOrder {bs : BusSemantics p} {d : DenseConstraintSystem p} {S : GSt p}
+    (h : GInv bs d S) (x : VarId) : GInv bs d (S.pushOrder x) :=
+  ⟨by simpa using h.rows, by simpa using h.sol⟩
+
+theorem GInv.setSol {bs : BusSemantics p} {d : DenseConstraintSystem p} {S : GSt p}
+    (h : GInv bs d S) (y : VarId) (t : DenseLinExpr p) (ht : GAsg bs d y t ∧ GCl d t) :
+    GInv bs d (S.setSol y (some t)) := by
+  refine ⟨by simpa using h.rows, ?_⟩
+  intro x u hx
+  rw [setSol_sol] at hx
+  rcases gSolFn_set S.sol y.index (some t) x with ⟨hix, hset⟩ | hset
+  · rw [hset] at hx
+    have hu : t = u := Option.some.inj hx
+    have hxy : y = x := by cases y; cases x; simp_all
+    subst hu; subst hxy
+    exact ht
+  · rw [hset] at hx; exact h.sol x u hx
+
+/-! ### Developing a row -/
+
+/-- The stored solutions are all true at any satisfying assignment, so substituting them into a row
+    preserves its value. -/
+theorem gDevelop_ok (ops : DenseZModOps p) (bs : BusSemantics p) (d : DenseConstraintSystem p)
+    (S : GSt p) (h : GInv bs d S) (r : DenseLinExpr p) (hr : GEnt bs d r ∧ GCl d r) :
+    GEnt bs d (gDevelop ops S.sol r) ∧ GCl d (gDevelop ops S.sol r) := by
+  unfold gDevelop
+  split
+  · refine ⟨?_, ?_⟩
+    · intro denv hsat
+      rw [denseLinSubstFWith_eq, denseLinSubstF_eval]
+      have henv : denseLinEnv (gSolFn S.sol) denv = denv := by
+        funext i
+        cases hi : gSolFn S.sol i with
+        | none => simp [denseLinEnv, hi]
+        | some row => simp [denseLinEnv, hi, (h.sol i row hi).1 denv hsat]
+      rw [henv]
+      exact hr.1 denv hsat
+    · rw [denseLinSubstFWith_eq]
+      exact denseLinSubstF_terms_closed r _ (· ∈ d.occ) hr.2
+        (fun i row hrow => (h.sol i row hrow).2)
+  · exact hr
+
+/-! ### The adoption step -/
+
+theorem gSubst1_eq (ops : DenseZModOps p) (s : DenseLinExpr p) (x : VarId) (t : DenseLinExpr p) :
+    gSubst1 ops s x t = denseLinSubst s x t := by
+  simp only [gSubst1, denseLinSubstFWith_eq, denseLinSubst]
+
+theorem gRewriteStored_inv (ops : DenseZModOps p) (bs : BusSemantics p)
+    (d : DenseConstraintSystem p) (x : VarId) (t : DenseLinExpr p) (ys : Array VarId)
+    (ht : GAsg bs d x t ∧ GCl d t) :
+    ∀ (k : Nat) (S : GSt p), GInv bs d S → GInv bs d (gRewriteStored ops x t ys k S) := by
+  intro k
+  induction k with
+  | zero => intro S h; exact h
+  | succ k ih =>
+      intro S h
+      rw [gRewriteStored]
+      cases hy : ys[ys.size - (k + 1)]? with
+      | none => simpa using ih S h
+      | some y =>
+          dsimp only
+          cases hs : gSolFn S.sol y with
+          | none => simpa using ih S h
+          | some s =>
+              dsimp only
+              by_cases hm : s.mentions x
+              · rw [if_pos hm]
+                refine ih _ ((h.setSol y (gSubst1 ops s x t) ?_).pushRev t y)
+                have hsy := h.sol y s hs
+                refine ⟨?_, ?_⟩
+                · intro denv hsat
+                  rw [gSubst1_eq, denseLinSubst_eval s x t denv (ht.1 denv hsat)]
+                  exact hsy.1 denv hsat
+                · rw [gSubst1_eq]
+                  exact denseLinSubst_terms_closed s x t (· ∈ d.occ) hsy.2 ht.2
+              · rw [if_neg hm]
+                exact ih S h
+
+theorem gAdopt_inv (ops : DenseZModOps p) (bs : BusSemantics p) (d : DenseConstraintSystem p)
+    (S : GSt p) (h : GInv bs d S) (i : Nat) (x : VarId) (t : DenseLinExpr p)
+    (ht : GAsg bs d x t ∧ GCl d t) : GInv bs d (gAdopt ops S i x t) := by
+  rw [gAdopt]
+  exact ((((gRewriteStored_inv ops bs d x t _ ht _ _ (h.clearRev x)).setSol x t
+    ht).pushRev t x).fireWatch x).pushOrder x |>.setStatus i 2
+
+/-! ### Taking a pivot -/
+
+/-- `denseSparseSolveAt` always solves for the variable it was asked about. -/
+theorem denseSparseSolveAt_fst (l : DenseLinExpr p) (y z : VarId) (t : DenseLinExpr p)
+    (h : denseSparseSolveAt l y = some (z, t)) : z = y := by
+  unfold denseSparseSolveAt at h
+  split_ifs at h <;> simp_all
+
+theorem gPick_solveAt (ops : DenseZModOps p) (occ : Array Nat) (prot : Array Bool)
+    (l : DenseLinExpr p) : ∀ (fuel : Nat) (banned : List VarId) (x : VarId) (t : DenseLinExpr p),
+      gPick ops occ prot l fuel banned = some (x, t) → denseSparseSolveAt l x = some (x, t) := by
   intro fuel
   induction fuel with
-  | zero => intro st dσ hσs hσv; exact ⟨hσs, hσv⟩
+  | zero => intro banned x t h; simp [gPick] at h
   | succ fuel ih =>
-      intro st dσ hσs hσv
-      cases hpop : denseMarkowitzPopValid (st.heap.size + 1) st with
-      | none =>
-          simp only [denseMarkowitzLoop, hpop]
-          exact ⟨hσs, hσv⟩
-      | some out =>
-          obtain ⟨entry, st'⟩ := out
-          cases hsource : sources[entry.rowId]? with
+      intro banned x t h
+      cases hb : gBestGo ops occ prot l.terms.length banned l.terms none with
+      | none => simp [gPick, hb] at h
+      | some y =>
+          cases hs : denseSparseSolveAtWith ops l y with
           | none =>
-              simp only [denseMarkowitzLoop, hpop, hsource]
-              exact ih _ _ hσs hσv
-          | some c =>
-              have hcmem : c ∈ d.algebraicConstraints := hsrc entry.rowId c hsource
-              let c' := denseSparseSubstF dσ.fn c
-              cases hpick :
-                  denseMarkowitzPick (denseSparseSubstF dσ.fn c) entry.pivot occ prot with
-              | none =>
-                  simp only [denseMarkowitzLoop, hpop, hsource, hpick]
-                  exact ih _ _ hσs hσv
-              | some xt =>
-                  obtain ⟨x, t⟩ := xt
-                  have hcclosed : c'.Closed (· ∈ d.occ) := by
-                    apply denseSparseSubstF_closed dσ.fn c
-                    · intro z hz
-                      exact DenseConstraintSystem.mem_occ_of_constraint hcmem hz
-                    · exact hσv
-                  have hx : ∀ denv, d.satisfies bs denv → denv x = t.eval denv := by
-                    intro denv hsat
-                    apply denseMarkowitzPick_sound c' entry.pivot x t occ prot hpick denv
-                    rw [denseSparseSubstF_eval dσ.fn c denv (hσs denv hsat)]
-                    exact hsat.1 c hcmem
-                  have htocc : ∀ z ∈ t.terms.map Prod.fst, z ∈ d.occ := by
-                    intro z hz
-                    exact hcclosed z
-                      (denseMarkowitzPick_terms c' entry.pivot x t occ prot hpick z hz)
-                  have htouched : ∀ y s, (y, s) ∈
-                        (dσ.revDeps.getD x.index ∅).toList.filterMap (fun y =>
-                          (dσ.map[y]?).bind
-                            (fun s => if s.mentions x then some (y, s) else none)) →
-                      dσ.fn y = some s := by
-                    intro y s hys
-                    obtain ⟨_, _, hy'⟩ := List.mem_filterMap.1 hys
-                    obtain ⟨s', hs', hif⟩ := Option.bind_eq_some_iff.1 hy'
-                    by_cases hm : s'.mentions x
-                    · rw [if_pos hm] at hif
-                      simp only [Option.some.injEq, Prod.mk.injEq] at hif
-                      obtain ⟨rfl, rfl⟩ := hif
-                      exact hs'
-                    · rw [if_neg hm] at hif
-                      exact absurd hif (by simp)
-                  let pairs := denseMarkowitzAdoptPairs dσ x t
-                  let dσ' := dσ.insertAll pairs
-                  have hnexts : ∀ denv, d.satisfies bs denv → ∀ i u,
-                      dσ'.fn i = some u → denv i = u.eval denv := by
-                    intro denv hsat
-                    refine DenseSparseSolved.insertAll_preserves pairs dσ
-                      (hσs denv hsat) ?_
-                    intro pr hpr
-                    unfold denseMarkowitzAdoptPairs at hpr
-                    rcases List.mem_append.1 hpr with hin | hin
-                    · obtain ⟨⟨y, s⟩, hys, rfl⟩ := List.mem_map.1 hin
-                      have hmemys : dσ.fn y = some s := htouched y s hys
-                      have hy : denv y = s.eval denv := hσs denv hsat y s hmemys
-                      exact hy.trans
-                        (denseLinSubst_eval s x t denv (hx denv hsat)).symm
-                    · rw [List.mem_singleton] at hin
-                      subst hin
-                      exact hx denv hsat
-                  have hnextv : ∀ i u, dσ'.fn i = some u →
-                      ∀ z ∈ u.terms.map Prod.fst, z ∈ d.occ := by
-                    refine DenseSparseSolved.insertAll_preserves pairs dσ hσv ?_
-                    intro pr hpr
-                    unfold denseMarkowitzAdoptPairs at hpr
-                    rcases List.mem_append.1 hpr with hin | hin
-                    · obtain ⟨⟨y, s⟩, hys, rfl⟩ := List.mem_map.1 hin
-                      have hmemys : dσ.fn y = some s := htouched y s hys
-                      exact denseLinSubst_terms_closed s x t (· ∈ d.occ)
-                        (hσv y s hmemys) htocc
-                    · rw [List.mem_singleton] at hin
-                      subst hin
-                      exact htocc
-                  simp only [denseMarkowitzLoop, hpop, hsource, hpick]
-                  exact ih _ dσ' hnexts hnextv
+              simp only [gPick, hb, hs] at h
+              exact ih (y :: banned) x t h
+          | some q =>
+              simp only [gPick, hb, hs, Option.some.injEq] at h
+              rw [denseSparseSolveAtWith_eq] at hs
+              subst h
+              have hxy : x = y := denseSparseSolveAt_fst l y x t hs
+              subst hxy
+              exact hs
 
-theorem denseSparseMarkowitzSchedule_sound (bs : BusSemantics p)
-    (d : DenseConstraintSystem p) (occ : Std.HashMap VarId Nat)
-    (prot : Std.HashSet VarId) :
-    (∀ denv, d.satisfies bs denv → ∀ i t,
-        (denseMarkowitzSchedule d.algebraicConstraints occ prot).fn i = some t →
-        denv i = t.eval denv) ∧
-    (∀ i t, (denseMarkowitzSchedule d.algebraicConstraints occ prot).fn i = some t →
-        ∀ z ∈ t.terms.map Prod.fst, z ∈ d.occ) := by
-  apply denseSparseMarkowitzLoop_sound bs d occ prot d.algebraicConstraints.toArray
-  · intro i c hc
-    rw [List.getElem?_toArray] at hc
-    exact List.mem_of_getElem? hc
-  · intro _ _ _ _ h
-    exact absurd h (by simp [DenseSparseSolved.fn, DenseSparseSolved.empty])
-  · intro _ _ h
-    exact absurd h (by simp [DenseSparseSolved.fn, DenseSparseSolved.empty])
-
-theorem denseSparseSourceOrderSchedule_sound (bs : BusSemantics p)
-    (d : DenseConstraintSystem p) (occ : Std.HashMap VarId Nat)
-    (prot : Std.HashSet VarId) :
-    (∀ denv, d.satisfies bs denv → ∀ i t,
-        (denseSourceOrderSchedule d.algebraicConstraints occ prot).fn i = some t →
-        denv i = t.eval denv) ∧
-    (∀ i t, (denseSourceOrderSchedule d.algebraicConstraints occ prot).fn i = some t →
-        ∀ z ∈ t.terms.map Prod.fst, z ∈ d.occ) := by
-  have hfirst := denseSparseGaussLoop_sound bs d occ prot
-    d.algebraicConstraints DenseSparseSolved.empty
-    (fun _c hc => hc)
-    (fun _ _ _ _ hti =>
-      absurd hti (by simp [DenseSparseSolved.fn, DenseSparseSolved.empty]))
-    (fun _ _ hti =>
-      absurd hti (by simp [DenseSparseSolved.fn, DenseSparseSolved.empty]))
-  by_cases hempty :
-      (denseSparseGaussLoop occ prot d.algebraicConstraints
-        DenseSparseSolved.empty).map.isEmpty
-  · simpa [denseSourceOrderSchedule, hempty] using hfirst
-  · have hsecond := denseSparseGaussLoop_sound bs d occ prot
-      d.algebraicConstraints
-      (denseSparseGaussLoop occ prot d.algebraicConstraints DenseSparseSolved.empty)
-      (fun _c hc => hc) hfirst.1 hfirst.2
-    simpa [denseSourceOrderSchedule, hempty] using hsecond
-
-theorem DenseSparseSolved.materialize_lookup (dσ : DenseSparseSolved p)
-    (i : VarId) (e : DenseExpr p) (h : dσ.materialize.fn i = some e) :
-    ∃ row, dσ.fn i = some row ∧ e = row.toExpr := by
-  simp only [DenseSparseSolved.materialize, DenseSolved.fn] at h
-  let pairs := dσ.map.toList.map (fun xt => (xt.1, xt.2.toExpr))
-  have hpairs :
-      pairs.foldl (fun out xt => out.insert xt.1 xt.2)
-          (∅ : Std.HashMap VarId (DenseExpr p)) =
-        dσ.map.toList.foldl (fun out xt => out.insert xt.1 xt.2.toExpr) ∅ := by
-    exact List.foldl_map
-  rw [← hpairs] at h
-  apply foldl_insert_getElem pairs
-    (∅ : Std.HashMap VarId (DenseExpr p))
-    (Q := fun j out => ∃ row, dσ.fn j = some row ∧ out = row.toExpr)
-  · intro j out hj
-    exact absurd hj (by simp)
-  · intro pr hpr
-    obtain ⟨xt, hxt, rfl⟩ := List.mem_map.1 hpr
-    refine ⟨xt.2, ?_, rfl⟩
-    exact Std.HashMap.mem_toList_iff_getElem?_eq_some.1 hxt
-  · exact h
-
-theorem DenseSparseSolved.materialize_sound (bs : BusSemantics p)
-    (d : DenseConstraintSystem p) (dσ : DenseSparseSolved p)
-    (hs : ∀ denv, d.satisfies bs denv → ∀ i t,
-      dσ.fn i = some t → denv i = t.eval denv)
-    (hv : ∀ i t, dσ.fn i = some t →
-      ∀ z ∈ t.terms.map Prod.fst, z ∈ d.occ) :
-    (∀ denv, d.satisfies bs denv → ∀ i e,
-        dσ.materialize.fn i = some e → denv i = e.eval denv) ∧
-    (∀ i e, dσ.materialize.fn i = some e → ∀ z ∈ e.vars, z ∈ d.occ) := by
-  constructor
-  · intro denv hsat i e he
-    obtain ⟨row, hrow, rfl⟩ := dσ.materialize_lookup i e he
-    rw [DenseLinExpr.toExpr_eval]
-    exact hs denv hsat i row hrow
-  · intro i e he z hz
-    obtain ⟨row, hrow, rfl⟩ := dσ.materialize_lookup i e he
-    exact hv i row hrow z (DenseLinExpr.toExpr_vars row z hz)
-
-theorem denseGaussSchedule_sound (bs : BusSemantics p) (d : DenseConstraintSystem p)
-    (occ : Std.HashMap VarId Nat) (prot : Std.HashSet VarId) :
-    (∀ denv, d.satisfies bs denv → ∀ i t,
-        (denseGaussSchedule d.algebraicConstraints occ prot).fn i = some t →
-        denv i = t.eval denv) ∧
-    (∀ i t, (denseGaussSchedule d.algebraicConstraints occ prot).fn i = some t →
-        ∀ z ∈ t.vars, z ∈ d.occ) := by
-  unfold denseGaussSchedule
+theorem gTake_inv (ops : DenseZModOps p) (bs : BusSemantics p) (d : DenseConstraintSystem p)
+    (occ : Array Nat) (prot : Array Bool) (S : GSt p) (h : GInv bs d S) (i : Nat)
+    (l : DenseLinExpr p) (hl : GEnt bs d l ∧ GCl d l) :
+    GInv bs d (gTake ops occ prot S i l) := by
+  rw [gTake]
   split
-  · exact DenseSparseSolved.materialize_sound bs d _
-      (denseSparseSourceOrderSchedule_sound bs d occ prot).1
-      (denseSparseSourceOrderSchedule_sound bs d occ prot).2
-  · exact DenseSparseSolved.materialize_sound bs d _
-      (denseSparseMarkowitzSchedule_sound bs d occ prot).1
-      (denseSparseMarkowitzSchedule_sound bs d occ prot).2
+  · exact h.setStatus i 2
+  · cases hp : gPick ops occ prot l (l.terms.length + 1) [] with
+    | none => simpa using h.setPending i l hl
+    | some q =>
+        obtain ⟨x, t⟩ := q
+        dsimp only
+        have hsolve := gPick_solveAt ops occ prot l _ [] x t hp
+        refine gAdopt_inv ops bs d S h i x t ⟨?_, ?_⟩
+        · intro denv hsat
+          exact denseSparseSolveAt_sound l x x t hsolve denv (hl.1 denv hsat)
+        · intro z hz
+          exact hl.2 z (denseSparseSolveAt_terms l x x t hsolve z hz)
 
 
-/-! ## The pass's correctness -/
+/-! ## The schedulers
 
-/-- The scheduled solution map is entailed and occurrence-closed. -/
-theorem denseGaussElim_loop_invariant (bs : BusSemantics p) (d : DenseConstraintSystem p) :
-    (∀ denv, d.satisfies bs denv → ∀ i t,
-        (denseGaussSchedule d.algebraicConstraints
-          (denseOccurrenceMap d) (denseProtectedVars d bs)).fn i = some t →
-          denv i = t.eval denv) ∧
-    (∀ i t, (denseGaussSchedule d.algebraicConstraints
-        (denseOccurrenceMap d) (denseProtectedVars d bs)).fn i = some t →
-        ∀ z ∈ t.vars, z ∈ d.occ) := by
-  exact denseGaussSchedule_sound bs d (denseOccurrenceMap d) (denseProtectedVars d bs)
+Both are plain recursions over the state, and the invariant is preserved by every step regardless of
+the order they pick — which is exactly why the buckets, the watch lists and `occ`/`prot` need no
+correctness argument. -/
 
-/-- `denseGaussElim` preserves coverage: on the non-trivial branch it substitutes an
-    occurrence-closed solution map, whose solutions are covered because their variables occur in a
-    covered system. -/
-theorem denseGaussElim_covered (reg : VarRegistry) (bs : BusSemantics p)
-    (d : DenseConstraintSystem p) (hcov : d.CoveredBy reg) :
-    (denseGaussElim bs d).CoveredBy reg := by
-  rw [denseGaussElim_eq]
+theorem gVisit_inv (ops : DenseZModOps p) (bs : BusSemantics p) (d : DenseConstraintSystem p)
+    (occ : Array Nat) (prot : Array Bool) (cs : Array (DenseExpr p))
+    (hcs : ∀ (j : Nat) (c : DenseExpr p), cs[j]? = some c → c ∈ d.algebraicConstraints)
+    (S : GSt p) (h : GInv bs d S) (i : Nat) : GInv bs d (gVisit ops occ prot cs S i) := by
+  rw [gVisit]
+  split
+  · cases hr : S.rows[i]? with
+    | none => simpa using h
+    | some r =>
+        dsimp only
+        exact gTake_inv ops bs d occ prot S h i _ (gDevelop_ok ops bs d S h r (h.rows i r hr))
+  · split
+    · cases hc : cs[i]? with
+      | none => simpa using h.clearWoken i
+      | some c =>
+          dsimp only
+          have hcm : c ∈ d.algebraicConstraints := hcs i c hc
+          have h' : GInv bs d (S.clearWoken i) := h.clearWoken i
+          cases hg : gRoot ops (S.clearWoken i).sol c with
+          | blocked ws => simpa using h'.addWatch i ws
+          | row l =>
+              dsimp only
+              refine gTake_inv ops bs d occ prot _ h' i l ⟨?_, ?_⟩
+              · intro denv hsat
+                have hσ : ∀ (j : VarId) (t : DenseLinExpr p),
+                    gSolFn (S.clearWoken i).sol j = some t → denv j = t.eval denv :=
+                  fun j t hj => (h'.sol j t hj).1 denv hsat
+                rw [← gRoot_eval ops _ denv hσ c l hg]
+                exact hsat.1 c hcm
+              · refine gRoot_terms ops _ (· ∈ d.occ)
+                  (fun j t hj => (h'.sol j t hj).2) c l hg ?_
+                intro z hz
+                exact DenseConstraintSystem.mem_occ_of_constraint hcm hz
+    · exact h
+
+theorem gBuildGo_inv (ops : DenseZModOps p) (bs : BusSemantics p) (d : DenseConstraintSystem p)
+    (cs : Array (DenseExpr p))
+    (hcs : ∀ (j : Nat) (c : DenseExpr p), cs[j]? = some c → c ∈ d.algebraicConstraints) :
+    ∀ (k : Nat) (S : GSt p), GInv bs d S → GInv bs d (gBuildGo ops cs k S) := by
+  intro k
+  induction k with
+  | zero => intro S h; exact h
+  | succ k ih =>
+      intro S h
+      rw [gBuildGo]
+      refine ih _ ?_
+      cases hc : cs[cs.size - (k + 1)]? with
+      | none => simpa using h
+      | some c =>
+          dsimp only
+          have hcm : c ∈ d.algebraicConstraints := hcs _ c hc
+          cases hg : gRoot ops S.sol c with
+          | blocked ws => simpa using h.addWatch _ ws
+          | row l =>
+              have hl : GEnt bs d l ∧ GCl d l := by
+                refine ⟨?_, ?_⟩
+                · intro denv hsat
+                  have hσ : ∀ (j : VarId) (t : DenseLinExpr p),
+                      gSolFn S.sol j = some t → denv j = t.eval denv :=
+                    fun j t hj => (h.sol j t hj).1 denv hsat
+                  rw [← gRoot_eval ops _ denv hσ c l hg]
+                  exact hsat.1 c hcm
+                · refine gRoot_terms ops _ (· ∈ d.occ) (fun j t hj => (h.sol j t hj).2) c l hg ?_
+                  intro z hz
+                  exact DenseConstraintSystem.mem_occ_of_constraint hcm hz
+              dsimp only
+              split
+              · exact h.setStatus _ 2
+              · exact h.setPending _ l hl
+
+theorem gSweepGo_inv (ops : DenseZModOps p) (bs : BusSemantics p) (d : DenseConstraintSystem p)
+    (occ : Array Nat) (prot : Array Bool) (cs : Array (DenseExpr p))
+    (hcs : ∀ (j : Nat) (c : DenseExpr p), cs[j]? = some c → c ∈ d.algebraicConstraints) :
+    ∀ (k : Nat) (S : GSt p), GInv bs d S → GInv bs d (gSweepGo ops occ prot cs k S) := by
+  intro k
+  induction k with
+  | zero => intro S h; exact h
+  | succ k ih =>
+      intro S h
+      rw [gSweepGo]
+      exact ih _ (gVisit_inv ops bs d occ prot cs hcs S h _)
+
+theorem gDrainAt_inv (ops : DenseZModOps p) (bs : BusSemantics p) (d : DenseConstraintSystem p)
+    (occ : Array Nat) (prot : Array Bool) (S : GSt p) (q : GQueue) (prog : Bool) (b i : Nat)
+    (h : GInv bs d S) : GInv bs d (gDrainAt ops occ prot S q prog b i).1 := by
+  rw [gDrainAt]
+  split
+  · exact h
+  · cases hr : S.rows[i]? with
+    | none => simpa using h
+    | some r =>
+        dsimp only
+        have hl := gDevelop_ok ops bs d S h r (h.rows i r hr)
+        split
+        · exact h.setStatus i 2
+        · split
+          · exact h.setRow i _ hl
+          · exact gTake_inv ops bs d occ prot S h i _ hl
+
+theorem gDrainStep_inv (ops : DenseZModOps p) (bs : BusSemantics p) (d : DenseConstraintSystem p)
+    (occ : Array Nat) (prot : Array Bool) (S : GSt p) (q : GQueue) (prog : Bool)
+    (h : GInv bs d S) : GInv bs d (gDrainStep ops occ prot S q prog).1 := by
+  rw [gDrainStep]
+  split
+  · exact h
+  · split
+    · exact h
+    · exact gDrainAt_inv ops bs d occ prot S _ prog _ _ h
+
+theorem gDrainGo_inv (ops : DenseZModOps p) (bs : BusSemantics p) (d : DenseConstraintSystem p)
+    (occ : Array Nat) (prot : Array Bool) :
+    ∀ (fuel : Nat) (S : GSt p) (q : GQueue) (prog : Bool), GInv bs d S →
+      GInv bs d (gDrainGo ops occ prot fuel S q prog).1 := by
+  intro fuel
+  induction fuel with
+  | zero => intro S q prog h; exact h
+  | succ fuel ih =>
+      intro S q prog h
+      rw [gDrainGo]
+      cases hb : q.next (gMaxBucket + 1) with
+      | none => simpa using h
+      | some b =>
+          dsimp only
+          have hs := gDrainStep_inv ops bs d occ prot S q prog h
+          cases hst : gDrainStep ops occ prot S q prog with
+          | mk S1 rest =>
+              cases rest with
+              | mk q1 prog1 =>
+                  rw [hst] at hs
+                  dsimp only
+                  exact ih S1 q1 prog1 hs
+
+theorem gWakeGo_inv (ops : DenseZModOps p) (bs : BusSemantics p) (d : DenseConstraintSystem p)
+    (cs : Array (DenseExpr p))
+    (hcs : ∀ (j : Nat) (c : DenseExpr p), cs[j]? = some c → c ∈ d.algebraicConstraints) :
+    ∀ (k : Nat) (S : GSt p) (q : GQueue) (prog : Bool), GInv bs d S →
+      GInv bs d (gWakeGo ops cs k S q prog).1 := by
+  intro k
+  induction k with
+  | zero => intro S q prog h; exact h
+  | succ k ih =>
+      intro S q prog h
+      rw [gWakeGo]
+      split
+      · cases hc : cs[cs.size - (k + 1)]? with
+        | none => simpa using ih _ _ _ (h.clearWoken _)
+        | some c =>
+            dsimp only
+            have hcm : c ∈ d.algebraicConstraints := hcs _ c hc
+            have h' : GInv bs d (S.clearWoken (cs.size - (k + 1))) := h.clearWoken _
+            cases hg : gRoot ops (S.clearWoken (cs.size - (k + 1))).sol c with
+            | blocked ws => simpa using ih _ _ _ (h'.addWatch _ ws)
+            | row l =>
+                have hl : GEnt bs d l ∧ GCl d l := by
+                  refine ⟨?_, ?_⟩
+                  · intro denv hsat
+                    have hσ : ∀ (j : VarId) (t : DenseLinExpr p),
+                        gSolFn (S.clearWoken (cs.size - (k + 1))).sol j = some t →
+                        denv j = t.eval denv :=
+                      fun j t hj => (h'.sol j t hj).1 denv hsat
+                    rw [← gRoot_eval ops _ denv hσ c l hg]
+                    exact hsat.1 c hcm
+                  · refine gRoot_terms ops _ (· ∈ d.occ) (fun j t hj => (h'.sol j t hj).2) c l hg ?_
+                    intro z hz
+                    exact DenseConstraintSystem.mem_occ_of_constraint hcm hz
+                dsimp only
+                split
+                · exact ih _ _ _ (h'.setStatus _ 2)
+                · exact ih _ _ _ (h'.setPending _ l hl)
+      · exact ih _ _ _ h
+
+theorem gRoundsGo_inv (ops : DenseZModOps p) (bs : BusSemantics p) (d : DenseConstraintSystem p)
+    (occ : Array Nat) (prot : Array Bool) (cs : Array (DenseExpr p))
+    (hcs : ∀ (j : Nat) (c : DenseExpr p), cs[j]? = some c → c ∈ d.algebraicConstraints) :
+    ∀ (round : Nat) (S : GSt p) (q : GQueue), GInv bs d S →
+      GInv bs d (gRoundsGo ops occ prot cs round S q) := by
+  intro round
+  induction round with
+  | zero => intro S q h; exact h
+  | succ round ih =>
+      intro S q h
+      rw [gRoundsGo]
+      have hd := gDrainGo_inv ops bs d occ prot ((gMaxBucket + 2) * cs.size + 8) S q false h
+      cases hdd : gDrainGo ops occ prot ((gMaxBucket + 2) * cs.size + 8) S q false with
+      | mk S1 rest1 =>
+          cases rest1 with
+          | mk q1 prog1 =>
+              rw [hdd] at hd
+              cases hww : gWakeGo ops cs cs.size S1 q1 false with
+              | mk S2 rest2 =>
+                  cases rest2 with
+                  | mk q2 prog2 =>
+                      have hw := gWakeGo_inv ops bs d cs hcs cs.size S1 q1 false hd
+                      rw [hww] at hw
+                      simp only [hww]
+                      split
+                      · exact ih _ _ hw
+                      · exact hw
+
+theorem GSt_empty_inv (bs : BusSemantics p) (d : DenseConstraintSystem p) (nc nv : Nat) :
+    GInv bs d (GSt.empty nc nv : GSt p) := by
+  constructor
+  · intro i l hi
+    rw [GSt.empty] at hi
+    rw [gRows_replicate nc _ i l hi]
+    refine ⟨?_, GCl_nil d _⟩
+    intro denv _
+    simp [DenseLinExpr.eval, zmodZeroP_eq]
+  · intro x t hx
+    rw [GSt.empty] at hx
+    unfold gSolFn at hx
+    by_cases hlt : x.index < nv
+    · rw [show (Array.replicate nv (none : Option (DenseLinExpr p)))[x.index]? = some none by
+        simp [hlt]] at hx
+      exact absurd hx (by simp)
+    · rw [show (Array.replicate nv (none : Option (DenseLinExpr p)))[x.index]? = none by
+        simp [hlt]] at hx
+      exact absurd hx (by simp)
+
+/-! ## The solved map -/
+
+theorem gSolveSystem_inv (bs : BusSemantics p) (d : DenseConstraintSystem p) :
+    GInv bs d (gSolveSystem bs d) := by
+  have hcs : ∀ (j : Nat) (c : DenseExpr p),
+      d.algebraicConstraints.toArray[j]? = some c → c ∈ d.algebraicConstraints := by
+    intro j c hj
+    rw [List.getElem?_toArray] at hj
+    exact List.mem_of_getElem? hj
+  rw [gSolveSystem]
+  cases hp : gPrepare bs d with
+  | mk occ prot =>
+      dsimp only
+      split
+      · rw [gRun]
+        exact gSweepGo_inv _ bs d occ prot _ hcs _ _
+          (gSweepGo_inv _ bs d occ prot _ hcs _ _
+            (gBuildGo_inv _ bs d _ hcs _ _ (GSt_empty_inv bs d _ _)))
+      · rw [gRunFill]
+        exact gRoundsGo_inv _ bs d occ prot _ hcs _ _ _
+          (gBuildGo_inv _ bs d _ hcs _ _ (GSt_empty_inv bs d _ _))
+
+theorem gOutFn_set (out : Array (Option (DenseExpr p))) (i : Nat) (v : Option (DenseExpr p))
+    (x : VarId) :
+    (i = x.index ∧ gOutFn (out.setIfInBounds i v) x = v) ∨
+      gOutFn (out.setIfInBounds i v) x = gOutFn out x := by
+  unfold gOutFn
+  by_cases hx : i = x.index
+  · subst hx
+    by_cases hi : x.index < out.size
+    · exact Or.inl ⟨rfl, by simp [hi]⟩
+    · exact Or.inr (by
+        simp [hi])
+  · right; simp [hx]
+
+/-- Every entry the output array carries is a stored solution's expression. -/
+theorem gOutGo_spec (S : GSt p) :
+    ∀ (k : Nat) (out : Array (Option (DenseExpr p))),
+      (∀ (i : VarId) (e : DenseExpr p), gOutFn out i = some e →
+        ∃ l, gSolFn S.sol i = some l ∧ e = l.toExpr) →
+      ∀ (i : VarId) (e : DenseExpr p), gOutFn (gOutGo S k out) i = some e →
+        ∃ l, gSolFn S.sol i = some l ∧ e = l.toExpr := by
+  intro k
+  induction k with
+  | zero => intro out hout i e h; exact hout i e h
+  | succ k ih =>
+      intro out hout i e h
+      rw [gOutGo] at h
+      refine ih _ ?_ i e h
+      cases hx : S.order[S.order.size - (k + 1)]? with
+      | none => simpa [hx] using hout
+      | some x =>
+          dsimp only
+          cases hs : gSolFn S.sol x with
+          | none => simpa using hout
+          | some l =>
+              dsimp only
+              intro j e' hj
+              rcases gOutFn_set out x.index (some l.toExpr) j with ⟨hix, hset⟩ | hset
+              · rw [hset] at hj
+                have he : l.toExpr = e' := Option.some.inj hj
+                have hxj : x = j := by cases x; cases j; simp_all
+                subst hxj; subst he
+                exact ⟨l, hs, rfl⟩
+              · rw [hset] at hj
+                exact hout j e' hj
+
+theorem gOutOf_spec (S : GSt p) (i : VarId) (e : DenseExpr p) (h : gOutFn (gOutOf S) i = some e) :
+    ∃ l, gSolFn S.sol i = some l ∧ e = l.toExpr := by
+  refine gOutGo_spec S S.order.size _ ?_ i e h
+  intro j e' hj
+  unfold gOutFn at hj
+  by_cases hlt : j.index < S.sol.size
+  · rw [show (Array.replicate S.sol.size (none : Option (DenseExpr p)))[j.index]? = some none by
+      simp [hlt]] at hj
+    exact absurd hj (by simp)
+  · rw [show (Array.replicate S.sol.size (none : Option (DenseExpr p)))[j.index]? = none by
+      simp [hlt]] at hj
+    exact absurd hj (by simp)
+
+/-- The two facts the spec asks of a substitution pass: the map is entailed and closed. -/
+theorem denseGaussElimF_map (bs : BusSemantics p) (d : DenseConstraintSystem p) :
+    (∀ denv, d.satisfies bs denv → ∀ (i : VarId) (e : DenseExpr p),
+        gOutFn (gOutOf (gSolveSystem bs d)) i = some e → denv i = e.eval denv) ∧
+    (∀ (i : VarId) (e : DenseExpr p), gOutFn (gOutOf (gSolveSystem bs d)) i = some e →
+        ∀ z ∈ e.vars, z ∈ d.occ) := by
+  have hinv := gSolveSystem_inv bs d
+  refine ⟨?_, ?_⟩
+  · intro denv hsat i e he
+    obtain ⟨l, hl, rfl⟩ := gOutOf_spec _ i e he
+    rw [DenseLinExpr.toExpr_eval]
+    exact (hinv.sol i l hl).1 denv hsat
+  · intro i e he z hz
+    obtain ⟨l, hl, rfl⟩ := gOutOf_spec _ i e he
+    exact (hinv.sol i l hl).2 z (DenseLinExpr.toExpr_vars l z hz)
+
+/-! ## The pass -/
+
+theorem denseGaussElimF_eq (bs : BusSemantics p) (d : DenseConstraintSystem p) :
+    denseGaussElimF bs d =
+      if (gSolveSystem bs d).order.isEmpty then d
+      else d.substF (gOutFn (gOutOf (gSolveSystem bs d))) := rfl
+
+theorem denseGaussElimF_covered (reg : VarRegistry) (bs : BusSemantics p)
+    (d : DenseConstraintSystem p) (hcov : d.CoveredBy reg) : (denseGaussElimF bs d).CoveredBy reg := by
+  rw [denseGaussElimF_eq]
   split_ifs with hempty
   · exact hcov
   · refine DenseConstraintSystem.substF_covered hcov ?_
     intro i _ t hti z hz
-    exact DenseConstraintSystem.occ_valid hcov z
-      ((denseGaussElim_loop_invariant bs d).2 i t hti z hz)
+    exact DenseConstraintSystem.occ_valid hcov z ((denseGaussElimF_map bs d).2 i t hti z hz)
 
-/-- **Correctness of `denseGaussElim`.** The empty-map branch is the identity (`refl`); the
-    substitution branch is `substF_denseCorrect`, fed the entailment and occurrence-closure of the
-    final solution map. -/
-theorem denseGaussElim_correct (reg : VarRegistry) (bs : BusSemantics p)
-    (d : DenseConstraintSystem p) :
-    DensePassCorrect reg.isInput d (denseGaussElim bs d) [] bs := by
-  have hinv := denseGaussElim_loop_invariant bs d
-  rw [denseGaussElim_eq]
+/-- **Correctness of `denseGaussElimF`.** The empty-map branch is the identity; the substitution
+    branch is `substF_denseCorrect`, fed the entailment and occurrence closure of the solved map. -/
+theorem denseGaussElimF_correct (reg : VarRegistry) (bs : BusSemantics p)
+    (d : DenseConstraintSystem p) : DensePassCorrect reg.isInput d (denseGaussElimF bs d) [] bs := by
+  have hmap := denseGaussElimF_map bs d
+  rw [denseGaussElimF_eq]
   split_ifs with hempty
   · exact DensePassCorrect.refl reg.isInput d bs
   · exact DenseConstraintSystem.substF_denseCorrect d _ bs reg.isInput
-      (fun denv hsat i t hti => hinv.1 denv hsat i t hti)
-      (fun i t hti z hz => hinv.2 i t hti z hz)
+      (fun denv hsat i t hti => hmap.1 denv hsat i t hti)
+      (fun i t hti z hz => hmap.2 i t hti z hz)
 
-/-- The wired dense Gauss-elimination pass (transform `denseGaussElim`, `Gauss.lean`). -/
-def denseGaussElimPass : DenseVerifiedPassW p :=
+/-- The wired dense Gauss-elimination pass (transform `denseGaussElimF`, `Gauss.lean`). -/
+def denseGaussElimFPass : DenseVerifiedPassW p :=
   DenseVerifiedPassW.of
-    (fun bs _ d => denseGaussElim bs d)
+    (fun bs _ d => denseGaussElimF bs d)
     (fun _ _ _ => [])
-    (fun reg bs _ d hcov => denseGaussElim_covered reg bs d hcov)
+    (fun reg bs _ d hcov => denseGaussElimF_covered reg bs d hcov)
     (fun _ _ _ _ _ => by intro x hx; simp at hx)
-    (fun reg bs _ d _ => denseGaussElim_correct reg bs d)
+    (fun reg bs _ d _ => denseGaussElimF_correct reg bs d)
 
 end ApcOptimizer.Dense

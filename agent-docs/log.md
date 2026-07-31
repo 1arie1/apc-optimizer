@@ -5700,3 +5700,87 @@ must hash everything the test behind it compares, unless that test is semantic r
 syntactic.**
 **Worked: yes (rootPairUnify 0.217x on its worst case, 0.925x end-to-end, output byte-identical,
 zero proof work).**
+
+### 160. Runtime: Gauss rebuilt as a watch-driven sparse engine (0.33–0.46x on the pass, sha256 total 0.87x)
+
+Full redesign of the Gauss pass (`gaussRedesign.md` has the design, the attribution and the rejected
+alternatives). The old pass re-derived every constraint's reduced form **from its source expression**
+at every visit, and above the 8192-row gate additionally maintained a *substituted expression tree*
+for every nonlinear row, refreshing it once per incident pivot. On sha256 `apc_001` (the worst case,
+gauss 8.8 s of 93 s) that was: 13 % of the pass rebuilding trees for rows that, in cycles 1–2,
+**never once turned affine** (`sigma = naff` exactly there); 28 % in the per-row build (`fromExpr`
+linearizes, and on failure runs a whole `DenseExpr.normalize` rebuild and linearizes *again*, plus
+`uniqueVars` and a per-row `HashMap` — for a 1.2-term row); 13.5 % in the heap; 8 % keeping σ
+back-substituted through the one `denseLinSubst` call site that the `@[csimp]` twin never reached
+(`Gauss.c`: `ZMod.commRing` + three projections rebuilt at the head of a `goto _start` loop).
+
+WHAT REPLACED IT (`Gauss.lean`; correctness in `Proofs/Gauss.lean`):
+1. **A three-valued fail-fast walk** (`gEval`): each constraint is walked once into a constant, an
+   affine row, or `blocked` carrying the variables to watch. Both `add` and `mul` propagate blocking
+   unconditionally, so the walk **stops at the first surviving variable×variable product** and
+   allocates nothing on that path. The verdict is exactly the old `denseSparseSubstF`'s: a product is
+   affine iff one side's *merged substituted* form is constant.
+2. **Two-watched-literal wake-up**: a blocked constraint is re-walked only when a variable of its
+   blocking product's substituted factors is solved — the only way that product can collapse. Untrusted:
+   a missed wake-up loses a pivot, never soundness.
+3. **Rows developed on arrival, not re-derived**: a pending row is substituted against σ when the
+   scheduler reaches it (one pass, one merge — `denseLinSubstF`), never re-walked from the source tree.
+4. **A lazy bucket queue** replaces the Markowitz heap above the gate: shortest row first, a row that
+   outgrew its bucket is re-filed instead of pivoted, FIFO within a bucket. No eager key maintenance,
+   no generations, no rekey fan-out.
+5. **Arrays for every per-variable index** (`sol`, `solRev`, `watch`, `occ`, `prot`, `status`) and a
+   one-scan pivot selection: on a merged row `denseGaussScore` is `(occ[v]-1)·|terms|`, so the choice
+   is min-occ with `±1` preferred — no per-row `HashMap`, no descriptor lists, no `argmin`.
+
+NUMBERS (this 20-core box, serial, interleaved, 3 reps; sha256 2 alternating runs):
+**sha256 `apc_001` gauss 8 816 → 3 734 ms (0.42x), run total 92.8 → 81.1 s (0.87x)**; wasm-eth
+`apc_006` 489 → 163 (0.33x, total 0.91x); wasm-eth `apc_012` 920 → 311 (0.34x, total 0.94x); keccak
+`apc_001` 677 → 255 (0.38x, total 0.93x); openvm-eth `apc_037` 171 → 79 (0.46x, total 0.94x). The
+end-to-end win on sha256 is twice gauss's own, because the new basis leaves cycle 1 with 72 324
+constraints instead of 87 000 (`tupleRange` 0.44x, `subsumedRange` 0.31x, `dedup` 0.78x).
+
+EFFECTIVENESS: **sha256 `apc_001` −3 vars and −931 bus interactions** (constraints equal); every other
+case identical except wasm-eth `apc_006`, which ends **+1 bus** — see the note below. Verified per case
+over openvm-eth (100), wasm-eth (100), OpenVM keccak, SP1 rsp (100) and SP1 keccak.
+
+THREE THINGS THE MEASUREMENTS OVERTURNED, each of which would have been a wrong design:
+- **The second sweep is not dead work.** It looks provably fruitless (over a prime field every
+  non-empty affine row pivots on first visit, so only nonlinear-source constraints can fire later) —
+  but deleting it measured openvm-eth `apc_037` gauss **170 → 317 ms** with changed output: 35 % of
+  that case's pivots come from the second sweep, all from nonlinear→affine transitions.
+- **Source order alone is not viable above the gate.** The first prototype used it everywhere and was
+  **1.88x slower** on wasm-eth `apc_012`, 98 % of the pass in the like-term merge: eagerly maintaining
+  a reduced σ in source order inflates a stored solution to **586 terms** before it cancels back to 7,
+  where the Markowitz baseline never builds a row above 32 in that whole run. Fill-aware selection is
+  load-bearing; being *Markowitz* is not.
+- **The 8192 gate must stay.** Removing it (bucket queue at every size) is runtime-neutral on OpenVM
+  (corpus aggregate 1.006x) and slightly better there — and regresses **8 of 100 SP1 `rsp` cases by
+  +88 variables**, the primary axis. That is entry 134's warning, measured: below the gate the
+  source-order basis is what the later syntactic-cleanup passes want.
+
+THE ONE REGRESSION, PINNED DOWN: wasm-eth `apc_006` +1 bus interaction. Digest-comparing the solution
+map invocation by invocation shows the new source-order path is **faithful variable-for-variable** (all
+ten invocations identical when both engines are forced to source order), and the **baseline itself**,
+forced to source order, also ends at 1359. So the +1 is the price of not reproducing Markowitz's exact
+key above the gate — the same substitution that buys sha256 its −931 bus. Reproducing Markowitz exactly
+would need the per-variable active-degree index back (the scheduler is only 7.4 % of the new pass, so
+it is affordable) but would give up the sha256 gain.
+
+PROOF SHAPE (why this cost ~1 000 lines and not 3 000): the pass's obligations are only *entailment*
+and *occurrence closure* of the final map, so the scheduler, buckets, watch lists and `occ`/`prot`
+appear in no theorem. The invariant is two lines — pending rows are entailed and closed, stored
+solutions are entailed assignments and closed — preserved by `gAdopt` alone, and every step of that is
+an affine-layer lemma the old pass already had (`denseSparseSolveAt_sound`, `denseLinSubst_eval`,
+`denseLinSubstF_terms_closed`, …). Rows stayed `DenseLinExpr` for exactly this reason. Net: **−1 553
+lines deleted** (all of `DenseGaussReduced`, the fused walk, the Markowitz scheduler and their ~450
+lines of proofs) against +1 540 added, and `Gauss.lean` shrinks 958 → 200 lines.
+
+WHAT THIS COST IN SPEED, AND WHERE THE NEXT WIN IS: an array-backed row type measured **0.27x** on
+sha256 against the list-backed one's 0.42x, but every array primitive would then need its own
+`toList`-correspondence proof. Two `Array`-hygiene traps are worth remembering, both measured on
+keccak: `{ S with f := g S.f }` leaves `S.f` shared and copies the whole array (7x on the pass), and
+so does projecting `.1`/`.2` out of a returned tuple — destructure instead. Residual on sha256 (LBR,
+gauss-gated): output `substF` 28.5 %, the constraint walk 23.8 %, the `occ`/`prot` prologue 21.9 %,
+scheduler 7.4 %, merge 6.6 %. The elimination algebra is ~13 % of the pass; the rest is three
+whole-system traversals, so the next levers are an unchanged-node-preserving `substF` twin (helps four
+other passes) and fusing the prologue into the build walk.

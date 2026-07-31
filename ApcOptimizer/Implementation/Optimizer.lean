@@ -62,7 +62,7 @@ def cleanupPasses (b : DegreeBound) : List (String × DenseVerifiedPassW p) :=
   [ ("degenRange", denseDegenRangePass pw),
     ("xorEqExtract", denseXorEqExtractPass),
     ("carryBranch", denseCarryBranchPass pw),
-    ("gauss", denseGaussElimPass),
+    ("gauss", denseGaussElimFPass),
     ("normalize1", denseNormalizePass),
     ("constFold1", denseConstantFoldPass),
     ("domainBatch", denseDomainBatchPassV pw),

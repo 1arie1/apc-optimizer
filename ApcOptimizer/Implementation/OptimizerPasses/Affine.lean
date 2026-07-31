@@ -265,56 +265,6 @@ def DenseLinExpr.toExpr (l : DenseLinExpr p) : DenseExpr p :=
 `densePm1PivotsOf`/`denseUnitPivotsOf`, which compare variables (filter on `t.1 = x`) and are
 consumed by the Gauss proof (`Proofs/Gauss.lean`). -/
 
-/-! ## `denseLinearize` introduces no new variable
-
-Proved locally here (Normalize.lean sits downstream); consumed by `Proofs/Gauss.lean`. -/
-
-/-- Every term variable of `denseLinearize e` occurs in `e`. -/
-theorem denseLinearize_mem_vars (e : DenseExpr p) (l : DenseLinExpr p)
-    (h : denseLinearize e = some l) : ∀ i ∈ l.terms.map Prod.fst, i ∈ e.vars := by
-  induction e generalizing l with
-  | const n => simp only [denseLinearize, Option.some.injEq] at h; subst h; simp
-  | var y =>
-      simp only [denseLinearize, Option.some.injEq] at h; subst h
-      intro x hx; simpa [DenseExpr.vars] using hx
-  | add a b iha ihb =>
-      cases hla : denseLinearize a with
-      | none => simp [denseLinearize, hla] at h
-      | some la => cases hlb : denseLinearize b with
-        | none => simp [denseLinearize, hla, hlb] at h
-        | some lb =>
-          simp only [denseLinearize, hla, hlb, Option.some.injEq] at h
-          subst h
-          intro x hx
-          simp only [DenseLinExpr.add, List.map_append, List.mem_append] at hx
-          simp only [DenseExpr.vars, List.mem_append]
-          exact hx.imp (iha la hla x) (ihb lb hlb x)
-  | mul a b iha ihb =>
-      cases hla : denseLinearize a with
-      | none => simp [denseLinearize, hla] at h
-      | some la => cases hlb : denseLinearize b with
-        | none => simp [denseLinearize, hla, hlb] at h
-        | some lb =>
-          by_cases h1 : la.terms.isEmpty = true
-          · simp only [denseLinearize, hla, hlb, if_pos h1, Option.some.injEq] at h
-            subst h
-            intro x hx
-            have hst : (lb.scale la.const).terms.map Prod.fst = lb.terms.map Prod.fst := by
-              simp [DenseLinExpr.scale, List.map_map, Function.comp_def]
-            rw [hst] at hx
-            exact List.mem_append.2 (Or.inr (ihb lb hlb x hx))
-          · by_cases h2 : lb.terms.isEmpty = true
-            · simp only [denseLinearize, hla, hlb, if_neg h1, if_pos h2, Option.some.injEq] at h
-              subst h
-              intro x hx
-              have hst : (la.scale lb.const).terms.map Prod.fst = la.terms.map Prod.fst := by
-                simp [DenseLinExpr.scale, List.map_map, Function.comp_def]
-              rw [hst] at hx
-              exact List.mem_append.2 (Or.inl (iha la hla x hx))
-            · simp only [denseLinearize, hla, hlb] at h
-              rw [if_neg h1, if_neg h2] at h
-              exact absurd h (by simp)
-
 /-! ## Coefficient / remainder of a dense linear form -/
 
 /-- Total coefficient of `x` in a dense linear form. -/

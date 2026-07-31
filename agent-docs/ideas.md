@@ -581,56 +581,42 @@ the allocation traffic of their results. The `.fallback` row is **done (entry 15
      Preflight's `T.doms xs` is 6.8 % on sha256, all `Std.HashMap VarId` probes: the R12 array-indexed
      prototype belongs here first.
 
-### gauss residual after entry 158 (arrays for the scheduler indexes)  ·  *runtime, sha256*
+### gauss residual after entry 160 (the sparse engine)  ·  *runtime, sha256*
 
-Measured on sha256 `apc_001` (gauss 11.3 s of 102.0 s on CI, 8 676 ms of 99 256 on this container —
-still the top pass either way), LBR shares of the post-entry-158 pass; the **shares** transfer
-between boxes, the ms estimates below are this container's. Ranked by size ÷ effort; **the whole Markowitz scheduler is planning data that
-appears in no correctness theorem, so 1–4 need no proof at all** — only value equality if the change
-is to stay byte-identical.
+Entry 160 replaced the pass with a watch-driven sparse engine: **gauss 8.8 → 3.7 s on sha256
+`apc_001` (0.42x), run total 0.87x**, −3 vars / −931 bus there, and `Gauss.lean` 958 → 200 lines.
+Items 1–5 of the old residual list are all gone with it (`fromExpr`'s double walk, the per-row
+`HashMap`, the index delta updates, the rekey fan-out, and the eager back-substitution's exponent).
+What is left, LBR shares of the *new* pass on sha256:
 
-1. **One walk in `DenseGaussReduced.fromExpr`** (16.9 % + 3.8 % = the whole of `denseMarkowitzBuild`,
-   ~1.8 s). It calls `denseLinearize e`; on failure `e.normalize` — a full tree rebuild — and
-   `denseLinearize` again, per constraint per invocation (11 of them). The retry can only succeed
-   where a *merged* linear form cancels to a constant (`denseLinearize`'s `mul` branch tests
-   `la.terms.isEmpty` on the **unmerged** list, so `(x - x) * y` fails before normalization and
-   linearizes after). `denseNormalizeResWith` (`Normalize.lean:665`) already carries each node's
-   linear form; a variant whose `mul` branch tests `la.norm.terms.isEmpty` answers both questions in
-   one walk. **Not obviously byte-identical** (term order after merging may differ) — count both
-   verdicts side by side over cycles 0–1 first. ~0.8–1.2 s.
-2. **`denseMarkowitzPivots` without its per-row `HashMap`** (6.3 %). It builds `denseCoeffIdx l.terms`
-   plus a `seen` set, but **every affine row in gauss is `norm`-alized** (`fromExpr`, `denseLinSubstF`,
-   `denseLinAdd`, `denseLinScale` and the fused walk all end in `.norm`), so each variable occurs once
-   with a nonzero coefficient: `coeff = t.2`, `count = 1`, `rhsNnz = terms.length - 1`, the `±1` and
-   unit descriptor lists are disjoint and the dedup is a no-op. One pass, no hash structure, gated on
-   `terms.length ≤ 32` with the current code above the gate (as `denseMergeTermsWith` does).
-   Byte-identical by construction, ~25 lines. ~0.3–0.5 s.
-3. **Delta index/degree updates in `denseMarkowitzRefreshRows`** (index 6.6 % + `refreshRow` 6.7 %).
-   It unindexes every variable of the old row and re-indexes every variable of the new one, when the
-   delta is "drop the pivot, add what the substituted row brought in" — ~1.4 M redundant index
-   operations per big invocation. Byte-identical (`degrees` is exact, so sub-then-add on a shared
-   variable is a no-op and `Nat` truncation cannot bite). ~0.3–0.6 s.
-4. **The rekey fan-out**: 257 515 re-keys for 52 194 adoptions in cycle 1, because `changed` includes
-   every variable of every rewritten stored solution (307 948 of them) although those only move the
-   *third* lexicographic key (`rewrite`). Dropping them would cut re-keys ~5× and with them the entry
-   allocations behind the `pop` phase (10.4 %, of which Batteries' heap code is only 2.1 % — the rest
-   is refcounting and allocating entry records). **Not byte-identical** → CI matrix. ~0.8 s.
-5. **Defer the back-substitution into stored solutions** (`denseLinSubst` 6.2 % + `insertAll` 1.1 % +
-   `adoptPairs`, and the fan-out grows with circuit size — the only idea here that changes gauss's
-   *exponent*). `denseMarkowitzAdoptPairs` eagerly rewrites every stored solution mentioning the new
-   pivot; a triangular store resolved once at `materialize` is `O(total)` instead of
-   `O(chain × total)`. Blocked on the loop needing a **fully resolved** σ for
-   `denseSparseSubstF dσ.fn c` (a triangular one would let pivots be chosen for already-solved
-   variables and leave them in the output), so it needs an on-demand memoized resolver — whose term
-   order differs from step-by-step rewriting, i.e. output changes and `insertAll_preserves`' argument
-   must be redone. Largest and riskiest; open it last.
-
-**Measured sub-bar / do not re-propose** (also in the dead-end list below): reusing
-`st.rows[rowId].reduced` instead of re-substituting the source constraint on selection is 2.2 % of the
-pass (~0.27 s) and would dissolve the pass's untrusted-metadata story; the `ZMod` angle is 1.3 % (both
-`Gauss.c` sweep hits are dead `csimp` originals); a different heap is worth 2.1 %.
+- **output `substF` 28.5 %** — the levers are an unchanged-node-preserving `DenseExpr.substF` twin
+  (return the input node when no descendant changed; most constraints contain no solved variable) and
+  the array-backed lookup the engine already builds. **Cross-cutting**: domainBatch, flagUnify,
+  fxSubst and rootPairUnify all call `substF`, so this is worth more than its gauss share.
+- **the constraint walk 23.8 %** — one fail-fast pass over every constraint tree; irreducible unless
+  the prologue is fused into it (next item).
+- **`occ`/`prot` prologue 21.9 %** — two array passes over the whole system; fuse into the build walk.
+- scheduler 7.4 %, merge 6.6 %, pick/solve 5.3 %, σ upkeep 0.8 %. The elimination algebra is ~13 % of
+  the pass; the rest is three whole-system traversals.
+- **An array-backed row type is worth 0.42x → 0.27x on sha256** (measured with the unproven
+  prototype) but each array primitive then needs its own `toList`-correspondence proof; rows stayed
+  `DenseLinExpr` so the affine-layer lemmas apply unchanged. Open if the pass ever tops the list again.
+- **Reproducing Markowitz's exact key** above the gate would remove the one per-case effectiveness
+  loss (wasm-eth `apc_006`, +1 bus) at the cost of sha256's −931 bus; it needs the per-variable
+  active-degree index back. The scheduler is 7.4 % of the pass, so it is affordable — but measure the
+  bus trade before doing it.
 
 ### Runtime dead ends (measured; do not re-propose without new evidence)
+
+- **Dropping gauss's second source-order sweep** (entry 160): looks provably fruitless over a prime
+  field, and measures openvm-eth `apc_037` gauss **170 → 317 ms** with changed output — 35 % of that
+  case's pivots come from it, all nonlinear→affine transitions.
+- **Source order at every system size in gauss** (entry 160): **1.88x slower** on wasm-eth `apc_012`,
+  98 % of the pass in the like-term merge, because eagerly maintaining a reduced σ in source order
+  inflates a stored solution to 586 terms before it cancels back to 7.
+- **Removing gauss's 8192 gate** (entry 160): runtime-neutral on OpenVM (corpus 1.006x) and slightly
+  better there, but **regresses 8 of 100 SP1 `rsp` cases by +88 variables** — the primary axis. Entry
+  134's warning, now measured.
 
 - **Indexing `densePdKeep`'s re-verification** (flagFold part C): `findIdx?` deep-equality scans and
   `List.take` prefixes replaced by a `densePdValHash` position index over an array — **0.98x on
@@ -737,6 +723,11 @@ pass (~0.27 s) and would dissolve the pass's untrusted-metadata story; the `ZMod
   busPairCancel's remaining cost in "per-drop `alive` copies, `denseCheckCancel`, `denseFirstMatchAt`";
   measured in entry 153 those are 2.1 %, ~0 % and ~0 % — the cost had never left the region scans, it
   had only moved from "every prefix position" to "every same-key-or-symbolic prefix position".
+- **`Array` sharing hygiene decides whether array indexes are fast at all** (entry 160, measured on
+  keccak): `{ S with f := g S.f }` leaves `S.f` shared, so the write copies the whole array — **7x on
+  the pass** when the array is per-variable — and projecting `.1`/`.2` out of a returned tuple does the
+  same. Destructure the record (or the tuple) first, update the local, then rebuild. A profile showing
+  `lean_copy_expand_array` next to `lean_dec_ref_cold` is this bug, not real work.
 - **Check open PRs / recent `claude/*` branches for duplicates before implementing.**
 
 ## Runtime ideas (2026-07-27 session, entry 148)
