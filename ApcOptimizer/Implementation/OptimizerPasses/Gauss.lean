@@ -533,9 +533,13 @@ def gDrainAt (ops : DenseZModOps p) (occ : Array Nat) (prot : Array Bool) (S : G
         else if min l.terms.length gMaxBucket > b then
           (S.setRow i l, q.push l.terms.length i, prog)
         else
-          let n := S.order.size
           let S := gTake ops occ prot S i l
-          (S, q, prog || S.order.size != n)
+          -- Progress is read back off `status` (`gTake` retires slot `i` exactly when it pivots)
+          -- rather than compared against `S.order.size` taken before the call: holding a reference
+          -- to `order` across `gTake` makes `gAdopt`'s `pushOrder` copy the whole array, so every
+          -- adoption costs O(|order|) — 34% of the pass on sha256.
+          let adopted := (S.status[i]?).getD 1 == 2
+          (S, q, prog || adopted)
 
 /-- One queue step: pop the shortest pending row and handle it. -/
 def gDrainStep (ops : DenseZModOps p) (occ : Array Nat) (prot : Array Bool) (S : GSt p)
