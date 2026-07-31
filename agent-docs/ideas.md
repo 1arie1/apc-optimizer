@@ -581,29 +581,30 @@ the allocation traffic of their results. The `.fallback` row is **done (entry 15
      Preflight's `T.doms xs` is 6.8 % on sha256, all `Std.HashMap VarId` probes: the R12 array-indexed
      prototype belongs here first.
 
-### gauss residual after entry 160 (the sparse engine)  ·  *runtime, sha256*
+### gauss residual after entries 160–161 (the sparse engine)  ·  *runtime, sha256*
 
-Entry 160 replaced the pass with a watch-driven sparse engine: **gauss 8.8 → 3.7 s on sha256
-`apc_001` (0.42x), run total 0.87x**, −3 vars / −931 bus there, and `Gauss.lean` 958 → 200 lines.
-Items 1–5 of the old residual list are all gone with it (`fromExpr`'s double walk, the per-row
-`HashMap`, the index delta updates, the rekey fan-out, and the eager back-substitution's exponent).
-What is left, LBR shares of the *new* pass on sha256:
+Entry 160 replaced the pass with a watch-driven sparse engine and entry 161 removed a pointer-sharing
+copy from its scheduler: **gauss 8.8 → 2.5 s on sha256 `apc_001` (0.29x)**, −3 vars / −931 bus there,
+and `Gauss.lean` 958 → 200 lines. Items 1–5 of the old residual list are all gone with it
+(`fromExpr`'s double walk, the per-row `HashMap`, the index delta updates, the rekey fan-out, and the
+eager back-substitution's exponent). What is left, LBR shares of the *new* pass on sha256:
 
-- **output `substF` 28.5 %** — the levers are an unchanged-node-preserving `DenseExpr.substF` twin
+- **the constraint walk 28.0 %** — one fail-fast pass over every constraint tree; irreducible unless
+  the prologue is fused into it.
+- **output `substF` 28.0 %** — the levers are an unchanged-node-preserving `DenseExpr.substF` twin
   (return the input node when no descendant changed; most constraints contain no solved variable) and
   the array-backed lookup the engine already builds. **Cross-cutting**: domainBatch, flagUnify,
   fxSubst and rootPairUnify all call `substF`, so this is worth more than its gauss share.
-- **the constraint walk 23.8 %** — one fail-fast pass over every constraint tree; irreducible unless
-  the prologue is fused into it (next item).
-- **`occ`/`prot` prologue 21.9 %** — two array passes over the whole system; fuse into the build walk.
-- scheduler 7.4 %, merge 6.6 %, pick/solve 5.3 %, σ upkeep 0.8 %. The elimination algebra is ~13 % of
-  the pass; the rest is three whole-system traversals.
-- **An array-backed row type is worth 0.42x → 0.27x on sha256** (measured with the unproven
-  prototype) but each array primitive then needs its own `toList`-correspondence proof; rows stayed
-  `DenseLinExpr` so the affine-layer lemmas apply unchanged. Open if the pass ever tops the list again.
+- **`occ`/`prot` prologue 21.8 %** — two array passes over the whole system; fuse into the build walk.
+- develop/merge 6.8 %, adopt 4.9 %, scheduler 3.8 %, pick/solve 1.7 %. The elimination algebra is
+  ~13 % of the pass; the rest is three whole-system traversals.
+- **An array-backed row type is worth only 2 525 → 2 375 ms on sha256** (~6 %, measured with a
+  `sorry`-ed prototype, identical output on four representatives) — *not* the 0.42x → 0.27x that entry
+  160 recorded, which was this scheduler copy misattributed to the row representation. Each array
+  primitive would need its own `toList`-correspondence proof, so rows stay `DenseLinExpr`. Below bar.
 - **Reproducing Markowitz's exact key** above the gate would remove the one per-case effectiveness
   loss (wasm-eth `apc_006`, +1 bus) at the cost of sha256's −931 bus; it needs the per-variable
-  active-degree index back. The scheduler is 7.4 % of the pass, so it is affordable — but measure the
+  active-degree index back. The scheduler is 3.8 % of the pass, so it is affordable — but measure the
   bus trade before doing it.
 
 ### Runtime dead ends (measured; do not re-propose without new evidence)
@@ -723,10 +724,14 @@ What is left, LBR shares of the *new* pass on sha256:
   busPairCancel's remaining cost in "per-drop `alive` copies, `denseCheckCancel`, `denseFirstMatchAt`";
   measured in entry 153 those are 2.1 %, ~0 % and ~0 % — the cost had never left the region scans, it
   had only moved from "every prefix position" to "every same-key-or-symbolic prefix position".
-- **`Array` sharing hygiene decides whether array indexes are fast at all** (entry 160, measured on
-  keccak): `{ S with f := g S.f }` leaves `S.f` shared, so the write copies the whole array — **7x on
-  the pass** when the array is per-variable — and projecting `.1`/`.2` out of a returned tuple does the
-  same. Destructure the record (or the tuple) first, update the local, then rebuild. A profile showing
+- **`Array` sharing hygiene decides whether array indexes are fast at all** (entries 160–161, measured
+  on keccak and sha256). Three traps, all the same cause: `{ S with f := g S.f }` leaves `S.f` shared,
+  so the write copies the whole array (**7x on the pass** when the array is per-variable); projecting
+  `.1`/`.2` out of a returned tuple does the same; and **reading a field for a before/after comparison
+  across a call that updates it** keeps it shared for the whole call — `let n := S.order.size; let S :=
+  gTake … S …; S.order.size != n` cost **34 % of gauss on sha256**, one O(|order|) copy plus
+  element-wise free per adoption. Destructure the record (or the tuple) first; derive "did it change?"
+  from state read *after* the call, never from a value captured before it. A profile showing
   `lean_copy_expand_array` next to `lean_dec_ref_cold` is this bug, not real work.
 - **Check open PRs / recent `claude/*` branches for duplicates before implementing.**
 

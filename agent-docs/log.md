@@ -5784,3 +5784,48 @@ gauss-gated): output `substF` 28.5 %, the constraint walk 23.8 %, the `occ`/`pro
 scheduler 7.4 %, merge 6.6 %. The elimination algebra is ~13 % of the pass; the rest is three
 whole-system traversals, so the next levers are an unchanged-node-preserving `substF` twin (helps four
 other passes) and fusing the prologue into the build walk.
+
+## Entry 161 — gauss: the "list rows cost 55 %" finding was a pointer-sharing bug (sha256 gauss 3.7 → 2.5 s)
+
+Entry 160 recorded that an array-backed row type measured 0.27x on sha256 against the landed
+list-backed 0.42x, and attributed the 1.3 s gap to the row representation. That was wrong. Rebuilding
+the engine over `Array (VarId × ZMod p)` rows (a `sorry`-ed prototype: `gRowNorm`/`gRowSubstF`/
+`gRowSolveAt` mirroring the affine layer, in-place merge via `Array.modify` at refcount 1) recovered
+**almost nothing**: sha256 gauss 3 761 → 3 707 ms. The gap was somewhere else.
+
+LBR attribution of the two binaries, gated on a gauss frame, found it in one line. The landed version
+spends **19 % of the pass in `lean_copy_expand_array` under `GSt.pushOrder`** and **31 % in
+`lean_dec_ref_cold` under `gDrainAt`**; the old prototype spends 1.3 % and 17 %. `gDrainAt` measured
+progress as
+
+    let n := S.order.size;  let S := gTake … S i l;  (S, q, prog || S.order.size != n)
+
+so `order` is *shared* for the whole `gTake` call, and `gAdopt`'s `pushOrder` copies the entire array
+on every adoption — O(|order|) memcpy plus an element-wise free of the old copy, ~50 k times on
+sha256. In the generated C the pre-call read is visible as a fourth `lean_ctor_get(S, 6)` in
+`gDrainAt`'s prologue that the fixed version does not emit. `gTake` retires slot `i` exactly when it
+pivots, so `(S.status[i]?).getD 1 == 2` read *after* the call decides progress identically while
+holding nothing.
+
+MEASURED (this box, serial, interleaved, 2 reps, gauss ms; all four outputs byte-identical):
+
+| variant | sha256 apc_001 | wasm apc_012 | keccak apc_001 | eth apc_006 |
+|---|---|---|---|---|
+| entry 160 as landed (list rows) | 3 761 | 305 | 265 | 39 |
+| **+ this fix (list rows)** | **2 525** | **284** | **228** | 40 |
+| array rows + this fix | 2 375 | 273 | 224 | 39 |
+
+So against the pre-redesign 8 816 ms the pass is now **0.29x** on sha256, and the row representation
+is worth a further ~6 % — not 55 %. `apc_006` is below the 8192 gate and never reaches this
+scheduler, which is why the four-case set hid the bug: it only bites where `gDrainAt` runs.
+The array prototype stays unbuilt: 6 % does not pay for a `toList`-correspondence proof per primitive.
+
+`prog` is scheduling data occurring in no theorem, so `gDrainAt_inv` and the rest of the ~1 000-line
+proof compile unchanged. Residual on sha256 after the fix: constraint walk 28.0 %, output `substF`
+28.0 %, `occ`/`prot` prologue 21.8 %, develop/merge 6.8 %, adopt 4.9 %, scheduler 3.8 %, pick 1.7 %.
+
+THE GENERAL LESSON (third form of the same trap, now in `ideas.md`): a before/after comparison on a
+field of a linear structure — `let n := S.f.size; …; S.f.size != n` — is as destructive as
+`{ S with f := g S.f }`. Derive "did it change?" from state read after the call. And when a variant
+measures much faster, attribute the difference before believing the explanation you had in mind: the
+first two A/B tables here were consistent with a story that was simply false.
