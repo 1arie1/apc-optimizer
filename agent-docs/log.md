@@ -5647,3 +5647,56 @@ the ms do not): row substitution 17.8 %,
 10.3 %, `lean_copy_expand_array` 5.7 → 0.5 %. The ranked residual is in `ideas.md`.
 **Worked: yes (gauss 0.86x on its worst case and 0.97x end-to-end on the CI serial bench,
 output byte-identical; PR #260).**
+
+
+### 159. Runtime: content-hash the two-root bucket key in rootPairUnify (0.22x on the pass, sha256)
+TARGETED the run's **top pass**: on merged main (`99f9682`), sha256 `apc_001` spends **9 125 ms of
+99 815 in `rootPairUnify`**, ahead of gauss (8 585), busUnify (7 952) and reencode (7 879). Unlike
+gauss it has no expensive invocation — no single call exceeds ~1 s, and 717 ms of it is spent in
+cleanup cycle 9, a cycle in which the system does not change. That shape (uniform cost per
+invocation, independent of what the pass achieves) is the signature of a scan that is quadratic in
+the *candidate population* rather than in the work done.
+MECHANISM. `denseRpKeyHash` hashed `(k, A.const, δ, A.terms.length)` — the **length** of the offset
+form's term list, not its contents. The `seen` accumulator is bucketed by that hash and the scan
+re-verifies each entry with the exact `e.key == xk.2` test, which compares the whole key including
+`A.terms`. So every candidate sharing `(k, const, δ, arity)` landed in one bucket and was compared
+structurally. This APC is ~4 000 near-identical instruction instances (its variable-sharing graph is
+4 003 disjoint islands of ≤107 items at entry — see the sha256 structure notes), so those buckets
+hold thousands of key-*unequal* entries and the deep comparison fails on essentially all of them:
+LBR puts `List_beq___at___00denseRpLoop` at **2.39 %** of the whole run and the scan's candidate
+lambda at **2.55 %**, i.e. ~5 % of the run inside a test that decides nothing.
+THE FIX hashes the terms' contents (`denseRpTermsHash`, a `mixHash` fold over
+`(VarId.index, coefficient)`), so key-unequal candidates never share a bucket and the exact test is
+reached about once per genuine twin. Net **+5 lines** of runtime.
+PROOF SURFACE: **none.** `Proofs/RootPairUnify.lean` threads `denseRpKeyHash` through `getD`/`insert`
+without ever unfolding it — the bucket is untrusted metadata, and the pass's soundness comes from
+`denseRpCheckPair` re-verifying every proposed pair. `lake build` needed no edit at all.
+WHY IT IS VALUE-IDENTICAL: the hash is a function of the key, so equal keys still share a bucket and
+no twin can be hidden; entries the finer hash *adds* to a bucket have `e.key ≠ xk.2` and are rejected
+by the scan's own test; and `denseRpInsertAll`'s `foldr` gives every bucket the same relative order
+as before, so `findSome?` selects the same entry. (Stated, not proved — output identity is not a
+correctness obligation here, only an effectiveness one, and it is checked below.)
+NUMBERS (this 20-core box, serial, interleaved, 2 reps): sha256 `apc_001` **`run` 89 016 / 88 644 →
+82 209 / 82 143 ms (0.925x)**; `profile` per-pass **rootPairUnify 8 647 → 1 877 ms (0.217x)** with
+the run total 83 090 → 74 637 ms. Other cases: wasm-eth `apc_012` 10 755 → 9 941 ms (0.92x), keccak
+`apc_001` 7 653 → 7 714 (1.01x), openvm-eth `apc_006` 868 → 878 (1.01x) — flat where candidate
+buckets are small, which is every case that does not repeat one instruction shape thousands of times.
+VERIFIED: `opt-export` **byte-identical** on 14 cases — sha256 `apc_001`, OpenVM keccak `apc_001`,
+openvm-eth `apc_006` / `apc_032` / `apc_037` / `apc_058` / `apc_063` / `apc_087` / `apc_088` /
+`apc_100`, wasm-eth `apc_001` / `apc_002` / `apc_012`, SP1 keccak `apc_001`, SP1 rsp `apc_001`;
+`lake build` clean, no warnings; `check-proof-integrity` passes (propext / Classical.choice /
+Quot.sound, no unused theorems).
+AUDIT OF THE SAME PATTERN ELSEWHERE (all 12 hash-keyed buckets under `OptimizerPasses/`): this was
+the only one. `denseFuKeyHash` (flagUnify) hashes all four key fields; `DenseExpr.bHash` /
+`denseBIbHash` (dedup, busUnify's already-present test, intervalForce), `densePayloadHash` /
+`denseAddrHash` / `denseKeyHash` (busPairCancel) and `densePdValHash` (flagFoldDrops) all hash full
+content; `denseLinHash` (addrDiseq) is order-insensitive *by design*, matching a value-equality test;
+`HashedDedup`'s 19 call sites pass the element's own `Hashable`; `DenseTwoRootMap` and
+`denseVarBucket` are keyed by `VarId` directly. The one other coarse key —
+`densePdKeySigs` = `(busId, mult, payload.length)` in flagFoldDrops — is deliberately coarse because
+its match test is *semantic* (`denseMsgEqCert`), and it compensates with per-slot `(bHash, bloom)`
+signatures; a content hash there would lose real twins. **The rule to carry forward: a bucket key
+must hash everything the test behind it compares, unless that test is semantic rather than
+syntactic.**
+**Worked: yes (rootPairUnify 0.217x on its worst case, 0.925x end-to-end, output byte-identical,
+zero proof work).**

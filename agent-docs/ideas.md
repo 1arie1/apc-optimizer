@@ -469,6 +469,19 @@ rewrite through `zmodZeroP_eq`/`zmodOneP_eq` rather than `rfl` — mechanical, b
 a few percent. Note also `Affine.trySolve`/`trySolveUnit` and `denseScaledSlotBound` need the ring
 for `⁻¹`/`scale` regardless, so converting only their guards would not empty their entries.
 
+**R9c (done, entry 159).** `denseRpKeyHash` bucketed rootPairUnify's `seen` accumulator on
+`(k, A.const, δ, A.terms.length)` while the scan re-verified with the exact whole-key test, so on a
+circuit that repeats one instruction shape ~4 000 times the buckets held thousands of key-unequal
+entries and ~5 % of the run went into a deep `List.beq` that decided nothing. Hashing the terms'
+contents is **0.217x on the pass, 0.925x end-to-end on sha256 `apc_001`**, byte-identical on 14
+cases, and needed **no proof work** (the bucket is untrusted metadata; the proofs never unfold the
+hash). An audit of all 12 hash-keyed buckets under `OptimizerPasses/` found no second instance — see
+the entry for the table and the rule (*a bucket key must hash everything the test behind it
+compares, unless that test is semantic rather than syntactic*). Note flagFoldDrops already carries
+the per-item signature idea (`DenseExpr.pdVarBloom`, `DensePdEntry.sigs`), which is why the variable
+gates measure 0.0–0.7 % of the run and a general per-item summary record is **not** a live lever
+(measured, entry 159 session).
+
 **R10. busUnify symbolic-window sweep at SHA scale**  ·  *52 s on sha256_big*. `denseSweepGo`
 tests every symbolic-address message against every open window: `constOpen.toList` is rebuilt per
 non-all-const message, and each open `symOpen` window pays the full `denseStepTest` certificate

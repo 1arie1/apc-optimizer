@@ -227,11 +227,18 @@ theorem denseRpCandidatesWith_eq (ops : DenseZModOps p) (c : DenseExpr p) :
   funext p c
   exact (denseRpCandidatesWith_eq denseZModOps c).symm
 
+/-- Content hash of a two-root key's offset form. Hashing the terms rather than their count keeps
+    key-unequal candidates out of each other's buckets, so the scan's exact `key == key'` test is
+    reached once per genuine twin instead of once per same-arity candidate. -/
+def denseRpTermsHash : List (VarId × ZMod p) → UInt64
+  | [] => 0x9e3779b97f4a7c15
+  | (v, c) :: rest => mixHash (mixHash (hash v.index) (hash c.val)) (denseRpTermsHash rest)
+
 /-- Hash of a candidate key, used to bucket the `seen` accumulator (bucketing never hides a twin;
     the exact `key == key'` check inside the scan separates any hash collision). -/
 def denseRpKeyHash (key : ZMod p × List (VarId × ZMod p) × ZMod p × ZMod p) : UInt64 :=
   mixHash (hash key.1.val)
-    (mixHash (hash key.2.2.1.val) (mixHash (hash key.2.2.2.val) (hash key.2.1.length)))
+    (mixHash (hash key.2.2.1.val) (mixHash (hash key.2.2.2.val) (denseRpTermsHash key.2.1)))
 
 /-- Prepend seen-entries into their key-hash buckets, preserving per-bucket insertion order. -/
 def denseRpInsertAll (m : Std.HashMap UInt64 (List (DenseRPSeen p)))
