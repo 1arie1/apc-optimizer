@@ -103,21 +103,6 @@ def denseAddrConstsNeq (shape : MemoryBusShape) (S bi : BusInteraction (DenseExp
        | _, _ => false)
     | _, _ => false)
 
-/-! ## The checked pair -/
-
-/-- A checked consecutive send→receive pair on bus `busId`: `S` a constant send, `R` a constant
-    receive, same constant address, and every `mid` message provably inactive or of a different
-    address. -/
-def denseCheckPair (shape : MemoryBusShape) (T : DenseTwoRootMap p) (nw : DenseNonzeroWits p)
-    (S : BusInteraction (DenseExpr p))
-    (mid : List (BusInteraction (DenseExpr p))) (R : BusInteraction (DenseExpr p)) : Bool :=
-  decide (denseMultConst S = some shape.setNewMult) &&
-    decide (denseMultConst R = some (-shape.setNewMult)) &&
-  denseAddrConstsEq shape S R &&
-  mid.all (fun m => denseAddrConstsNeq shape S m || denseAddrAffineNeq shape S m
-    || denseAddrTwoRootNeq shape T S m || denseAddrNonzeroNeq shape nw S m
-    || decide (denseMultConst m = some 0))
-
 /-! ## A canonical address key -/
 
 /-- A canonical address key. -/
@@ -149,10 +134,11 @@ branches of one two-root reduction differ by a constant, hence share one signatu
 def denseBUTermKey (l : DenseLinExpr p) : List (VarId × ZMod p) :=
   l.norm.terms.mergeSort (fun a b => decide (a.1.index ≤ b.1.index))
 
-/-- Order-insensitive hash of `denseBUTermKey`, which gates the list compare: unequal hashes are
-    unequal keys, and that is the overwhelmingly common case. -/
-def denseBULinSig (l : DenseLinExpr p) : UInt64 :=
-  l.norm.terms.foldl (fun h t => h + mixHash (hash t.1) (hash t.2.val)) 0
+/-- Hash *of the canonical key*, which gates the list compare: unequal hashes are unequal keys,
+    and that is the overwhelmingly common case. Deriving it from the key rather than from the term
+    list makes the gate's soundness `congrArg` and saves a second `norm`. -/
+def denseBUKeyHash (k : List (VarId × ZMod p)) : UInt64 :=
+  k.foldl (fun h t => mixHash h (mixHash (hash t.1) (hash t.2.val))) 0
 
 structure DenseBUSlot (p : ℕ) where
   expr : DenseExpr p
@@ -164,7 +150,7 @@ structure DenseBUSlot (p : ℕ) where
   linKey : List (VarId × ZMod p)
   /-- Per two-root reduction: hash, canonical terms, and the two branches' constants. Both
       branches differ by a constant, so they share one key. -/
-  reds : Array (UInt64 × List (VarId × ZMod p) × ZMod p × ZMod p)
+  reds : List (UInt64 × List (VarId × ZMod p) × ZMod p × ZMod p)
 
 /-- Prepared interaction: the multiplicity constant, one record per address slot, and the canonical
     address key. -/
@@ -176,12 +162,13 @@ structure DenseBUPre (p : ℕ) where
 
 def denseBUSlotPrep (T : DenseTwoRootMap p) (e : DenseExpr p) : DenseBUSlot p :=
   let lin := denseLinearize e
+  let key := match lin with | some L => denseBUTermKey L | none => []
   { expr := e, eHash := e.bHash, cval := e.constValue?
     lin := lin
-    linSig := match lin with | some L => denseBULinSig L | none => 0
-    linKey := match lin with | some L => denseBUTermKey L | none => []
-    reds := ((densePtrReductions T e).map
-      (fun r => (denseBULinSig r.1, denseBUTermKey r.1, r.1.const, r.2.const))).toArray }
+    linKey := key
+    linSig := denseBUKeyHash key
+    reds := (densePtrReductions T e).map
+      (fun r => let k := denseBUTermKey r.1; (denseBUKeyHash k, k, r.1.const, r.2.const)) }
 
 /-- Assemble a prepared interaction from its slot records. -/
 def denseBUOfSlots (bi : BusInteraction (DenseExpr p))
@@ -233,23 +220,29 @@ def denseBUConstsNeq (a b : DenseBUPre p) : Bool :=
     match sa.cval, sb.cval with | some c, some c' => decide (c ≠ c') | _, _ => false)
     a.slots b.slots
 
-/-- `denseAddrAffineNeq` on prepared records: `denseConstDiffNZ` decided on canonical terms, with
-    the hash short-circuiting the list compare. -/
-def denseBUAffineNeq (a b : DenseBUPre p) : Bool :=
-  denseBUSlotsAny (fun sa sb =>
-    match sa.lin, sb.lin with
-    | some L, some L' =>
-      sa.linSig == sb.linSig && decide (sa.linKey = sb.linKey) && decide (L.const ≠ L'.const)
-    | _, _ => false) a.slots b.slots
+/-- `denseConstDiffNZ` on two prepared slots: the canonical keys agree and the constants do not.
+    The hash short-circuits the list compare. -/
+@[inline] def denseBUAffineNeqSlot (sa sb : DenseBUSlot p) : Bool :=
+  match sa.lin, sb.lin with
+  | some L, some L' =>
+    (sa.linSig == sb.linSig && decide (sa.linKey = sb.linKey)) && decide (L.const ≠ L'.const)
+  | _, _ => false
 
-/-- `denseAddrTwoRootNeq` on prepared records: one key compare per reduction pair decides all four
-    branch differences, which differ only in their constants. -/
+/-- One key compare per reduction pair decides all four branch differences, which differ only in
+    their constants. -/
+@[inline] def denseBUTwoRootNeqSlot (sa sb : DenseBUSlot p) : Bool :=
+  sa.reds.any (fun r => sb.reds.any (fun r' =>
+    ((r.1 == r'.1 && decide (r.2.1 = r'.2.1)) &&
+      (decide (r.2.2.1 ≠ r'.2.2.1) && decide (r.2.2.1 ≠ r'.2.2.2))) &&
+      (decide (r.2.2.2 ≠ r'.2.2.1) && decide (r.2.2.2 ≠ r'.2.2.2))))
+
+/-- `denseAddrAffineNeq` on prepared records. -/
+def denseBUAffineNeq (a b : DenseBUPre p) : Bool :=
+  denseBUSlotsAny denseBUAffineNeqSlot a.slots b.slots
+
+/-- `denseAddrTwoRootNeq` on prepared records. -/
 def denseBUTwoRootNeq (a b : DenseBUPre p) : Bool :=
-  denseBUSlotsAny (fun sa sb =>
-    sa.reds.any (fun r => sb.reds.any (fun r' =>
-      r.1 == r'.1 && decide (r.2.1 = r'.2.1) &&
-      decide (r.2.2.1 ≠ r'.2.2.1) && decide (r.2.2.1 ≠ r'.2.2.2) &&
-      decide (r.2.2.2 ≠ r'.2.2.1) && decide (r.2.2.2 ≠ r'.2.2.2)))) a.slots b.slots
+  denseBUSlotsAny denseBUTwoRootNeqSlot a.slots b.slots
 
 /-- `denseDiffSumOver` over prepared slot pairs. -/
 def denseBUDiffSum : List (Option (DenseBUSlot p) × Option (DenseBUSlot p)) →
@@ -365,7 +358,7 @@ def denseBUSweep (ops : DenseZModOps p) (nw : DenseNonzeroWits p) (setMult prevM
 /-- Scatter the sweep's pairs by send position, then read them back ascending — the pairs come
     out in consume order, and the equalities have to follow send order. -/
 def denseBUScatter (n : Nat) (pairs : List (Nat × Nat)) : Array (Option Nat) :=
-  pairs.foldl (fun a ij => a.set! ij.1 (some ij.2)) (Array.replicate n none)
+  pairs.foldl (fun a ij => a.setIfInBounds ij.1 (some ij.2)) (Array.replicate n none)
 
 def denseBUCands (out : Array (Option Nat)) : (i : Nat) → List (Nat × Nat) → List (Nat × Nat)
   | 0, acc => acc
@@ -394,11 +387,13 @@ def denseBUMidScan (ops : DenseZModOps p) (nw : DenseNonzeroWits p) (arr : Array
       | some b => if denseBUMidOk ops nw a b then denseBUMidScan ops nw arr a j fuel (q + 1)
                   else false
 
+/-- The verifier checks the ordering itself, which is what lets the sweep stay entirely untrusted:
+    nothing about the windows, the scatter or the candidate order carries a proof obligation. -/
 def denseBUCheckPair (ops : DenseZModOps p) (nw : DenseNonzeroWits p) (setMult prevMult : ZMod p)
     (arr : Array (DenseBUPre p)) (i j : Nat) : Bool :=
   match arr[i]?, arr[j]? with
   | some a, some r =>
-    decide (a.mult = some setMult) && decide (r.mult = some prevMult) &&
+    decide (i < j) && decide (a.mult = some setMult) && decide (r.mult = some prevMult) &&
       denseBUConstsEq a r && denseBUMidScan ops nw arr a j (j - i) (i + 1)
   | _, _ => false
 
@@ -417,58 +412,42 @@ def denseBUCollect (ops : DenseZModOps p) (nw : DenseNonzeroWits p) (setMult pre
 
 /-! ## Per-invocation scaffolding -/
 
-/-- The memory-shaped buses in first-occurrence order, each with its interactions in source order;
-    one pass over the interaction list, one `memShape` call per distinct bus id. -/
+/-- The memory-shaped buses in first-occurrence order of bus id, each paired with its shape and its
+    interactions in source order. -/
 def denseBUBusLists (memShape : Nat → Option MemoryBusShape)
     (bis : List (BusInteraction (DenseExpr p))) :
-    Array (MemoryBusShape × Array (BusInteraction (DenseExpr p))) :=
-  (bis.foldl (init := ((∅ : Std.HashMap Nat (Option Nat)),
-      (#[] : Array (MemoryBusShape × Array (BusInteraction (DenseExpr p)))))) fun st bi =>
-    match st.1[bi.busId]? with
-    | some (some k) => (st.1, st.2.modify k (fun sl => (sl.1, sl.2.push bi)))
-    | some none => st
-    | none =>
-      match memShape bi.busId with
-      | some shape => (st.1.insert bi.busId (some st.2.size), st.2.push (shape, #[bi]))
-      | none => (st.1.insert bi.busId none, st.2)).2
+    List (Nat × MemoryBusShape × List (BusInteraction (DenseExpr p))) :=
+  ((bis.map (fun bi => bi.busId)).dedup).filterMap (fun busId =>
+    (memShape busId).map (fun shape => (busId, shape, bis.filter (fun bi => bi.busId = busId))))
 
 /-- The variables a two-root lookup can reach: those of an address-slot expression of an
     interaction on a memory-shaped bus, at that bus's own address fields. `densePtrReductions`
     keys on the queried form's own variables, so no other entry is ever read. -/
-def denseBUAddrVars (busLists : Array (MemoryBusShape × Array (BusInteraction (DenseExpr p)))) :
+def denseBUAddrVars
+    (busLists : List (Nat × MemoryBusShape × List (BusInteraction (DenseExpr p)))) :
     Std.HashSet VarId :=
   busLists.foldl (fun acc sl =>
-    sl.2.foldl (fun acc bi =>
-      sl.1.addressFields.foldl (fun acc slot =>
+    sl.2.2.foldl (fun acc bi =>
+      sl.2.1.addressFields.foldl (fun acc slot =>
         match bi.payload[slot]? with
         | some e => e.vars.foldl (fun a v => a.insert v) acc
         | none => acc) acc) acc) ∅
 
-/-- The two-root entries of one constraint, restricted to `avars`. `denseTwoRootOfLins l1 l2 x`
-    succeeds only when the two factors' normal forms agree away from `x` *and* at `x`, so when the
-    normal forms are equal outright every variable with a unit coefficient gets an entry and the
-    per-variable `norm` (an `O(t²)` merge run once per variable) is skipped. -/
+/-- The two-root entries of one constraint, restricted to the variables a lookup can reach. Only a
+    variable with a nonzero coefficient in the first factor can produce an entry, so the candidate
+    list is that factor's normalized terms rather than `c.vars.eraseDups`. -/
 def denseBUAddTwoRoot (avars : Std.HashSet VarId) (T : DenseTwoRootMap p) (c : DenseExpr p) :
     DenseTwoRootMap p :=
   match c with
   | .mul f1 f2 =>
     match denseLinearize f1, denseLinearize f2 with
     | some l1, some l2 =>
-      let n1 := l1.norm
-      let n2 := l2.norm
-      if n1.terms = n2.terms then
-        n1.terms.foldl (fun T t =>
-          if avars.contains t.1 && decide (t.2 ≠ 0) && decide (t.2 * t.2⁻¹ = 1) then
-            T.insertEntry t.1 t.2 ⟨l1.const, n1.terms.filter (fun s => s.1 ≠ t.1)⟩
-              (l2.const - l1.const)
-          else T) T
-      else
-        n1.terms.foldl (fun T t =>
-          if avars.contains t.1 then
-            match denseTwoRootOfLins l1 l2 t.1 with
-            | some (k, A, δ) => if k * k⁻¹ = 1 then T.insertEntry t.1 k A δ else T
-            | none => T
-          else T) T
+      (l1.norm.terms.map (fun t => t.1)).foldl (fun T v =>
+        if avars.contains v then
+          match denseTwoRootOfLins l1 l2 v with
+          | some (k, A, δ) => if k * k⁻¹ = 1 then T.insertEntry v k A δ else T
+          | none => T
+        else T) T
     | _, _ => T
   | _ => T
 
@@ -479,30 +458,43 @@ def denseBUTwoRootMap (avars : Std.HashSet VarId) (cs : List (DenseExpr p)) : De
 
 /-- The entailed equalities of one bus: prepare, sweep, verify. -/
 def denseBUForBus (ops : DenseZModOps p) (T : DenseTwoRootMap p) (nw : DenseNonzeroWits p)
-    (shape : MemoryBusShape) (bis : Array (BusInteraction (DenseExpr p))) : List (DenseExpr p) :=
+    (shape : MemoryBusShape) (bisL : List (BusInteraction (DenseExpr p))) : List (DenseExpr p) :=
   let setMult := denseSetNewMult ops shape
   let prevMult := denseGetPreviousMult ops shape
+  let bis := bisL.toArray
   let arr := bis.map (denseBUPrep shape T)
   let pairs := denseBUSweep ops nw setMult prevMult arr arr.size 0 ∅ [] []
   let out := denseBUScatter arr.size pairs
   denseBUCollect ops nw setMult prevMult shape bis arr (denseBUCands out out.size [])
 
-/-- The constraints `denseBusUnifyF` appends: the entailed slot equalities of every verified
-    consecutive send→receive pair, minus those that are identically zero or already present. -/
-def denseBusUnifyNewCs (bs : BusSemantics p) (facts : BusFacts p bs)
-    (d : DenseConstraintSystem p) : List (DenseExpr p) :=
-  let _ := bs
-  let ops : DenseZModOps p := denseZModOps
-  let busLists := denseBUBusLists facts.memShape d.busInteractions
-  if busLists.isEmpty then [] else
+/-- The two-root table over the constraints that can be queried (`denseBUAddrVars`). -/
+def denseBUTable (busLists : List (Nat × MemoryBusShape × List (BusInteraction (DenseExpr p))))
+    (d : DenseConstraintSystem p) : DenseTwoRootMap p :=
   let avars := denseBUAddrVars busLists
-  let T := denseBUTwoRootMap avars (d.algebraicConstraints.filter (fun c => c.mentionsAny avars))
+  denseBUTwoRootMap avars (d.algebraicConstraints.filter (fun c => c.mentionsAny avars))
+
+/-- `DenseNonzeroWits.build` with the witness list scanned once instead of twice. -/
+def denseBUWits (d : DenseConstraintSystem p) : DenseNonzeroWits p :=
   let ws := d.algebraicConstraints.flatMap denseReciprocalWits?
-  let nw : DenseNonzeroWits p := ⟨ws, denseNZIndexOf ws⟩
-  let eqs := (busLists.toList.map (fun sl => denseBUForBus ops T nw sl.1 sl.2)).flatten
-  if eqs.isEmpty then [] else
-  -- The already-present test buckets by `DenseExpr.bHash`; only a constraint of an equality's own
-  -- shape can be `==` to one, so the rest never enter the bucket.
+  ⟨ws, denseNZIndexOf ws⟩
+
+/-- The equalities every bus contributes, before the zero / already-present filter. -/
+def denseBUEqsOf (busLists : List (Nat × MemoryBusShape × List (BusInteraction (DenseExpr p))))
+    (d : DenseConstraintSystem p) : List (DenseExpr p) :=
+  let T := denseBUTable busLists d
+  let nw := denseBUWits d
+  (busLists.map (fun sl => denseBUForBus denseZModOps T nw sl.2.1 sl.2.2)).flatten
+
+def denseBUEqs (memShape : Nat → Option MemoryBusShape) (d : DenseConstraintSystem p) :
+    List (DenseExpr p) :=
+  let busLists := denseBUBusLists memShape d.busInteractions
+  if busLists.isEmpty then [] else denseBUEqsOf busLists d
+
+/-- Drop the equalities that are identically zero or already present. The already-present test
+    buckets by `DenseExpr.bHash`; only a constraint of an equality's own shape can be `==` to one,
+    so the rest never enter the bucket. -/
+def denseBUFilterNew (d : DenseConstraintSystem p) (eqs : List (DenseExpr p)) :
+    List (DenseExpr p) :=
   let dHashes : Std.HashMap UInt64 (List (DenseExpr p)) :=
     d.algebraicConstraints.foldl (fun m c =>
       match c with
@@ -511,6 +503,14 @@ def denseBusUnifyNewCs (bs : BusSemantics p) (facts : BusFacts p bs)
   let containsC : DenseExpr p → Bool := fun c =>
     (dHashes.getD c.bHash []).any (fun c' => c' == c)
   eqs.filter (fun c => !c.normalize.fold.isConstZero && !containsC c)
+
+/-- The constraints `denseBusUnifyF` appends: the entailed slot equalities of every verified
+    consecutive send→receive pair, minus those that are identically zero or already present. -/
+def denseBusUnifyNewCs (bs : BusSemantics p) (facts : BusFacts p bs)
+    (d : DenseConstraintSystem p) : List (DenseExpr p) :=
+  let _ := bs
+  let eqs := denseBUEqs facts.memShape d
+  if eqs.isEmpty then [] else denseBUFilterNew d eqs
 
 /-- For a memory bus, a `set` (send) at address `a` immediately followed by a matching `get`
     (receive) at the same address must carry the same payload, so this adds the entailed slot
