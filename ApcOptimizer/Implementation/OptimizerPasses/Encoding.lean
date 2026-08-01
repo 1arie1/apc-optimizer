@@ -48,6 +48,10 @@ def zmodNegOneP : ∀ (p : ℕ), ZMod p
   | 0 => (-1 : ℤ)
   | n + 1 => (⟨n, Nat.lt_succ_self n⟩ : Fin (n + 1))
 
+def zmodNegP : ∀ {p : ℕ}, ZMod p → ZMod p
+  | 0 => Int.neg
+  | n + 1 => fun a => (Neg.neg (α := Fin (n + 1)) a : Fin (n + 1))
+
 /-- `c = 0`, dictionary-free: `val` sends `0` to `0` and nothing else, at every `p`
     (`ZMod.val_eq_zero`). -/
 def zmodIsZero (c : ZMod p) : Bool := c.val == 0
@@ -92,6 +96,9 @@ The `…P` value lemmas are the same five obligations as `denseZModOps`' `_eq` f
   cases p with | zero => rfl | succ n => rfl
 
 @[simp] theorem zmodOneP_eq : zmodOneP p = 1 := by
+  cases p with | zero => rfl | succ n => rfl
+
+@[simp] theorem zmodNegP_eq (a : ZMod p) : zmodNegP a = -a := by
   cases p with | zero => rfl | succ n => rfl
 
 @[simp] theorem zmodNegOneP_eq : zmodNegOneP p = -1 := by
