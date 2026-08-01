@@ -25,166 +25,146 @@ namespace ApcOptimizer.Dense
 
 variable {p : ℕ}
 
-/-- `a = b`, dictionary-free (`zmodIsZero` is exact at every `p`). -/
-@[inline] def dbEq (a b : ZMod p) : Bool :=
-  zmodIsZero (zmodAddP a (zmodMulP (zmodNegOneP p) b))
+/-! ## Domains
 
-/-! ## Domains -/
+The scan works on `ZMod p` values in their `ZMod.val` representation — a plain `Nat` below `p` —
+so a point costs machine arithmetic instead of a `p`-match plus a `Fin` reconstruction per
+operation. `DbDom` therefore stores `Nat`s; `zmodOfNatP` maps back at the boundary. -/
 
 /-- A finite domain: explicit values, `[0, bound)`, or the `bound`-element coset
-    `{(v + negB) * aInv : v < bound}` (a byte operand's entailed domain, never materialized). -/
-inductive DbDom (p : ℕ) where
-  | explicit (vals : Array (ZMod p))
+    `{(v + negB) * aInv : v < bound}` (a byte operand's entailed domain, never materialized).
+    Every value is a `ZMod.val`. -/
+inductive DbDom where
+  | explicit (vals : Array Nat)
   | range (bound : Nat)
-  | coset (bound : Nat) (negB aInv : ZMod p)
+  | coset (bound : Nat) (negB aInv : Nat)
 
-@[inline] def DbDom.size : DbDom p → Nat
+@[inline] def DbDom.size : DbDom → Nat
   | .explicit vs => vs.size
   | .range b => b
   | .coset b _ _ => b
-
-/-! ### Element iteration with early exit (no element list is ever built) -/
-
-def dbRangeIter {β : Type} (f : β → ZMod p → β) (stop : β → Bool) (cur : ZMod p) :
-    Nat → β → β
-  | 0, acc => acc
-  | n + 1, acc =>
-    if stop acc then acc
-    else dbRangeIter f stop (zmodAddP cur (zmodOneP p)) n (f acc cur)
-
-def dbCosetIter {β : Type} (f : β → ZMod p → β) (stop : β → Bool) (negB aInv cur : ZMod p) :
-    Nat → β → β
-  | 0, acc => acc
-  | n + 1, acc =>
-    if stop acc then acc
-    else
-      dbCosetIter f stop negB aInv (zmodAddP cur (zmodOneP p)) n
-        (f acc (zmodMulP (zmodAddP cur negB) aInv))
-
-def dbArrayIter {β : Type} (vs : Array (ZMod p)) (f : β → ZMod p → β) (stop : β → Bool)
-    (i : Nat) (acc : β) : β :=
-  if h : i < vs.size then
-    (if stop acc then acc else dbArrayIter vs f stop (i + 1) (f acc vs[i]))
-  else acc
-  termination_by vs.size - i
-  decreasing_by all_goals omega
-
-def DbDom.iter {β : Type} (d : DbDom p) (f : β → ZMod p → β) (stop : β → Bool) (init : β) : β :=
-  match d with
-  | .explicit vs => dbArrayIter vs f stop 0 init
-  | .range b => dbRangeIter f stop (zmodZeroP p) b init
-  | .coset b negB aInv => dbCosetIter f stop negB aInv (zmodZeroP p) b init
-
-/-! ### Indexed element access
-
-The box loops walk each domain by index with O(1) element access, so no domain is ever materialized
-and no closure is applied per element. -/
 
 /-- `(n : ZMod p)`, dictionary-free (mirrors `zmodOneP`). -/
 def zmodOfNatP : ∀ (p : ℕ), Nat → ZMod p
   | 0, n => ((n : ℤ) : ZMod 0)
   | m + 1, n => (⟨n % (m + 1), Nat.mod_lt _ (Nat.succ_pos m)⟩ : Fin (m + 1))
 
-/-- The `i`-th element of a domain, in `toList` order. -/
-@[inline] def DbDom.at (d : DbDom p) (i : Nat) : ZMod p :=
+/-- `a + b` on `val`s: both are below `p`, so the sum needs a conditional subtraction rather than
+    the division `Fin.add` performs. -/
+@[inline] def dbAddN (p a b : Nat) : Nat := let s := a + b; if s < p then s else s - p
+
+@[inline] def dbMulN (p a b : Nat) : Nat := a * b % p
+
+/-- The `i`-th element of a domain, in `toList` order. The index is a position in a domain of at
+    most `maxEnumSize` elements, so the reduction is a comparison rather than a division. -/
+@[inline] def DbDom.at (p : ℕ) (d : DbDom) (i : Nat) : Nat :=
   match d with
-  | .explicit vs => vs.getD i (zmodZeroP p)
-  | .range _ => zmodOfNatP p i
-  | .coset _ negB aInv => zmodMulP (zmodAddP (zmodOfNatP p i) negB) aInv
+  | .explicit vs => vs.getD i 0
+  | .range _ => if i < p then i else i % p
+  | .coset _ negB aInv =>
+    dbMulN p (dbAddN p (if i < p then i else i % p) negB) aInv
+
+/-- Elements of a coset domain, with early exit; the other two arms need no iteration. -/
+def dbCosetIterN {β : Type} (p : ℕ) (f : β → Nat → β) (stop : β → Bool) (negB aInv cur : Nat) :
+    Nat → β → β
+  | 0, acc => acc
+  | n + 1, acc =>
+    if stop acc then acc
+    else dbCosetIterN p f stop negB aInv ((cur + 1 % p) % p) n (f acc (dbMulN p ((cur + negB) % p) aInv))
 
 /-- The single value the domain admits, or `none` (`denseDomainConstantValueV?`). -/
-def DbDom.const? (d : DbDom p) : Option (ZMod p) :=
+def DbDom.const? (p : ℕ) (d : DbDom) : Option Nat :=
   match d with
   | .explicit vs =>
     match vs[0]? with
     | none => none
-    | some v => if vs.all (fun w => dbEq w v) then some v else none
-  | .range b => if b == 1 then some (zmodZeroP p) else none
-  | .coset b negB aInv => if b == 1 then some (zmodMulP negB aInv) else none
+    | some v => if vs.all (fun w => w == v) then some v else none
+  | .range b => if b == 1 then some 0 else none
+  | .coset b negB aInv => if b == 1 then some (dbMulN p negB aInv) else none
 
 /-- Every element is `< bound` as a `Nat` (`denseDomainBelowV`). -/
-def DbDom.below (d : DbDom p) (bound : Nat) : Bool :=
+def DbDom.below (p : ℕ) (d : DbDom) (bound : Nat) : Bool :=
   match d with
-  | .explicit vs => vs.all (fun v => decide (v.val < bound))
+  | .explicit vs => vs.all (fun v => decide (v < bound))
   | .range b => decide (b ≤ bound)
   | .coset b negB aInv =>
-    dbCosetIter (fun acc v => acc && decide (v.val < bound)) (fun acc => !acc) negB aInv
-      (zmodZeroP p) b true
+    dbCosetIterN p (fun acc v => acc && decide (v < bound)) (fun acc => !acc) negB aInv 0 b true
 
 /-! ## Compiled items
 
 `DbTree` leaves are `VarId.index`es into the scan's register file, so a compiled item is
 target-independent: it is built once per invocation and shared by every target that gathers it. -/
 
-inductive DbTree (p : ℕ) where
-  | const (c : ZMod p)
+inductive DbTree where
+  | const (c : Nat)
   | reg (i : Nat)
-  | add (a b : DbTree p)
-  | mul (a b : DbTree p)
+  | add (a b : DbTree)
+  | mul (a b : DbTree)
 
-def dbEval (regs : Array (ZMod p)) : DbTree p → ZMod p
+def dbEval (p : ℕ) (regs : Array Nat) : DbTree → Nat
   | .const c => c
-  | .reg i => regs.getD i (zmodZeroP p)
-  | .add a b => zmodAddP (dbEval regs a) (dbEval regs b)
-  | .mul a b => zmodMulP (dbEval regs a) (dbEval regs b)
+  | .reg i => regs.getD i 0
+  | .add a b => dbAddN p (dbEval p regs a) (dbEval p regs b)
+  | .mul a b => dbMulN p (dbEval p regs a) (dbEval p regs b)
 
-def dbCompile : DenseExpr p → DbTree p
-  | .const c => .const c
+def dbCompile : DenseExpr p → DbTree
+  | .const c => .const c.val
   | .var i => .reg i.index
   | .add a b => .add (dbCompile a) (dbCompile b)
   | .mul a b => .mul (dbCompile a) (dbCompile b)
 
 /-- One gathered item's per-point obligation; the bus arms mirror `DenseCBiPred`. -/
-inductive DbItem (p : ℕ) where
-  | zero (e : DbTree p)
+inductive DbItem where
+  | zero (e : DbTree)
   | always
-  | varRange (mult x width : DbTree p)
-  | varRangeConst (mult x : DbTree p) (bound : Nat)
-  | tupleRange (mult x y : DbTree p) (boundX boundY : Nat)
-  | fixedRange (mult value : DbTree p) (bound : Nat)
-  | byte (mult o1 o2 result : DbTree p) (bound : Nat) (kind : DenseBytePredKind)
-  | fallback (busId : Nat) (mult : DbTree p) (payload : List (DbTree p))
+  | varRange (mult x width : DbTree)
+  | varRangeConst (mult x : DbTree) (bound : Nat)
+  | tupleRange (mult x y : DbTree) (boundX boundY : Nat)
+  | fixedRange (mult value : DbTree) (bound : Nat)
+  | byte (mult o1 o2 result : DbTree) (bound : Nat) (kind : DenseBytePredKind)
+  | fallback (busId : Nat) (mult : DbTree) (payload : List DbTree)
 
-def dbByteRel (kind : DenseBytePredKind) (a b r : ZMod p) : Bool :=
+def dbByteRel (kind : DenseBytePredKind) (a b r : Nat) : Bool :=
   match kind with
-  | .xor => decide (r.val = Nat.xor a.val b.val)
-  | .pair => zmodIsZero r
-  | .or => decide (r.val = Nat.lor a.val b.val)
-  | .and => decide (r.val = Nat.land a.val b.val)
+  | .xor => decide (r = Nat.xor a b)
+  | .pair => r == 0
+  | .or => decide (r = Nat.lor a b)
+  | .and => decide (r = Nat.land a b)
 
-def dbItemOk {bs : BusSemantics p} (facts : BusFacts p bs) (regs : Array (ZMod p)) :
-    DbItem p → Bool
-  | .zero e => zmodIsZero (dbEval regs e)
+def dbItemOk {bs : BusSemantics p} (facts : BusFacts p bs) (regs : Array Nat) :
+    DbItem → Bool
+  | .zero e => dbEval p regs e == 0
   | .always => true
   | .varRange mult x width =>
-    if zmodIsZero (dbEval regs mult) then true
+    if dbEval p regs mult == 0 then true
     else
-      let w := dbEval regs width
-      decide (w.val ≤ 17) && decide ((dbEval regs x).val < 2 ^ w.val)
+      let w := dbEval p regs width
+      decide (w ≤ 17) && decide (dbEval p regs x < 2 ^ w)
   | .varRangeConst mult x bound =>
-    if zmodIsZero (dbEval regs mult) then true
-    else decide ((dbEval regs x).val < bound)
+    if dbEval p regs mult == 0 then true
+    else decide (dbEval p regs x < bound)
   | .tupleRange mult x y boundX boundY =>
-    if zmodIsZero (dbEval regs mult) then true
-    else decide ((dbEval regs x).val < boundX) && decide ((dbEval regs y).val < boundY)
+    if dbEval p regs mult == 0 then true
+    else decide (dbEval p regs x < boundX) && decide (dbEval p regs y < boundY)
   | .fixedRange mult value bound =>
-    if zmodIsZero (dbEval regs mult) then true
-    else decide ((dbEval regs value).val < bound)
+    if dbEval p regs mult == 0 then true
+    else decide (dbEval p regs value < bound)
   | .byte mult o1 o2 result bound kind =>
-    if zmodIsZero (dbEval regs mult) then true
+    if dbEval p regs mult == 0 then true
     else
-      let a := dbEval regs o1
-      let b := dbEval regs o2
-      decide (a.val < bound) && decide (b.val < bound) && dbByteRel kind a b (dbEval regs result)
+      let a := dbEval p regs o1
+      let b := dbEval p regs o2
+      decide (a < bound) && decide (b < bound) && dbByteRel kind a b (dbEval p regs result)
   | .fallback busId mult payload =>
-    let m := dbEval regs mult
-    if zmodIsZero m then true
+    let m := dbEval p regs mult
+    if m == 0 then true
     else
       facts.acceptsDec
-        { busId := busId, multiplicity := m, payload := payload.map (dbEval regs) }
+        { busId := busId, multiplicity := zmodOfNatP p m,
+          payload := payload.map (fun t => zmodOfNatP p (dbEval p regs t)) }
 
-def dbAllOk {bs : BusSemantics p} (facts : BusFacts p bs) (items : Array (DbItem p))
-    (regs : Array (ZMod p)) (i : Nat) : Bool :=
+def dbAllOk {bs : BusSemantics p} (facts : BusFacts p bs) (items : Array DbItem)
+    (regs : Array Nat) (i : Nat) : Bool :=
   if h : i < items.size then
     (if dbItemOk facts regs items[i] then dbAllOk facts items regs (i + 1) else false)
   else true
@@ -224,8 +204,8 @@ def dbBiPreEmpty : DbBiPre p := ⟨none, [], #[], false, none, false, none, none
 
 /-! ### Compiling a bus interaction (mirrors `denseCompileCBiPredV`) -/
 
-def dbCompileRange (bi : BusInteraction (DenseExpr p)) (e : DbBiPre p) (mult : DbTree p) :
-    Option (DbItem p) :=
+def dbCompileRange (bi : BusInteraction (DenseExpr p)) (e : DbBiPre p) (mult : DbTree) :
+    Option (DbItem) :=
   match e.mult? with
   | some m =>
     if zmodIsOne m then
@@ -238,7 +218,7 @@ def dbCompileRange (bi : BusInteraction (DenseExpr p)) (e : DbBiPre p) (mult : D
     else none
   | none => none
 
-def dbCompileByte (e : DbBiPre p) (mult : DbTree p) : Option (DbItem p) :=
+def dbCompileByte (e : DbBiPre p) (mult : DbTree) : Option (DbItem) :=
   match e.byte? with
   | none => none
   | some b =>
@@ -246,7 +226,7 @@ def dbCompileByte (e : DbBiPre p) (mult : DbTree p) : Option (DbItem p) :=
     | none => none
     | some opValue =>
       let spec := b.spec
-      let mk : DenseBytePredKind → Option (DbItem p) := fun kind =>
+      let mk : DenseBytePredKind → Option (DbItem) := fun kind =>
         some (.byte mult (dbCompile b.o1) (dbCompile b.o2) (dbCompile b.result) spec.bound kind)
       if opValue = spec.xorOp then mk .xor
       else if opValue = spec.pairOp then mk .pair
@@ -263,8 +243,8 @@ def dbCompileByte (e : DbBiPre p) (mult : DbTree p) : Option (DbItem p) :=
           | some andOp => if opValue = andOp then mk .and else none
           | none => none
 
-def dbCompileOther (bi : BusInteraction (DenseExpr p)) (e : DbBiPre p) (mult : DbTree p) :
-    DbItem p :=
+def dbCompileOther (bi : BusInteraction (DenseExpr p)) (e : DbBiPre p) (mult : DbTree) :
+    DbItem :=
   match dbCompileRange bi e mult with
   | some item => item
   | none =>
@@ -273,7 +253,7 @@ def dbCompileOther (bi : BusInteraction (DenseExpr p)) (e : DbBiPre p) (mult : D
     | none => .fallback bi.busId mult (bi.payload.map dbCompile)
 
 def dbCompileBi {bs : BusSemantics p} (facts : BusFacts p bs)
-    (bi : BusInteraction (DenseExpr p)) (e : DbBiPre p) : DbItem p :=
+    (bi : BusInteraction (DenseExpr p)) (e : DbBiPre p) : DbItem :=
   if denseBiAlwaysOk facts bi then .always
   else
     let mult := dbCompile bi.multiplicity
@@ -354,23 +334,23 @@ def dbRootsIn (i : VarId) : DbRootPlan p → Option (List (ZMod p))
 /-! ## The domain table -/
 
 structure DbTab (p : ℕ) where
-  dom : Array (Option (DbDom p))
+  dom : Array (Option (DbDom))
 
 /-- Keep the strictly smaller domain, as `DenseDomainTable.insertEntry`. -/
-def DbTab.insert (T : DbTab p) (i : Nat) (d : DbDom p) : DbTab p :=
+def DbTab.insert (T : DbTab p) (i : Nat) (d : DbDom) : DbTab p :=
   let ⟨dom⟩ := T
   match dom.getD i none with
   | some d0 => if d.size < d0.size then ⟨dom.set! i (some d)⟩ else ⟨dom⟩
   | none => ⟨dom.set! i (some d)⟩
 
-@[inline] def DbTab.get (T : DbTab p) (i : Nat) : Option (DbDom p) := T.dom.getD i none
+@[inline] def DbTab.get (T : DbTab p) (i : Nat) : Option (DbDom) := T.dom.getD i none
 
 def dbAddConstraintVars (plan : DbRootPlan p) (vs : Array VarId) (k : Nat) (T : DbTab p) :
     DbTab p :=
   if h : k < vs.size then
     let i := vs[k]
     match dbRootsIn i plan with
-    | some rs => dbAddConstraintVars plan vs (k + 1) (T.insert i.index (.explicit rs.toArray))
+    | some rs => dbAddConstraintVars plan vs (k + 1) (T.insert i.index (.explicit (rs.map ZMod.val).toArray))
     | none => dbAddConstraintVars plan vs (k + 1) T
   else T
   termination_by vs.size - k
@@ -403,10 +383,10 @@ def dbBusSlots {bs : BusSemantics p} (facts : BusFacts p bs) (bi : BusInteractio
 
 /-! ### Byte-operand domains (`denseAddByteVarDoms`), coset streamed -/
 
-def dbByteOperand (e : DenseExpr p) (bound : Nat) : Option (Nat × DbDom p) :=
+def dbByteOperand (e : DenseExpr p) (bound : Nat) : Option (Nat × DbDom) :=
   match e with
   | .var i => some (i.index, .range bound)
-  | _ => (denseAffineOfExpr e).map (fun t => (t.1.index, .coset bound (zmodNegP t.2.2) t.2.1⁻¹))
+  | _ => (denseAffineOfExpr e).map (fun t => (t.1.index, .coset bound (zmodNegP t.2.2).val (t.2.1⁻¹).val))
 
 def dbByteOperandVar (e : DenseExpr p) : Option Nat :=
   match e with
@@ -453,7 +433,7 @@ def dbBoxOf (T : DbTab p) (vs : Array VarId) (k : Nat) (acc : Nat) : Option Nat 
   termination_by vs.size - k
   decreasing_by all_goals omega
 
-def dbDomsOf (T : DbTab p) (vs : Array VarId) : Option (Array (DbDom p)) :=
+def dbDomsOf (T : DbTab p) (vs : Array VarId) : Option (Array (DbDom)) :=
   vs.foldl (init := some #[]) fun acc v =>
     match acc with
     | none => none
@@ -464,12 +444,12 @@ def dbDomsOf (T : DbTab p) (vs : Array VarId) : Option (Array (DbDom p)) :=
 
 /-- Enumerate a box, testing one item at every point; `false` at the first failure. Explicit-arg
     loops: no per-point allocation. -/
-partial def dbBoxAllOne {bs : BusSemantics p} (facts : BusFacts p bs) (item : DbItem p)
-    (keys : Array Nat) (doms : Array (DbDom p)) (d i n : Nat) (regs : Array (ZMod p))
-    (ok : Bool) : Array (ZMod p) × Bool :=
+partial def dbBoxAllOne {bs : BusSemantics p} (facts : BusFacts p bs) (item : DbItem)
+    (keys : Array Nat) (doms : Array (DbDom)) (d i n : Nat) (regs : Array Nat)
+    (ok : Bool) : Array Nat × Bool :=
   if i ≥ n || !ok then ⟨regs, ok⟩
   else
-    let regs := regs.set! (keys.getD d 0) ((doms.getD d (.range 0)).at i)
+    let regs := regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (.range 0)) i)
     if d + 1 ≥ keys.size then
       if dbItemOk facts regs item then dbBoxAllOne facts item keys doms d (i + 1) n regs true
       else ⟨regs, false⟩
@@ -479,22 +459,22 @@ partial def dbBoxAllOne {bs : BusSemantics p} (facts : BusFacts p bs) (item : Db
       if ok then dbBoxAllOne facts item keys doms d (i + 1) n regs true else ⟨regs, false⟩
 
 /-- The box point where key `d` takes element `min i (size_d - 1)`. -/
-def dbDiagPoint (keys : Array Nat) (doms : Array (DbDom p)) (i : Nat) (regs : Array (ZMod p)) :
-    Array (ZMod p) :=
+def dbDiagPoint (p : ℕ) (keys : Array Nat) (doms : Array (DbDom)) (i : Nat) (regs : Array Nat) :
+    Array Nat :=
   (Array.range keys.size).foldl (init := regs) fun regs d =>
     let dom := doms.getD d (.range 0)
-    regs.set! (keys.getD d 0) (dom.at (min i (dom.size - 1)))
+    regs.set! (keys.getD d 0) (DbDom.at p dom (min i (dom.size - 1)))
 
 /-- Refute redundancy on the box diagonal before sweeping it. The sweep varies the last key fastest,
     so a constraint that only fails once an *outer* key moves costs a whole inner domain to refute;
     97 % of the non-redundant checks on sha256/keccak fail within the first eight diagonal points
     (measured). Verdict-identical: these are box points, so a failure here is a failure there. -/
-partial def dbDiagRefute {bs : BusSemantics p} (facts : BusFacts p bs) (item : DbItem p)
-    (keys : Array Nat) (doms : Array (DbDom p)) (i imax : Nat) (regs : Array (ZMod p)) :
-    Array (ZMod p) × Bool :=
+partial def dbDiagRefute {bs : BusSemantics p} (facts : BusFacts p bs) (item : DbItem)
+    (keys : Array Nat) (doms : Array (DbDom)) (i imax : Nat) (regs : Array Nat) :
+    Array Nat × Bool :=
   if i ≥ imax then ⟨regs, false⟩
   else
-    let regs := dbDiagPoint keys doms i regs
+    let regs := dbDiagPoint p keys doms i regs
     if dbItemOk facts regs item then dbDiagRefute facts item keys doms (i + 1) imax regs
     else ⟨regs, true⟩
 
@@ -504,7 +484,7 @@ def dbDiagGate : Nat := 16
 
 /-- `denseConstraintRedundantV`: identically zero on the box of its own variables' domains. -/
 def dbConstraintRedundant {bs : BusSemantics p} (facts : BusFacts p bs) (T : DbTab p)
-    (item : DbItem p) (vs : Array VarId) (regs : Array (ZMod p)) : Array (ZMod p) × Bool :=
+    (item : DbItem) (vs : Array VarId) (regs : Array Nat) : Array Nat × Bool :=
   match dbBoxOf T vs 0 1 with
   | none => ⟨regs, false⟩
   | some box =>
@@ -530,7 +510,7 @@ def dbExprBelow (T : DbTab p) (e : DenseExpr p) (bound : Nat) : Bool :=
   | some c => decide (c.val < bound)
   | none =>
     match e with
-    | .var i => match T.get i.index with | some d => d.below bound | none => false
+    | .var i => match T.get i.index with | some d => DbDom.below p d bound | none => false
     | _ => false
 
 def dbRangeCheckRedundant (T : DbTab p) (bi : BusInteraction (DenseExpr p)) (e : DbBiPre p) :
@@ -595,43 +575,32 @@ def dbBiDomainRedundant {bs : BusSemantics p} (facts : BusFacts p bs) (T : DbTab
 The register file is `VarId.index`-keyed and owned by the scan; the candidate mask is a value array
 plus an alive flag array with a live count, so the abort test is O(1) per point. -/
 
-structure DbScanSt (p : ℕ) where
-  regs : Array (ZMod p)
-  vals : Array (ZMod p)
+structure DbScanSt where
+  regs : Array Nat
+  vals : Array Nat
   alive : Array Bool
   live : Nat
   started : Bool
 deriving Inhabited
 
-def dbAbsorbGo (regs : Array (ZMod p)) (keys : Array Nat) (i : Nat)
-    (vals : Array (ZMod p)) (alive : Array Bool) (live : Nat) :
-    Array (ZMod p) × Array Bool × Nat :=
+def dbAbsorbGo (regs : Array Nat) (keys : Array Nat) (i : Nat)
+    (vals : Array Nat) (alive : Array Bool) (live : Nat) :
+    Array Nat × Array Bool × Nat :=
   if h : i < keys.size then
     if alive.getD i false then
-      let cur := regs.getD (keys[i]) (zmodZeroP p)
-      if dbEq cur (vals.getD i (zmodZeroP p)) then dbAbsorbGo regs keys (i + 1) vals alive live
+      if regs.getD (keys[i]) 0 == vals.getD i 0 then dbAbsorbGo regs keys (i + 1) vals alive live
       else dbAbsorbGo regs keys (i + 1) vals (alive.set! i false) (live - 1)
     else dbAbsorbGo regs keys (i + 1) vals alive live
   else (vals, alive, live)
   termination_by keys.size - i
   decreasing_by all_goals omega
 
-/-- Intersect the mask with a surviving point (initializing it from the first survivor). -/
-def dbAbsorb (keys : Array Nat) (st : DbScanSt p) : DbScanSt p :=
-  let ⟨regs, vals, alive, live, started⟩ := st
-  if !started then
-    let vals := keys.map (fun k => regs.getD k (zmodZeroP p))
-    ⟨regs, vals, Array.replicate keys.size true, keys.size, true⟩
-  else
-    let (vals, alive, live) := dbAbsorbGo regs keys 0 vals alive live
-    ⟨regs, vals, alive, live, started⟩
-
 /-- Intersect the mask with a surviving point; called only for survivors. -/
-def dbAbsorbArgs (keys : Array Nat) (regs : Array (ZMod p)) (vals : Array (ZMod p))
+def dbAbsorbArgs (keys : Array Nat) (regs : Array Nat) (vals : Array Nat)
     (alive : Array Bool) (live : Nat) (started : Bool) :
-    Array (ZMod p) × Array Bool × Nat × Bool :=
+    Array Nat × Array Bool × Nat × Bool :=
   if !started then
-    ⟨keys.map (fun k => regs.getD k (zmodZeroP p)), Array.replicate keys.size true, keys.size, true⟩
+    ⟨keys.map (fun k => regs.getD k 0), Array.replicate keys.size true, keys.size, true⟩
   else
     let (vals, alive, live) := dbAbsorbGo regs keys 0 vals alive live
     ⟨vals, alive, live, started⟩
@@ -639,13 +608,13 @@ def dbAbsorbArgs (keys : Array Nat) (regs : Array (ZMod p)) (vals : Array (ZMod 
 /-- The box loop. State is passed as explicit arguments, so nothing is allocated per point: the
     innermost dimension is walked in place (`regs.set!` on a uniquely-owned register file) and only a
     surviving point touches the mask. -/
-partial def dbScanLoop {bs : BusSemantics p} (facts : BusFacts p bs) (items : Array (DbItem p))
-    (keys : Array Nat) (doms : Array (DbDom p)) (d i n : Nat)
-    (regs : Array (ZMod p)) (vals : Array (ZMod p)) (alive : Array Bool) (live : Nat)
-    (started : Bool) : DbScanSt p :=
+partial def dbScanLoop {bs : BusSemantics p} (facts : BusFacts p bs) (items : Array (DbItem))
+    (keys : Array Nat) (doms : Array (DbDom)) (d i n : Nat)
+    (regs : Array Nat) (vals : Array Nat) (alive : Array Bool) (live : Nat)
+    (started : Bool) : DbScanSt :=
   if i ≥ n || (started && live == 0) then ⟨regs, vals, alive, live, started⟩
   else
-    let regs := regs.set! (keys.getD d 0) ((doms.getD d (.range 0)).at i)
+    let regs := regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (.range 0)) i)
     if d + 1 ≥ keys.size then
       -- innermost: test the point in place
       if dbAllOk facts items regs 0 then
@@ -659,8 +628,8 @@ partial def dbScanLoop {bs : BusSemantics p} (facts : BusFacts p bs) (items : Ar
       dbScanLoop facts items keys doms d (i + 1) n regs vals alive live started
 
 /-- Scan a job's box, starting from an empty mask. -/
-def dbScanBox {bs : BusSemantics p} (facts : BusFacts p bs) (items : Array (DbItem p))
-    (keys : Array Nat) (doms : Array (DbDom p)) (regs : Array (ZMod p)) : DbScanSt p :=
+def dbScanBox {bs : BusSemantics p} (facts : BusFacts p bs) (items : Array (DbItem))
+    (keys : Array Nat) (doms : Array (DbDom)) (regs : Array Nat) : DbScanSt :=
   if keys.isEmpty then
     -- the variable-free box has exactly one (empty) point
     if dbAllOk facts items regs 0 then ⟨regs, #[], #[], 0, true⟩ else ⟨regs, #[], #[], 0, false⟩
@@ -671,14 +640,14 @@ def dbScanBox {bs : BusSemantics p} (facts : BusFacts p bs) (items : Array (DbIt
 /-- A preflighted target: an immediate answer, or a scan job carrying its compiled items. -/
 inductive DbPlan (p : ℕ) where
   | done (forced : List (VarId × ZMod p))
-  | scan (keys : Array VarId) (doms : Array (DbDom p)) (items : Array (DbItem p))
+  | scan (keys : Array VarId) (doms : Array (DbDom)) (items : Array (DbItem))
       (constOk : Bool)
 
-def dbForcedOfMask (keys : Array VarId) (vals : Array (ZMod p)) (alive : Array Bool) (i : Nat) :
+def dbForcedOfMask (p : ℕ) (keys : Array VarId) (vals : Array Nat) (alive : Array Bool) (i : Nat) :
     List (VarId × ZMod p) :=
   if h : i < keys.size then
-    let rest := dbForcedOfMask keys vals alive (i + 1)
-    if alive.getD i false then (keys[i], vals.getD i (zmodZeroP p)) :: rest else rest
+    let rest := dbForcedOfMask p keys vals alive (i + 1)
+    if alive.getD i false then (keys[i], zmodOfNatP p (vals.getD i 0)) :: rest else rest
   else []
   termination_by keys.size - i
   decreasing_by all_goals omega
@@ -688,25 +657,25 @@ def dbZeroAll (keys : Array VarId) : List (VarId × ZMod p) :=
 
 /-- Run one plan, threading the register file so it is allocated once for the whole run. -/
 def dbRunPlan {bs : BusSemantics p} (facts : BusFacts p bs) (nv : Nat)
-    (st : Array (ZMod p) × List (List (VarId × ZMod p))) (plan : DbPlan p) :
-    Array (ZMod p) × List (List (VarId × ZMod p)) :=
+    (st : Array Nat × List (List (VarId × ZMod p))) (plan : DbPlan p) :
+    Array Nat × List (List (VarId × ZMod p)) :=
   match plan with
   | .done forced => ⟨st.1, forced :: st.2⟩
   | .scan keys doms items constOk =>
     let ⟨regs0, out⟩ := st
-    let regs0 := if regs0.size == nv then regs0 else Array.replicate nv (zmodZeroP p)
+    let regs0 := if regs0.size == nv then regs0 else Array.replicate nv 0
     if !constOk then ⟨regs0, dbZeroAll keys :: out⟩
     else
       let res := dbScanBox facts items (keys.map (fun v => v.index)) doms regs0
       let ⟨regs, vals, alive, live, started⟩ := res
       if !started then ⟨regs, dbZeroAll keys :: out⟩
       else if live == 0 then ⟨regs, [] :: out⟩
-      else ⟨regs, dbForcedOfMask keys vals alive 0 :: out⟩
+      else ⟨regs, dbForcedOfMask p keys vals alive 0 :: out⟩
 
 def dbRunPlans {bs : BusSemantics p} (facts : BusFacts p bs) (nv : Nat) (plans : List (DbPlan p)) :
     List (List (VarId × ZMod p)) :=
   (plans.foldl (dbRunPlan facts nv)
-    (⟨#[], []⟩ : Array (ZMod p) × List (List (VarId × ZMod p)))).2.reverse
+    (⟨#[], []⟩ : Array Nat × List (List (VarId × ZMod p)))).2.reverse
 
 /-! ## Target dedup: content hash plus an exact compare on the ascending index key -/
 
@@ -750,15 +719,15 @@ structure DbCtx (p : ℕ) where
   nv : Nat
   T : DbTab p
   csVars : Array (Array VarId)
-  csItems : Array (DbItem p)
+  csItems : Array (DbItem)
   csActive : Array Bool
   csBucket : Array (Array Nat)
   /-- Variable-free constraints' target-independent contribution: their count (active or not) and
       the active ones' items (`denseConstraintCovIndexV`). -/
   csVarlessCount : Nat
-  csVarlessItems : Array (DbItem p)
+  csVarlessItems : Array (DbItem)
   biVars : Array (Array VarId)
-  biItems : Array (DbItem p)
+  biItems : Array (DbItem)
   biUsable : Array Bool
   biInformative : Array Bool
   biDomRed : Array Bool
@@ -806,8 +775,8 @@ def dbBytePhase (pre : Array (DbBiPre p)) (k : Nat) (T : DbTab p) : DbTab p :=
 
 /-- Per-constraint `active` (`¬ redundant`), threading the register file. -/
 def dbActivePhase {bs : BusSemantics p} (facts : BusFacts p bs) (T : DbTab p)
-    (csItems : Array (DbItem p)) (csVars : Array (Array VarId)) (k : Nat)
-    (st : Array (ZMod p) × Array Bool) : Array (ZMod p) × Array Bool :=
+    (csItems : Array (DbItem)) (csVars : Array (Array VarId)) (k : Nat)
+    (st : Array Nat × Array Bool) : Array Nat × Array Bool :=
   if h : k < csItems.size then
     let ⟨regs, out⟩ := st
     let ⟨regs, red⟩ := dbConstraintRedundant facts T csItems[k] (csVars.getD k #[]) regs
@@ -835,7 +804,7 @@ structure DbGather (p : ℕ) where
   biCount : Nat
   informative : Bool
   domRed : Bool
-  items : Array (DbItem p)
+  items : Array (DbItem)
 
 def dbGatherCsAt (ctx : DbCtx p) (xs : Array VarId) (g : DbGather p) (pos : Nat) : DbGather p :=
   if dbSubset (ctx.csVars.getD pos #[]) xs then
@@ -863,10 +832,11 @@ def dbGather (ctx : DbCtx p) (xs : Array VarId) : DbGather p :=
     (ctx.biBucket.getD v.index #[]).foldl (dbGatherBiAt ctx xs) g
 
 /-- Constant-domain answers for a target that needs no scan (`denseConstantDomainsV`). -/
-def dbConstantDomains (keys : Array VarId) (doms : Array (DbDom p)) : List (VarId × ZMod p) :=
+def dbConstantDomains (p : ℕ) (keys : Array VarId) (doms : Array (DbDom)) :
+    List (VarId × ZMod p) :=
   (keys.zipIdx.foldr (init := []) fun ki acc =>
-    match (doms.getD ki.2 (.range 0)).const? with
-    | some c => (ki.1, c) :: acc
+    match DbDom.const? p (doms.getD ki.2 (.range 0)) with
+    | some c => (ki.1, zmodOfNatP p c) :: acc
     | none => acc)
 
 def dbPreflight (ctx : DbCtx p) (xs : Array VarId) : Option (DbPlan p) :=
@@ -879,7 +849,7 @@ def dbPreflight (ctx : DbCtx p) (xs : Array VarId) : Option (DbPlan p) :=
       let informative := g.fullCount != 0 || g.informative
       if informative && box * (g.fullCount + g.biCount) ≤ maxEnumWork then
         if g.activeCs == 0 && g.domRed && doms.all (fun d => d.size != 0) then
-          some (.done (dbConstantDomains xs doms))
+          some (.done (dbConstantDomains p xs doms))
         else
           some (.scan xs doms g.items ctx.constOk)
       else none
@@ -970,7 +940,7 @@ def dbBuildCtx (bs : BusSemantics p) (facts : BusFacts p bs) (d : DenseConstrain
     if e.usable && (dbBoxOf T e.vars 0 1).isSome then dbCompileBi facts bij.1 e
     else DbItem.always
   let ⟨_, csActive⟩ := dbActivePhase facts T csItems csVars 0
-    ⟨Array.replicate nv (zmodZeroP p), #[]⟩
+    ⟨Array.replicate nv 0, #[]⟩
   let biDomRed := (bis.zipIdx).map fun bij =>
     let e := pre.getD bij.2 dbBiPreEmpty
     e.usable && (dbBoxOf T e.vars 0 1).isSome && dbBiDomainRedundant facts T bij.1 e
