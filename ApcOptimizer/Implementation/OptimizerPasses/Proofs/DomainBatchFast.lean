@@ -335,6 +335,172 @@ theorem dbBusSlots_sound [NeZero p] {bs : BusSemantics p} (facts : BusFacts p bs
     | mul a b =>
       simp only [dbBusSlots]; exact ih (slot + 1) seen _ T hshift hT
 
+/-! ### Byte-operand domains
+
+A byte operand's domain is the `bound`-element coset `{(v + negB) * aInv}`, streamed rather than
+materialized, with `negB` and `aInv` stored as `val`s. -/
+
+theorem dbDom_at_coset [NeZero p] (bound negB aInv k : ℕ) :
+    DbDom.at p (.coset bound negB aInv) k = dbMulN p (dbAddN p (k % p) negB) aInv := by
+  simp only [DbDom.at]
+  by_cases hk : k < p
+  · rw [if_pos hk, Nat.mod_eq_of_lt hk]
+  · rw [if_neg hk]
+
+theorem dbDomMem_coset [NeZero p] (bound : ℕ) (b ainv : ZMod p) (v : ZMod p) (k : ℕ)
+    (hk : k < bound) (hv : v = ((k : ZMod p) - b) * ainv) :
+    DbDomMem p (.coset bound (zmodNegP b).val ainv.val) v.val := by
+  refine ⟨k, hk, ?_⟩
+  rw [dbDom_at_coset, ← ZMod.val_natCast (n := p) k, dbAddN_val, dbMulN_val, hv,
+    zmodNegP_eq, sub_eq_add_neg]
+
+/-- `denseByteOperandCosetMem` as an index into the coset. -/
+theorem dbByteOperand_cosetIndex [Fact p.Prime] [NeZero p] (e : DenseExpr p) (bound : ℕ)
+    (x : VarId) (a b : ZMod p) (haff : denseAffineOfExpr e = some (x, a, b))
+    (denv : VarId → ZMod p) (hbnd : (e.eval denv).val < bound) :
+    ∃ k, k < bound ∧ denv x = ((k : ZMod p) - b) * a⁻¹ := by
+  have hmem := denseByteOperandCosetMem e bound x a b haff denv hbnd
+  rw [List.map_map, List.mem_map] at hmem
+  obtain ⟨k, hk, hveq⟩ := hmem
+  exact ⟨k, List.mem_range.mp hk, hveq.symm⟩
+
+/-- An operand domain contains the value a satisfying assignment gives its variable, given the
+    operand is below the byte bound. -/
+theorem dbByteOperand_sound [Fact p.Prime] [NeZero p] (denv : VarId → ZMod p)
+    (e : DenseExpr p) (bound i : ℕ) (dm : DbDom)
+    (h : dbByteOperand e bound = some (i, dm))
+    (hbnd : (e.eval denv).val < bound) : DbDomMem p dm (denv ⟨i⟩).val := by
+  unfold dbByteOperand at h
+  cases e with
+  | var j =>
+    simp only [Option.some.injEq, Prod.mk.injEq] at h
+    obtain ⟨rfl, rfl⟩ := h
+    exact dbDomMem_range bound _ (ZMod.val_lt _) hbnd
+  | const c =>
+    rcases haff : denseAffineOfExpr (.const c : DenseExpr p) with _ | ⟨x, a, b⟩
+    · rw [haff] at h; exact absurd h (by simp)
+    · rw [haff] at h
+      simp only [Option.map_some, Option.some.injEq, Prod.mk.injEq] at h
+      obtain ⟨rfl, rfl⟩ := h
+      obtain ⟨k, hk, hveq⟩ := dbByteOperand_cosetIndex (.const c) bound x a b haff denv hbnd
+      exact dbDomMem_coset bound b a⁻¹ (denv x) k hk hveq
+  | add ea eb =>
+    rcases haff : denseAffineOfExpr (.add ea eb) with _ | ⟨x, a, b⟩
+    · rw [haff] at h; exact absurd h (by simp)
+    · rw [haff] at h
+      simp only [Option.map_some, Option.some.injEq, Prod.mk.injEq] at h
+      obtain ⟨rfl, rfl⟩ := h
+      obtain ⟨k, hk, hveq⟩ := dbByteOperand_cosetIndex (.add ea eb) bound x a b haff denv hbnd
+      exact dbDomMem_coset bound b a⁻¹ (denv x) k hk hveq
+  | mul ea eb =>
+    rcases haff : denseAffineOfExpr (.mul ea eb) with _ | ⟨x, a, b⟩
+    · rw [haff] at h; exact absurd h (by simp)
+    · rw [haff] at h
+      simp only [Option.map_some, Option.some.injEq, Prod.mk.injEq] at h
+      obtain ⟨rfl, rfl⟩ := h
+      obtain ⟨k, hk, hveq⟩ := dbByteOperand_cosetIndex (.mul ea eb) bound x a b haff denv hbnd
+      exact dbDomMem_coset bound b a⁻¹ (denv x) k hk hveq
+
+/-! ### Linking a precomputed view to its interaction
+
+`DbBiPre` caches the `BusFacts` answers for one interaction; these say the cache is faithful. -/
+
+def DbBytePreOf {bs : BusSemantics p} (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) (b : DbBytePre p) : Prop :=
+  facts.byteXorSpec bi.busId = some b.spec ∧
+    ∃ op, b.spec.decode bi.payload = some (op, b.o1, b.o2, b.result) ∧ b.op? = op.constValue?
+
+def DbBiPreOf {bs : BusSemantics p} (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) (e : DbBiPre p) : Prop :=
+  e.mult? = bi.multiplicity.constValue? ∧ e.pat = bi.payload.map DenseExpr.constValue? ∧
+    ∀ b, e.byte? = some b → DbBytePreOf facts bi b
+
+theorem dbAddByteOperand_sound [Fact p.Prime] [NeZero p] (denv : VarId → ZMod p)
+    (e : DenseExpr p) (bound : ℕ) (T : DbTab p) (hT : DbTabSound p denv T)
+    (hbnd : (e.eval denv).val < bound) : DbTabSound p denv (dbAddByteOperand e bound T) := by
+  unfold dbAddByteOperand
+  rcases hv : dbByteOperandVar e with _ | i
+  · exact hT
+  · dsimp only
+    rcases hg : T.get i with _ | d0
+    · exact hT
+    · dsimp only
+      by_cases hlt : bound < d0.size
+      · rw [if_pos hlt]
+        rcases hbo : dbByteOperand e bound with _ | ⟨i', dm⟩
+        · exact hT
+        · dsimp only
+          exact dbTabSound_insert denv T i' dm hT
+            (dbByteOperand_sound denv e bound i' dm hbo hbnd)
+      · rw [if_neg hlt]; exact hT
+
+theorem dbAddByteBi_sound [Fact p.Prime] [NeZero p] {bs : BusSemantics p} (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) (e : DbBiPre p) (hpre : DbBiPreOf facts bi e)
+    (denv : VarId → ZMod p)
+    (hob : (denseBIEval bi denv).multiplicity ≠ 0 → bs.accepts (denseBIEval bi denv))
+    (T : DbTab p) (hT : DbTabSound p denv T) : DbTabSound p denv (dbAddByteBi e T) := by
+  obtain ⟨hmult, _, hbyte⟩ := hpre
+  rw [dbAddByteBi]
+  rcases hm : e.mult? with _ | mult
+  · exact hT
+  · dsimp only
+    by_cases hmz : zmodIsZero mult
+    · rw [if_pos hmz]; exact hT
+    · rw [if_neg hmz]
+      rcases hb : e.byte? with _ | b
+      · exact hT
+      · dsimp only
+        rcases hop : b.op? with _ | opv
+        · exact hT
+        · dsimp only
+          by_cases hbnds : denseByteOpBounds b.spec opv
+          · rw [if_pos hbnds]
+            obtain ⟨hspec, op, hdec, hopc⟩ := hbyte b hb
+            have hmz' : mult ≠ 0 := by simpa [zmodIsZero_eq] using hmz
+            obtain ⟨h1, h2⟩ := denseByteOperandBound bs facts bi denv mult
+              (by rw [← hmult, hm]) hmz' b.spec hspec op b.o1 b.o2 b.result hdec opv
+              (by rw [← hopc, hop]) hbnds hob
+            exact dbAddByteOperand_sound denv b.o2 b.spec.bound _
+              (dbAddByteOperand_sound denv b.o1 b.spec.bound T hT h1) h2
+          · rw [if_neg hbnds]; exact hT
+
+theorem dbBytePhase_sound [Fact p.Prime] [NeZero p] {bs : BusSemantics p} (facts : BusFacts p bs)
+    (denv : VarId → ZMod p) (pre : Array (DbBiPre p))
+    (hpre : ∀ k, ∀ hk : k < pre.size, ∃ bi, DbBiPreOf facts bi pre[k] ∧
+      ((denseBIEval bi denv).multiplicity ≠ 0 → bs.accepts (denseBIEval bi denv))) :
+    ∀ (k : ℕ) (T : DbTab p), DbTabSound p denv T →
+      DbTabSound p denv (dbBytePhase pre k T) := by
+  intro k
+  induction hk : pre.size - k generalizing k with
+  | zero => intro T hT; rw [dbBytePhase, dif_neg (by omega)]; exact hT
+  | succ n ih =>
+    intro T hT
+    have hlt : k < pre.size := by omega
+    rw [dbBytePhase, dif_pos hlt]
+    obtain ⟨bi, hbi, hob⟩ := hpre k hlt
+    exact ih (k + 1) (by omega) _ (dbAddByteBi_sound facts bi pre[k] hbi denv hob T hT)
+
+theorem dbBusPhase_sound [NeZero p] {bs : BusSemantics p} (facts : BusFacts p bs)
+    (denv : VarId → ZMod p) (bis : Array (BusInteraction (DenseExpr p)))
+    (pre : Array (DbBiPre p))
+    (hpre : ∀ k, ∀ hk : k < bis.size, DbBiPreOf facts bis[k] (pre.getD k dbBiPreEmpty) ∧
+      ((denseBIEval bis[k] denv).multiplicity ≠ 0 → bs.accepts (denseBIEval bis[k] denv))) :
+    ∀ (k : ℕ) (st : DbTab p × Array Bool), DbTabSound p denv st.1 →
+      DbTabSound p denv (dbBusPhase facts bis pre k st).1 := by
+  intro k
+  induction hk : bis.size - k generalizing k with
+  | zero => intro st hT; rw [dbBusPhase, dif_neg (by omega)]; exact hT
+  | succ n ih =>
+    intro st hT
+    have hlt : k < bis.size := by omega
+    rw [dbBusPhase, dif_pos hlt]
+    obtain ⟨⟨hmult, hpat, _⟩, hob⟩ := hpre k hlt
+    refine ih (k + 1) (by omega) _ ?_
+    dsimp only
+    rw [hmult, hpat]
+    exact dbBusSlots_sound facts bis[k] denv hob bis[k].payload 0 #[] false st.1
+      (fun m => by simp) hT
+
 theorem dbDomainBatchσ_entailed [Fact p.Prime] [NeZero p]
     (bs : BusSemantics p) (facts : BusFacts p bs) (d : DenseConstraintSystem p) :
     EntailedMap d bs (dbDomainBatchσ bs facts d).map := by
