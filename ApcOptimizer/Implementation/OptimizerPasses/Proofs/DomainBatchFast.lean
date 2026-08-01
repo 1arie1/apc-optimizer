@@ -1,5 +1,6 @@
 import ApcOptimizer.Implementation.OptimizerPasses.DomainBatchFast
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DomainBatch
+import ApcOptimizer.Implementation.OptimizerPasses.Proofs.ByteCheckPack
 
 set_option autoImplicit false
 
@@ -413,7 +414,10 @@ def DbBytePreOf {bs : BusSemantics p} (facts : BusFacts p bs)
 def DbBiPreOf {bs : BusSemantics p} (facts : BusFacts p bs)
     (bi : BusInteraction (DenseExpr p)) (e : DbBiPre p) : Prop :=
   e.mult? = bi.multiplicity.constValue? ∧ e.pat = bi.payload.map DenseExpr.constValue? ∧
-    ∀ b, e.byte? = some b → DbBytePreOf facts bi b
+    (∀ b, e.byte? = some b → DbBytePreOf facts bi b) ∧
+    (e.varRange = true → facts.varRangeBus bi.busId = true) ∧
+    (∀ t, e.tuple? = some t → facts.tupleRangeBus bi.busId = some t) ∧
+    (∀ t, e.rangeAt? = some t → facts.rangeCheckAt bi.busId e.pat = some t)
 
 theorem dbAddByteOperand_sound [Fact p.Prime] [NeZero p] (denv : VarId → ZMod p)
     (e : DenseExpr p) (bound : ℕ) (T : DbTab p) (hT : DbTabSound p denv T)
@@ -439,7 +443,7 @@ theorem dbAddByteBi_sound [Fact p.Prime] [NeZero p] {bs : BusSemantics p} (facts
     (denv : VarId → ZMod p)
     (hob : (denseBIEval bi denv).multiplicity ≠ 0 → bs.accepts (denseBIEval bi denv))
     (T : DbTab p) (hT : DbTabSound p denv T) : DbTabSound p denv (dbAddByteBi e T) := by
-  obtain ⟨hmult, _, hbyte⟩ := hpre
+  obtain ⟨hmult, _, hbyte, _, _, _⟩ := hpre
   rw [dbAddByteBi]
   rcases hm : e.mult? with _ | mult
   · exact hT
@@ -494,12 +498,325 @@ theorem dbBusPhase_sound [NeZero p] {bs : BusSemantics p} (facts : BusFacts p bs
     intro st hT
     have hlt : k < bis.size := by omega
     rw [dbBusPhase, dif_pos hlt]
-    obtain ⟨⟨hmult, hpat, _⟩, hob⟩ := hpre k hlt
+    obtain ⟨⟨hmult, hpat, _, _, _, _⟩, hob⟩ := hpre k hlt
     refine ih (k + 1) (by omega) _ ?_
     dsimp only
     rw [hmult, hpat]
     exact dbBusSlots_sound facts bis[k] denv hob bis[k].payload 0 #[] false st.1
       (fun m => by simp) hT
+
+/-! ## 3. Items
+
+A gathered item's obligation holds at a satisfying assignment. Only this direction is needed: the
+mask is an intersection over *survivors*, so it suffices that the assignment's own point survives. -/
+
+theorem zmodOfNatP_eq [NeZero p] (n : ℕ) : zmodOfNatP p n = (n : ZMod p) := by
+  cases p with
+  | zero => exact absurd rfl (NeZero.ne 0)
+  | succ m =>
+    refine ZMod.val_injective (m + 1) ?_
+    rw [ZMod.val_natCast]
+    rfl
+
+theorem zmodOfNatP_val [NeZero p] (x : ZMod p) : zmodOfNatP p x.val = x := by
+  rw [zmodOfNatP_eq, ZMod.natCast_val, ZMod.cast_id]
+
+/-- Agreement on a bus interaction's variables restricts to each of its expressions. -/
+theorem dbRegsAgree_mult (denv : VarId → ZMod p) (regs : Array ℕ)
+    (bi : BusInteraction (DenseExpr p)) (h : DbRegsAgree denv regs (denseBIVars bi)) :
+    DbRegsAgree denv regs bi.multiplicity.vars := fun i hi =>
+  h i (by rw [denseBIVars]; exact List.mem_append_left _ hi)
+
+theorem dbRegsAgree_payload (denv : VarId → ZMod p) (regs : Array ℕ)
+    (bi : BusInteraction (DenseExpr p)) (h : DbRegsAgree denv regs (denseBIVars bi))
+    (x : DenseExpr p) (hx : x ∈ bi.payload) : DbRegsAgree denv regs x.vars := fun i hi =>
+  h i (by
+    rw [denseBIVars]
+    exact List.mem_append_right _ (List.mem_flatMap.mpr ⟨x, hx, hi⟩))
+
+/-- The evaluated message of `bi`, spelled out. -/
+theorem denseBIEval_mk (bi : BusInteraction (DenseExpr p)) (denv : VarId → ZMod p) :
+    denseBIEval bi denv =
+      { busId := bi.busId, multiplicity := bi.multiplicity.eval denv,
+        payload := bi.payload.map (fun e => e.eval denv) } := rfl
+
+section Items
+variable {bs : BusSemantics p}
+
+/-- The evaluated payload of the fallback message is the interaction's own evaluated payload. -/
+theorem dbFallback_payload [NeZero p] (denv : VarId → ZMod p) (regs : Array ℕ)
+    (bi : BusInteraction (DenseExpr p)) (hagree : DbRegsAgree denv regs (denseBIVars bi)) :
+    (bi.payload.map dbCompile).map (fun t => zmodOfNatP p (dbEval p regs t))
+      = bi.payload.map (fun ex => ex.eval denv) := by
+  rw [List.map_map]
+  refine List.map_congr_left ?_
+  intro x hx
+  simp only [Function.comp_apply]
+  rw [dbEval_dbCompile denv regs x (dbRegsAgree_payload denv regs bi hagree x hx),
+    zmodOfNatP_val]
+
+theorem dbFallback_ok [NeZero p] (facts : BusFacts p bs) (bi : BusInteraction (DenseExpr p))
+    (denv : VarId → ZMod p) (regs : Array ℕ) (hagree : DbRegsAgree denv regs (denseBIVars bi))
+    (hob : (denseBIEval bi denv).multiplicity ≠ 0 → bs.accepts (denseBIEval bi denv)) :
+    dbItemOk facts regs
+      (.fallback bi.busId (dbCompile bi.multiplicity) (bi.payload.map dbCompile)) = true := by
+  have hmv : dbEval p regs (dbCompile bi.multiplicity) = (bi.multiplicity.eval denv).val :=
+    dbEval_dbCompile denv regs bi.multiplicity (dbRegsAgree_mult denv regs bi hagree)
+  simp only [dbItemOk]
+  by_cases hz : dbEval p regs (dbCompile bi.multiplicity) = 0
+  · simp [hz]
+  · have hne : bi.multiplicity.eval denv ≠ 0 := by
+      intro h0; exact hz (by rw [hmv, h0, ZMod.val_zero])
+    have hmsg : (⟨bi.busId, zmodOfNatP p (dbEval p regs (dbCompile bi.multiplicity)),
+        (bi.payload.map dbCompile).map (fun t => zmodOfNatP p (dbEval p regs t))⟩ :
+          BusInteraction (ZMod p)) = denseBIEval bi denv := by
+      rw [denseBIEval_mk, hmv, zmodOfNatP_val, dbFallback_payload denv regs bi hagree]
+    simp only [beq_iff_eq, hz, if_false]
+    rw [hmsg]
+    exact (facts.acceptsDec_iff _).mpr (hob (by rw [denseBIEval_mk]; exact hne))
+
+theorem dbCompileRange_ok [Fact p.Prime] [NeZero p] (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) (e : DbBiPre p) (hpre : DbBiPreOf facts bi e)
+    (denv : VarId → ZMod p) (regs : Array ℕ) (hagree : DbRegsAgree denv regs (denseBIVars bi))
+    (hob : (denseBIEval bi denv).multiplicity ≠ 0 → bs.accepts (denseBIEval bi denv))
+    (item : DbItem) (h : dbCompileRange bi e (dbCompile bi.multiplicity) = some item) :
+    dbItemOk facts regs item = true := by
+  obtain ⟨hmult?, hpat, _, _, _, hra⟩ := hpre
+  rw [dbCompileRange] at h
+  rcases hm : e.mult? with _ | m
+  · rw [hm] at h; exact absurd h (by simp)
+  · rw [hm] at h
+    dsimp only at h
+    by_cases hone : zmodIsOne m
+    · rw [if_pos hone] at h
+      rcases hr : e.rangeAt? with _ | ⟨slot, bound⟩
+      · rw [hr] at h; exact absurd h (by simp)
+      · rw [hr] at h
+        dsimp only at h
+        rcases hv : bi.payload[slot]? with _ | value
+        · rw [hv] at h; exact absurd h (by simp)
+        · rw [hv] at h
+          simp only [Option.some.injEq] at h
+          subst h
+          have hm1 : m = 1 := by simpa [zmodIsOne_eq] using hone
+          have hmc : bi.multiplicity.constValue? = some 1 := by rw [← hmult?, hm, hm1]
+          have hmeval : bi.multiplicity.eval denv = 1 :=
+            bi.multiplicity.constValue?_sound 1 hmc denv
+          have hvmem : value ∈ bi.payload := List.mem_of_getElem? hv
+          have hvv : dbEval p regs (dbCompile value) = (value.eval denv).val :=
+            dbEval_dbCompile denv regs value (dbRegsAgree_payload denv regs bi hagree value hvmem)
+          have hmv : dbEval p regs (dbCompile bi.multiplicity) = (bi.multiplicity.eval denv).val :=
+            dbEval_dbCompile denv regs bi.multiplicity (dbRegsAgree_mult denv regs bi hagree)
+          obtain ⟨_, hrc⟩ := facts.rangeCheckAt_sound bi.busId
+            (bi.payload.map DenseExpr.constValue?) slot bound (by rw [← hpat]; exact hra _ hr)
+          obtain ⟨_, hiff⟩ := hrc (denseBIEval bi denv) rfl (by rw [denseBIEval_mk]; exact hmeval)
+            (denseMatches_evalPattern bi.payload denv)
+          have hpl : (denseBIEval bi denv).payload[slot]? = some (value.eval denv) := by
+            show (bi.payload.map (fun x => x.eval denv))[slot]? = _
+            rw [List.getElem?_map, hv]; rfl
+          have hacc : bs.accepts (denseBIEval bi denv) := by
+            refine hob ?_
+            rw [denseBIEval_mk, hmeval]; exact one_ne_zero
+          simp only [dbItemOk, hvv, hmv, hmeval]
+          by_cases hz : (1 : ZMod p).val = 0
+          · simp [hz]
+          · simp only [beq_iff_eq, hz, if_false, decide_eq_true_eq]
+            exact (hiff (value.eval denv) hpl).mp hacc
+    · rw [if_neg hone] at h; exact absurd h (by simp)
+
+/-- The byte arm: bounds and the bitwise relation come from the spec's own soundness. -/
+theorem dbByteItem_ok [NeZero p] (facts : BusFacts p bs) (bi : BusInteraction (DenseExpr p))
+    (denv : VarId → ZMod p) (regs : Array ℕ) (hagree : DbRegsAgree denv regs (denseBIVars bi))
+    (hob : (denseBIEval bi denv).multiplicity ≠ 0 → bs.accepts (denseBIEval bi denv))
+    (o1 o2 r : DenseExpr p) (h1m : o1 ∈ bi.payload) (h2m : o2 ∈ bi.payload)
+    (hrm : r ∈ bi.payload) (bound : ℕ) (kind : DenseBytePredKind)
+    (hrel : bs.accepts (denseBIEval bi denv) →
+      (o1.eval denv).val < bound ∧ (o2.eval denv).val < bound ∧
+        dbByteRel kind (o1.eval denv).val (o2.eval denv).val (r.eval denv).val = true) :
+    dbItemOk facts regs (.byte (dbCompile bi.multiplicity) (dbCompile o1) (dbCompile o2)
+      (dbCompile r) bound kind) = true := by
+  have hmv : dbEval p regs (dbCompile bi.multiplicity) = (bi.multiplicity.eval denv).val :=
+    dbEval_dbCompile denv regs bi.multiplicity (dbRegsAgree_mult denv regs bi hagree)
+  have e1 : dbEval p regs (dbCompile o1) = (o1.eval denv).val :=
+    dbEval_dbCompile denv regs o1 (dbRegsAgree_payload denv regs bi hagree o1 h1m)
+  have e2 : dbEval p regs (dbCompile o2) = (o2.eval denv).val :=
+    dbEval_dbCompile denv regs o2 (dbRegsAgree_payload denv regs bi hagree o2 h2m)
+  have er : dbEval p regs (dbCompile r) = (r.eval denv).val :=
+    dbEval_dbCompile denv regs r (dbRegsAgree_payload denv regs bi hagree r hrm)
+  simp only [dbItemOk, hmv, e1, e2, er]
+  by_cases hz : (bi.multiplicity.eval denv).val = 0
+  · simp [hz]
+  · have hne : bi.multiplicity.eval denv ≠ 0 := fun h0 => hz (by rw [h0, ZMod.val_zero])
+    obtain ⟨hb1, hb2, hrl⟩ := hrel (hob (by rw [denseBIEval_mk]; exact hne))
+    simp [hz, hb1, hb2, hrl]
+
+theorem dbCompileByte_ok [NeZero p] (facts : BusFacts p bs) (bi : BusInteraction (DenseExpr p))
+    (e : DbBiPre p) (hpre : DbBiPreOf facts bi e) (denv : VarId → ZMod p) (regs : Array ℕ)
+    (hagree : DbRegsAgree denv regs (denseBIVars bi))
+    (hob : (denseBIEval bi denv).multiplicity ≠ 0 → bs.accepts (denseBIEval bi denv))
+    (item : DbItem) (h : dbCompileByte e (dbCompile bi.multiplicity) = some item) :
+    dbItemOk facts regs item = true := by
+  obtain ⟨_, _, hbyte, _, _, _⟩ := hpre
+  rw [dbCompileByte] at h
+  rcases hb : e.byte? with _ | b
+  · rw [hb] at h; exact absurd h (by simp)
+  · rw [hb] at h
+    dsimp only at h
+    rcases hop : b.op? with _ | opv
+    · rw [hop] at h; exact absurd h (by simp)
+    · rw [hop] at h
+      dsimp only at h
+      obtain ⟨hspec, op, hdec, hopc⟩ := hbyte b hb
+      obtain ⟨h1m, h2m, hrm⟩ := b.spec.decode_mem bi.payload op b.o1 b.o2 b.result hdec
+      have hopeval : op.eval denv = opv := op.constValue?_sound opv (by rw [← hopc, hop]) denv
+      obtain ⟨hxor, hpair⟩ :=
+        denseByteXorSpec_decode_iff bs facts b.spec bi hspec op b.o1 b.o2 b.result hdec denv
+      obtain ⟨hor, hand⟩ :=
+        denseByteBoolSound_decode_iff bs facts b.spec bi hspec op b.o1 b.o2 b.result hdec denv
+      have mk : ∀ kind, (bs.accepts (denseBIEval bi denv) →
+          (b.o1.eval denv).val < b.spec.bound ∧ (b.o2.eval denv).val < b.spec.bound ∧
+            dbByteRel kind (b.o1.eval denv).val (b.o2.eval denv).val
+              (b.result.eval denv).val = true) →
+          dbItemOk facts regs (.byte (dbCompile bi.multiplicity) (dbCompile b.o1)
+            (dbCompile b.o2) (dbCompile b.result) b.spec.bound kind) = true :=
+        fun kind hrel => dbByteItem_ok facts bi denv regs hagree hob b.o1 b.o2 b.result
+          h1m h2m hrm b.spec.bound kind hrel
+      by_cases hxo : opv = b.spec.xorOp
+      · rw [if_pos hxo] at h
+        simp only [Option.some.injEq] at h; subst h
+        refine mk .xor (fun hacc => ?_)
+        obtain ⟨u1, u2, u3⟩ := (hxor (by rw [hopeval, hxo])).mp hacc
+        exact ⟨u1, u2, by simp [dbByteRel, u3]⟩
+      · rw [if_neg hxo] at h
+        by_cases hpo : opv = b.spec.pairOp
+        · rw [if_pos hpo] at h
+          simp only [Option.some.injEq] at h; subst h
+          refine mk .pair (fun hacc => ?_)
+          obtain ⟨u1, u2, u3⟩ := (hpair (by rw [hopeval, hpo])).mp hacc
+          exact ⟨u1, u2, by simp [dbByteRel, u3]⟩
+        · rw [if_neg hpo] at h
+          rcases hoo : b.spec.orOp with _ | oop
+          · rw [hoo] at h
+            dsimp only at h
+            rcases hao : b.spec.andOp with _ | aop
+            · rw [hao] at h; exact absurd h (by simp)
+            · rw [hao] at h
+              dsimp only at h
+              by_cases hae : opv = aop
+              · rw [if_pos hae] at h
+                simp only [Option.some.injEq] at h; subst h
+                refine mk .and (fun hacc => ?_)
+                obtain ⟨u1, u2, u3⟩ := (hand aop hao (by rw [hopeval, hae])).mp hacc
+                exact ⟨u1, u2, by simp [dbByteRel, u3]⟩
+              · rw [if_neg hae] at h; exact absurd h (by simp)
+          · rw [hoo] at h
+            dsimp only at h
+            by_cases hoe : opv = oop
+            · rw [if_pos hoe] at h
+              simp only [Option.some.injEq] at h; subst h
+              refine mk .or (fun hacc => ?_)
+              obtain ⟨u1, u2, u3⟩ := (hor oop hoo (by rw [hopeval, hoe])).mp hacc
+              exact ⟨u1, u2, by simp [dbByteRel, u3]⟩
+            · rw [if_neg hoe] at h
+              rcases hao : b.spec.andOp with _ | aop
+              · rw [hao] at h; exact absurd h (by simp)
+              · rw [hao] at h
+                dsimp only at h
+                by_cases hae : opv = aop
+                · rw [if_pos hae] at h
+                  simp only [Option.some.injEq] at h; subst h
+                  refine mk .and (fun hacc => ?_)
+                  obtain ⟨u1, u2, u3⟩ := (hand aop hao (by rw [hopeval, hae])).mp hacc
+                  exact ⟨u1, u2, by simp [dbByteRel, u3]⟩
+                · rw [if_neg hae] at h; exact absurd h (by simp)
+
+theorem dbCompileOther_ok [Fact p.Prime] [NeZero p] (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) (e : DbBiPre p) (hpre : DbBiPreOf facts bi e)
+    (denv : VarId → ZMod p) (regs : Array ℕ) (hagree : DbRegsAgree denv regs (denseBIVars bi))
+    (hob : (denseBIEval bi denv).multiplicity ≠ 0 → bs.accepts (denseBIEval bi denv)) :
+    dbItemOk facts regs (dbCompileOther bi e (dbCompile bi.multiplicity)) = true := by
+  rw [dbCompileOther]
+  rcases hr : dbCompileRange bi e (dbCompile bi.multiplicity) with _ | item
+  · dsimp only
+    rcases hb : dbCompileByte e (dbCompile bi.multiplicity) with _ | item2
+    · exact dbFallback_ok facts bi denv regs hagree hob
+    · exact dbCompileByte_ok facts bi e hpre denv regs hagree hob item2 hb
+  · exact dbCompileRange_ok facts bi e hpre denv regs hagree hob item hr
+
+theorem dbCompileBi_ok [Fact p.Prime] [NeZero p] (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) (e : DbBiPre p) (hpre : DbBiPreOf facts bi e)
+    (denv : VarId → ZMod p) (regs : Array ℕ) (hagree : DbRegsAgree denv regs (denseBIVars bi))
+    (hob : (denseBIEval bi denv).multiplicity ≠ 0 → bs.accepts (denseBIEval bi denv)) :
+    dbItemOk facts regs (dbCompileBi facts bi e) = true := by
+  obtain ⟨_, _, _, hvrf, htuf, _⟩ := hpre
+  have hmv : dbEval p regs (dbCompile bi.multiplicity) = (bi.multiplicity.eval denv).val :=
+    dbEval_dbCompile denv regs bi.multiplicity (dbRegsAgree_mult denv regs bi hagree)
+  rw [dbCompileBi]
+  by_cases hok : denseBiAlwaysOk facts bi
+  · rw [if_pos hok]; rfl
+  · rw [if_neg hok]
+    dsimp only
+    split
+    · next x width heq =>
+      have hx : x ∈ bi.payload := by rw [heq]; simp
+      have hw : width ∈ bi.payload := by rw [heq]; simp
+      have ex : dbEval p regs (dbCompile x) = (x.eval denv).val :=
+        dbEval_dbCompile denv regs x (dbRegsAgree_payload denv regs bi hagree x hx)
+      have ew : dbEval p regs (dbCompile width) = (width.eval denv).val :=
+        dbEval_dbCompile denv regs width (dbRegsAgree_payload denv regs bi hagree width hw)
+      have hmsg : denseBIEval bi denv =
+          ⟨bi.busId, bi.multiplicity.eval denv, [x.eval denv, width.eval denv]⟩ := by
+        rw [denseBIEval_mk, heq]; rfl
+      by_cases hvr : e.varRange
+      · rw [if_pos hvr]
+        obtain ⟨_, hiff⟩ := facts.varRangeBus_sound bi.busId (hvrf hvr)
+        have hkey : bi.multiplicity.eval denv ≠ 0 →
+            (width.eval denv).val ≤ 17 ∧ (x.eval denv).val < 2 ^ (width.eval denv).val := by
+          intro hne
+          exact (hiff (x.eval denv) (width.eval denv) (bi.multiplicity.eval denv)).mp
+            (by rw [← hmsg]; exact hob (by rw [hmsg]; exact hne))
+        rcases hwc : width.constValue? with _ | widthValue
+        · dsimp only
+          simp only [dbItemOk, hmv, ex, ew]
+          by_cases hz : (bi.multiplicity.eval denv).val = 0
+          · simp [hz]
+          · have hne : bi.multiplicity.eval denv ≠ 0 := fun h0 => hz (by rw [h0, ZMod.val_zero])
+            obtain ⟨u1, u2⟩ := hkey hne
+            simp [hz, u1, u2]
+        · dsimp only
+          have hweval : width.eval denv = widthValue := width.constValue?_sound _ hwc denv
+          by_cases hle : widthValue.val ≤ 17
+          · rw [if_pos hle]
+            simp only [dbItemOk, hmv, ex]
+            by_cases hz : (bi.multiplicity.eval denv).val = 0
+            · simp [hz]
+            · have hne : bi.multiplicity.eval denv ≠ 0 := fun h0 => hz (by rw [h0, ZMod.val_zero])
+              obtain ⟨_, u2⟩ := hkey hne
+              rw [hweval] at u2
+              simp [hz, u2]
+          · rw [if_neg hle]
+            simp only [dbItemOk, hmv, ex, ew]
+            by_cases hz : (bi.multiplicity.eval denv).val = 0
+            · simp [hz]
+            · have hne : bi.multiplicity.eval denv ≠ 0 := fun h0 => hz (by rw [h0, ZMod.val_zero])
+              obtain ⟨u1, u2⟩ := hkey hne
+              simp [hz, u1, u2]
+      · rw [if_neg hvr]
+        rcases ht : e.tuple? with _ | ⟨bx, byy⟩
+        · dsimp only
+          exact dbCompileOther_ok facts bi e ⟨‹_›, ‹_›, ‹_›, hvrf, htuf, ‹_›⟩ denv regs hagree hob
+        · dsimp only
+          obtain ⟨_, _, hiff⟩ := facts.tupleRangeBus_sound bi.busId bx byy (htuf _ ht)
+          simp only [dbItemOk, hmv, ex, ew]
+          by_cases hz : (bi.multiplicity.eval denv).val = 0
+          · simp [hz]
+          · have hne : bi.multiplicity.eval denv ≠ 0 := fun h0 => hz (by rw [h0, ZMod.val_zero])
+            obtain ⟨u1, u2⟩ := (hiff (x.eval denv) (width.eval denv)
+              (bi.multiplicity.eval denv)).mp (by rw [← hmsg]; exact hob (by rw [hmsg]; exact hne))
+            simp [hz, u1, u2]
+    · exact dbCompileOther_ok facts bi e ⟨‹_›, ‹_›, ‹_›, hvrf, htuf, ‹_›⟩ denv regs hagree hob
+
+end Items
 
 theorem dbDomainBatchσ_entailed [Fact p.Prime] [NeZero p]
     (bs : BusSemantics p) (facts : BusFacts p bs) (d : DenseConstraintSystem p) :

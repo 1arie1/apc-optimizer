@@ -1401,7 +1401,7 @@ private theorem denseCompilePayloadCBiPredV_eval (ops : DenseZModOps p)
 
 /-- The two `.always` claims agree on evaluated messages: a bus that never violates, or one checked
     for arity only at `bi`'s arity (`denseBIEval` maps the payload, so the arity is preserved). -/
-private theorem denseBiAlwaysOk_accepts {bs : BusSemantics p} (facts : BusFacts p bs)
+theorem denseBiAlwaysOk_accepts {bs : BusSemantics p} (facts : BusFacts p bs)
     (bi : BusInteraction (DenseExpr p)) (env : VarId → ZMod p)
     (h : denseBiAlwaysOk facts bi = true) :
     bs.accepts (denseBIEval bi env) := by

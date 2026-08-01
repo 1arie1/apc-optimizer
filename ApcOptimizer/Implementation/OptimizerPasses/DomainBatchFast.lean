@@ -444,10 +444,11 @@ def dbDomsOf (T : DbTab p) (vs : Array VarId) : Option (Array (DbDom)) :=
 
 /-- Enumerate a box, testing one item at every point; `false` at the first failure. Explicit-arg
     loops: no per-point allocation. -/
-partial def dbBoxAllOne {bs : BusSemantics p} (facts : BusFacts p bs) (item : DbItem)
+def dbBoxAllOne {bs : BusSemantics p} (facts : BusFacts p bs) (item : DbItem)
     (keys : Array Nat) (doms : Array (DbDom)) (d i n : Nat) (regs : Array Nat)
     (ok : Bool) : Array Nat × Bool :=
-  if i ≥ n || !ok then ⟨regs, ok⟩
+  if i ≥ n then ⟨regs, ok⟩
+  else if !ok then ⟨regs, ok⟩
   else
     let regs := regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (.range 0)) i)
     if d + 1 ≥ keys.size then
@@ -457,6 +458,11 @@ partial def dbBoxAllOne {bs : BusSemantics p} (facts : BusFacts p bs) (item : Db
       let ⟨regs, ok⟩ := dbBoxAllOne facts item keys doms (d + 1) 0
         (doms.getD (d + 1) (.range 0)).size regs true
       if ok then dbBoxAllOne facts item keys doms d (i + 1) n regs true else ⟨regs, false⟩
+  termination_by (keys.size - d, n - i)
+  decreasing_by
+    all_goals first
+      | (apply Prod.Lex.right; omega)
+      | (apply Prod.Lex.left; omega)
 
 /-- The box point where key `d` takes element `min i (size_d - 1)`. -/
 def dbDiagPoint (p : ℕ) (keys : Array Nat) (doms : Array (DbDom)) (i : Nat) (regs : Array Nat) :
@@ -469,7 +475,7 @@ def dbDiagPoint (p : ℕ) (keys : Array Nat) (doms : Array (DbDom)) (i : Nat) (r
     so a constraint that only fails once an *outer* key moves costs a whole inner domain to refute;
     97 % of the non-redundant checks on sha256/keccak fail within the first eight diagonal points
     (measured). Verdict-identical: these are box points, so a failure here is a failure there. -/
-partial def dbDiagRefute {bs : BusSemantics p} (facts : BusFacts p bs) (item : DbItem)
+def dbDiagRefute {bs : BusSemantics p} (facts : BusFacts p bs) (item : DbItem)
     (keys : Array Nat) (doms : Array (DbDom)) (i imax : Nat) (regs : Array Nat) :
     Array Nat × Bool :=
   if i ≥ imax then ⟨regs, false⟩
@@ -477,6 +483,8 @@ partial def dbDiagRefute {bs : BusSemantics p} (facts : BusFacts p bs) (item : D
     let regs := dbDiagPoint p keys doms i regs
     if dbItemOk facts regs item then dbDiagRefute facts item keys doms (i + 1) imax regs
     else ⟨regs, true⟩
+  termination_by imax - i
+  decreasing_by omega
 
 /-- Boxes at most this size are swept directly; the diagonal pre-test would cost more than it
     saves. -/
@@ -608,11 +616,12 @@ def dbAbsorbArgs (keys : Array Nat) (regs : Array Nat) (vals : Array Nat)
 /-- The box loop. State is passed as explicit arguments, so nothing is allocated per point: the
     innermost dimension is walked in place (`regs.set!` on a uniquely-owned register file) and only a
     surviving point touches the mask. -/
-partial def dbScanLoop {bs : BusSemantics p} (facts : BusFacts p bs) (items : Array (DbItem))
+def dbScanLoop {bs : BusSemantics p} (facts : BusFacts p bs) (items : Array (DbItem))
     (keys : Array Nat) (doms : Array (DbDom)) (d i n : Nat)
     (regs : Array Nat) (vals : Array Nat) (alive : Array Bool) (live : Nat)
     (started : Bool) : DbScanSt :=
-  if i ≥ n || (started && live == 0) then ⟨regs, vals, alive, live, started⟩
+  if i ≥ n then ⟨regs, vals, alive, live, started⟩
+  else if started && live == 0 then ⟨regs, vals, alive, live, started⟩
   else
     let regs := regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (.range 0)) i)
     if d + 1 ≥ keys.size then
@@ -626,6 +635,11 @@ partial def dbScanLoop {bs : BusSemantics p} (facts : BusFacts p bs) (items : Ar
         dbScanLoop facts items keys doms (d + 1) 0 (doms.getD (d + 1) (.range 0)).size
           regs vals alive live started
       dbScanLoop facts items keys doms d (i + 1) n regs vals alive live started
+  termination_by (keys.size - d, n - i)
+  decreasing_by
+    all_goals first
+      | (apply Prod.Lex.right; omega)
+      | (apply Prod.Lex.left; omega)
 
 /-- Scan a job's box, starting from an empty mask. -/
 def dbScanBox {bs : BusSemantics p} (facts : BusFacts p bs) (items : Array (DbItem))
