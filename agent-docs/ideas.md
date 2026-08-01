@@ -492,11 +492,11 @@ index windows by address-expression hash with the existing tests re-run on hits.
 
 **R11. `decide (A ∧ B)` evaluates both sides eagerly**  ·  *latent bignum landmine, cheap fix*.
 `Decidable (A ∧ B)` instances are strict in both arguments in compiled code, so
-`decide (widthValue.val ≤ 17 ∧ xValue.val < 2 ^ widthValue.val)`
-(`DomainBatchRuntime.lean:166`, `.varRange` evaluator) computes `2 ^ widthValue.val` even when
-the guard fails — for a symbolic width slot that is a 2^31-bit GMP number per evaluated point.
-`OpenVmSemantics.lean:95` already uses the short-circuiting `decide … && decide …` form;
-rewrite the evaluator arms the same way (`Bool.decide_and` bridges proofs). Audit other
+`decide (widthValue.val ≤ 17 ∧ xValue.val < 2 ^ widthValue.val)` computes `2 ^ widthValue.val` even
+when the guard fails — for a symbolic width slot that is a 2^31-bit GMP number per evaluated point.
+`OpenVmSemantics.lean:95` already uses the short-circuiting `decide … && decide …` form; the
+rebuilt `domainBatch` evaluator (`DomainBatch.lean`, `dbItemOk`) does too — audit the remaining
+arms elsewhere the same way (`Bool.decide_and` bridges proofs). Audit other
 `decide (… ∧ …)` in per-point code (`denseScaledSlotBound`'s guard is a cheaper instance of the
 same pattern).
 
@@ -521,7 +521,11 @@ with `Array.modify`, which hands the element over uniquely and mutates in place.
    (`Std.HashMap VarId Nat`, threaded through four `csimp`'d descriptor twins — more edits, ~0.4 s).
 
 **R13. domainBatch is per-target *setup*-bound, not enumeration-bound** (measured 2026-07-28, LBR
-profiles over five OpenVM cases + SP1 keccak; entry 152). **The table below is CPU; for the wall,
+profiles over five OpenVM cases + SP1 keccak; entry 152). **Largely superseded by entry 162**, which
+rebuilt the engine: the per-target compile is gone (items compile once per invocation), the coset is
+streamed rather than materialized (retires (c)), the domain table is array-indexed (retires the
+`T.doms` half of (e)), and the fan-out — with `DenseForcedScanV.work` — is deleted. (b) is still
+open and is cross-pass; (d) is now a measured dead end. **The table below is CPU; for the wall,
 see entry 155's `IO` phase timers** — the pass is 70 % serial and its largest single item, the
 variable-free bus tail in the gathers, does not appear here at all (it is spread across the
 `denseCompileCBiPredsV` and gather rows). Phase shares of in-pass samples:
@@ -700,6 +704,13 @@ eager back-substitution's exponent). What is left, LBR shares of the *new* pass 
   placement (now pre-drop/pack, entry 103) is the working point.
 - **Feeding `rest` as the basis lookup in the coda's `byteJustified`**: 63 s/case for −3
   interactions (entry 102). Use an index or nothing.
+- **domainBatch: prefix-pruned or component-split enumeration** (was R13(d)): the wide boxes on the
+  big OpenVM cases are single-variable, so neither the pruning nor the `∏ → Σ` split has anything to
+  cut. Measured on a box-shape counter, entry 162.
+- **domainBatch: fusing the three per-constraint prologue walks into one** (entry 162): one walk
+  returning a tuple allocates per node and replaces two allocation-free walks — sha256 4 254 → 4 321
+  ms. Same for a flat scalar item table in place of the compiled tree, a fail-fast root miner, and
+  sampling the box instead of sweeping it. Restructuring a traversal loses to removing work from it.
 
 ## Working rules (accumulated)
 
@@ -733,6 +744,16 @@ eager back-substitution's exponent). What is left, LBR shares of the *new* pass 
   element-wise free per adoption. Destructure the record (or the tuple) first; derive "did it change?"
   from state read *after* the call, never from a value captured before it. A profile showing
   `lean_copy_expand_array` next to `lean_dec_ref_cold` is this bug, not real work.
+- **`Task.spawn` is not free to try.** It marks every shared heap object multi-threaded
+  *permanently*, so all later refcount operations on them are atomic — in the spawning pass and in
+  every pass after it. Measure the whole run, not the parallel section (entry 162).
+- **Structural sharing in a pass's output is a downstream tax.** Returning shared subterms costs the
+  pass nothing and defeats Lean's reset/reuse in every later pass that rewrites those nodes: 4.5 s
+  on sha256 for a sharing substitution that looked free (entry 162).
+- **A/B the total against the baseline binary, not just the pass's column.** A constant downstream
+  penalty is invisible to within-engine comparisons (entry 162).
+- **`partial def` admits no equation lemmas** — nothing can be stated about it, so a loop that will
+  ever need a proof must carry a termination measure from the start (entry 162).
 - **Check open PRs / recent `claude/*` branches for duplicates before implementing.**
 
 ## Runtime ideas (2026-07-27 session, entry 148)

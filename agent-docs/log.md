@@ -5829,3 +5829,93 @@ field of a linear structure — `let n := S.f.size; …; S.f.size != n` — is a
 `{ S with f := g S.f }`. Derive "did it change?" from state read after the call. And when a variant
 measures much faster, attribute the difference before believing the explanation you had in mind: the
 first two A/B tables here were consistent with a story that was simply false.
+
+## Entry 162 — domainBatch: rebuilt as a compiled box scan over a register file (pass 0.13–0.46×, sha256 total 0.94×)
+
+`domainBatch` was rank 1 of the runtime profile (35.6 s of the 202-APC corpus, 12.2 %, nonzero on
+every APC). Entries 151/152/155 had cut its biggest single items; what was left was spread evenly
+over a per-point path that allocated a `List (ZMod p)` point, compiled a predicate per target, and
+did field arithmetic through `ZMod.commRing` dictionaries. This entry replaces the engine.
+
+**What it is now.** Domains are `Nat`-valued (`ZMod.val`s) in a `VarId.index`-keyed `Array`; every
+gathered item compiles **once per invocation** into a `DbItem`/`DbTree` program over a register file
+`Array Nat`; the box loop writes one register per dimension step and tests items in place, so a
+point is neither allocated nor compiled. The candidate mask is a value array plus an alive-flag
+array with a live count, so the abort test is O(1). Per-interaction `BusFacts` answers are resolved
+once into a `DbBiPre`, and each item's distinct variable list is computed once and reused by the
+table build, the target list, the buckets and the gathers. A `.coset` domain arm streams a byte
+operand's coset in the field with one hoisted inverse instead of materializing 256 elements.
+
+MEASURED (this box, serial, interleaved, 2 reps, best-of; every one of the eight outputs
+byte-identical to `main`'s):
+
+| case | pass main | pass new | ratio | total main | total new | ratio |
+|---|---:|---:|---:|---:|---:|---:|
+| sha256 `apc_001` | 8 027 | **3 714** | **0.46×** | 79 887 | 74 848 | 0.94× |
+| keccak `apc_001` | 920 | **349** | **0.38×** | 7 973 | 7 429 | 0.93× |
+| SP1 keccak `apc_001` | 878 | **114** | **0.13×** | 3 788 | 3 035 | 0.80× |
+| wasm-eth `apc_012` | 1 148 | **505** | **0.44×** | 10 486 | 9 702 | 0.93× |
+| wasm-eth `apc_063` | 1 217 | **445** | **0.37×** | 8 684 | 7 759 | 0.89× |
+| wasm-eth `apc_005` | 25 | **7** | **0.28×** | 116 | 97 | 0.84× |
+| openvm-eth `apc_006` | 152 | **55** | **0.36×** | 975 | 892 | 0.91× |
+| openvm-eth `apc_071` | 437 | **107** | **0.24×** | 897 | 571 | 0.64× |
+
+Effectiveness is unchanged by construction: the forced set is the same set, and the exported circuits
+compare byte-for-byte on all eight cases.
+
+**The five wins that paid** (each measured on its own, interleaved A/B, output byte-identical):
+
+1. *Dictionary-free per-point arithmetic.* The scan runs on `ZMod.val`s: `dbAddN` is a conditional
+   subtraction, `dbMulN` one `%`, and equality one `==` instead of the `zmodIsZero (a + (-1)*b)`
+   the field form needs. Entry 156's rule applies twice over — mentioning `0`/`+`/`*` on `ZMod p`
+   anywhere in a function builds `ZMod.commRing p` at the function's *entry*, ahead of every branch.
+2. *The `a = 1` fast path in root finding.* A normalized `x - c` needs no modular inverse; the
+   residual test cannot fail. Most affine factors are of that shape.
+3. *One `BusFacts` query per interaction.* `spec.decode` alone allocated and ran three times per
+   interaction. The gates matter: resolve `varRangeBus`/`tupleRangeBus` only on a two-slot payload
+   and `rangeCheckAt` only when neither answered, or the dedup costs more than it saves on the
+   bus-heavy wasm cases.
+4. *Deleting the `Task` fan-out.* See the rule below.
+5. *Deleting the output's structural sharing.* See the rule below.
+
+**Two runtime rules, both learned the hard way here** (also in `ideas.md`):
+
+- **`Task.spawn` marks every shared heap object multi-threaded, permanently.** After the fan-out
+  touches them, all later refcount operations on those objects are atomic — in this pass *and in
+  every pass that runs after it*. The old fan-out was gated on constraint count (8192), so it spawned
+  on cycles 0–5 where there was no scan work (17.5× CPU for no wall gain) and refused on the cycles
+  that had it. Gating on the actual scan work fixed the gate; deleting the fan-out outright was
+  better still.
+- **Structural sharing in a pass's output defeats Lean's reset/reuse in the passes downstream.** A
+  substitution that returns shared subterms costs nothing in the pass and 4.5 s afterwards on
+  sha256, because every later pass that rewrites those nodes now copies instead of updating in
+  place. *This was invisible while I tracked only the pass's own column* — the section below.
+
+**Measured dead ends** (all built or prototyped, all rejected by measurement): fusing the three
+per-constraint walks into one (per-node tuple allocation replaced two allocation-free walks:
+sha256 4254 → 4321 ms); a flat scalar item table instead of the tree; a fail-fast root miner;
+sampling the box instead of sweeping it; per-component enumeration and prefix pruning (the wide
+boxes are single-variable, so neither pays — this retires R13(d)).
+
+**A methodology error worth recording.** For most of the rebuild I tracked the pass's own column and
+used end-to-end numbers only for within-engine comparisons. That is exactly blind to a *constant
+downstream* penalty, and it hid win 5 for the whole session; it surfaced only when a rebase forced a
+comparison against `main`'s own binary. Always A/B the total against the baseline binary, not just
+the pass.
+
+**`partial def` cannot be proved about.** The three scan loops were `partial`, which gives no
+equation lemmas at all — nothing above them can be stated. They are now well-founded on
+`(keys.size - d, n - i)` with `Prod.Lex`, at no runtime cost; the compound `started && live == 0`
+guard had to be split so the arithmetic half is visible to `omega`.
+
+**The proof** (`Proofs/DomainBatch.lean`, ~2 300 lines) is five layers: the `Nat` representation
+mirrors `DenseExpr.eval` through `ZMod.val`; each table phase only inserts domains containing the
+assignment's value; a gathered item's `dbItemOk` holds at a satisfying assignment; the sweep visits
+that assignment's own point, so the surviving mask agrees with it; and the context is sound, so each
+preflighted plan answers soundly. Both "no answer" exits are vacuous — a variable-free obligation
+cannot fail at a satisfying assignment, and the sweep cannot come back empty.
+
+With the old engine retired the pass is one implementation file plus one proof file
+(`DomainBatch.lean`, `Proofs/DomainBatch.lean`), −2 390 lines of dead value-only engine, and the
+shared surface `domainFold` and the solution-map passes need moved to `DomainTable.lean` /
+`Proofs/DomainTable.lean`.
