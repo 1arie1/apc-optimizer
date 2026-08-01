@@ -212,6 +212,129 @@ theorem dbTabSound_mono (denv : VarId → ZMod p) (T T' : DbTab p)
     (h : ∀ i dm, T'.get i = some dm → T.get i = some dm) (hT : DbTabSound p denv T) :
     DbTabSound p denv T' := fun i dm hi => hT i dm (h i dm hi)
 
+/-! ## 2d. The three table phases
+
+Each phase only inserts, so soundness is an induction with `dbTabSound_insert` at every step. -/
+
+/-- Constraint roots: `dbAddConstraintVars` inserts the roots of each of the constraint's variables,
+    and a satisfying assignment's value is one of them. -/
+theorem dbAddConstraintVars_sound [Fact p.Prime] [NeZero p] (denv : VarId → ZMod p)
+    (c : DenseExpr p) (hc : c.eval denv = 0) (vs : Array VarId) :
+    ∀ (k : ℕ) (T : DbTab p), DbTabSound p denv T →
+      DbTabSound p denv (dbAddConstraintVars (dbRootPlan c) vs k T) := by
+  intro k
+  induction hk : vs.size - k generalizing k with
+  | zero =>
+    intro T hT
+    rw [dbAddConstraintVars, dif_neg (by omega)]
+    exact hT
+  | succ n ih =>
+    intro T hT
+    have hlt : k < vs.size := by omega
+    rw [dbAddConstraintVars, dif_pos hlt]
+    dsimp only
+    split
+    · next rs hr =>
+      refine ih (k + 1) (by omega) _ (dbTabSound_insert denv T _ _ hT ?_)
+      refine dbDomMem_explicit _ _ ?_
+      have hmem : denv vs[k] ∈ rs := dbRootsIn_sound vs[k] c rs hr denv hc
+      simpa using List.mem_map.mpr ⟨denv vs[k], hmem, rfl⟩
+    · exact ih (k + 1) (by omega) T hT
+
+theorem dbConstraintPhase_sound [Fact p.Prime] [NeZero p] (denv : VarId → ZMod p)
+    (cs : Array (DenseExpr p)) (hcs : ∀ c ∈ cs, c.eval denv = 0)
+    (csVars : Array (Array VarId)) :
+    ∀ (k : ℕ) (T : DbTab p), DbTabSound p denv T →
+      DbTabSound p denv (dbConstraintPhase cs csVars k T) := by
+  intro k
+  induction hk : cs.size - k generalizing k with
+  | zero =>
+    intro T hT; rw [dbConstraintPhase, dif_neg (by omega)]; exact hT
+  | succ n ih =>
+    intro T hT
+    have hlt : k < cs.size := by omega
+    rw [dbConstraintPhase, dif_pos hlt]
+    refine ih (k + 1) (by omega) _ ?_
+    split
+    · exact dbAddConstraintVars_sound denv cs[k] (hcs cs[k] (Array.getElem_mem hlt)) _ 0 T hT
+    · exact hT
+
+/-- Bus slot bounds: the fact's own soundness, specialised to the constant multiplicity and the
+    constant-slot pattern the engine precomputes. -/
+theorem dbSlotBound_sound {bs : BusSemantics p} (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) (slot bound : ℕ) (i : VarId)
+    (hslot : bi.payload[slot]? = some (.var i))
+    (h : dbSlotBound facts bi bi.multiplicity.constValue?
+      (bi.payload.map DenseExpr.constValue?) slot = some bound)
+    (denv : VarId → ZMod p)
+    (hob : (denseBIEval bi denv).multiplicity ≠ 0 → bs.accepts (denseBIEval bi denv)) :
+    (denv i).val < bound := by
+  rw [dbSlotBound.eq_def] at h
+  rcases hm : bi.multiplicity.constValue? with _ | mval
+  · rw [hm] at h; exact absurd h (by simp)
+  · rw [hm] at h
+    dsimp only at h
+    by_cases hmz : zmodIsZero mval
+    · rw [if_pos hmz] at h; exact absurd h (by simp)
+    · rw [if_neg hmz] at h
+      have hmeval : (denseBIEval bi denv).multiplicity = mval :=
+        bi.multiplicity.constValue?_sound mval hm denv
+      have hmne : mval ≠ 0 := by
+        simpa [zmodIsZero_eq] using hmz
+      have hviol : bs.accepts (denseBIEval bi denv) := hob (by rw [hmeval]; exact hmne)
+      have hget : (denseBIEval bi denv).payload[slot]? = some (denv i) := by
+        show (bi.payload.map (fun e => e.eval denv))[slot]? = some (denv i)
+        rw [List.getElem?_map, hslot]; rfl
+      rw [← hmeval] at h
+      exact facts.slotBound_sound (denseBIEval bi denv)
+        (bi.payload.map DenseExpr.constValue?) slot bound (denv i) h
+        (denseMatches_evalPattern bi.payload denv) hviol hget
+
+/-- The slot walk inserts only `.range bound` domains justified by `dbSlotBound_sound`, at the
+    variable sitting in that slot. `rest` is the suffix of the payload starting at `slot`. -/
+theorem dbBusSlots_sound [NeZero p] {bs : BusSemantics p} (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) (denv : VarId → ZMod p)
+    (hob : (denseBIEval bi denv).multiplicity ≠ 0 → bs.accepts (denseBIEval bi denv)) :
+    ∀ (rest : List (DenseExpr p)) (slot : ℕ) (seen : Array VarId) (inf : Bool) (T : DbTab p),
+      (∀ k, rest[k]? = bi.payload[slot + k]?) → DbTabSound p denv T →
+      DbTabSound p denv (dbBusSlots facts bi bi.multiplicity.constValue?
+        (bi.payload.map DenseExpr.constValue?) rest slot seen inf T).2 := by
+  intro rest
+  induction rest with
+  | nil => intro slot seen inf T _ hT; exact hT
+  | cons e rest ih =>
+    intro slot seen inf T hsuf hT
+    have hshift : ∀ k, rest[k]? = bi.payload[(slot + 1) + k]? := by
+      intro k
+      have := hsuf (k + 1)
+      simpa [Nat.add_assoc, Nat.add_comm 1 k, Nat.add_left_comm] using this
+    cases e with
+    | var i =>
+      rw [dbBusSlots]
+      dsimp only
+      by_cases hseen : seen.contains i
+      · rw [if_pos hseen]; exact ih (slot + 1) seen inf T hshift hT
+      · rw [if_neg hseen]
+        have hslot : bi.payload[slot]? = some (.var i) := by
+          have := hsuf 0; simpa using this.symm
+        rcases hsb : dbSlotBound facts bi bi.multiplicity.constValue?
+          (bi.payload.map DenseExpr.constValue?) slot with _ | bound
+        · dsimp only; exact ih (slot + 1) (seen.push i) true T hshift hT
+        · dsimp only
+          refine ih (slot + 1) (seen.push i) inf _ hshift ?_
+          by_cases hb : bound ≤ maxDomainBound
+          · rw [if_pos hb]
+            refine dbTabSound_insert denv T i.index _ hT ?_
+            exact dbDomMem_range bound _ (ZMod.val_lt _)
+              (dbSlotBound_sound facts bi slot bound i hslot hsb denv hob)
+          · rw [if_neg hb]; exact hT
+    | const c =>
+      simp only [dbBusSlots]; exact ih (slot + 1) seen _ T hshift hT
+    | add a b =>
+      simp only [dbBusSlots]; exact ih (slot + 1) seen _ T hshift hT
+    | mul a b =>
+      simp only [dbBusSlots]; exact ih (slot + 1) seen _ T hshift hT
+
 theorem dbDomainBatchσ_entailed [Fact p.Prime] [NeZero p]
     (bs : BusSemantics p) (facts : BusFacts p bs) (d : DenseConstraintSystem p) :
     EntailedMap d bs (dbDomainBatchσ bs facts d).map := by
