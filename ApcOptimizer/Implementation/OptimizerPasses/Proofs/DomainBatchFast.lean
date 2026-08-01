@@ -818,6 +818,268 @@ theorem dbCompileBi_ok [Fact p.Prime] [NeZero p] (facts : BusFacts p bs)
 
 end Items
 
+/-! ## 4. The scan
+
+The mask is an intersection over surviving points, so the key facts are: absorbing *any* point can
+only kill keys, and absorbing the assignment's own point makes every surviving key carry the
+assignment's value. Reaching that point is an induction over the box dimensions. -/
+
+/-- The register file carries the assignment's values on the target's keys. -/
+def DbRegsAt (denv : VarId → ZMod p) (keys : Array ℕ) (regs : Array ℕ) : Prop :=
+  ∀ d, d < keys.size → regs.getD (keys.getD d 0) 0 = (denv ⟨keys.getD d 0⟩).val
+
+/-- Every key the mask still calls forced carries the assignment's value. -/
+def DbMaskAgree (denv : VarId → ZMod p) (keys : Array ℕ) (st : DbScanSt) : Prop :=
+  ∀ i, i < keys.size → st.alive.getD i false = true →
+    st.vals.getD i 0 = (denv ⟨keys.getD i 0⟩).val
+
+/-- What the scan must deliver: it started, and either nothing survives or the mask agrees. -/
+def DbScanGood (denv : VarId → ZMod p) (keys : Array ℕ) (st : DbScanSt) : Prop :=
+  st.started = true ∧ (st.live = 0 ∨ DbMaskAgree denv keys st)
+
+theorem dbAbsorbGo_spec (regs keys vals : Array ℕ) :
+    ∀ (m i live : ℕ) (alive : Array Bool), keys.size - i ≤ m →
+      (dbAbsorbGo regs keys i vals alive live).1 = vals ∧
+      (∀ j, (dbAbsorbGo regs keys i vals alive live).2.1.getD j false = true →
+        alive.getD j false = true) ∧
+      (∀ j, i ≤ j → j < keys.size →
+        (dbAbsorbGo regs keys i vals alive live).2.1.getD j false = true →
+        regs.getD (keys.getD j 0) 0 = vals.getD j 0) := by
+  intro m
+  induction m with
+  | zero =>
+    intro i live alive hm
+    rw [dbAbsorbGo, dif_neg (by omega)]
+    exact ⟨rfl, fun _ h => h, fun j hj hjs _ => absurd hjs (by omega)⟩
+  | succ m ih =>
+    intro i live alive hm
+    by_cases hlt : i < keys.size
+    · rw [dbAbsorbGo, dif_pos hlt]
+      have hkey : keys.getD i 0 = keys[i] := by
+        rw [Array.getD_eq_getD_getElem?, Array.getElem?_eq_getElem hlt]; rfl
+      have hdead : ∀ (al : Array Bool), (al.set! i false).getD i false = false := by
+        intro al
+        rw [Array.getD_eq_getD_getElem?, Array.set!, Array.getElem?_setIfInBounds_self]
+        split <;> rfl
+      have hne : ∀ (al : Array Bool) (j : ℕ), j ≠ i →
+          (al.set! i false).getD j false = al.getD j false := by
+        intro al j hji
+        rw [Array.getD_eq_getD_getElem?, Array.getD_eq_getD_getElem?, Array.set!,
+          Array.getElem?_setIfInBounds_ne (Ne.symm hji)]
+      by_cases hal : alive.getD i false
+      · rw [if_pos hal]
+        by_cases heq : regs.getD keys[i] 0 == vals.getD i 0
+        · rw [if_pos heq]
+          obtain ⟨h1, h2, h3⟩ := ih (i + 1) live alive (by omega)
+          refine ⟨h1, h2, fun j hj hjs hjl => ?_⟩
+          rcases Nat.lt_or_ge i j with hij | hij
+          · exact h3 j (by omega) hjs hjl
+          · have : j = i := by omega
+            subst this; rw [hkey]; simpa using heq
+        · rw [if_neg heq]
+          obtain ⟨h1, h2, h3⟩ := ih (i + 1) (live - 1) (alive.set! i false) (by omega)
+          refine ⟨h1, fun j hjl => ?_, fun j hj hjs hjl => ?_⟩
+          · have hj2 := h2 j hjl
+            rcases Nat.decEq j i with hji | hji
+            · rwa [hne alive j hji] at hj2
+            · subst hji; rw [hdead alive] at hj2; exact absurd hj2 (by simp)
+          · rcases Nat.lt_or_ge i j with hij | hij
+            · exact h3 j (by omega) hjs hjl
+            · have hji : j = i := by omega
+              subst hji
+              have hj2 := h2 j hjl
+              rw [hdead alive] at hj2; exact absurd hj2 (by simp)
+      · rw [if_neg hal]
+        obtain ⟨h1, h2, h3⟩ := ih (i + 1) live alive (by omega)
+        refine ⟨h1, h2, fun j hj hjs hjl => ?_⟩
+        rcases Nat.lt_or_ge i j with hij | hij
+        · exact h3 j (by omega) hjs hjl
+        · have : j = i := by omega
+          subst this
+          exact absurd (h2 j hjl) (by simpa using hal)
+    · rw [dbAbsorbGo, dif_neg hlt]
+      exact ⟨rfl, fun _ h => h, fun j hj hjs _ => absurd hjs (by omega)⟩
+
+theorem dbAbsorbArgs_true (keys regs vals : Array ℕ) (alive : Array Bool) (live : ℕ) :
+    dbAbsorbArgs keys regs vals alive live true =
+      ((dbAbsorbGo regs keys 0 vals alive live).1, (dbAbsorbGo regs keys 0 vals alive live).2.1,
+        (dbAbsorbGo regs keys 0 vals alive live).2.2, true) := by
+  rw [dbAbsorbArgs]; simp
+
+theorem dbAbsorbArgs_false (keys regs vals : Array ℕ) (alive : Array Bool) (live : ℕ) :
+    dbAbsorbArgs keys regs vals alive live false =
+      (keys.map (fun k => regs.getD k 0), Array.replicate keys.size true, keys.size, true) := by
+  rw [dbAbsorbArgs]; simp
+
+theorem dbMap_getD (keys : Array ℕ) (f : ℕ → ℕ) (j : ℕ) (hj : j < keys.size) :
+    (keys.map f).getD j 0 = f (keys.getD j 0) := by
+  rw [Array.getD_eq_getD_getElem?, Array.getD_eq_getD_getElem?,
+    Array.getElem?_eq_getElem (by simpa using hj), Array.getElem?_eq_getElem hj,
+    Array.getElem_map]
+  rfl
+
+theorem dbReplicate_getD (n j : ℕ) (hj : j < n) : (Array.replicate n true).getD j false = true := by
+  rw [Array.getD_eq_getD_getElem?, Array.getElem?_eq_getElem (by simpa using hj),
+    Array.getElem_replicate]
+  rfl
+
+/-- Absorbing the assignment's own point leaves the mask agreeing with it, whatever it held. -/
+theorem dbAbsorbArgs_agree (denv : VarId → ZMod p) (keys regs vals : Array ℕ)
+    (alive : Array Bool) (live : ℕ) (started : Bool) (hregs : DbRegsAt denv keys regs) :
+    ∀ j, j < keys.size →
+      (dbAbsorbArgs keys regs vals alive live started).2.1.getD j false = true →
+      (dbAbsorbArgs keys regs vals alive live started).1.getD j 0
+        = (denv ⟨keys.getD j 0⟩).val := by
+  intro j hj hal
+  cases started with
+  | true =>
+    rw [dbAbsorbArgs_true] at hal ⊢
+    obtain ⟨h1, _, h3⟩ := dbAbsorbGo_spec regs keys vals keys.size 0 live alive (by omega)
+    simp only at hal ⊢
+    rw [h1, ← h3 j (Nat.zero_le j) hj hal]
+    exact hregs j hj
+  | false =>
+    rw [dbAbsorbArgs_false] at hal ⊢
+    simp only at hal ⊢
+    rw [dbMap_getD keys _ j hj]
+    exact hregs j hj
+
+/-- Absorbing any point can only kill keys, so agreement survives. -/
+theorem dbAbsorbArgs_preserve (denv : VarId → ZMod p) (keys regs vals : Array ℕ)
+    (alive : Array Bool) (live : ℕ)
+    (hag : ∀ j, j < keys.size → alive.getD j false = true →
+      vals.getD j 0 = (denv ⟨keys.getD j 0⟩).val) :
+    ∀ j, j < keys.size →
+      (dbAbsorbArgs keys regs vals alive live true).2.1.getD j false = true →
+      (dbAbsorbArgs keys regs vals alive live true).1.getD j 0
+        = (denv ⟨keys.getD j 0⟩).val := by
+  intro j hj hal
+  rw [dbAbsorbArgs_true] at hal ⊢
+  obtain ⟨h1, h2, _⟩ := dbAbsorbGo_spec regs keys vals keys.size 0 live alive (by omega)
+  simp only at hal ⊢
+  rw [h1]
+  exact hag j hj (h2 j hal)
+
+/-- Once the mask is good, the rest of the sweep keeps it good. -/
+theorem dbScanLoop_preserve {bs : BusSemantics p} (facts : BusFacts p bs) (items : Array DbItem)
+    (keys : Array ℕ) (doms : Array DbDom) (denv : VarId → ZMod p) :
+    ∀ (d i n : ℕ) (regs vals : Array ℕ) (alive : Array Bool) (live : ℕ) (started : Bool),
+      DbScanGood denv keys ⟨regs, vals, alive, live, started⟩ →
+      DbScanGood denv keys
+        (dbScanLoop facts items keys doms d i n regs vals alive live started) := by
+  intro d i n regs vals alive live started
+  induction d, i, n, regs, vals, alive, live, started using
+    dbScanLoop.induct facts items keys doms with
+  | case1 d i n regs vals alive live started hge =>
+    intro hg; rw [dbScanLoop, if_pos hge]; exact hg
+  | case2 d i n regs vals alive live started hlt hdead =>
+    intro hg; rw [dbScanLoop, if_neg hlt, if_pos hdead]; exact hg
+  | case3 d i n regs vals alive live started hlt halive regs1 hinner hok vals1 alive1 live1
+      started1 habs ih =>
+    intro hg
+    obtain ⟨hst, hlive⟩ := hg
+    have hst' : started = true := hst
+    subst hst'
+    have hne : ¬ live = 0 := fun h0 => halive (by simp [h0])
+    have hagree : DbMaskAgree denv keys ⟨regs, vals, alive, live, true⟩ := hlive.resolve_left hne
+    have hok' : dbAllOk facts items
+        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i)) 0 = true := hok
+    have habs' : dbAbsorbArgs keys
+        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i))
+        vals alive live true = (vals1, alive1, live1, started1) := habs
+    rw [dbScanLoop, if_neg hlt, if_neg halive]
+    simp only [if_pos hinner]
+    rw [if_pos hok', habs']
+    refine ih ⟨?_, Or.inr ?_⟩
+    · have hst4 : (dbAbsorbArgs keys
+          (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i))
+          vals alive live true).2.2.2 = started1 := congrArg (fun r => r.2.2.2) habs'
+      rw [dbAbsorbArgs_true] at hst4
+      exact hst4.symm
+    · intro j hj hj2
+      rw [show vals1 = (dbAbsorbArgs keys regs1 vals alive live true).1 from
+        (congrArg (fun r => r.1) habs).symm]
+      refine dbAbsorbArgs_preserve denv keys regs1 vals alive live hagree j hj ?_
+      rw [show (dbAbsorbArgs keys regs1 vals alive live true).2.1 = alive1 from
+        congrArg (fun r => r.2.1) habs]
+      exact hj2
+  | case4 d i n regs vals alive live started hlt halive regs1 hinner hok ih =>
+    intro hg
+    have hok' : ¬ dbAllOk facts items
+        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i)) 0 = true := hok
+    rw [dbScanLoop, if_neg hlt, if_neg halive]
+    simp only [if_pos hinner]
+    rw [if_neg hok']
+    exact ih hg
+  | case5 d i n regs vals alive live started hlt halive regs1 hinner regs2 vals1 alive1 live1
+      started1 hrec ihinner ih =>
+    intro hg
+    have hrec' : dbScanLoop facts items keys doms (d + 1) 0
+        (doms.getD (d + 1) (DbDom.range 0)).size
+        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i))
+        vals alive live started = ⟨regs2, vals1, alive1, live1, started1⟩ := hrec
+    rw [dbScanLoop, if_neg hlt, if_neg halive]
+    simp only [if_neg hinner]
+    rw [hrec']
+    refine ih ?_
+    have := ihinner hg
+    rw [hrec] at this
+    exact this
+
+theorem dbSetD_ne {α : Type} (a : Array α) (k k' : ℕ) (v dflt : α) (h : k' ≠ k) :
+    (a.set! k v).getD k' dflt = a.getD k' dflt := by
+  rw [Array.getD_eq_getD_getElem?, Array.getD_eq_getD_getElem?, Array.set!,
+    Array.getElem?_setIfInBounds_ne (Ne.symm h)]
+
+/-- The sweep at dimension `d` writes only the keys from `d` on. -/
+theorem dbScanLoop_regs {bs : BusSemantics p} (facts : BusFacts p bs) (items : Array DbItem)
+    (keys : Array ℕ) (doms : Array DbDom) (k : ℕ) :
+    ∀ (d i n : ℕ) (regs vals : Array ℕ) (alive : Array Bool) (live : ℕ) (started : Bool),
+      d < keys.size → (∀ d', d ≤ d' → d' < keys.size → keys.getD d' 0 ≠ k) →
+      (dbScanLoop facts items keys doms d i n regs vals alive live started).regs.getD k 0
+        = regs.getD k 0 := by
+  intro d i n regs vals alive live started
+  induction d, i, n, regs, vals, alive, live, started using
+    dbScanLoop.induct facts items keys doms with
+  | case1 d i n regs vals alive live started hge =>
+    intro _ _; rw [dbScanLoop, if_pos hge]
+  | case2 d i n regs vals alive live started hlt hdead =>
+    intro _ _; rw [dbScanLoop, if_neg hlt, if_pos hdead]
+  | case3 d i n regs vals alive live started hlt halive regs1 hinner hok vals1 alive1 live1
+      started1 habs ih =>
+    intro hd hfp
+    have hok' : dbAllOk facts items
+        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i)) 0 = true := hok
+    have habs' : dbAbsorbArgs keys
+        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i))
+        vals alive live started = (vals1, alive1, live1, started1) := habs
+    rw [dbScanLoop, if_neg hlt, if_neg halive]
+    simp only [if_pos hinner]
+    rw [if_pos hok', habs', ih hd hfp]
+    exact dbSetD_ne regs _ k _ 0 (fun he => hfp d (le_refl d) hd he.symm)
+  | case4 d i n regs vals alive live started hlt halive regs1 hinner hok ih =>
+    intro hd hfp
+    have hok' : ¬ dbAllOk facts items
+        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i)) 0 = true := hok
+    rw [dbScanLoop, if_neg hlt, if_neg halive]
+    simp only [if_pos hinner]
+    rw [if_neg hok', ih hd hfp]
+    exact dbSetD_ne regs _ k _ 0 (fun he => hfp d (le_refl d) hd he.symm)
+  | case5 d i n regs vals alive live started hlt halive regs1 hinner regs2 vals1 alive1 live1
+      started1 hrec ihinner ih =>
+    intro hd hfp
+    have hrec' : dbScanLoop facts items keys doms (d + 1) 0
+        (doms.getD (d + 1) (DbDom.range 0)).size
+        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i))
+        vals alive live started = ⟨regs2, vals1, alive1, live1, started1⟩ := hrec
+    rw [dbScanLoop, if_neg hlt, if_neg halive]
+    simp only [if_neg hinner]
+    rw [hrec', ih hd hfp]
+    have hin := ihinner (by omega) (fun d' hd' hlt' => hfp d' (by omega) hlt')
+    rw [hrec'] at hin
+    rw [hin]
+    exact dbSetD_ne regs _ k _ 0 (fun he => hfp d (le_refl d) hd he.symm)
+
 theorem dbDomainBatchσ_entailed [Fact p.Prime] [NeZero p]
     (bs : BusSemantics p) (facts : BusFacts p bs) (d : DenseConstraintSystem p) :
     EntailedMap d bs (dbDomainBatchσ bs facts d).map := by
