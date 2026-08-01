@@ -1,12 +1,12 @@
 import ApcOptimizer.Implementation.OptimizerPasses.DomainFold
-import ApcOptimizer.Implementation.OptimizerPasses.DomainBatchRuntime
+import ApcOptimizer.Implementation.OptimizerPasses.DomainTable
 
 set_option autoImplicit false
 
 /-! # Dense `domainFold`, with compiled value-only evaluation
 
 The hot evaluators (`denseGroupSurvivorsEV`, `denseConstOnSurvsV`) compile the group's covered
-constraints once (via `DomainBatch.lean`'s `IExpr`) and evaluate every enumerated point by index,
+constraints once (via `DomainTable.lean`'s `IExpr`) and evaluate every enumerated point by index,
 value-only (`List (ZMod p)` points, no `VarId` per point). Runs with at least
 `domainFoldTargetIndexThreshold` candidate groups use the index-preserving indexed loop; fewer use
 the direct loop. Runtime only — correctness is in `Proofs/DomainFold.lean`. -/

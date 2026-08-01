@@ -1,4 +1,4 @@
-import ApcOptimizer.Implementation.OptimizerPasses.DomainBatch
+import ApcOptimizer.Implementation.OptimizerPasses.DomainTable
 import ApcOptimizer.Implementation.OptimizerPasses.OneHotAnnihilate
 
 set_option autoImplicit false
@@ -102,7 +102,7 @@ theorem denseGroupDoms_fst (es : List (DenseExpr p)) :
 /-! ## Ordered dense inverted index
 
 `denseCoveredIdx` restores the covered items to original order and equals the plain filter whenever
-every `Q`-item shares a variable with `xs`. The underlying index is from `DomainBatch.lean`. -/
+every `Q`-item shares a variable with `xs`. The underlying index is from `DomainTable.lean`. -/
 
 variable {α : Type}
 

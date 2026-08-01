@@ -1,449 +1,1017 @@
-import ApcOptimizer.Implementation.OptimizerPasses.EnumEngine
-import ApcOptimizer.Implementation.OptimizerPasses.HashedDedup
-import ApcOptimizer.Implementation.OptimizerPasses.SearchBudgets
-import ApcOptimizer.Implementation.OptimizerPasses.DigitFold
-import ApcOptimizer.Implementation.OptimizerPasses.Normalize
-import ApcOptimizer.Implementation.OptimizerPasses.Gauss
-import ApcOptimizer.Implementation.OptimizerPasses.Rewrite
+import ApcOptimizer.Implementation.OptimizerPasses.DomainTable
 
 set_option autoImplicit false
 
-/-! # Dense finite-domain-table construction
+/-! # The `domainBatch` pass
 
-Finite domains per `VarId`, derived from product-of-affine-factor constraints (`denseRootsIn`) and
-fact-bounded bus payload slots (`denseInteractionDomainF`). -/
+Finite domains per variable — the affine roots of a constraint, a bus `slotBound` fact, a byte
+operand's coset — then a box enumeration per candidate variable set, keeping every variable that
+takes the same value in every surviving point as a forced constant. Soundness is
+`dbDomainBatchσ_entailed` in `Proofs/DomainBatch.lean`.
+
+The representation is built for the scan:
+
+* every per-variable structure is an `Array` keyed by `VarId.index` (domain table, anchor buckets);
+* each item's distinct variable list is computed **once** and reused by the table build, the target
+  list, the buckets and the gathers;
+* the affine roots of a product constraint come from one linearization per factor, shared by the
+  constraint's ≤ 3 variables;
+* items compile **once per invocation** to programs over a `VarId.index`-keyed register file
+  (`DbItem`/`DbTree`) holding `ZMod.val`s, so a scan neither compiles nor allocates a point: the box
+  loop writes one register per step and the candidate mask is a value array plus an alive flag array
+  with a live count, so the abort test is O(1);
+* a `.coset` domain arm streams a byte operand's coset in the field with one hoisted inverse. -/
 
 namespace ApcOptimizer.Dense
 
 variable {p : ℕ}
 
-/-! ## Dense `rootsIn` -/
+/-! ## Domains
 
-/-- Find the affine root of `c * v + i` if `[(j, a)]` is a single term `j = i` with `a ≠ 0`. -/
-def denseRootsOfTerms (i : VarId) (c : ZMod p) :
-    List (VarId × ZMod p) → Option (List (ZMod p))
-  | [] => if c = 0 then none else some []
+The scan works on `ZMod p` values in their `ZMod.val` representation — a plain `Nat` below `p` —
+so a point costs machine arithmetic instead of a `p`-match plus a `Fin` reconstruction per
+operation. `DbDom` therefore stores `Nat`s; `zmodOfNatP` maps back at the boundary. -/
+
+/-- A finite domain: explicit values, `[0, bound)`, or the `bound`-element coset
+    `{(v + negB) * aInv : v < bound}` (a byte operand's entailed domain, never materialized).
+    Every value is a `ZMod.val`. -/
+inductive DbDom where
+  | explicit (vals : Array Nat)
+  | range (bound : Nat)
+  | coset (bound : Nat) (negB aInv : Nat)
+
+@[inline] def DbDom.size : DbDom → Nat
+  | .explicit vs => vs.size
+  | .range b => b
+  | .coset b _ _ => b
+
+/-- `(n : ZMod p)`, dictionary-free (mirrors `zmodOneP`). -/
+def zmodOfNatP : ∀ (p : ℕ), Nat → ZMod p
+  | 0, n => ((n : ℤ) : ZMod 0)
+  | m + 1, n => (⟨n % (m + 1), Nat.mod_lt _ (Nat.succ_pos m)⟩ : Fin (m + 1))
+
+/-- `a + b` on `val`s: both are below `p`, so the sum needs a conditional subtraction rather than
+    the division `Fin.add` performs. -/
+@[inline] def dbAddN (p a b : Nat) : Nat := let s := a + b; if s < p then s else s - p
+
+@[inline] def dbMulN (p a b : Nat) : Nat := a * b % p
+
+/-- The `i`-th element of a domain, in `toList` order. The index is a position in a domain of at
+    most `maxEnumSize` elements, so the reduction is a comparison rather than a division. -/
+@[inline] def DbDom.at (p : ℕ) (d : DbDom) (i : Nat) : Nat :=
+  match d with
+  | .explicit vs => vs.getD i 0
+  | .range _ => if i < p then i else i % p
+  | .coset _ negB aInv =>
+    dbMulN p (dbAddN p (if i < p then i else i % p) negB) aInv
+
+/-- Elements of a coset domain, with early exit; the other two arms need no iteration. -/
+def dbCosetIterN {β : Type} (p : ℕ) (f : β → Nat → β) (stop : β → Bool) (negB aInv cur : Nat) :
+    Nat → β → β
+  | 0, acc => acc
+  | n + 1, acc =>
+    if stop acc then acc
+    else dbCosetIterN p f stop negB aInv ((cur + 1 % p) % p) n (f acc (dbMulN p ((cur + negB) % p) aInv))
+
+/-- The single value the domain admits, or `none` (`denseDomainConstantValueV?`). -/
+def DbDom.const? (p : ℕ) (d : DbDom) : Option Nat :=
+  match d with
+  | .explicit vs =>
+    match vs[0]? with
+    | none => none
+    | some v => if vs.all (fun w => w == v) then some v else none
+  | .range b => if b == 1 then some 0 else none
+  | .coset b negB aInv => if b == 1 then some (dbMulN p negB aInv) else none
+
+/-- Every element is `< bound` as a `Nat` (`denseDomainBelowV`). -/
+def DbDom.below (p : ℕ) (d : DbDom) (bound : Nat) : Bool :=
+  match d with
+  | .explicit vs => vs.all (fun v => decide (v < bound))
+  | .range b => decide (b ≤ bound)
+  | .coset b negB aInv =>
+    dbCosetIterN p (fun acc v => acc && decide (v < bound)) (fun acc => !acc) negB aInv 0 b true
+
+/-! ## Compiled items
+
+`DbTree` leaves are `VarId.index`es into the scan's register file, so a compiled item is
+target-independent: it is built once per invocation and shared by every target that gathers it. -/
+
+inductive DbTree where
+  | const (c : Nat)
+  | reg (i : Nat)
+  | add (a b : DbTree)
+  | mul (a b : DbTree)
+
+def dbEval (p : ℕ) (regs : Array Nat) : DbTree → Nat
+  | .const c => c
+  | .reg i => regs.getD i 0
+  | .add a b => dbAddN p (dbEval p regs a) (dbEval p regs b)
+  | .mul a b => dbMulN p (dbEval p regs a) (dbEval p regs b)
+
+def dbCompile : DenseExpr p → DbTree
+  | .const c => .const c.val
+  | .var i => .reg i.index
+  | .add a b => .add (dbCompile a) (dbCompile b)
+  | .mul a b => .mul (dbCompile a) (dbCompile b)
+
+/-- One gathered item's per-point obligation; the bus arms mirror `DenseCBiPred`. -/
+inductive DbItem where
+  | zero (e : DbTree)
+  | always
+  | varRange (mult x width : DbTree)
+  | varRangeConst (mult x : DbTree) (bound : Nat)
+  | tupleRange (mult x y : DbTree) (boundX boundY : Nat)
+  | fixedRange (mult value : DbTree) (bound : Nat)
+  | byte (mult o1 o2 result : DbTree) (bound : Nat) (kind : DenseBytePredKind)
+  | fallback (busId : Nat) (mult : DbTree) (payload : List DbTree)
+
+def dbByteRel (kind : DenseBytePredKind) (a b r : Nat) : Bool :=
+  match kind with
+  | .xor => decide (r = Nat.xor a b)
+  | .pair => r == 0
+  | .or => decide (r = Nat.lor a b)
+  | .and => decide (r = Nat.land a b)
+
+def dbItemOk {bs : BusSemantics p} (facts : BusFacts p bs) (regs : Array Nat) :
+    DbItem → Bool
+  | .zero e => dbEval p regs e == 0
+  | .always => true
+  | .varRange mult x width =>
+    if dbEval p regs mult == 0 then true
+    else
+      let w := dbEval p regs width
+      decide (w ≤ 17) && decide (dbEval p regs x < 2 ^ w)
+  | .varRangeConst mult x bound =>
+    if dbEval p regs mult == 0 then true
+    else decide (dbEval p regs x < bound)
+  | .tupleRange mult x y boundX boundY =>
+    if dbEval p regs mult == 0 then true
+    else decide (dbEval p regs x < boundX) && decide (dbEval p regs y < boundY)
+  | .fixedRange mult value bound =>
+    if dbEval p regs mult == 0 then true
+    else decide (dbEval p regs value < bound)
+  | .byte mult o1 o2 result bound kind =>
+    if dbEval p regs mult == 0 then true
+    else
+      let a := dbEval p regs o1
+      let b := dbEval p regs o2
+      decide (a < bound) && decide (b < bound) && dbByteRel kind a b (dbEval p regs result)
+  | .fallback busId mult payload =>
+    let m := dbEval p regs mult
+    if m == 0 then true
+    else
+      facts.acceptsDec
+        { busId := busId, multiplicity := zmodOfNatP p m,
+          payload := payload.map (fun t => zmodOfNatP p (dbEval p regs t)) }
+
+def dbAllOk {bs : BusSemantics p} (facts : BusFacts p bs) (items : Array DbItem)
+    (regs : Array Nat) (i : Nat) : Bool :=
+  if h : i < items.size then
+    (if dbItemOk facts regs items[i] then dbAllOk facts items regs (i + 1) else false)
+  else true
+  termination_by items.size - i
+  decreasing_by all_goals omega
+
+/-! ### Per-interaction data, computed once
+
+Every `BusFacts` query about an interaction is resolved here, once, and read by the three consumers
+that used to each ask again: the byte-domain phase, the item compiler and the domain-redundancy
+test. `spec.decode` in particular allocates and was run three times per interaction. -/
+
+/-- An interaction's byte-bus view: the spec, the op selector's constant value, and the decoded
+    logical operands. -/
+structure DbBytePre (p : ℕ) where
+  spec : ByteXorSpec p
+  op? : Option (ZMod p)
+  o1 : DenseExpr p
+  o2 : DenseExpr p
+  result : DenseExpr p
+
+/-- The constant multiplicity, the constant-slot pattern, the distinct variables, the stateless
+    flag and the resolved bus facts of one interaction. Built once and never rewritten:
+    `denseBiInformative`'s verdict rides alongside in its own array, so the slot-bound phase
+    does not rebuild this record per interaction. -/
+structure DbBiPre (p : ℕ) where
+  mult? : Option (ZMod p)
+  pat : List (Option (ZMod p))
+  vars : Array VarId
+  usable : Bool
+  byte? : Option (DbBytePre p)
+  varRange : Bool
+  tuple? : Option (Nat × Nat)
+  rangeAt? : Option (Nat × Nat)
+
+def dbBiPreEmpty : DbBiPre p := ⟨none, [], #[], false, none, false, none, none⟩
+
+/-- Resolve every `BusFacts` query about one interaction. Faithfulness of the cache is
+    `DbBiPreOf` (`Proofs/DomainBatch.lean`). -/
+def dbPreOne {bs : BusSemantics p} (facts : BusFacts p bs) (bi : BusInteraction (DenseExpr p))
+    (vars : Array VarId) : DbBiPre p :=
+  let pat := bi.payload.map DenseExpr.constValue?
+  let usable := !bs.isStateful bi.busId
+  -- the width/tuple facts are consulted only on a two-slot payload, and the range fact only when
+  -- neither of them answered: each is resolved exactly where its consumers can reach it
+  let twoSlot := match bi.payload with | [_, _] => true | _ => false
+  let varRange := usable && twoSlot && facts.varRangeBus bi.busId
+  let tuple? := if usable && twoSlot && !varRange then facts.tupleRangeBus bi.busId else none
+  { mult? := bi.multiplicity.constValue?
+    pat
+    vars
+    usable
+    -- read by the compiler and the pair-redundancy test (both `usable`-only) and by the
+    -- byte-domain phase (nonzero constant multiplicity only)
+    byte? :=
+      if usable || (bi.multiplicity.constValue?).any (fun m => !zmodIsZero m) then
+        (facts.byteXorSpec bi.busId).bind fun spec =>
+          (spec.decode bi.payload).map fun t => ⟨spec, t.1.constValue?, t.2.1, t.2.2.1, t.2.2.2⟩
+      else none
+    varRange
+    tuple?
+    rangeAt? :=
+      if usable && !varRange && tuple?.isNone then facts.rangeCheckAt bi.busId pat else none }
+
+/-! ### Compiling a bus interaction (mirrors `denseCompileCBiPredV`) -/
+
+def dbCompileRange (bi : BusInteraction (DenseExpr p)) (e : DbBiPre p) (mult : DbTree) :
+    Option (DbItem) :=
+  match e.mult? with
+  | some m =>
+    if zmodIsOne m then
+      match e.rangeAt? with
+      | some (slot, bound) =>
+        match bi.payload[slot]? with
+        | some value => some (.fixedRange mult (dbCompile value) bound)
+        | none => none
+      | none => none
+    else none
+  | none => none
+
+def dbCompileByte (e : DbBiPre p) (mult : DbTree) : Option (DbItem) :=
+  match e.byte? with
+  | none => none
+  | some b =>
+    match b.op? with
+    | none => none
+    | some opValue =>
+      let spec := b.spec
+      let mk : DenseBytePredKind → Option (DbItem) := fun kind =>
+        some (.byte mult (dbCompile b.o1) (dbCompile b.o2) (dbCompile b.result) spec.bound kind)
+      if opValue = spec.xorOp then mk .xor
+      else if opValue = spec.pairOp then mk .pair
+      else
+        match spec.orOp with
+        | some orOp =>
+          if opValue = orOp then mk .or
+          else
+            match spec.andOp with
+            | some andOp => if opValue = andOp then mk .and else none
+            | none => none
+        | none =>
+          match spec.andOp with
+          | some andOp => if opValue = andOp then mk .and else none
+          | none => none
+
+def dbCompileOther (bi : BusInteraction (DenseExpr p)) (e : DbBiPre p) (mult : DbTree) :
+    DbItem :=
+  match dbCompileRange bi e mult with
+  | some item => item
+  | none =>
+    match dbCompileByte e mult with
+    | some item => item
+    | none => .fallback bi.busId mult (bi.payload.map dbCompile)
+
+def dbCompileBi {bs : BusSemantics p} (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) (e : DbBiPre p) : DbItem :=
+  if denseBiAlwaysOk facts bi then .always
+  else
+    let mult := dbCompile bi.multiplicity
+    match bi.payload with
+    | [x, width] =>
+      if e.varRange then
+        match width.constValue? with
+        | some widthValue =>
+          if widthValue.val ≤ 17 then .varRangeConst mult (dbCompile x) (2 ^ widthValue.val)
+          else .varRange mult (dbCompile x) (dbCompile width)
+        | none => .varRange mult (dbCompile x) (dbCompile width)
+      else
+        match e.tuple? with
+        | some (boundX, boundY) =>
+          .tupleRange mult (dbCompile x) (dbCompile width) boundX boundY
+        | none => dbCompileOther bi e mult
+    | _ => dbCompileOther bi e mult
+
+/-! ## Distinct variables per item, computed once -/
+
+def dbPushVar (acc : Array VarId) (i : VarId) : Array VarId :=
+  if acc.contains i then acc else acc.push i
+
+def dbVarsOf : DenseExpr p → Array VarId → Array VarId
+  | .const _, acc => acc
+  | .var i, acc => dbPushVar acc i
+  | .add a b, acc => dbVarsOf b (dbVarsOf a acc)
+  | .mul a b, acc => dbVarsOf b (dbVarsOf a acc)
+
+def dbVarsOfList : List (DenseExpr p) → Array VarId → Array VarId
+  | [], acc => acc
+  | e :: rest, acc => dbVarsOfList rest (dbVarsOf e acc)
+
+def dbBiVars (bi : BusInteraction (DenseExpr p)) : Array VarId :=
+  dbVarsOfList bi.payload (dbVarsOf bi.multiplicity #[])
+
+/-! ## Affine roots: one linearization per factor
+
+`denseRootsIn i c` linearizes the whole tree once per queried variable. The plan below linearizes
+each factor of the product spine once; answering a variable is then a walk over normalized forms. -/
+
+inductive DbRootPlan (p : ℕ) where
+  | leaf (lin : Option (DenseLinExpr p))
+  | prod (lin : Option (DenseLinExpr p)) (a b : DbRootPlan p)
+
+def dbRootPlan : DenseExpr p → DbRootPlan p
+  | .mul a b =>
+    .prod ((denseLinearize (.mul a b)).map DenseLinExpr.norm) (dbRootPlan a) (dbRootPlan b)
+  | e => .leaf ((denseLinearize e).map DenseLinExpr.norm)
+
+/-- `denseRootsOfTerms` on an already-normalized form. Every operation is a `zmod…P` primitive:
+    mentioning `0`, `+` or `*` here rebuilds `ZMod.commRing p` at the function's entry, ahead of the
+    terms match, on all ~1.5 M calls of a sha256 run. -/
+def dbRootsOfLin (i : VarId) (l : DenseLinExpr p) : Option (List (ZMod p)) :=
+  match l.terms with
+  | [] => if zmodIsZero l.const then none else some []
   | [(j, a)] =>
-      let r := -(a⁻¹ * c)
-      if j = i ∧ a ≠ 0 ∧ a * r + c = 0 then some [r] else none
+    if j = i then
+      if zmodIsZero a then none
+      -- a normalized `x - c`: the root is `c`, with no modular inverse to compute
+      else if zmodIsOne a then some [zmodNegP l.const]
+      else
+        let r := zmodNegP (zmodMulP a⁻¹ l.const)
+        if zmodIsZero (zmodAddP (zmodMulP a r) l.const) then some [r] else none
+    else none
   | _ :: _ :: _ => none
 
-/-- The affine root of `i` in `e`, through `denseLinearize` + `DenseLinExpr.norm`. -/
-def denseAffineRootsIn (i : VarId) (e : DenseExpr p) : Option (List (ZMod p)) :=
-  (denseLinearize e).bind (fun l => denseRootsOfTerms i l.norm.const l.norm.terms)
-
-/-- The roots of `i` in `e`: affine roots, recursing into a product's factors. -/
-def denseRootsIn (i : VarId) : DenseExpr p → Option (List (ZMod p))
-  | .const n => denseAffineRootsIn i (.const n)
-  | .var j => denseAffineRootsIn i (.var j)
-  | .add a b => denseAffineRootsIn i (.add a b)
-  | .mul a b =>
-    match denseAffineRootsIn i (.mul a b) with
+def dbRootsIn (i : VarId) : DbRootPlan p → Option (List (ZMod p))
+  | .leaf lin => lin.bind (dbRootsOfLin i)
+  | .prod lin a b =>
+    match lin.bind (dbRootsOfLin i) with
     | some r => some r
     | none =>
-      match denseRootsIn i a, denseRootsIn i b with
+      match dbRootsIn i a, dbRootsIn i b with
       | some ra, some rb => some (ra ++ rb)
       | _, _ => none
 
-/-! ## The dense domain table -/
+/-! ## The domain table -/
 
-/-- Finite domains for `VarId`s (runtime-only; no soundness field). -/
-structure DenseDomainTable (p : ℕ) where
-  map : Std.HashMap VarId (FiniteDomain p)
+structure DbTab (p : ℕ) where
+  dom : Array (Option (DbDom))
 
-def DenseDomainTable.empty : DenseDomainTable p := ⟨∅⟩
+/-- Keep the strictly smaller domain, as `DenseDomainTable.insertEntry`. -/
+def DbTab.insert (T : DbTab p) (i : Nat) (d : DbDom) : DbTab p :=
+  let ⟨dom⟩ := T
+  match dom.getD i none with
+  | some d0 => if d.size < d0.size then ⟨dom.set! i (some d)⟩ else ⟨dom⟩
+  | none => ⟨dom.set! i (some d)⟩
 
-/-- Insert an entailed domain, keeping the smaller of two candidate domains. -/
-def DenseDomainTable.insertEntry (T : DenseDomainTable p) (i : VarId) (d : FiniteDomain p) :
-    DenseDomainTable p :=
-  let keep : Bool := match T.map[i]? with
-    | some d0 => decide (d.size < d0.size)
-    | none => true
-  if keep then ⟨T.map.insert i d⟩ else T
+@[inline] def DbTab.get (T : DbTab p) (i : Nat) : Option (DbDom) := T.dom.getD i none
 
-/-- The table's domains for a `VarId` list, all-or-nothing. -/
-def DenseDomainTable.doms (T : DenseDomainTable p) :
-    List VarId → Option (List (VarId × FiniteDomain p))
-  | [] => some []
-  | i :: is =>
-    match T.map[i]?, T.doms is with
-    | some d, some rest => some ((i, d) :: rest)
-    | _, _ => none
+def dbAddConstraintVars (plan : DbRootPlan p) (vs : Array VarId) (k : Nat) (T : DbTab p) :
+    DbTab p :=
+  if h : k < vs.size then
+    let i := vs[k]
+    match dbRootsIn i plan with
+    | some rs => dbAddConstraintVars plan vs (k + 1) (T.insert i.index (.explicit (rs.map ZMod.val).toArray))
+    | none => dbAddConstraintVars plan vs (k + 1) T
+  else T
+  termination_by vs.size - k
+  decreasing_by all_goals omega
 
-/-! ## `.map`-extraction helpers and the insert correspondence -/
-
-theorem DenseDomainTable.insertEntry_map (T : DenseDomainTable p) (i : VarId) (d : FiniteDomain p) :
-    (T.insertEntry i d).map
-      = (if (match T.map[i]? with | some d0 => decide (d.size < d0.size) | none => (true : Bool))
-             = true
-         then T.map.insert i d else T.map) := by
-  unfold DenseDomainTable.insertEntry
-  rw [apply_ite DenseDomainTable.map]
-
-/-! ## Constraint-sourced domains -/
-
-/-- Insert `c`'s entailed domain for each variable in a given list. -/
-def denseAddConstraintVars (c : DenseExpr p) :
-    List VarId → DenseDomainTable p → DenseDomainTable p
-  | [], T => T
-  | i :: is, T =>
-    match denseRootsIn i c with
-    | some d => denseAddConstraintVars c is (T.insertEntry i (.explicit d))
-    | none => denseAddConstraintVars c is T
-
-/-- Constraint-sourced domains: for each constraint with at most 3 distinct variables, insert the
-    entailed domain of each. -/
-def denseAddConstraintDoms : List (DenseExpr p) → DenseDomainTable p → DenseDomainTable p
-  | [], T => T
-  | c :: rest, T =>
-    let vs := c.vars.dedup
-    denseAddConstraintDoms rest (if vs.length ≤ 3 then denseAddConstraintVars c vs T else T)
-
-/-! ## Bus-sourced range domains -/
-
-/-- The raw-variable payload entries of a dense interaction. -/
-def densePayloadRawVars (bi : BusInteraction (DenseExpr p)) : List VarId :=
-  bi.payload.filterMap (fun e => match e with | .var i => some i | _ => none)
-
-/-- A bus obligation's range domain for `i`, via `denseInteractionBound`. -/
-def denseInteractionDomainF (bs : BusSemantics p) (facts : BusFacts p bs)
-    (bi : BusInteraction (DenseExpr p)) (i : VarId) : Option (FiniteDomain p) :=
-  match denseInteractionBound bs facts bi i with
+def dbSlotBound {bs : BusSemantics p} (facts : BusFacts p bs) (bi : BusInteraction (DenseExpr p))
+    (mult? : Option (ZMod p)) (pat : List (Option (ZMod p))) (slot : Nat) : Option Nat :=
+  match mult? with
   | none => none
-  | some bound => if bound ≤ maxDomainBound then some (.range bound) else none
+  | some m => if zmodIsZero m then none else facts.slotBound bi.busId m pat slot
 
-/-- Insert `bi`'s entailed domain for each variable in a given list. -/
-def denseAddBusVars (bs : BusSemantics p) (facts : BusFacts p bs)
-    (bi : BusInteraction (DenseExpr p)) :
-    List VarId → DenseDomainTable p → DenseDomainTable p
-  | [], T => T
-  | i :: is, T =>
-    match denseInteractionDomainF bs facts bi i with
-    | some d => denseAddBusVars bs facts bi is (T.insertEntry i d)
-    | none => denseAddBusVars bs facts bi is T
+/-- Walk the payload once: the raw-variable slots' bounds (first slot per variable, as
+    `denseVarSlot`) feed both the table and `denseBiInformative`'s second disjunct. -/
+def dbBusSlots {bs : BusSemantics p} (facts : BusFacts p bs) (bi : BusInteraction (DenseExpr p))
+    (mult? : Option (ZMod p)) (pat : List (Option (ZMod p))) :
+    List (DenseExpr p) → Nat → Array VarId → Bool → DbTab p → Bool × DbTab p
+  | [], _, _, inf, T => (inf, T)
+  | e :: rest, slot, seen, inf, T =>
+    match e with
+    | .var i =>
+      if seen.contains i then dbBusSlots facts bi mult? pat rest (slot + 1) seen inf T
+      else
+        match dbSlotBound facts bi mult? pat slot with
+        | none => dbBusSlots facts bi mult? pat rest (slot + 1) (seen.push i) true T
+        | some bound =>
+          let T := if bound ≤ maxDomainBound then T.insert i.index (.range bound) else T
+          dbBusSlots facts bi mult? pat rest (slot + 1) (seen.push i) inf T
+    | _ =>
+      dbBusSlots facts bi mult? pat rest (slot + 1) seen (inf || !(e.constValue?).isSome) T
 
-/-- Bus-sourced domains: for each interaction, insert the entailed domain of each raw-variable
-    payload entry. -/
-def denseAddBusDoms (bs : BusSemantics p) (facts : BusFacts p bs) :
-    List (BusInteraction (DenseExpr p)) → DenseDomainTable p → DenseDomainTable p
-  | [], T => T
-  | bi :: rest, T =>
-    denseAddBusDoms bs facts rest (denseAddBusVars bs facts bi (densePayloadRawVars bi).dedup T)
+/-! ### Byte-operand domains (`denseAddByteVarDoms`), coset streamed -/
 
-/-! ## Dense enumeration engine -/
+def dbByteOperand (e : DenseExpr p) (bound : Nat) : Option (Nat × DbDom) :=
+  match e with
+  | .var i => some (i.index, .range bound)
+  | _ => (denseAffineOfExpr e).map (fun t => (t.1.index, .coset bound (zmodNegP t.2.2).val (t.2.1⁻¹).val))
 
-def denseEnvOfFast : List (VarId × ZMod p) → VarId → ZMod p
-  | [], _ => 0
-  | (x, v) :: rest, y => if (y == x) = true then v else denseEnvOfFast rest y
+def dbByteOperandVar (e : DenseExpr p) : Option Nat :=
+  match e with
+  | .var i => some i.index
+  | _ => (denseAffineOfExpr e).map (fun t => t.1.index)
 
-/-! ### Boxed runtime twins of the point lookups
+def dbAddByteOperand (e : DenseExpr p) (bound : Nat) (T : DbTab p) : DbTab p :=
+  match dbByteOperandVar e with
+  | none => T
+  | some i =>
+    match T.get i with
+    | none => T
+    | some d0 =>
+      if bound < d0.size then
+        match dbByteOperand e bound with
+        | some (i', d) => T.insert i' d
+        | none => T
+      else T
 
-`p` is a runtime value, so the `0` in the miss case is a full `CommRing (ZMod p)` instance chain,
-and Lean builds it at the head of each recursive step — once per list cell walked, not once per
-lookup. Taking the zero as a parameter hoists it out of the walk. -/
+def dbAddByteBi (e : DbBiPre p) (T : DbTab p) : DbTab p :=
+  match e.mult? with
+  | none => T
+  | some m =>
+    if zmodIsZero m then T
+    else
+      match e.byte? with
+      | none => T
+      | some b =>
+        match b.op? with
+        | none => T
+        | some opv =>
+          if denseByteOpBounds b.spec opv then
+            dbAddByteOperand b.o2 b.spec.bound (dbAddByteOperand b.o1 b.spec.bound T)
+          else T
 
-def denseEnvOfW (zero : ZMod p) : List (VarId × ZMod p) → VarId → ZMod p
-  | [], _ => zero
-  | (x, v) :: rest, y => if (y == x) = true then v else denseEnvOfW zero rest y
+/-! ## Box helpers -/
 
-theorem denseEnvOfW_eq (pt : List (VarId × ZMod p)) (y : VarId) :
-    denseEnvOfW 0 pt y = denseEnvOfFast pt y := by
-  induction pt with
-  | nil => rfl
-  | cons t rest ih =>
-      obtain ⟨x, v⟩ := t
-      simp only [denseEnvOfW, denseEnvOfFast, ih]
+def dbBoxOf (T : DbTab p) (vs : Array VarId) (k : Nat) (acc : Nat) : Option Nat :=
+  if h : k < vs.size then
+    match T.get vs[k].index with
+    | none => none
+    | some d => dbBoxOf T vs (k + 1) (acc * d.size)
+  else some acc
+  termination_by vs.size - k
+  decreasing_by all_goals omega
 
-def denseEnvOfFastFast (pt : List (VarId × ZMod p)) (y : VarId) : ZMod p :=
-  denseEnvOfW (zmodZeroP p) pt y
+def dbDomsOf (T : DbTab p) (vs : Array VarId) : Option (Array (DbDom)) :=
+  vs.foldl (init := some #[]) fun acc v =>
+    match acc with
+    | none => none
+    | some ds =>
+      match T.get v.index with
+      | none => none
+      | some d => some (ds.push d)
 
-@[csimp] theorem denseEnvOfFast_eq_fast : @denseEnvOfFast = @denseEnvOfFastFast := by
-  funext p pt y
-  rw [denseEnvOfFastFast, zmodZeroP_eq]
-  exact (denseEnvOfW_eq pt y).symm
+/-- Enumerate a box, testing one item at every point; `false` at the first failure. Explicit-arg
+    loops: no per-point allocation. -/
+def dbBoxAllOne {bs : BusSemantics p} (facts : BusFacts p bs) (item : DbItem)
+    (keys : Array Nat) (doms : Array (DbDom)) (d i n : Nat) (regs : Array Nat)
+    (ok : Bool) : Array Nat × Bool :=
+  if i ≥ n then ⟨regs, ok⟩
+  else if !ok then ⟨regs, ok⟩
+  else
+    let regs := regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (.range 0)) i)
+    if d + 1 ≥ keys.size then
+      if dbItemOk facts regs item then dbBoxAllOne facts item keys doms d (i + 1) n regs true
+      else ⟨regs, false⟩
+    else
+      let ⟨regs, ok⟩ := dbBoxAllOne facts item keys doms (d + 1) 0
+        (doms.getD (d + 1) (.range 0)).size regs true
+      if ok then dbBoxAllOne facts item keys doms d (i + 1) n regs true else ⟨regs, false⟩
+  termination_by (keys.size - d, n - i)
+  decreasing_by
+    all_goals first
+      | (apply Prod.Lex.right; omega)
+      | (apply Prod.Lex.left; omega)
 
-def denseContainsFast (xs : List VarId) (y : VarId) : Bool :=
-  match xs with
-  | [] => false
-  | x :: rest => (y == x) || denseContainsFast rest y
+/-- The box point where key `d` takes element `min i (size_d - 1)`. -/
+def dbDiagPoint (p : ℕ) (keys : Array Nat) (doms : Array (DbDom)) (i : Nat) (regs : Array Nat) :
+    Array Nat :=
+  (Array.range keys.size).foldl (init := regs) fun regs d =>
+    let dom := doms.getD d (.range 0)
+    regs.set! (keys.getD d 0) (DbDom.at p dom (min i (dom.size - 1)))
 
-/-! ### Index-compiled evaluation over dense points -/
+/-- Refute redundancy on the box diagonal before sweeping it. The sweep varies the last key fastest,
+    so a constraint that only fails once an *outer* key moves costs a whole inner domain to refute;
+    97 % of the non-redundant checks on sha256/keccak fail within the first eight diagonal points
+    (measured). Verdict-identical: these are box points, so a failure here is a failure there. -/
+def dbDiagRefute {bs : BusSemantics p} (facts : BusFacts p bs) (item : DbItem)
+    (keys : Array Nat) (doms : Array (DbDom)) (i imax : Nat) (regs : Array Nat) :
+    Array Nat × Bool :=
+  if i ≥ imax then ⟨regs, false⟩
+  else
+    let regs := dbDiagPoint p keys doms i regs
+    if dbItemOk facts regs item then dbDiagRefute facts item keys doms (i + 1) imax regs
+    else ⟨regs, true⟩
+  termination_by imax - i
+  decreasing_by omega
 
-/-- Positional lookup in a dense assignment; ignores keys. -/
-def denseLookupIx : List (VarId × ZMod p) → Nat → ZMod p
-  | [], _ => 0
-  | (_, v) :: _, 0 => v
-  | _ :: rest, i + 1 => denseLookupIx rest i
+/-- Boxes at most this size are swept directly; the diagonal pre-test would cost more than it
+    saves. -/
+def dbDiagGate : Nat := 16
 
-/-- Boxed twin of `denseLookupIx`; see the note on `denseEnvOfW` above. -/
-def denseLookupIxW (zero : ZMod p) : List (VarId × ZMod p) → Nat → ZMod p
-  | [], _ => zero
-  | (_, v) :: _, 0 => v
-  | _ :: rest, i + 1 => denseLookupIxW zero rest i
+/-- `denseConstraintRedundantV`: identically zero on the box of its own variables' domains. -/
+def dbConstraintRedundant {bs : BusSemantics p} (facts : BusFacts p bs) (T : DbTab p)
+    (item : DbItem) (vs : Array VarId) (regs : Array Nat) : Array Nat × Bool :=
+  match dbBoxOf T vs 0 1 with
+  | none => ⟨regs, false⟩
+  | some box =>
+    if box ≤ maxEnumSize then
+      match dbDomsOf T vs with
+      | none => ⟨regs, false⟩
+      | some doms =>
+        if vs.isEmpty then ⟨regs, dbItemOk facts regs item⟩
+        else
+          let keys := vs.map (fun v => v.index)
+          let ⟨regs, refuted⟩ :=
+            if dbDiagGate < box then dbDiagRefute facts item keys doms 0 8 regs
+            else ⟨regs, false⟩
+          if refuted then ⟨regs, false⟩
+          else
+            dbBoxAllOne facts item keys doms 0 0 (doms.getD 0 (.range 0)).size regs true
+    else ⟨regs, false⟩
 
-theorem denseLookupIxW_eq (pt : List (VarId × ZMod p)) (i : Nat) :
-    denseLookupIxW 0 pt i = denseLookupIx pt i := by
-  induction pt generalizing i with
-  | nil => rfl
-  | cons t rest ih => cases i <;> simp only [denseLookupIxW, denseLookupIx, ih]
+/-! ## Domain-redundancy of an interaction -/
 
-def denseLookupIxFast (pt : List (VarId × ZMod p)) (i : Nat) : ZMod p :=
-  denseLookupIxW 0 pt i
+def dbExprBelow (T : DbTab p) (e : DenseExpr p) (bound : Nat) : Bool :=
+  match e.constValue? with
+  | some c => decide (c.val < bound)
+  | none =>
+    match e with
+    | .var i => match T.get i.index with | some d => DbDom.below p d bound | none => false
+    | _ => false
 
-@[csimp] theorem denseLookupIx_eq_fast : @denseLookupIx = @denseLookupIxFast := by
-  funext p pt i
-  exact (denseLookupIxW_eq pt i).symm
+def dbRangeCheckRedundant (T : DbTab p) (bi : BusInteraction (DenseExpr p)) (e : DbBiPre p) :
+    Bool :=
+  match e.mult? with
+  | some mult =>
+    if zmodIsZero mult then true
+    else if zmodIsOne mult then
+      match e.rangeAt? with
+      | some (slot, bound) =>
+        match bi.payload[slot]? with
+        | some x => dbExprBelow T x bound
+        | none => false
+      | none => false
+    else false
+  | none => false
 
-/-- Evaluate a compiled `IExpr` over a dense point; positional. -/
-def denseIExprEvalWith (add mul : ZMod p → ZMod p → ZMod p) (pt : List (VarId × ZMod p)) :
-    IExpr p → ZMod p
-  | .const n => n
-  | .ix i => denseLookupIx pt i
-  | .add a b => add (denseIExprEvalWith add mul pt a) (denseIExprEvalWith add mul pt b)
-  | .mul a b => mul (denseIExprEvalWith add mul pt a) (denseIExprEvalWith add mul pt b)
+def dbBytePairRedundant (T : DbTab p) (e : DbBiPre p) : Bool :=
+  match e.byte? with
+  | none => false
+  | some b =>
+    match b.op?, b.result.constValue? with
+    | some opValue, some resultValue =>
+      opValue = b.spec.pairOp && zmodIsZero resultValue &&
+        dbExprBelow T b.o1 b.spec.bound && dbExprBelow T b.o2 b.spec.bound
+    | _, _ => false
 
-/-- Boxed twin: takes the lookup zero too, so an evaluation costs one instance chain rather than
-    one per `.ix` node. -/
-def denseIExprEvalWithZ (add mul : ZMod p → ZMod p → ZMod p) (zero : ZMod p)
-    (pt : List (VarId × ZMod p)) : IExpr p → ZMod p
-  | .const n => n
-  | .ix i => denseLookupIxW zero pt i
-  | .add a b =>
-      add (denseIExprEvalWithZ add mul zero pt a) (denseIExprEvalWithZ add mul zero pt b)
-  | .mul a b =>
-      mul (denseIExprEvalWithZ add mul zero pt a) (denseIExprEvalWithZ add mul zero pt b)
+/-- `denseConstBiV?` from the pattern computed once. -/
+def dbConstBi? (bi : BusInteraction (DenseExpr p)) (mult? : Option (ZMod p))
+    (pat : List (Option (ZMod p))) : Option (BusInteraction (ZMod p)) :=
+  match mult? with
+  | none => none
+  | some m =>
+    match pat.foldr (fun s acc => match s, acc with
+      | some v, some vs => some (v :: vs)
+      | _, _ => none) (some []) with
+    | none => none
+    | some payload => some { busId := bi.busId, multiplicity := m, payload }
 
-theorem denseIExprEvalWithZ_eq (add mul : ZMod p → ZMod p → ZMod p)
-    (pt : List (VarId × ZMod p)) (ie : IExpr p) :
-    denseIExprEvalWithZ add mul 0 pt ie = denseIExprEvalWith add mul pt ie := by
-  induction ie with
-  | const n => rfl
-  | ix i => exact denseLookupIxW_eq pt i
-  | add a b iha ihb => simp only [denseIExprEvalWithZ, denseIExprEvalWith, iha, ihb]
-  | mul a b iha ihb => simp only [denseIExprEvalWithZ, denseIExprEvalWith, iha, ihb]
+/-- `denseBiDomainRedundantV`. -/
+def dbBiDomainRedundant {bs : BusSemantics p} (facts : BusFacts p bs) (T : DbTab p)
+    (bi : BusInteraction (DenseExpr p)) (e : DbBiPre p) : Bool :=
+  match dbConstBi? bi e.mult? e.pat with
+  | some value => zmodIsZero value.multiplicity || facts.acceptsDec value
+  | none =>
+    if facts.neverViolates bi.busId then true
+    else
+      match bi.payload with
+      | [x, b] =>
+        if e.varRange then
+          match b.constValue? with
+          | some width => if width.val ≤ 17 then dbExprBelow T x (2 ^ width.val) else false
+          | none => false
+        else
+          match e.tuple? with
+          | some (boundX, boundB) => dbExprBelow T x boundX && dbExprBelow T b boundB
+          | none => dbRangeCheckRedundant T bi e || dbBytePairRedundant T e
+      | _ => dbRangeCheckRedundant T bi e || dbBytePairRedundant T e
 
-def denseIExprEvalWithFast (add mul : ZMod p → ZMod p → ZMod p) (pt : List (VarId × ZMod p))
-    (ie : IExpr p) : ZMod p :=
-  denseIExprEvalWithZ add mul 0 pt ie
+/-! ## The box scan
 
-@[csimp] theorem denseIExprEvalWith_eq_fast :
-    @denseIExprEvalWith = @denseIExprEvalWithFast := by
-  funext p add mul pt ie
-  exact (denseIExprEvalWithZ_eq add mul pt ie).symm
+The register file is `VarId.index`-keyed and owned by the scan; the candidate mask is a value array
+plus an alive flag array with a live count, so the abort test is O(1) per point. -/
 
-/-! ### Compiling dense items to `IExpr`/`CBi` -/
+structure DbScanSt where
+  regs : Array Nat
+  vals : Array Nat
+  alive : Array Bool
+  live : Nat
+  started : Bool
+deriving Inhabited
 
-/-- First position of `y` in dense `keys`. -/
-def denseVarIx (keys : List VarId) (y : VarId) : Option Nat :=
-  match keys with
-  | [] => none
-  | x :: rest => if (y == x) = true then some 0 else (denseVarIx rest y).map (· + 1)
+def dbAbsorbGo (regs : Array Nat) (keys : Array Nat) (i : Nat)
+    (vals : Array Nat) (alive : Array Bool) (live : Nat) :
+    Array Nat × Array Bool × Nat :=
+  if h : i < keys.size then
+    if alive.getD i false then
+      if regs.getD (keys[i]) 0 == vals.getD i 0 then dbAbsorbGo regs keys (i + 1) vals alive live
+      else dbAbsorbGo regs keys (i + 1) vals (alive.set! i false) (live - 1)
+    else dbAbsorbGo regs keys (i + 1) vals alive live
+  else (vals, alive, live)
+  termination_by keys.size - i
+  decreasing_by all_goals omega
 
-/-- Compile a dense expression against dense `keys`. -/
-def denseCompileE (keys : List VarId) : DenseExpr p → Option (IExpr p)
-  | .const n => some (.const n)
-  | .var y => (denseVarIx keys y).map .ix
-  | .add a b =>
-    match denseCompileE keys a, denseCompileE keys b with
-    | some ia, some ib => some (.add ia ib)
-    | _, _ => none
-  | .mul a b =>
-    match denseCompileE keys a, denseCompileE keys b with
-    | some ia, some ib => some (.mul ia ib)
-    | _, _ => none
+/-- Intersect the mask with a surviving point; called only for survivors. -/
+def dbAbsorbArgs (keys : Array Nat) (regs : Array Nat) (vals : Array Nat)
+    (alive : Array Bool) (live : Nat) (started : Bool) :
+    Array Nat × Array Bool × Nat × Bool :=
+  if !started then
+    ⟨keys.map (fun k => regs.getD k 0), Array.replicate keys.size true, keys.size, true⟩
+  else
+    let (vals, alive, live) := dbAbsorbGo regs keys 0 vals alive live
+    ⟨vals, alive, live, started⟩
 
-/-- Compile a list of dense expressions, all-or-nothing. -/
-def denseCompileEs (keys : List VarId) : List (DenseExpr p) → Option (List (IExpr p))
-  | [] => some []
-  | e :: rest =>
-    match denseCompileE keys e, denseCompileEs keys rest with
-    | some ie, some irest => some (ie :: irest)
-    | _, _ => none
+/-- The box loop. State is passed as explicit arguments, so nothing is allocated per point: the
+    innermost dimension is walked in place (`regs.set!` on a uniquely-owned register file) and only a
+    surviving point touches the mask. -/
+def dbScanLoop {bs : BusSemantics p} (facts : BusFacts p bs) (items : Array (DbItem))
+    (keys : Array Nat) (doms : Array (DbDom)) (d i n : Nat)
+    (regs : Array Nat) (vals : Array Nat) (alive : Array Bool) (live : Nat)
+    (started : Bool) : DbScanSt :=
+  if i ≥ n then ⟨regs, vals, alive, live, started⟩
+  else if started && live == 0 then ⟨regs, vals, alive, live, started⟩
+  else
+    let regs := regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (.range 0)) i)
+    if d + 1 ≥ keys.size then
+      -- innermost: test the point in place
+      if dbAllOk facts items regs 0 then
+        let ⟨vals, alive, live, started⟩ := dbAbsorbArgs keys regs vals alive live started
+        dbScanLoop facts items keys doms d (i + 1) n regs vals alive live started
+      else dbScanLoop facts items keys doms d (i + 1) n regs vals alive live started
+    else
+      let ⟨regs, vals, alive, live, started⟩ :=
+        dbScanLoop facts items keys doms (d + 1) 0 (doms.getD (d + 1) (.range 0)).size
+          regs vals alive live started
+      dbScanLoop facts items keys doms d (i + 1) n regs vals alive live started
+  termination_by (keys.size - d, n - i)
+  decreasing_by
+    all_goals first
+      | (apply Prod.Lex.right; omega)
+      | (apply Prod.Lex.left; omega)
 
-def denseCompileBi (keys : List VarId) (bi : BusInteraction (DenseExpr p)) : Option (CBi p) :=
-  match denseCompileE keys bi.multiplicity, denseCompileEs keys bi.payload with
-  | some m, some pl => some ⟨bi.busId, m, pl⟩
-  | _, _ => none
+/-- Scan a job's box, starting from an empty mask. -/
+def dbScanBox {bs : BusSemantics p} (facts : BusFacts p bs) (items : Array (DbItem))
+    (keys : Array Nat) (doms : Array (DbDom)) (regs : Array Nat) : DbScanSt :=
+  if keys.isEmpty then
+    -- the variable-free box has exactly one (empty) point
+    if dbAllOk facts items regs 0 then ⟨regs, #[], #[], 0, true⟩ else ⟨regs, #[], #[], 0, false⟩
+  else dbScanLoop facts items keys doms 0 0 (doms.getD 0 (.range 0)).size regs #[] #[] 0 false
 
-/-- Compile a list of dense interactions, all-or-nothing. -/
-def denseCompileBis (keys : List VarId) : List (BusInteraction (DenseExpr p)) →
-    Option (List (CBi p))
-  | [] => some []
-  | bi :: rest =>
-    match denseCompileBi keys bi, denseCompileBis keys rest with
-    | some cbi, some crest => some (cbi :: crest)
-    | _, _ => none
+/-! ## Plans -/
 
-/-! ### `DenseExpr.eval` congruence -/
+/-- A preflighted target: an immediate answer, or a scan job carrying its compiled items. -/
+inductive DbPlan (p : ℕ) where
+  | done (forced : List (VarId × ZMod p))
+  | scan (keys : Array VarId) (doms : Array (DbDom)) (items : Array (DbItem))
+      (constOk : Bool)
 
-/-- `DenseExpr.eval` depends only on the values of the variables that occur. -/
-theorem DenseExpr.eval_congr (e : DenseExpr p) (f g : VarId → ZMod p)
-    (h : ∀ i ∈ e.vars, f i = g i) : e.eval f = e.eval g := by
-  induction e with
-  | const n => rfl
-  | var i => exact h i (by simp [DenseExpr.vars])
-  | add a b iha ihb =>
-      simp only [DenseExpr.vars, List.mem_append] at h
-      simp only [DenseExpr.eval, iha (fun i hi => h i (Or.inl hi)), ihb (fun i hi => h i (Or.inr hi))]
-  | mul a b iha ihb =>
-      simp only [DenseExpr.vars, List.mem_append] at h
-      simp only [DenseExpr.eval, iha (fun i hi => h i (Or.inl hi)), ihb (fun i hi => h i (Or.inr hi))]
+def dbForcedOfMask (p : ℕ) (keys : Array VarId) (vals : Array Nat) (alive : Array Bool) (i : Nat) :
+    List (VarId × ZMod p) :=
+  if h : i < keys.size then
+    let rest := dbForcedOfMask p keys vals alive (i + 1)
+    if alive.getD i false then (keys[i], zmodOfNatP p (vals.getD i 0)) :: rest else rest
+  else []
+  termination_by keys.size - i
+  decreasing_by all_goals omega
 
-/-! ## Dense `varsInF` -/
+def dbZeroAll (keys : Array VarId) : List (VarId × ZMod p) :=
+  keys.toList.map (fun x => (x, zmodZeroP p))
 
-/-- Whether every variable of the expression lies in `xs`. -/
-def DenseExpr.varsInF (xs : List VarId) : DenseExpr p → Bool
-  | .const _ => true
-  | .var y => denseContainsFast xs y
-  | .add a b => a.varsInF xs && b.varsInF xs
-  | .mul a b => a.varsInF xs && b.varsInF xs
+/-- Run one plan, threading the register file so it is allocated once for the whole run. -/
+def dbRunPlan {bs : BusSemantics p} (facts : BusFacts p bs) (nv : Nat)
+    (st : Array Nat × List (List (VarId × ZMod p))) (plan : DbPlan p) :
+    Array Nat × List (List (VarId × ZMod p)) :=
+  match plan with
+  | .done forced => ⟨st.1, forced :: st.2⟩
+  | .scan keys doms items constOk =>
+    let ⟨regs0, out⟩ := st
+    let regs0 := if regs0.size == nv then regs0 else Array.replicate nv 0
+    if !constOk then ⟨regs0, dbZeroAll keys :: out⟩
+    else
+      let res := dbScanBox facts items (keys.map (fun v => v.index)) doms regs0
+      let ⟨regs, vals, alive, live, started⟩ := res
+      if !started then ⟨regs, dbZeroAll keys :: out⟩
+      else if live == 0 then ⟨regs, [] :: out⟩
+      else ⟨regs, dbForcedOfMask p keys vals alive 0 :: out⟩
 
-def denseVarsInListF (xs : List VarId) : List VarId → Bool
-  | [] => true
-  | v :: vs => denseContainsFast xs v && denseVarsInListF xs vs
+def dbRunPlans {bs : BusSemantics p} (facts : BusFacts p bs) (nv : Nat) (plans : List (DbPlan p)) :
+    List (List (VarId × ZMod p)) :=
+  (plans.foldl (dbRunPlan facts nv)
+    (⟨#[], []⟩ : Array Nat × List (List (VarId × ZMod p)))).2.reverse
 
-/-! ## Dense `biInformative` -/
+/-! ## Target dedup: content hash plus an exact compare on the ascending index key -/
 
-/-- Whether a bus interaction is informative: some payload entry is neither a variable nor a known
-    constant, or is a variable whose interaction bound is unknown. -/
-def denseBiInformative (bs : BusSemantics p) (facts : BusFacts p bs)
-    (bi : BusInteraction (DenseExpr p)) : Bool :=
-  bi.payload.any (fun e => !(e.isVar || e.constValue?.isSome)) ||
-  bi.payload.any (fun e => match e with
-    | .var i => (denseInteractionBound bs facts bi i).isNone
-    | _ => false)
+def dbKeyHash (vs : Array VarId) : UInt64 :=
+  vs.foldl (init := 0x9e3779b97f4a7c15) fun h v =>
+    (h ^^^ (UInt64.ofNat v.index)) * 0x100000001b3
 
-/-! ## Dense inverted index
+def dbInsSorted (x : Nat) (out : Array Nat) (i : Nat) : Array Nat :=
+  if h : i < out.size then
+    if x < out[i] then out.insertIdx i x
+    else if x == out[i] then out
+    else dbInsSorted x out (i + 1)
+  else out.push x
+  termination_by out.size - i
+  decreasing_by all_goals omega
 
-The candidate list for a target is the union of the buckets under its variables plus the
-variable-less positions. -/
+/-- Seen target keys, bucketed by content hash with an exact compare (a false hit would lose a
+    forced constant, so the compare is not optional). -/
+structure DbSeen where
+  buckets : Std.HashMap UInt64 (List (Array Nat))
 
-structure DenseCovIndex where
-  buckets : Std.HashMap VarId (List Nat)
-  varless : List Nat
+/-- Destructure before reading the bucket: leaving `s.buckets` referenced by the record while
+    inserting copies the whole table per insert. -/
+def DbSeen.insertNew (s : DbSeen) (h : UInt64) (k : Array Nat) : Bool × DbSeen :=
+  let ⟨buckets⟩ := s
+  let cur := buckets.getD h []
+  if cur.any (fun k' => k' == k) then (false, ⟨buckets⟩)
+  else (true, ⟨buckets.insert h (k :: cur)⟩)
 
-def denseBuildStep {α : Type} (varsOf : α → List VarId) (ai : α × Nat) (idx : DenseCovIndex) :
-    DenseCovIndex :=
-  match varsOf ai.1 with
-  | [] => ⟨idx.buckets, ai.2 :: idx.varless⟩
-  | vs => ⟨vs.foldl (fun m v => m.insert v (ai.2 :: m.getD v [])) idx.buckets, idx.varless⟩
+/-- The dedup key: ascending distinct `VarId.index`es (targets carry a handful of variables). -/
+def dbSortedKey (vs : Array VarId) : Array Nat :=
+  vs.foldl (init := #[]) fun acc v => dbInsSorted v.index acc 0
 
-def denseCovBuild {α : Type} (varsOf : α → List VarId) (items : List α) : DenseCovIndex :=
-  items.zipIdx.foldr (denseBuildStep varsOf) ⟨∅, []⟩
+/-! ## The per-invocation context
 
-/-- Build an index with each non-variable-less item stored under one anchor variable. -/
-def denseAnchorBuildStep {α : Type} (varsOf : α → List VarId) (ai : α × Nat)
-    (idx : DenseCovIndex) : DenseCovIndex :=
-  match varsOf ai.1 with
-  | [] => ⟨idx.buckets, ai.2 :: idx.varless⟩
-  | v :: _ => ⟨idx.buckets.insert v (ai.2 :: idx.buckets.getD v []), idx.varless⟩
+Everything the target loop reads, built by four passes over the system: variable lists, the domain
+table (constraint roots, then bus slot bounds, then byte operands), the per-item flags, and the
+anchor buckets. -/
 
-def denseAnchorCovBuild {α : Type} (varsOf : α → List VarId) (items : List α) : DenseCovIndex :=
-  items.zipIdx.foldr (denseAnchorBuildStep varsOf) ⟨∅, []⟩
-
-/-- The dense candidate positions for target `xs`. -/
-def denseCandidates (idx : DenseCovIndex) (xs : List VarId) : List Nat :=
-  (xs.flatMap (fun v => idx.buckets.getD v [])) ++ idx.varless
-
-/-! ### `buildStep` bucket projection helpers -/
-
-theorem denseBuildStep_buckets_nil {α : Type} (varsOf : α → List VarId) (ai : α × Nat)
-    (idx : DenseCovIndex) (h : varsOf ai.1 = []) : (denseBuildStep varsOf ai idx).buckets = idx.buckets := by
-  simp only [denseBuildStep, h]
-
-theorem denseBuildStep_buckets_cons {α : Type} (varsOf : α → List VarId) (ai : α × Nat)
-    (idx : DenseCovIndex) (w0 : VarId) (ws : List VarId) (h : varsOf ai.1 = w0 :: ws) :
-    (denseBuildStep varsOf ai idx).buckets
-      = (w0 :: ws).foldl (fun m v => m.insert v (ai.2 :: m.getD v [])) idx.buckets := by
-  simp only [denseBuildStep, h]
-
-/-! ### Dense `ForcedIdx` and its correspondence -/
-
-/-- A constraint and the target-planning data reused by every enumeration. -/
-structure DenseConstraintPlan (p : ℕ) where
-  expr : DenseExpr p
-  vars : List VarId
-  active : Bool
-
-/-- A bus interaction and the target-planning data reused by every enumeration. -/
-structure DenseBusPlan (p : ℕ) where
-  interaction : BusInteraction (DenseExpr p)
-  vars : List VarId
-  usable : Bool
-  informative : Bool
-  domainRedundant : Bool
-
-/-- Compact anchor buckets used by the read-only per-target gathers. -/
-structure DenseArrayCovIndex where
-  buckets : Std.HashMap VarId (Array Nat)
-  varless : Array Nat
-
-/-- Constraint anchors with inactive variable-free plans summarized once. -/
-structure DenseConstraintCovIndex where
-  buckets : Std.HashMap VarId (Array Nat)
-  inactiveVarlessCount : Nat
-  activeVarless : Array Nat
-
-/-- The variable-free usable interactions' contribution to a gather, which is the same for every
-    target: their count, their `informative`/`domainRedundant` folds, and the constant value of
-    their obligations (`constOk`, false as soon as one of them is violated). -/
-structure DenseBusVarlessSummary (p : ℕ) where
-  count : Nat
-  informative : Bool
-  allDomainRedundant : Bool
+structure DbCtx (p : ℕ) where
+  nv : Nat
+  T : DbTab p
+  csVars : Array (Array VarId)
+  csItems : Array (DbItem)
+  csActive : Array Bool
+  csBucket : Array (Array Nat)
+  /-- Variable-free constraints' target-independent contribution: their count (active or not) and
+      the active ones' items (`denseConstraintCovIndexV`). -/
+  csVarlessCount : Nat
+  csVarlessItems : Array (DbItem)
+  biVars : Array (Array VarId)
+  biItems : Array (DbItem)
+  biUsable : Array Bool
+  biInformative : Array Bool
+  biDomRed : Array Bool
+  biBucket : Array (Array Nat)
+  /-- The variable-free usable interactions' summary (`DenseBusVarlessSummary`). -/
+  biVarlessCount : Nat
+  biVarlessInformative : Bool
+  biVarlessDomRed : Bool
   constOk : Bool
 
-/-- The per-target index bundle (plain data; correctness via correspondence). -/
-structure DenseForcedIdx (p : ℕ) where
-  csIdx : DenseConstraintCovIndex
-  arrCs : Array (DenseConstraintPlan p)
-  bisIdx : DenseArrayCovIndex
-  arrBis : Array (DenseBusPlan p)
-  busVarless : DenseBusVarlessSummary p
+def dbNvOf (vs : Array (Array VarId)) (m : Nat) : Nat :=
+  vs.foldl (init := m) fun acc a => a.foldl (fun b v => max b (v.index + 1)) acc
 
-/-- The dense domain-table `doms` list has keys `xs`. -/
-theorem DenseDomainTable.doms_fst (T : DenseDomainTable p) :
-    ∀ (xs : List VarId) (ds : List (VarId × FiniteDomain p)),
-      T.doms xs = some ds → ds.map Prod.fst = xs := by
-  intro xs
-  induction xs with
-  | nil => intro ds h; simp only [DenseDomainTable.doms, Option.some.injEq] at h; subst h; rfl
-  | cons x rest ih =>
-      intro ds h
-      rw [DenseDomainTable.doms] at h
-      cases hd : T.map[x]? with
-      | none => rw [hd] at h; exact absurd h (by simp)
-      | some d =>
-          cases hr : T.doms rest with
-          | none => rw [hd, hr] at h; exact absurd h (by simp)
-          | some ds' =>
-              rw [hd, hr] at h
-              simp only [Option.some.injEq] at h
-              subst h
-              simp [ih ds' hr]
+/-- Phase 1: constraint-sourced domains, one root plan per constraint (≤ 3 distinct variables). -/
+def dbConstraintPhase (cs : Array (DenseExpr p)) (csVars : Array (Array VarId)) (k : Nat)
+    (T : DbTab p) : DbTab p :=
+  if h : k < cs.size then
+    let vs := csVars.getD k #[]
+    let T := if vs.size ≤ 3 then dbAddConstraintVars (dbRootPlan cs[k]) vs 0 T else T
+    dbConstraintPhase cs csVars (k + 1) T
+  else T
+  termination_by cs.size - k
+  decreasing_by all_goals omega
 
-/-- Canonical dedup key of a variable set: the sorted, duplicate-free `List VarId`, so the key is
-    invariant under the order and multiplicity of `xs` and distinct variables never collide. -/
-def denseVarSetKey (xs : List VarId) : List VarId :=
-  xs.dedup.mergeSort (fun a b => compare a.index b.index != .gt)
+/-- Phase 2: bus slot bounds and `informative`, one payload walk per interaction. -/
+def dbBusPhase {bs : BusSemantics p} (facts : BusFacts p bs)
+    (bis : Array (BusInteraction (DenseExpr p))) (pre : Array (DbBiPre p)) (k : Nat)
+    (st : DbTab p × Array Bool) : DbTab p × Array Bool :=
+  if h : k < bis.size then
+    let ⟨T, inf⟩ := st
+    let e := pre.getD k dbBiPreEmpty
+    let (i, T) := dbBusSlots facts bis[k] e.mult? e.pat bis[k].payload 0 #[] false T
+    dbBusPhase facts bis pre (k + 1) ⟨T, inf.push i⟩
+  else st
+  termination_by bis.size - k
+  decreasing_by all_goals omega
 
-/-! ### Regression guards: the key is an exact `VarId` set -/
+/-- Phase 3: byte-operand domains (reads the table phase 2 produced). -/
+def dbBytePhase (pre : Array (DbBiPre p)) (k : Nat) (T : DbTab p) : DbTab p :=
+  if h : k < pre.size then
+    dbBytePhase pre (k + 1) (dbAddByteBi pre[k] T)
+  else T
+  termination_by pre.size - k
+  decreasing_by all_goals omega
 
-private def egRegA : VarRegistry × VarId :=
-  VarRegistry.empty.register { name := "x", powdrId? := some 1 }
-private def egRegB : VarRegistry × VarId :=
-  egRegA.1.register { name := "x", powdrId? := some 2 }
-private def egA : VarId := egRegA.2
-private def egB : VarId := egRegB.2
+/-- The per-constraint scan programs. An item with a variable outside the table can never be
+    gathered (a target's keys are all domained), so it needs neither a program nor a redundancy
+    verdict. -/
+def dbCsItemsOf (T : DbTab p) (cs : Array (DenseExpr p)) (csVars : Array (Array VarId)) :
+    Array (DbItem) :=
+  let gatherable := csVars.map (fun vs => (dbBoxOf T vs 0 1).isSome)
+  (cs.zipIdx).map fun cj =>
+    if gatherable.getD cj.2 false then DbItem.zero (dbCompile cj.1) else DbItem.always
 
--- distinct equal-name variables get distinct singleton keys
-#guard denseVarSetKey [egA] != denseVarSetKey [egB]
--- order-independence
-#guard denseVarSetKey [egA, egB] == denseVarSetKey [egB, egA]
--- set semantics: duplicate ids collapse
-#guard denseVarSetKey [egA, egA, egB] == denseVarSetKey [egA, egB]
+/-- The per-interaction scan programs (see `dbCsItemsOf` for the gate). -/
+def dbBiItemsOf {bs : BusSemantics p} (facts : BusFacts p bs) (T : DbTab p)
+    (bis : Array (BusInteraction (DenseExpr p))) (pre : Array (DbBiPre p)) : Array (DbItem) :=
+  (bis.zipIdx).map fun bij =>
+    let e := pre.getD bij.2 dbBiPreEmpty
+    if e.usable && (dbBoxOf T e.vars 0 1).isSome then dbCompileBi facts bij.1 e
+    else DbItem.always
 
-/-- Apply a dense solution map to a system, unless it is empty. Kept as a standalone function so
-    the solution map is computed exactly once (as the argument). -/
-def applyσ (dσ : DenseSolved p) (d : DenseConstraintSystem p) : DenseConstraintSystem p :=
-  if dσ.map.isEmpty then d else d.substF dσ.fn
+/-- Per-constraint `active` (`¬ redundant`), threading the register file. -/
+def dbActivePhase {bs : BusSemantics p} (facts : BusFacts p bs) (T : DbTab p)
+    (csItems : Array (DbItem)) (csVars : Array (Array VarId)) (k : Nat)
+    (st : Array Nat × Array Bool) : Array Nat × Array Bool :=
+  if h : k < csItems.size then
+    let ⟨regs, out⟩ := st
+    let ⟨regs, red⟩ := dbConstraintRedundant facts T csItems[k] (csVars.getD k #[]) regs
+    dbActivePhase facts T csItems csVars (k + 1) ⟨regs, out.push (!red)⟩
+  else st
+  termination_by csItems.size - k
+  decreasing_by all_goals omega
+
+def dbBucketsOf (nv : Nat) (vars : Array (Array VarId)) : Array (Array Nat) × Array Nat :=
+  vars.zipIdx.foldl (init := (Array.replicate nv (#[] : Array Nat), (#[] : Array Nat)))
+    fun st vi =>
+      let ⟨buckets, varless⟩ := st
+      match vi.1[0]? with
+      | none => ⟨buckets, varless.push vi.2⟩
+      | some v => ⟨buckets.modify v.index (fun b => b.push vi.2), varless⟩
+
+/-- `denseVarsInListF`: every variable of the item is a key of the target. -/
+@[inline] def dbSubset (vs xs : Array VarId) : Bool := vs.all (fun v => xs.contains v)
+
+/-! ## Gather and preflight -/
+
+structure DbGather (p : ℕ) where
+  fullCount : Nat
+  activeCs : Nat
+  biCount : Nat
+  informative : Bool
+  domRed : Bool
+  items : Array (DbItem)
+
+def dbGatherCsAt (ctx : DbCtx p) (xs : Array VarId) (g : DbGather p) (pos : Nat) : DbGather p :=
+  if dbSubset (ctx.csVars.getD pos #[]) xs then
+    let ⟨fullCount, activeCs, biCount, informative, domRed, items⟩ := g
+    if ctx.csActive.getD pos false then
+      ⟨fullCount + 1, activeCs + 1, biCount, informative, domRed,
+        items.push (ctx.csItems.getD pos .always)⟩
+    else ⟨fullCount + 1, activeCs, biCount, informative, domRed, items⟩
+  else g
+
+def dbGatherBiAt (ctx : DbCtx p) (xs : Array VarId) (g : DbGather p) (pos : Nat) : DbGather p :=
+  if ctx.biUsable.getD pos false && dbSubset (ctx.biVars.getD pos #[]) xs then
+    let ⟨fullCount, activeCs, biCount, informative, domRed, items⟩ := g
+    ⟨fullCount, activeCs, biCount + 1, informative || ctx.biInformative.getD pos false,
+      domRed && ctx.biDomRed.getD pos false, items.push (ctx.biItems.getD pos .always)⟩
+  else g
+
+def dbGather (ctx : DbCtx p) (xs : Array VarId) : DbGather p :=
+  let g0 : DbGather p :=
+    { fullCount := ctx.csVarlessCount, activeCs := ctx.csVarlessItems.size,
+      biCount := ctx.biVarlessCount, informative := ctx.biVarlessInformative,
+      domRed := ctx.biVarlessDomRed, items := ctx.csVarlessItems }
+  xs.foldl (init := g0) fun g v =>
+    let g := (ctx.csBucket.getD v.index #[]).foldl (dbGatherCsAt ctx xs) g
+    (ctx.biBucket.getD v.index #[]).foldl (dbGatherBiAt ctx xs) g
+
+/-- Constant-domain answers for a target that needs no scan (`denseConstantDomainsV`). -/
+def dbConstantDomains (p : ℕ) (keys : Array VarId) (doms : Array (DbDom)) :
+    List (VarId × ZMod p) :=
+  (keys.zipIdx.foldr (init := []) fun ki acc =>
+    match DbDom.const? p (doms.getD ki.2 (.range 0)) with
+    | some c => (ki.1, zmodOfNatP p c) :: acc
+    | none => acc)
+
+def dbPreflight (ctx : DbCtx p) (xs : Array VarId) : Option (DbPlan p) :=
+  match dbDomsOf ctx.T xs with
+  | none => none
+  | some doms =>
+    let box := doms.foldl (fun acc d => acc * d.size) 1
+    if box ≤ maxEnumSize then
+      let g := dbGather ctx xs
+      let informative := g.fullCount != 0 || g.informative
+      if informative && box * (g.fullCount + g.biCount) ≤ maxEnumWork then
+        if g.activeCs == 0 && g.domRed && doms.all (fun d => d.size != 0) then
+          some (.done (dbConstantDomains p xs doms))
+        else
+          some (.scan xs doms g.items ctx.constOk)
+      else none
+    else none
+
+/-! ## The target loop: gate, then dedup, then preflight -/
+
+def dbTargetStep (ctx : DbCtx p) (xs : Array VarId)
+    (st : DbSeen × List (DbPlan p)) : DbSeen × List (DbPlan p) :=
+  if xs.isEmpty then st
+  else
+    -- cheap gate first: every variable domained, and the box within the enumeration cap
+    match dbBoxOf ctx.T xs 0 1 with
+    | none => st
+    | some box =>
+      if maxEnumSize < box then st
+      else
+        let ⟨seen, plans⟩ := st
+        let ⟨isNew, seen⟩ := seen.insertNew (dbKeyHash xs) (dbSortedKey xs)
+        if !isNew then ⟨seen, plans⟩
+        else
+          match dbPreflight ctx xs with
+          | none => ⟨seen, plans⟩
+          | some plan => ⟨seen, plan :: plans⟩
+
+def dbTargetsCs (ctx : DbCtx p) (k : Nat) (st : DbSeen × List (DbPlan p)) :
+    DbSeen × List (DbPlan p) :=
+  if h : k < ctx.csVars.size then
+    dbTargetsCs ctx (k + 1) (dbTargetStep ctx ctx.csVars[k] st)
+  else st
+  termination_by ctx.csVars.size - k
+  decreasing_by all_goals omega
+
+def dbTargetsBis (ctx : DbCtx p) (k : Nat) (st : DbSeen × List (DbPlan p)) :
+    DbSeen × List (DbPlan p) :=
+  if h : k < ctx.biVars.size then
+    dbTargetsBis ctx (k + 1) (dbTargetStep ctx ctx.biVars[k] st)
+  else st
+  termination_by ctx.biVars.size - k
+  decreasing_by all_goals omega
+
+/-! ## The invocation -/
+
+/-- Build the context: variable lists, the three table phases, the flags and the buckets. -/
+def dbBuildCtx (bs : BusSemantics p) (facts : BusFacts p bs) (d : DenseConstraintSystem p) :
+    DbCtx p :=
+  let cs := d.algebraicConstraints.toArray
+  let bis := d.busInteractions.toArray
+  let csVars := cs.map (fun c => dbVarsOf c #[])
+  let biVars := bis.map dbBiVars
+  let nv := dbNvOf biVars (dbNvOf csVars 0)
+  let T0 : DbTab p := ⟨Array.replicate nv none⟩
+  let T1 := dbConstraintPhase cs csVars 0 T0
+  let pre : Array (DbBiPre p) :=
+    (bis.zipIdx).map fun bij => dbPreOne facts bij.1 (biVars.getD bij.2 #[])
+  let ⟨T2, biInf⟩ := dbBusPhase facts bis pre 0 ⟨T1, #[]⟩
+  let T := dbBytePhase pre 0 T2
+  let csItems := dbCsItemsOf T cs csVars
+  let biItems := dbBiItemsOf facts T bis pre
+  let ⟨_, csActive⟩ := dbActivePhase facts T csItems csVars 0
+    ⟨Array.replicate nv 0, #[]⟩
+  let biDomRed := (bis.zipIdx).map fun bij =>
+    let e := pre.getD bij.2 dbBiPreEmpty
+    e.usable && (dbBoxOf T e.vars 0 1).isSome && dbBiDomainRedundant facts T bij.1 e
+  let ⟨csBucket, csVarless⟩ := dbBucketsOf nv csVars
+  let ⟨biBucket, biVarless⟩ := dbBucketsOf nv biVars
+  let csVarlessItems := csVarless.filterMap (fun i =>
+    if csActive.getD i false then some (csItems.getD i .always) else none)
+  -- the variable-free usable interactions' summary (entry 155): count, flags and the constant
+  -- verdict their obligations already decide
+  let biSummary := biVarless.foldl (init := (0, false, true, true)) fun s i =>
+    let e := pre.getD i dbBiPreEmpty
+    if e.usable then
+      (s.1 + 1, s.2.1 || biInf.getD i false, s.2.2.1 && biDomRed.getD i false,
+        s.2.2.2 && dbItemOk facts #[] (biItems.getD i .always))
+    else s
+  { nv, T, csVars, csItems, csActive, csBucket,
+    csVarlessCount := csVarless.size, csVarlessItems,
+    biVars, biItems,
+    biUsable := pre.map (fun e => e.usable),
+    biInformative := biInf,
+    biDomRed, biBucket,
+    biVarlessCount := biSummary.1, biVarlessInformative := biSummary.2.1,
+    biVarlessDomRed := biSummary.2.2.1, constOk := biSummary.2.2.2 }
+
+/-- Domain-batch: builds a finite domain per variable (from constraints like `x*(x-1)=0` giving
+    `x ∈ {0,1}`, and from bus range checks), enumerates the small Cartesian product of those
+    domains, and for each variable that takes the same value in every surviving assignment infers
+    that forced constant. Returns the map of all such `var := const` substitutions. -/
+def dbDomainBatchσ (bs : BusSemantics p) (facts : BusFacts p bs) (d : DenseConstraintSystem p) :
+    DenseSolved p :=
+  let ctx := dbBuildCtx bs facts d
+  let ⟨_, plansRev⟩ := dbTargetsBis ctx 0 (dbTargetsCs ctx 0 ⟨⟨∅⟩, []⟩)
+  let plans := plansRev.reverse
+  -- run serially: handing plans to `Task.spawn` marks the shared objects multi-threaded, and every
+  -- later refcount touch on them — in this pass and in every pass after it — becomes atomic
+  let results := dbRunPlans facts ctx.nv plans
+  results.foldl (fun dσ forced =>
+    dσ.insertAll (forced.map (fun f => (f.1, DenseExpr.const f.2)))) DenseSolved.empty
+
+/-- The value-only dense domain-batch transform, over the rebuilt engine. -/
+def dbDomainBatchTransform (pw : PrimeWitness p) (bs : BusSemantics p)
+    (facts : BusFacts p bs) (d : DenseConstraintSystem p) : DenseConstraintSystem p :=
+  if pw.isPrime = true then applyσ (dbDomainBatchσ bs facts d) d else d
+
+end ApcOptimizer.Dense

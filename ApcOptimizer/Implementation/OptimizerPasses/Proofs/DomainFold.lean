@@ -1,5 +1,5 @@
 import ApcOptimizer.Implementation.OptimizerPasses.DomainFoldRuntime
-import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DomainBatch
+import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DomainTable
 
 set_option autoImplicit false
 

@@ -24,6 +24,7 @@ import ApcOptimizer.Implementation.OptimizerPasses.IdentitySubst
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.IdentitySubst
 import ApcOptimizer.Implementation.OptimizerPasses.DenseUmbrella
 import ApcOptimizer.Implementation.OptimizerPasses.HashedDedup
+import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DomainBatch
 
 set_option autoImplicit false
 
@@ -65,7 +66,7 @@ def cleanupPasses (b : DegreeBound) : List (String × DenseVerifiedPassW p) :=
     ("gauss", denseGaussElimFPass),
     ("normalize1", denseNormalizePass),
     ("constFold1", denseConstantFoldPass),
-    ("domainBatch", denseDomainBatchPassV pw),
+    ("domainBatch", dbDomainBatchPass pw),
     ("normalize2", denseNormalizePass),
     ("constFold2", denseConstantFoldPass),
     ("zeroRegister", denseZeroRegisterPass),

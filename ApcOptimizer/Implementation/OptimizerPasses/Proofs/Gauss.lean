@@ -1,5 +1,5 @@
 import ApcOptimizer.Implementation.OptimizerPasses.Gauss
-import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DomainBatch
+import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DomainTable
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.FlagUnify
 
 set_option autoImplicit false

@@ -78,57 +78,6 @@ def foldlStop {α β : Type} (f : β → α → β) (stop : β → Bool) : List 
   | [], acc => acc
   | a :: rest, acc => if stop acc then acc else foldlStop f stop rest (f acc a)
 
-theorem foldlStop_stopped {α β : Type} (f : β → α → β) (stop : β → Bool) (l : List α) (acc : β)
-    (h : stop acc = true) : foldlStop f stop l acc = acc := by
-  cases l with
-  | nil => rfl
-  | cons a rest => rw [foldlStop, if_pos h]
-
-theorem foldlStop_append {α β : Type} (f : β → α → β) (stop : β → Bool)
-    (xs ys : List α) (acc : β) :
-    foldlStop f stop (xs ++ ys) acc = foldlStop f stop ys (foldlStop f stop xs acc) := by
-  induction xs generalizing acc with
-  | nil => rfl
-  | cons a xs ih =>
-    rw [List.cons_append, foldlStop, foldlStop]
-    by_cases h : stop acc = true
-    · rw [if_pos h, if_pos h, foldlStop_stopped f stop ys acc h]
-    · rw [if_neg h, if_neg h, ih]
-
-theorem foldlStop_map {α β γ : Type} (f : β → γ → β) (stop : β → Bool) (k : α → γ)
-    (l : List α) (acc : β) :
-    foldlStop f stop (l.map k) acc = foldlStop (fun acc a => f acc (k a)) stop l acc := by
-  induction l generalizing acc with
-  | nil => rfl
-  | cons a rest ih =>
-    rw [List.map_cons, foldlStop, foldlStop]
-    by_cases h : stop acc = true
-    · rw [if_pos h, if_pos h]
-    · rw [if_neg h, if_neg h, ih]
-
-theorem foldlStop_flatMap {α β γ : Type} (f : β → γ → β) (stop : β → Bool) (h : α → List γ)
-    (l : List α) (acc : β) :
-    foldlStop (fun acc a => foldlStop f stop (h a) acc) stop l acc
-      = foldlStop f stop (l.flatMap h) acc := by
-  induction l generalizing acc with
-  | nil => rfl
-  | cons a rest ih =>
-    rw [List.flatMap_cons, foldlStop, foldlStop_append]
-    by_cases hs : stop acc = true
-    · rw [if_pos hs, foldlStop_stopped f stop (h a) acc hs,
-        foldlStop_stopped f stop (rest.flatMap h) acc hs]
-    · rw [if_neg hs, ih]
-
-theorem foldlStop_congr {α β : Type} (f g : β → α → β) (stop : β → Bool) (l : List α) (acc : β)
-    (h : ∀ acc a, f acc a = g acc a) : foldlStop f stop l acc = foldlStop g stop l acc := by
-  induction l generalizing acc with
-  | nil => rfl
-  | cons a rest ih =>
-    rw [foldlStop, foldlStop]
-    by_cases hs : stop acc = true
-    · rw [if_pos hs, if_pos hs]
-    · rw [if_neg hs, if_neg hs, h acc a, ih]
-
 /-! ### Sparse positional map and self-zip membership -/
 
 /-- The positional pass-through map equals the plain map when the function fixes the item at

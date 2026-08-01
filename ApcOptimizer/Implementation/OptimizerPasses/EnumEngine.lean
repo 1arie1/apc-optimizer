@@ -46,39 +46,12 @@ def rangeFoldFrom {β : Type} (f : β → ZMod p → β) (stop : β → Bool)
   | n + 1, acc =>
     if stop acc then acc else rangeFoldFrom f stop next (next current) n (f acc current)
 
-theorem rangeFoldFrom_eq {β : Type} (f : β → ZMod p → β) (stop : β → Bool)
-    (next : ZMod p → ZMod p) (hnext : ∀ v, next v = v + 1)
-    (start count : Nat) (current : ZMod p) (hcurrent : current = (start : ZMod p)) (acc : β) :
-    rangeFoldFrom f stop next current count acc
-      = foldlStop f stop ((List.range' start count).map (Nat.cast : Nat → ZMod p)) acc := by
-  induction count generalizing start current acc with
-  | zero => rfl
-  | succ n ih =>
-    rw [rangeFoldFrom, List.range'_succ, List.map_cons, foldlStop]
-    by_cases h : stop acc = true
-    · rw [if_pos h, if_pos h]
-    · rw [if_neg h, if_neg h, hcurrent]
-      apply ih (start + 1) (next (start : ZMod p)) _ (f acc (start : ZMod p))
-      rw [hnext]
-      simp
-
 /-- Fold over a domain's elements with early exit; equal to `foldlStop f stop d.toList`. -/
 def FiniteDomain.foldElts {β : Type} (zero : ZMod p) (next : ZMod p → ZMod p)
     (f : β → ZMod p → β) (stop : β → Bool) :
     FiniteDomain p → β → β
   | .explicit vs, acc => foldlStop f stop vs acc
   | .range b, acc => rangeFoldFrom f stop next zero b acc
-
-theorem FiniteDomain.foldElts_eq {β : Type} (zero : ZMod p) (next : ZMod p → ZMod p)
-    (hzero : zero = 0) (hnext : ∀ v, next v = v + 1)
-    (f : β → ZMod p → β) (stop : β → Bool)
-    (d : FiniteDomain p) (acc : β) :
-    d.foldElts zero next f stop acc = foldlStop f stop d.toList acc := by
-  cases d with
-  | explicit vs => rfl
-  | range b =>
-    rw [FiniteDomain.foldElts, FiniteDomain.toList,
-      rangeFoldFrom_eq f stop next hnext 0 b zero (by simpa using hzero), List.range_eq_range']
 
 /-! ## Interned, index-compiled items
 
