@@ -1026,6 +1026,14 @@ theorem dbScanLoop_preserve {bs : BusSemantics p} (facts : BusFacts p bs) (items
     rw [hrec] at this
     exact this
 
+theorem dbSetD_self (regs : Array ℕ) (k v : ℕ) (hk : k < regs.size) :
+    (regs.set! k v).getD k 0 = v := by
+  rw [Array.getD_eq_getD_getElem?, Array.set!, Array.getElem?_setIfInBounds_self, if_pos hk]
+  rfl
+
+theorem dbSet_size (regs : Array ℕ) (k v : ℕ) : (regs.set! k v).size = regs.size := by
+  rw [Array.set!]; simp
+
 theorem dbSetD_ne {α : Type} (a : Array α) (k k' : ℕ) (v dflt : α) (h : k' ≠ k) :
     (a.set! k v).getD k' dflt = a.getD k' dflt := by
   rw [Array.getD_eq_getD_getElem?, Array.getD_eq_getD_getElem?, Array.set!,
@@ -1079,6 +1087,196 @@ theorem dbScanLoop_regs {bs : BusSemantics p} (facts : BusFacts p bs) (items : A
     rw [hrec'] at hin
     rw [hin]
     exact dbSetD_ne regs _ k _ 0 (fun he => hfp d (le_refl d) hd he.symm)
+
+theorem dbScanLoop_size {bs : BusSemantics p} (facts : BusFacts p bs) (items : Array DbItem)
+    (keys : Array ℕ) (doms : Array DbDom) :
+    ∀ (d i n : ℕ) (regs vals : Array ℕ) (alive : Array Bool) (live : ℕ) (started : Bool),
+      (dbScanLoop facts items keys doms d i n regs vals alive live started).regs.size
+        = regs.size := by
+  intro d i n regs vals alive live started
+  induction d, i, n, regs, vals, alive, live, started using
+    dbScanLoop.induct facts items keys doms with
+  | case1 d i n regs vals alive live started hge => rw [dbScanLoop, if_pos hge]
+  | case2 d i n regs vals alive live started hlt hdead =>
+    rw [dbScanLoop, if_neg hlt, if_pos hdead]
+  | case3 d i n regs vals alive live started hlt halive regs1 hinner hok vals1 alive1 live1
+      started1 habs ih =>
+    have hok' : dbAllOk facts items
+        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i)) 0 = true := hok
+    have habs' : dbAbsorbArgs keys
+        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i))
+        vals alive live started = (vals1, alive1, live1, started1) := habs
+    rw [dbScanLoop, if_neg hlt, if_neg halive]
+    simp only [if_pos hinner]
+    rw [if_pos hok', habs', ih, dbSet_size]
+  | case4 d i n regs vals alive live started hlt halive regs1 hinner hok ih =>
+    have hok' : ¬ dbAllOk facts items
+        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i)) 0 = true := hok
+    rw [dbScanLoop, if_neg hlt, if_neg halive]
+    simp only [if_pos hinner]
+    rw [if_neg hok', ih, dbSet_size]
+  | case5 d i n regs vals alive live started hlt halive regs1 hinner regs2 vals1 alive1 live1
+      started1 hrec ihinner ih =>
+    have hrec' : dbScanLoop facts items keys doms (d + 1) 0
+        (doms.getD (d + 1) (DbDom.range 0)).size
+        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i))
+        vals alive live started = ⟨regs2, vals1, alive1, live1, started1⟩ := hrec
+    rw [dbScanLoop, if_neg hlt, if_neg halive]
+    simp only [if_neg hinner]
+    rw [hrec', ih]
+    have := ihinner
+    rw [hrec'] at this
+    rw [this, dbSet_size]
+
+/-- The sweep reaches the assignment's own point, so the mask it ends with agrees with it (or is
+    empty, in which case the plan forces nothing). `idx` picks each key's index in its domain. -/
+theorem dbScanLoop_reach {bs : BusSemantics p} (facts : BusFacts p bs) (items : Array DbItem)
+    (keys : Array ℕ) (doms : Array DbDom) (denv : VarId → ZMod p) (idx : ℕ → ℕ)
+    (hdist : ∀ a b, a < keys.size → b < keys.size → keys.getD a 0 = keys.getD b 0 → a = b)
+    (hidx : ∀ d, d < keys.size → idx d < (doms.getD d (.range 0)).size ∧
+      DbDom.at p (doms.getD d (.range 0)) (idx d) = (denv ⟨keys.getD d 0⟩).val)
+    (hitems : ∀ regs', DbRegsAt denv keys regs' → dbAllOk facts items regs' 0 = true) :
+    ∀ (d i n : ℕ) (regs vals : Array ℕ) (alive : Array Bool) (live : ℕ) (started : Bool),
+      d < keys.size → n = (doms.getD d (.range 0)).size → i ≤ idx d →
+      (∀ d', d' < keys.size → keys.getD d' 0 < regs.size) →
+      (∀ d', d' < d → regs.getD (keys.getD d' 0) 0 = (denv ⟨keys.getD d' 0⟩).val) →
+      DbScanGood denv keys
+        (dbScanLoop facts items keys doms d i n regs vals alive live started) := by
+  intro d i n regs vals alive live started
+  induction d, i, n, regs, vals, alive, live, started using
+    dbScanLoop.induct facts items keys doms with
+  | case1 d i n regs vals alive live started hge =>
+    intro hd hn hi _ _
+    exact absurd hge (by rw [hn]; have := (hidx d hd).1; omega)
+  | case2 d i n regs vals alive live started hlt hdead =>
+    intro _ _ _ _ _
+    rw [dbScanLoop, if_neg hlt, if_pos hdead]
+    simp only [Bool.and_eq_true, beq_iff_eq] at hdead
+    exact ⟨hdead.1, Or.inl hdead.2⟩
+  | case3 d i n regs vals alive live started hlt halive regs1 hinner hok vals1 alive1 live1
+      started1 habs ih =>
+    intro hd hn hi hcov houter
+    have hok' : dbAllOk facts items
+        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i)) 0 = true := hok
+    have habs' : dbAbsorbArgs keys
+        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i))
+        vals alive live started = (vals1, alive1, live1, started1) := habs
+    have hset : ∀ d', d' < d →
+        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i)).getD
+          (keys.getD d' 0) 0 = (denv ⟨keys.getD d' 0⟩).val := by
+      intro d' hd'
+      rw [dbSetD_ne regs _ _ _ 0 (fun he => by
+        have := hdist d' d (by omega) hd he; omega)]
+      exact houter d' hd'
+    rw [dbScanLoop, if_neg hlt, if_neg halive]
+    simp only [if_pos hinner]
+    rw [if_pos hok', habs']
+    rcases Nat.lt_or_ge i (idx d) with hlti | hgei
+    · exact ih hd hn (by omega) (fun d' hd' => by rw [dbSet_size]; exact hcov d' hd')
+        (fun d' hd' => hset d' hd')
+    · -- this is the assignment's own point: the mask now agrees, and stays agreeing
+      have hieq : i = idx d := by omega
+      have hregsAt : DbRegsAt denv keys
+          (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i)) := by
+        intro d0 hd0
+        rcases Nat.lt_trichotomy d0 d with h | h | h
+        · exact hset d0 h
+        · subst h
+          rw [dbSetD_self regs _ _ (hcov d0 hd0), hieq]
+          exact (hidx d0 hd0).2
+        · omega
+      refine dbScanLoop_preserve facts items keys doms denv _ _ _ _ _ _ _ _ ⟨?_, Or.inr ?_⟩
+      · have hst4 : (dbAbsorbArgs keys
+            (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i))
+            vals alive live started).2.2.2 = started1 := congrArg (fun r => r.2.2.2) habs'
+        cases started with
+        | true => rw [dbAbsorbArgs_true] at hst4; exact hst4.symm
+        | false => rw [dbAbsorbArgs_false] at hst4; exact hst4.symm
+      · intro j hj hj2
+        rw [show vals1 = (dbAbsorbArgs keys
+          (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i))
+          vals alive live started).1 from (congrArg (fun r => r.1) habs').symm]
+        refine dbAbsorbArgs_agree denv keys _ vals alive live started hregsAt j hj ?_
+        rw [show (dbAbsorbArgs keys
+          (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i))
+          vals alive live started).2.1 = alive1 from congrArg (fun r => r.2.1) habs']
+        exact hj2
+  | case4 d i n regs vals alive live started hlt halive regs1 hinner hok ih =>
+    intro hd hn hi hcov houter
+    have hok' : ¬ dbAllOk facts items
+        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i)) 0 = true := hok
+    have hset : ∀ d', d' < d →
+        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i)).getD
+          (keys.getD d' 0) 0 = (denv ⟨keys.getD d' 0⟩).val := by
+      intro d' hd'
+      rw [dbSetD_ne regs _ _ _ 0 (fun he => by
+        have := hdist d' d (by omega) hd he; omega)]
+      exact houter d' hd'
+    rw [dbScanLoop, if_neg hlt, if_neg halive]
+    simp only [if_pos hinner]
+    rw [if_neg hok']
+    rcases Nat.lt_or_ge i (idx d) with hlti | hgei
+    · exact ih hd hn (by omega) (fun d' hd' => by rw [dbSet_size]; exact hcov d' hd')
+        (fun d' hd' => hset d' hd')
+    · -- the assignment's own point cannot fail
+      exfalso
+      refine hok' (hitems _ ?_)
+      intro d0 hd0
+      rcases Nat.lt_trichotomy d0 d with h | h | h
+      · exact hset d0 h
+      · subst h
+        rw [dbSetD_self regs _ _ (hcov d0 hd0), show i = idx d0 from by omega]
+        exact (hidx d0 hd0).2
+      · omega
+  | case5 d i n regs vals alive live started hlt halive regs1 hinner regs2 vals1 alive1 live1
+      started1 hrec ihinner ih =>
+    intro hd hn hi hcov houter
+    have hrec' : dbScanLoop facts items keys doms (d + 1) 0
+        (doms.getD (d + 1) (DbDom.range 0)).size
+        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i))
+        vals alive live started = ⟨regs2, vals1, alive1, live1, started1⟩ := hrec
+    have hd1 : d + 1 < keys.size := by omega
+    have hset : ∀ d', d' < d →
+        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i)).getD
+          (keys.getD d' 0) 0 = (denv ⟨keys.getD d' 0⟩).val := by
+      intro d' hd'
+      rw [dbSetD_ne regs _ _ _ 0 (fun he => by
+        have := hdist d' d (by omega) hd he; omega)]
+      exact houter d' hd'
+    rw [dbScanLoop, if_neg hlt, if_neg halive]
+    simp only [if_neg hinner]
+    rw [hrec']
+    rcases Nat.lt_or_ge i (idx d) with hlti | hgei
+    · -- not yet the right index at this dimension: keep sweeping, restoring the outer agreement
+      refine ih hd hn (by omega) (fun d' hd' => by
+        have hsz := dbScanLoop_size facts items keys doms (d + 1) 0
+          (doms.getD (d + 1) (DbDom.range 0)).size
+          (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i))
+          vals alive live started
+        rw [hrec'] at hsz
+        rw [show regs2.size = regs.size from by rw [hsz, dbSet_size]]
+        exact hcov d' hd') (fun d' hd' => ?_)
+      have hfoot := dbScanLoop_regs facts items keys doms (keys.getD d' 0) (d + 1) 0
+        (doms.getD (d + 1) (DbDom.range 0)).size
+        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i))
+        vals alive live started hd1
+        (fun e he hes hkey => by have := hdist d' e (by omega) hes hkey.symm; omega)
+      rw [hrec'] at hfoot
+      rw [hfoot]
+      exact hset d' hd'
+    · -- the right index here: the inner sweep reaches the point, then the rest preserves it
+      have hieq : i = idx d := by omega
+      refine dbScanLoop_preserve facts items keys doms denv _ _ _ _ _ _ _ _ ?_
+      have := ihinner hd1 rfl (Nat.zero_le _)
+        (fun d' hd' => by rw [dbSet_size]; exact hcov d' hd') (fun d' hd' => by
+        rcases Nat.lt_trichotomy d' d with h | h | h
+        · exact hset d' h
+        · subst h
+          rw [dbSetD_self regs _ _ (hcov d' hd), hieq]
+          exact (hidx d' hd).2
+        · omega)
+      rw [hrec'] at this
+      exact this
 
 theorem dbDomainBatchσ_entailed [Fact p.Prime] [NeZero p]
     (bs : BusSemantics p) (facts : BusFacts p bs) (d : DenseConstraintSystem p) :
