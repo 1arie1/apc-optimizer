@@ -1,5 +1,5 @@
 import ApcOptimizer.Implementation.OptimizerPasses.DigitFold
-import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DomainBatch
+import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DomainTable
 
 set_option autoImplicit false
 
@@ -251,7 +251,7 @@ theorem denseBuild_sound (bs : BusSemantics p) (facts : BusFacts p bs)
   exact denseAddAll_soundAt bs facts denv bis hbus ∅ (DenseBMSoundAt.empty denv) i b hlk
 
 /-! # Correctness of the dense digit-fold pass (`denseDigitFoldPass`, `DigitFold.lean`), reducing
-the forced substitution to `DenseConstraintSystem.substF_denseCorrect` (`Proofs/DomainBatch.lean`). -/
+the forced substitution to `DenseConstraintSystem.substF_denseCorrect` (`Proofs/DomainTable.lean`). -/
 
 /-! ## Byte-pair recognizer soundness -/
 

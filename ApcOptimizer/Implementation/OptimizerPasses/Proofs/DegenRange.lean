@@ -1,6 +1,6 @@
 import ApcOptimizer.Implementation.OptimizerPasses.DegenRange
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.EntailedCheck
-import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DomainBatch
+import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DomainTable
 
 set_option autoImplicit false
 

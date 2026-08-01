@@ -102,7 +102,7 @@ structure BusFacts (p : ℕ) (bs : BusSemantics p) where
       neverViolatesArity m.busId m.payload.length = true → bs.accepts m
   /-- Decides `bs.accepts`. The audited `accepts` is a `Prop`, so this is how a pass evaluates the
       bus semantics at runtime. It is a full decision procedure, not merely sound: passes rewrite
-      between it and the semantic condition (see `Proofs/DomainBatch.lean`), which needs both
+      between it and the semantic condition (see `Proofs/DomainTable.lean`), which needs both
       directions. -/
   acceptsDec : BusInteraction (ZMod p) → Bool
   acceptsDec_iff : ∀ (m : BusInteraction (ZMod p)), acceptsDec m = true ↔ bs.accepts m

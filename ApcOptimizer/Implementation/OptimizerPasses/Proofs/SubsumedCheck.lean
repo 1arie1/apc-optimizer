@@ -1,7 +1,7 @@
 import ApcOptimizer.Implementation.OptimizerPasses.SubsumedCheck
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.FlagFoldDrops
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.RootPairUnify
-import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DomainBatch
+import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DomainTable
 
 set_option autoImplicit false
 

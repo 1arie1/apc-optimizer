@@ -1,6 +1,6 @@
 import ApcOptimizer.Implementation.OptimizerPasses.ZeroRegister
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.BusUnify
-import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DomainBatch
+import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DomainTable
 
 set_option autoImplicit false
 

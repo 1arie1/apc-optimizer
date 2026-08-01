@@ -17,8 +17,9 @@ import ApcOptimizer.Implementation.OptimizerPasses.DigitFold
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DigitFold
 import ApcOptimizer.Implementation.OptimizerPasses.Gauss
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.Gauss
+import ApcOptimizer.Implementation.OptimizerPasses.DomainTable
+import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DomainTable
 import ApcOptimizer.Implementation.OptimizerPasses.DomainBatch
-import ApcOptimizer.Implementation.OptimizerPasses.DomainBatchRuntime
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DomainBatch
 import ApcOptimizer.Implementation.OptimizerPasses.OneHotAnnihilate
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.OneHotAnnihilate

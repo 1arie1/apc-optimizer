@@ -1,4 +1,4 @@
-import ApcOptimizer.Implementation.OptimizerPasses.DomainBatch
+import ApcOptimizer.Implementation.OptimizerPasses.DomainTable
 import ApcOptimizer.Implementation.OptimizerPasses.DomainFold
 import ApcOptimizer.Implementation.OptimizerPasses.AddrDiseq
 

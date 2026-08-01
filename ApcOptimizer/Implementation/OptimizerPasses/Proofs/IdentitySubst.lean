@@ -1,12 +1,12 @@
 import ApcOptimizer.Implementation.OptimizerPasses.IdentitySubst
-import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DomainBatch
+import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DomainTable
 
 set_option autoImplicit false
 
 /-! # Dense late identity-result substitution: correctness and wiring
 
 `DensePassCorrect` for `denseIdentitySubstF` (`IdentitySubst.lean`), a single batch
-`DenseConstraintSystem.substF` riding on `substF_denseCorrect` (`Proofs/DomainBatch.lean`): every
+`DenseConstraintSystem.substF` riding on `substF_denseCorrect` (`Proofs/DomainTable.lean`): every
 mapped pair is forced by its interaction's acceptance and every resolved operand occurs in `d`. -/
 
 namespace ApcOptimizer.Dense

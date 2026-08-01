@@ -1,5 +1,5 @@
 import ApcOptimizer.Implementation.OptimizerPasses.Reencode
-import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DomainBatch
+import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DomainTable
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.RootPairUnify
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DropPasses
 
