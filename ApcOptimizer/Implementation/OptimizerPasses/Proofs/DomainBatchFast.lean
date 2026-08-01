@@ -17,10 +17,6 @@ theorem dbDomainBatchσ_entailed [Fact p.Prime] [NeZero p]
     EntailedMap d bs (dbDomainBatchσ bs facts d).map := by
   sorry
 
-theorem dbApplyσ_eq (dσ : DenseSolved p) (d : DenseConstraintSystem p) :
-    dbApplyσ dσ d = applyσ dσ d := by
-  sorry
-
 theorem dbDomainBatchTransform_covered (pw : PrimeWitness p) (reg : VarRegistry)
     (bs : BusSemantics p) (facts : BusFacts p bs) (d : DenseConstraintSystem p)
     (hcov : d.CoveredBy reg) :
@@ -29,7 +25,7 @@ theorem dbDomainBatchTransform_covered (pw : PrimeWitness p) (reg : VarRegistry)
   · haveI : Fact p.Prime := ⟨pw.correct hpB⟩
     haveI : NeZero p := ⟨(pw.correct hpB).ne_zero⟩
     rw [show dbDomainBatchTransform pw bs facts d = applyσ (dbDomainBatchσ bs facts d) d
-        from by simp only [dbDomainBatchTransform, if_pos hpB, dbApplyσ_eq], applyσ]
+        from by simp only [dbDomainBatchTransform, if_pos hpB], applyσ]
     by_cases he : (dbDomainBatchσ bs facts d).map.isEmpty = true
     · rw [if_pos he]; exact hcov
     · rw [if_neg he]
@@ -47,7 +43,7 @@ theorem dbDomainBatchTransform_correct (pw : PrimeWitness p) (reg : VarRegistry)
   · haveI : Fact p.Prime := ⟨pw.correct hpB⟩
     haveI : NeZero p := ⟨(pw.correct hpB).ne_zero⟩
     rw [show dbDomainBatchTransform pw bs facts d = applyσ (dbDomainBatchσ bs facts d) d
-        from by simp only [dbDomainBatchTransform, if_pos hpB, dbApplyσ_eq], applyσ]
+        from by simp only [dbDomainBatchTransform, if_pos hpB], applyσ]
     by_cases he : (dbDomainBatchσ bs facts d).map.isEmpty = true
     · rw [if_pos he]; exact DensePassCorrect_refl reg.isInput d bs
     · rw [if_neg he]

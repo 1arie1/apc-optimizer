@@ -980,48 +980,9 @@ def dbDomainBatchσ (bs : BusSemantics p) (facts : BusFacts p bs) (d : DenseCons
   results.foldl (fun dσ forced =>
     dσ.insertAll (forced.map (fun f => (f.1, DenseExpr.const f.2)))) DenseSolved.empty
 
-/-! ## Applying the solution
-
-An array-backed lookup instead of a `Std.HashMap` probe per variable leaf, and a substitution that
-returns the input node when no descendant changed — most constraints contain no solved variable, so
-most of the system is shared rather than rebuilt. -/
-
-/-- `none` = unchanged. -/
-def dbSubstTree (σ : Array (Option (DenseExpr p))) : DenseExpr p → Option (DenseExpr p)
-  | .const _ => none
-  | .var i => σ.getD i.index none
-  | .add a b =>
-    match dbSubstTree σ a, dbSubstTree σ b with
-    | none, none => none
-    | sa, sb => some (.add (sa.getD a) (sb.getD b))
-  | .mul a b =>
-    match dbSubstTree σ a, dbSubstTree σ b with
-    | none, none => none
-    | sa, sb => some (.mul (sa.getD a) (sb.getD b))
-
-@[inline] def dbSubst (σ : Array (Option (DenseExpr p))) (e : DenseExpr p) : DenseExpr p :=
-  (dbSubstTree σ e).getD e
-
-def dbSubstBi (σ : Array (Option (DenseExpr p))) (bi : BusInteraction (DenseExpr p)) :
-    BusInteraction (DenseExpr p) :=
-  { busId := bi.busId, multiplicity := dbSubst σ bi.multiplicity,
-    payload := bi.payload.map (dbSubst σ) }
-
-def dbSolvedArray (dσ : DenseSolved p) : Array (Option (DenseExpr p)) :=
-  let nv := dσ.map.fold (fun acc k _ => max acc (k.index + 1)) 0
-  dσ.map.fold (fun a k v => a.set! k.index (some v)) (Array.replicate nv none)
-
-/-- Apply a dense solution map to a system, unless it is empty (`applyσ`, array-backed). -/
-def dbApplyσ (dσ : DenseSolved p) (d : DenseConstraintSystem p) : DenseConstraintSystem p :=
-  if dσ.map.isEmpty then d
-  else
-    let σ := dbSolvedArray dσ
-    { algebraicConstraints := d.algebraicConstraints.map (dbSubst σ),
-      busInteractions := d.busInteractions.map (dbSubstBi σ) }
-
 /-- The value-only dense domain-batch transform, over the rebuilt engine. -/
 def dbDomainBatchTransform (pw : PrimeWitness p) (bs : BusSemantics p)
     (facts : BusFacts p bs) (d : DenseConstraintSystem p) : DenseConstraintSystem p :=
-  if pw.isPrime = true then dbApplyσ (dbDomainBatchσ bs facts d) d else d
+  if pw.isPrime = true then applyσ (dbDomainBatchσ bs facts d) d else d
 
 end ApcOptimizer.Dense
