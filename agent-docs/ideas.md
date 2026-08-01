@@ -482,13 +482,41 @@ the per-item signature idea (`DenseExpr.pdVarBloom`, `DensePdEntry.sigs`), which
 gates measure 0.0–0.7 % of the run and a general per-item summary record is **not** a live lever
 (measured, entry 159 session).
 
-**R10. busUnify symbolic-window sweep at SHA scale**  ·  *52 s on sha256_big*. `denseSweepGo`
-tests every symbolic-address message against every open window: `constOpen.toList` is rebuilt per
-non-all-const message, and each open `symOpen` window pays the full `denseStepTest` certificate
-chain per message. The sweep is an untrusted proposal (`denseCheckPair` re-verifies), **but its
-consumer/excluded/blocker decisions choose which candidates are proposed**, so any restructuring
-must keep decisions bit-identical — memoize `denseStepTest` only under full structural keys, or
-index windows by address-expression hash with the existing tests re-run on hits.
+~~**R10. busUnify symbolic-window sweep at SHA scale**~~ · **done (busUnify rebuild, 2026-08-01)**.
+The pass is 0.10–0.18x on every representative (keccak 1594 → 167 ms, sha256 `apc_001`
+7764 → 1243 ms, run 0.81x / 0.91x), output byte-identical. Prepared per-interaction records
+(address slot constant value / linear form / two-root reductions, derived once instead of once per
+compared pair), a sweep over an array of them proposing `(sendPos, recvPos)` index pairs, and the
+affine and two-root arms decided on canonical (merged, zero-dropped, sorted) term keys with an
+order-insensitive hash gating the list compare. See the entry in `log.md` for the phase table.
+**What is left in the pass** (sha256 `apc_001`, `IO` phase timers, ~650 ms of real work under a
+~680 ms floor of output forcing that every pass pays): verifier 226 ms, prep 99, sweep 100, the
+address-variable scope + constraint filter 78, the already-present filter 77+13, table 47.
+
+**R10b. The two-root certificate table is over-scoped and cubic — and busPairCancel still pays
+it**  ·  *measured 2026-08-01, ~31 % of busPairCancel on wasm-eth `apc_012`*. Two independent
+defects in `AddrDiseq.lean`, both fixed inside busUnify's own copy but not in the shared library:
+   - **Scope.** `denseAddrSlotVars` collects address-slot variables over *every* interaction at
+     *every* declared shape's slots, and `addVars` then inserts an entry for *every* variable of
+     every constraint mentioning one of them. Only the variables of address expressions of
+     interactions **on a memory bus, at that bus's own address fields** are ever looked up
+     (`densePtrReductions` keys on the queried form's own variables, and every certificate arm is
+     gated on the compared message being on the candidate's bus). wasm-eth `apc_012` last cycle:
+     2 382 variables / 1 034 constraints / 2 100 entries → **61 / 60 / 60**.
+   - **Cubic build.** `denseTwoRootOfLins l1 l2 x` recomputes `(l.others x).norm` — itself an
+     `O(t²)` like-term merge — once per variable, so a product constraint costs `O(t³)`. It
+     succeeds only when the two factors' normal forms agree away from `x` *and* at `x`, so when
+     `n1.terms = n2.terms` every variable with a unit coefficient gets an entry directly
+     (`A = ⟨l1.const, n1.terms.filter (· ≠ x)⟩`, `δ = l2.const − l1.const`) and the per-variable
+     `norm` disappears; otherwise fall back to the current test.
+   Together: the build for all invocations drops **586 → 18 ms** on wasm-eth `apc_012` and
+   **101 → 18 ms** on keccak. busPairCancel's thunk is not always forced, so what it *actually*
+   pays today is less than the full build: forcing it eagerly (output unchanged) costs
+   994 → 1269 ms on wasm `apc_012` and 382 → 417 ms on keccak, which puts the paid share at
+   **311 ms of 994 (31 %)** and **66 ms of 382 (17 %)**. Expect busPairCancel ≈ 0.71x on wasm
+   `apc_012`, ≈ 0.87x on keccak. The port is mechanical (the code exists in `BusUnify.lean`);
+   `buildForAddrs_sound` needs re-proving and every `denseAddrTwoRootNeq` call site in
+   busPairCancel needs the same-bus gating argument checked.
 
 **R11. `decide (A ∧ B)` evaluates both sides eagerly**  ·  *latent bignum landmine, cheap fix*.
 `Decidable (A ∧ B)` instances are strict in both arguments in compiled code, so
@@ -623,6 +651,26 @@ eager back-substitution's exponent). What is left, LBR shares of the *new* pass 
   better there, but **regresses 8 of 100 SP1 `rsp` cases by +88 variables** — the primary axis. Entry
   134's warning, now measured.
 
+- **Signature-*gating* busUnify's exact verifier arms** (2026-08-01): keeping
+  `denseConstDiffNZ` behind an order-insensitive term-hash comparison measures **neutral to
+  worse** (sha256 `apc_001` verify 226 vs 201 ms ungated, keccak 58 vs 55). In a `mid` scan every
+  position must be *refuted*, so the deciding arm is the one that **succeeds** — where the gate
+  always passes and only adds a compare. The win is in *replacing* the test with a canonical-key
+  comparison, not gating it (done, 0.86x on the pass).
+- **Hash-consing busUnify's prepared address slots** (2026-08-01): memoizing `denseBUSlotPrep` by
+  `DenseExpr.bHash` with a structural re-check made prep **99 → 367 ms** on sha256 `apc_001`. The
+  address-slot derivations (`constValue?`, `denseLinearize`, `densePtrReductions`) cost ~0.7 µs
+  per slot; a `Std.HashMap` probe plus a deep expression compare costs more than that. Distinct
+  address *tuples* being few (587 for 29 372 messages) does not make the memo pay.
+- **Dropping busUnify's `mentionsAny` pre-filter before the two-root build** (2026-08-01): the
+  builder already filters per variable, so the filter looks redundant — but folding the raw
+  constraint list instead measures **scope+build 8 → 26 ms on keccak and 9 → 55 ms on wasm-eth
+  `apc_012`** (identical map), because every product constraint then pays two `denseLinearize`s.
+  The fail-fast tree walk is cheaper than linearizing.
+- **A same-key sparse `mid` scan for busUnify's verifier** (entry-148 pattern): the two cycles
+  where the verifier is expensive on sha256 `apc_001` (88 and 84 ms) are 12 % all-constant
+  addresses, while the two cycles that are 96 % all-constant cost 30 and 39 ms. The index would
+  help exactly where the scan is already cheap.
 - **Indexing `densePdKeep`'s re-verification** (flagFold part C): `findIdx?` deep-equality scans and
   `List.take` prefixes replaced by a `densePdValHash` position index over an array — **0.98x on
   flagFold, sub-bar** (entry 157). The cost it targets is real (866 ms on sha256 `apc_001`, 574 of it
@@ -671,6 +719,12 @@ eager back-substitution's exponent). What is left, LBR shares of the *new* pass 
   indexes are the pattern.
 - **Feeding whole regions into per-query justification arms**: 63 s/case for −3 interactions
   (entry 102). Use a position index or nothing.
+- **LBR attribution is unusable on a deeply recursive pass** (2026-08-01): on busUnify only
+  **4.4 % of samples carried a pass frame against 21.7 % of wall** — the sweep recurses deeper
+  than the LBR buffer, so the pass-restricted table is off by 5x, not by a margin. Every number in
+  the busUnify rebuild came from `IO` phase timers. `OptimizingRuntime.md`'s truncation warning
+  understates this case; check the gated `tot` against the pass's share of wall *before* reading
+  any pass-restricted table.
 - CI notes (updated 2026-07-29): the effectiveness-matrix runtime row swung **+51 % → +15 % on
   identical code** for openvm-eth while its own per-pass table showed ≤1.04× — treat the wall row
   as ±50 % noise on the small parallel sets and read the per-pass table instead; the serial
