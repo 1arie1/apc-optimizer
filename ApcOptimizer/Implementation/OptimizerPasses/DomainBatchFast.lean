@@ -202,6 +202,33 @@ structure DbBiPre (p : ℕ) where
 
 def dbBiPreEmpty : DbBiPre p := ⟨none, [], #[], false, none, false, none, none⟩
 
+/-- Resolve every `BusFacts` query about one interaction. Faithfulness of the cache is
+    `DbBiPreOf` (`Proofs/DomainBatchFast.lean`). -/
+def dbPreOne {bs : BusSemantics p} (facts : BusFacts p bs) (bi : BusInteraction (DenseExpr p))
+    (vars : Array VarId) : DbBiPre p :=
+  let pat := bi.payload.map DenseExpr.constValue?
+  let usable := !bs.isStateful bi.busId
+  -- the width/tuple facts are consulted only on a two-slot payload, and the range fact only when
+  -- neither of them answered: each is resolved exactly where its consumers can reach it
+  let twoSlot := match bi.payload with | [_, _] => true | _ => false
+  let varRange := usable && twoSlot && facts.varRangeBus bi.busId
+  let tuple? := if usable && twoSlot && !varRange then facts.tupleRangeBus bi.busId else none
+  { mult? := bi.multiplicity.constValue?
+    pat
+    vars
+    usable
+    -- read by the compiler and the pair-redundancy test (both `usable`-only) and by the
+    -- byte-domain phase (nonzero constant multiplicity only)
+    byte? :=
+      if usable || (bi.multiplicity.constValue?).any (fun m => !zmodIsZero m) then
+        (facts.byteXorSpec bi.busId).bind fun spec =>
+          (spec.decode bi.payload).map fun t => ⟨spec, t.1.constValue?, t.2.1, t.2.2.1, t.2.2.2⟩
+      else none
+    varRange
+    tuple?
+    rangeAt? :=
+      if usable && !varRange && tuple?.isNone then facts.rangeCheckAt bi.busId pat else none }
+
 /-! ### Compiling a bus interaction (mirrors `denseCompileCBiPredV`) -/
 
 def dbCompileRange (bi : BusInteraction (DenseExpr p)) (e : DbBiPre p) (mult : DbTree) :
@@ -787,6 +814,23 @@ def dbBytePhase (pre : Array (DbBiPre p)) (k : Nat) (T : DbTab p) : DbTab p :=
   termination_by pre.size - k
   decreasing_by all_goals omega
 
+/-- The per-constraint scan programs. An item with a variable outside the table can never be
+    gathered (a target's keys are all domained), so it needs neither a program nor a redundancy
+    verdict. -/
+def dbCsItemsOf (T : DbTab p) (cs : Array (DenseExpr p)) (csVars : Array (Array VarId)) :
+    Array (DbItem) :=
+  let gatherable := csVars.map (fun vs => (dbBoxOf T vs 0 1).isSome)
+  (cs.zipIdx).map fun cj =>
+    if gatherable.getD cj.2 false then DbItem.zero (dbCompile cj.1) else DbItem.always
+
+/-- The per-interaction scan programs (see `dbCsItemsOf` for the gate). -/
+def dbBiItemsOf {bs : BusSemantics p} (facts : BusFacts p bs) (T : DbTab p)
+    (bis : Array (BusInteraction (DenseExpr p))) (pre : Array (DbBiPre p)) : Array (DbItem) :=
+  (bis.zipIdx).map fun bij =>
+    let e := pre.getD bij.2 dbBiPreEmpty
+    if e.usable && (dbBoxOf T e.vars 0 1).isSome then dbCompileBi facts bij.1 e
+    else DbItem.always
+
 /-- Per-constraint `active` (`¬ redundant`), threading the register file. -/
 def dbActivePhase {bs : BusSemantics p} (facts : BusFacts p bs) (T : DbTab p)
     (csItems : Array (DbItem)) (csVars : Array (Array VarId)) (k : Nat)
@@ -917,42 +961,12 @@ def dbBuildCtx (bs : BusSemantics p) (facts : BusFacts p bs) (d : DenseConstrain
   let nv := dbNvOf biVars (dbNvOf csVars 0)
   let T0 : DbTab p := ⟨Array.replicate nv none⟩
   let T1 := dbConstraintPhase cs csVars 0 T0
-  let pre0 : Array (DbBiPre p) := (bis.zipIdx).map fun bij =>
-    let bi := bij.1
-    let pat := bi.payload.map DenseExpr.constValue?
-    let usable := !bs.isStateful bi.busId
-    -- the width/tuple facts are consulted only on a two-slot payload, and the range fact only when
-    -- neither of them answered: each is resolved exactly where its consumers can reach it
-    let twoSlot := match bi.payload with | [_, _] => true | _ => false
-    let varRange := usable && twoSlot && facts.varRangeBus bi.busId
-    let tuple? := if usable && twoSlot && !varRange then facts.tupleRangeBus bi.busId else none
-    { mult? := bi.multiplicity.constValue?,
-      pat,
-      vars := biVars.getD bij.2 #[],
-      usable,
-      -- read by the compiler and the pair-redundancy test (both `usable`-only) and by the
-      -- byte-domain phase (nonzero constant multiplicity only)
-      byte? :=
-        if usable || (bi.multiplicity.constValue?).any (fun m => !zmodIsZero m) then
-          (facts.byteXorSpec bi.busId).bind fun spec =>
-            (spec.decode bi.payload).map fun t => ⟨spec, t.1.constValue?, t.2.1, t.2.2.1, t.2.2.2⟩
-        else none,
-      varRange,
-      tuple?,
-      rangeAt? :=
-        if usable && !varRange && tuple?.isNone then facts.rangeCheckAt bi.busId pat else none }
-  let ⟨T2, biInf⟩ := dbBusPhase facts bis pre0 0 ⟨T1, #[]⟩
-  let pre := pre0
+  let pre : Array (DbBiPre p) :=
+    (bis.zipIdx).map fun bij => dbPreOne facts bij.1 (biVars.getD bij.2 #[])
+  let ⟨T2, biInf⟩ := dbBusPhase facts bis pre 0 ⟨T1, #[]⟩
   let T := dbBytePhase pre 0 T2
-  -- an item with a variable outside the table can never be gathered (a target's keys are all
-  -- domained), so it needs neither a program nor a redundancy verdict
-  let csGatherable := csVars.map (fun vs => (dbBoxOf T vs 0 1).isSome)
-  let csItems := (cs.zipIdx).map fun cj =>
-    if csGatherable.getD cj.2 false then DbItem.zero (dbCompile cj.1) else DbItem.always
-  let biItems := (bis.zipIdx).map fun bij =>
-    let e := pre.getD bij.2 dbBiPreEmpty
-    if e.usable && (dbBoxOf T e.vars 0 1).isSome then dbCompileBi facts bij.1 e
-    else DbItem.always
+  let csItems := dbCsItemsOf T cs csVars
+  let biItems := dbBiItemsOf facts T bis pre
   let ⟨_, csActive⟩ := dbActivePhase facts T csItems csVars 0
     ⟨Array.replicate nv 0, #[]⟩
   let biDomRed := (bis.zipIdx).map fun bij =>
