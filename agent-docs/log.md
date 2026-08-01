@@ -5919,3 +5919,58 @@ With the old engine retired the pass is one implementation file plus one proof f
 (`DomainBatch.lean`, `Proofs/DomainBatch.lean`), −2 390 lines of dead value-only engine, and the
 shared surface `domainFold` and the solution-map passes need moved to `DomainTable.lean` /
 `Proofs/DomainTable.lean`.
+
+### 163. Runtime: busUnify rebuilt — prepared address records, canonical term keys (0.11–0.18x on the pass, sha256 total 0.91x)
+
+The top pass on keccak (1.59 s of 7.44 s) and #2 on sha256 `apc_001` (7.76 s of 75.5 s). Every
+(window, message) classification re-derived, per compared pair, data that depends only on the two
+interactions: up to 8 `constValue?` tree folds, 4 `denseLinearize`s and 4 `densePtrReductions`
+(each a linearize + a `Std.HashMap`-backed dedup + branch construction). 0.6–7 µs per address
+comparison, 5 k–470 k comparisons per invocation.
+
+**Where the time was** (`IO` phase timers; LBR is useless here — only 4.4 % of samples carried a
+pass frame against 21.7 % of wall, the sweep recurses deeper than the buffer):
+
+| phase | keccak | wasm-eth `apc_012` | sha256 `apc_001` |
+|---|---:|---:|---:|
+| two-root table build | 85 | **577** | **1368** |
+| sweep | **1047** | 343 | **3943** |
+| verifier (`denseCheckPair`) | 322 | 220 | 1235 |
+| rest | 44 | 49 | 482 |
+
+**The rebuilt engine.** One record per memory-bus interaction (`denseBUPrep`) holding each address
+slot's constant value, linear form and two-root reductions, plus the *canonical key* of every form
+— its merged, zero-dropped, variable-sorted term list — and a hash of that key. `denseConstDiffNZ`
+is exactly "canonical keys equal, constants differ", so the affine and two-root arms became a list
+compare gated by an integer compare: no `add`, no `scale`, no `norm`, no allocation, and the sweep
+and the verifier run the *same* test. A candidate is a pair of indices into the bus's array, so
+`mid` is an index range (578 k cons cells per invocation on sha256 cycle 1 no longer built), the
+window stores no suffix, and the `mergeSort` is a scatter. The two-root table is scoped to the
+variables a lookup can reach — address slots of memory-bus interactions at their own shape's fields
+(2382 → 61 variables on wasm-eth `apc_012`) — and only constraints of an equality's own shape enter
+the already-present bucket.
+
+**The proof got smaller** (`Proofs/BusUnify.lean` 619 → 741 lines, but the *engine's* share is
+lower): the verifier re-derives `i < j` from the candidate pair, so the sweep, the scatter and the
+candidate order carry no obligation whatsoever — `OpenWF`, the three `HashMap` value lemmas,
+`denseEmitCand_split` and `denseSweepGo_split` are all gone. The prepared record stores exactly what
+the certificates read, so three arms are equal to the originals slot for slot and reuse their
+soundness lemmas. Canonical keys are proved *semantically* (equal keys ⇒ the normalized term lists
+are permutations ⇒ equal sums ⇒ the values differ by the differing constants), which avoids
+`denseMergeTerms` internals entirely. `denseCheckPair`/`denseCheckPair_sound` are deleted.
+
+**Measured** (interleaved, 3 reps; sha256 single shot), pass / run: keccak 1592 → 174 ms (0.11x) /
+7444 → 5996 ms (**0.81x**); sha256 `apc_001` 7757 → 1277 ms (0.16x) / 75.5 → 68.6 s (**0.91x**);
+wasm-eth `apc_012` 1307 → 212 ms (0.16x) / 0.89x; `apc_063` 868 → 170; `apc_037` 804 → 154;
+openvm-eth `apc_100` 144 → 25 ms / 0.89x; `apc_037` 72 → 16; `apc_071` 35 → 11; `apc_006` 47 → 19;
+SP1 keccak 243 → 159 ms. No pass regressed on any case. `opt-export` byte-identical to `origin/main`
+on 11 cases across both VMs.
+
+**Four measured negatives** (all in `ideas.md`): signature-*gating* the exact arms is neutral (in a
+`mid` scan the deciding arm is the one that succeeds, where the gate always passes); hash-consing
+the prepared slots took prep 99 → 367 ms on sha256; dropping the `mentionsAny` pre-filter before the
+table build costs 3x on that phase; a same-key sparse `mid` scan would help exactly the cycles where
+the scan is already cheap. Also sized but not implemented: **busPairCancel builds the same
+over-scoped, cubic table and pays 31 % of its runtime for it on wasm-eth `apc_012`** (R10b).
+
+**Worked: yes.**
