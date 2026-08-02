@@ -639,6 +639,50 @@ eager back-substitution's exponent). What is left, LBR shares of the *new* pass 
   active-degree index back. The scheduler is 3.8 % of the pass, so it is affordable — but measure the
   bus trade before doing it.
 
+**R14. The per-invocation index lifecycle is now the dominant cost of the index-heavy passes**  ·
+*measured 2026-08-02 on the rebuilt busPairCancel; cross-pass, framework-level effort*. After that
+pass was rebuilt (windowed region scans, scoped two-root table, in-place tombstones, non-allocating
+`constValue?`, per-invocation eagerness decision — 0.36–0.60x), its remaining profile is **~45 %
+building, marking and freeing `O(system)` indexes**, not scanning: on sha256 `apc_001` it constructs
+seven of them (receive index, per-bus key index, per-bus prepared address records, bound-witness
+index, form-witness index, candidate-constraint index, single-variable domain buckets) on **each of
+11 invocations**, while the last five invocations produce **nine drops between them**. `entry` alone
+is 14 % of the pass and 57 % of that is `lean_dec_ref_cold` freeing exactly those structures.
+
+Every index-heavy pass has the same shape — the indexes are a pure function of the system, the
+system barely changes across the terminal cycles, and the pass framework's type
+(`DenseVerifiedPassW`, morally `cs → cs`) gives a pass no way to carry anything from one invocation
+to the next. The fix is a **state channel**: let a pass return an opaque per-pass cache alongside
+its output, keyed by a cheap system fingerprint, and hand it back on the next invocation. Notes:
+
+- It is *not* R6. R6 is about skipping recomputed **work** (per-target memoization, dirty
+  worklists) and was measured to be a poor fit at target granularity. R14 is about not rebuilding
+  **derived read-only structures** whose inputs are unchanged — a strictly simpler contract.
+- Soundness is cheap if the cache is *untrusted*: every index in busPairCancel is already re-checked
+  at use, so a stale entry costs time, never soundness. The trusted ones (`domIdx`, `cands`) carry
+  a `∀ c ∈ lookup v, c ∈ cs.algebraicConstraints` obligation, which a fingerprint on
+  `cs.algebraicConstraints` does not discharge — those either stay per-invocation or need the
+  membership proof carried in the cache.
+- Sizing before building: on sha256 `apc_001` busPairCancel would save on the order of 1 s of its
+  3.2 s; the same lever exists in reencode, domainBatch, gauss and flagFold, whose per-invocation
+  index builds were never separately attributed.
+- The cheap slice that is already **done** and should be done first everywhere else: decide
+  *eagerness* per invocation instead of caching across them (`denseThunkIf` + a cheap
+  "will any candidate exist?" predicate, 0.84–0.92x on busPairCancel). See also the `Thunk` note
+  below.
+
+**`Thunk.get` marks its value multi-threaded — always** (verified in the 4.32.2 runtime
+disassembly: `lean_thunk_get_core` calls `lean_apply_1` then `lean_mark_mt` unconditionally). So
+forcing a thunk walks the whole freshly-built value graph and permanently flips every object in it
+to atomic refcounting — `lean_dec_ref_cold` is 18–20 % of the *whole run's* samples, in `profile`
+and in `run` alike. Consequences, all measured on busPairCancel:
+   - a `Thunk` holding a large value that will certainly be forced is **slower** than building it
+     eagerly (prepared records: 0.91x by switching to `Thunk.pure`);
+   - but unconditional eagerness is worse still when some invocations never force it
+     (3672 → 3966 ms);
+   - so the decision belongs at the call site, per invocation (`denseThunkIf`, above). `Thunk.pure`
+     and `Thunk.mk` have the same `.get`, so the choice is invisible to every proof.
+
 ### Runtime dead ends (measured; do not re-propose without new evidence)
 
 - **Dropping gauss's second source-order sweep** (entry 160): looks provably fruitless over a prime

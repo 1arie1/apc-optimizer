@@ -2,16 +2,16 @@ import ApcOptimizer.Implementation.OptimizerPasses.AddrDiseqPre
 
 set_option autoImplicit false
 
-/-! # Constant-address-key position index for `busPairCancel`'s region scans
+/-! # Address-key position index for `busPairCancel`'s region scans
 
-The mid/shield scans walked every position of their region per candidate pair — with tens of
-thousands of accepted drops each re-scanning an `O(prefix)` region, the scan *volume* dominated
-the pass. For a candidate whose address slots are all constants, a message can only fail the
-region tests if it is on the same bus and either shares the candidate's constant address key or
-has a non-constant key: every other position is refuted by the bus-id or constant-disequality arm
-and contributes the identity to the scan fold. `DenseKeyIdx` buckets each bus's positions by
-constant address key (plus a `sym` list for non-constant keys, and both as arrays), so the scans
-below visit only the same-key and symbolic positions — and the shield stops at the first position
+A message can only fail a candidate's region tests if it is on the candidate's bus: every other
+position is refuted by the bus-id arm and contributes the identity to the scan fold. For a candidate
+whose address slots are all constants, it must in addition share the candidate's constant address
+key or have a non-constant one, since a differing constant key is refuted by the constant-disequality
+arm. `DenseKeyIdx` therefore indexes each bus's positions three ways — by constant address key
+(`byKey`), the non-constant-key ones (`sym`), and all of them (`all`, what a candidate with a
+non-constant key of its own scans) — so a scan visits only positions that can decide it. The walks
+are bounded to the position window by `denseLowerBound`, and the shield stops at the first position
 that decides it. `Proofs/BusPairCancelKeyIdx.lean` proves the builder sound and packages the scan
 results back into the full-region forms (`denseRegionTests`). -/
 
@@ -31,15 +31,18 @@ def denseAddrKeyOf (shape : MemoryBusShape) (bi : BusInteraction (DenseExpr p)) 
 def denseKeyHash (k : List (ZMod p)) : UInt64 :=
   k.foldl (fun h c => mixHash h (hash c.val)) 7
 
-/-- Per-bus constant-key position index: `byKey` buckets the bus's all-constant-key positions by
-    key hash, `sym` lists its non-constant-key positions; both ascending. -/
+/-- Per-bus position index: `byKey` buckets the bus's all-constant-key positions by key hash, `sym`
+    lists its non-constant-key positions, `all` every position on the bus (what a candidate with a
+    non-constant key of its own must scan); all ascending. -/
 structure DenseKeyIdx (p : ℕ) where
   byKey : Std.HashMap UInt64 (List Nat)
   sym : List Nat
-  /-- `byKey`/`sym` as ascending arrays: the runtime walks these (`denseLiveAllGated`,
+  all : List Nat
+  /-- `byKey`/`sym`/`all` as ascending arrays: the runtime walks these (`denseLiveAllGated`,
       `denseShieldEarly`) instead of materializing a filtered list per candidate. -/
   byKeyA : Std.HashMap UInt64 (Array Nat)
   symA : Array Nat
+  allA : Array Nat
 
 /-- Insert one position (front of its bucket; the builder folds positions descending). -/
 def denseKeyIdxAdd (shape : MemoryBusShape) (busId : Nat)
@@ -51,36 +54,62 @@ def denseKeyIdxAdd (shape : MemoryBusShape) (busId : Nat)
       match denseAddrKeyOf shape m with
       | some k =>
           let h := denseKeyHash k
-          { idx with byKey := idx.byKey.insert h (pos :: idx.byKey.getD h []) }
-      | none => { idx with sym := pos :: idx.sym }
+          { idx with byKey := idx.byKey.insert h (pos :: idx.byKey.getD h []),
+                     all := pos :: idx.all }
+      | none => { idx with sym := pos :: idx.sym, all := pos :: idx.all }
     else idx
   | none => idx
 
 def denseKeyIdxBuild (shape : MemoryBusShape) (busId : Nat)
     (arr : Array (BusInteraction (DenseExpr p))) : DenseKeyIdx p :=
-  let idx := (List.range arr.size).foldr (denseKeyIdxAdd shape busId arr) ⟨∅, [], ∅, #[]⟩
-  { idx with byKeyA := idx.byKey.map (fun _ l => l.toArray), symA := idx.sym.toArray }
+  let idx := (List.range arr.size).foldr (denseKeyIdxAdd shape busId arr) ⟨∅, [], [], ∅, #[], #[]⟩
+  { idx with byKeyA := idx.byKey.map (fun _ l => l.toArray), symA := idx.sym.toArray,
+             allA := idx.all.toArray }
+
+/-! ## Windowed access to the ascending index arrays
+
+Every scan below runs over a position window (`[lo, hi)` for the mid test, `[0, bound)` for the
+shield). The arrays are ascending, so the window is a contiguous index range, and the walks are
+bounded by `denseLowerBound` instead of testing every entry: entries outside the range fail the
+scan's own gate by sortedness, so bounding them away is value-identical. -/
+
+/-- Binary search in the ascending `a` over index range `[lo, hi)`. -/
+def denseLowerBoundGo (a : Array Nat) (x lo hi : Nat) : Nat :=
+  if lo < hi then
+    let mid := (lo + hi) / 2
+    if (a[mid]?).getD 0 < x then denseLowerBoundGo a x (mid + 1) hi
+    else denseLowerBoundGo a x lo mid
+  else lo
+  termination_by hi - lo
+  decreasing_by all_goals omega
+
+/-- The first index of the ascending `a` whose entry is `≥ x` (`a.size` if there is none). -/
+def denseLowerBound (a : Array Nat) (x : Nat) : Nat := denseLowerBoundGo a x 0 a.size
 
 /-! ## The index scans
 
-The mid test walks the index arrays with a window gate; the shield walks them **descending with an
-early exit**, since its verdict is decided by the topmost visited live position `q` with
-`¬P q ∨ Q q` (`ok = P q`, `true` when there is none — `denseShieldScanSegP_true_of`), so the
-positions below the last provable receive are never tested. Both walks re-check the position window
-at every entry, so the index needs no range search. -/
+The mid test walks the index arrays over the window's index range; the shield walks them
+**descending from the window's top with an early exit**, since its verdict is decided by the topmost
+visited live position `q` with `¬P q ∨ Q q` (`ok = P q`, `true` when there is none —
+`denseShieldScanSegP_true_of`), so the positions below the last provable receive are never tested.
+Both walks re-check the window at every entry, so the bounds only need to be sound, not tight. -/
 
-/-- `P` at every live entry of `a` (indices `[0, n)`) whose position lies in `[lo, hi)`. -/
-def denseLiveAllGated {α : Type} (P : α → Bool) (preArr : Array α) (alive : Array Bool)
-    (a : Array Nat) (lo hi : Nat) : Nat → Bool
+/-- `P` at every live entry of `a` (indices `[start, n)`) whose position lies in `[lo, hi)`. The
+    caller passes `start = denseLowerBound a lo` and `n = denseLowerBound a hi`, so the walk covers
+    exactly the entries the window gate can accept. -/
+@[specialize] def denseLiveAllGated {α : Type} (P : α → Bool) (preArr : Array α) (alive : Array Bool)
+    (a : Array Nat) (lo hi start : Nat) : Nat → Bool
   | 0 => true
   | n + 1 =>
-    (match a[n]? with
-     | some pos =>
-       if decide (lo ≤ pos) && decide (pos < hi) && alive[pos]?.getD false then
-         (preArr[pos]?).elim true P
-       else true
-     | none => true)
-      && denseLiveAllGated P preArr alive a lo hi n
+    if n < start then true
+    else
+      (match a[n]? with
+       | some pos =>
+         if decide (lo ≤ pos) && decide (pos < hi) && alive[pos]?.getD false then
+           (preArr[pos]?).elim true P
+         else true
+       | none => true)
+        && denseLiveAllGated P preArr alive a lo hi start n
 
 /-- One descending step of the shield: `some v` when position `pos` decides it (`v = P pos`), `none`
     when `pos` is outside the window, dead, or refuted without being a provable receive. -/
@@ -98,7 +127,7 @@ def denseLiveAllGated {α : Type} (P : α → Bool) (preArr : Array α) (alive :
 /-- Descending early-exit shield over the entries of the two ascending arrays below `bound`: the
     larger of the two current tails is tested first, so entries are visited in descending position
     order and the walk stops at the topmost deciding one. `fuel` bounds the walk (`nb + ns`). -/
-def denseShieldEarly {α : Type} (P Q : α → Bool) (preArr : Array α) (alive : Array Bool)
+@[specialize] def denseShieldEarly {α : Type} (P Q : α → Bool) (preArr : Array α) (alive : Array Bool)
     (b s : Array Nat) (bound : Nat) : Nat → Nat → Nat → Bool
   | 0, _, _ => true
   | fuel + 1, nb, ns =>
@@ -122,14 +151,17 @@ def denseShieldEarly {α : Type} (P Q : α → Bool) (preArr : Array α) (alive 
         | some v => v
         | none => denseShieldEarly P Q preArr alive b s bound fuel nb (ns - 1)
 
-/-- Descending early-exit shield over the whole segment `[0, n)` — the symbolic-key fallback, which
-    has no index to walk. -/
-def denseShieldEarlySeg {α : Type} (P Q : α → Bool) (preArr : Array α) (alive : Array Bool)
-    (bound : Nat) : Nat → Bool
-  | 0 => true
-  | n + 1 =>
-    match denseShieldDecide P Q preArr alive bound n with
-    | some v => v
-    | none => denseShieldEarlySeg P Q preArr alive bound n
+/-- Both region tests for one candidate over its two scan arrays: the mid walk over the index range
+    the window `[i + 1, j)` maps to, and the descending shield below `i`. The shield's bounds sit
+    inside the `&&`, so a failed mid test skips them. -/
+@[inline] def denseScanDecide {α : Type} (Pmid Ppre Q : α → Bool) (preArr : Array α)
+    (alive : Array Bool) (b s : Array Nat) (i j : Nat) : Bool :=
+  (denseLiveAllGated Pmid preArr alive b (i + 1) j (denseLowerBound b (i + 1))
+      (denseLowerBound b j)
+    && denseLiveAllGated Pmid preArr alive s (i + 1) j (denseLowerBound s (i + 1))
+        (denseLowerBound s j))
+  && (let nb := denseLowerBound b i
+      let ns := denseLowerBound s i
+      denseShieldEarly Ppre Q preArr alive b s i (nb + ns) nb ns)
 
 end ApcOptimizer.Dense

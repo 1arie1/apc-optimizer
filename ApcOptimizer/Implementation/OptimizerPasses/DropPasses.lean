@@ -11,11 +11,53 @@ variable {p : ℕ}
 
 /-! ## Tautology-lookup removal (dense) -/
 
+/-- `constValue?` deciding the fold's shape instead of building it: a non-constant subterm
+    short-circuits, so no folded copy of the expression is allocated. The multiplication arms return
+    the annihilating factor itself rather than a zero literal, which is the same value there. -/
+def DenseExpr.constValueImpl : DenseExpr p → Option (ZMod p)
+  | .const n => some n
+  | .var _ => none
+  | .add a b =>
+    match a.constValueImpl with
+    | none => none
+    | some x =>
+      match b.constValueImpl with
+      | none => none
+      | some y => some (zmodAdd x y)
+  | .mul a b =>
+    match a.constValueImpl with
+    | some x =>
+      if zmodIsZero x then some x
+      else
+        match b.constValueImpl with
+        | none => none
+        | some y => some (zmodMul x y)
+    | none =>
+      match b.constValueImpl with
+      | some y => if zmodIsZero y then some y else none
+      | none => none
+
 /-- Constant value of a dense expression (fold then require a literal). -/
 def DenseExpr.constValue? (e : DenseExpr p) : Option (ZMod p) :=
   match e.fold with
   | .const c => some c
   | _ => none
+
+@[csimp] theorem DenseExpr_constValue?_eq_impl :
+    @DenseExpr.constValue? = @DenseExpr.constValueImpl := by
+  funext q e
+  induction e with
+  | const n => rfl
+  | var i => rfl
+  | add a b iha ihb =>
+      simp only [DenseExpr.constValue?, DenseExpr.fold] at *
+      rw [DenseExpr.constValueImpl, ← iha, ← ihb]
+      cases a.fold <;> cases b.fold <;> simp [DenseExpr.foldAdd] <;> split_ifs <;> simp
+  | mul a b iha ihb =>
+      simp only [DenseExpr.constValue?, DenseExpr.fold] at *
+      rw [DenseExpr.constValueImpl, ← iha, ← ihb]
+      cases a.fold <;> cases b.fold <;>
+        simp [DenseExpr.foldMul] <;> (try split_ifs) <;> simp_all
 
 /-- Constant values of a dense payload list. -/
 def denseConstValues? : List (DenseExpr p) → Option (List (ZMod p))

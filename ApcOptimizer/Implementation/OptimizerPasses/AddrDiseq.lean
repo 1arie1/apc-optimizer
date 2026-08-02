@@ -162,14 +162,19 @@ theorem addVars_of_none {c : DenseExpr p} (h : ∀ v, denseTwoRootOf? c v = none
               rw [← addVarsLins_eq h1 h2 T vs]
               simp [addVarsFast, h1, h2]
 
-/-- Fold `addVars` over a constraint list. -/
-def addAll : DenseTwoRootMap p → (pending : List (DenseExpr p)) → DenseTwoRootMap p
+/-- Fold `addVars` over a constraint list, with the candidate variables of each constraint
+    restricted to `vars`: an entry for a variable outside `vars` is never looked up
+    (`buildForAddrs`), and `denseTwoRootOfLins` normalizes both factors per candidate variable, so
+    this is the whole cost of the build. -/
+def addAllFor (vars : Std.HashSet VarId) :
+    DenseTwoRootMap p → (pending : List (DenseExpr p)) → DenseTwoRootMap p
   | T, [] => T
-  | T, c :: rest => addAll (addVars c T c.vars.eraseDups) rest
+  | T, c :: rest => addAllFor vars (addVars c T (c.vars.filter vars.contains).eraseDups) rest
 
-/-- Build the map for a constraint list (empty on composite `p`). -/
-def build (constraints : List (DenseExpr p)) : DenseTwoRootMap p :=
-  if Nat.Prime p then addAll empty constraints else empty
+/-- Build the map for a constraint list, indexing only the variables in `vars` (empty on
+    composite `p`). -/
+def buildFor (vars : Std.HashSet VarId) (constraints : List (DenseExpr p)) : DenseTwoRootMap p :=
+  if Nat.Prime p then addAllFor vars empty constraints else empty
 
 end DenseTwoRootMap
 
@@ -386,28 +391,30 @@ def DenseExpr.mentionsAny (s : Std.HashSet VarId) : DenseExpr p → Bool
   | .add a b => a.mentionsAny s || b.mentionsAny s
   | .mul a b => a.mentionsAny s || b.mentionsAny s
 
-/-- The variables at address-field positions of the declared memory shapes, over every interaction:
-    `denseAddrTwoRootNeq` reads exactly those payload slots (of the *candidate's* shape, so an
-    interaction on any bus can be read at another bus's address positions). -/
+/-- The variables a two-root lookup can reach: those of an address-slot expression of an
+    interaction on a memory-shaped bus, at *that bus's own* address fields. Every certificate arm
+    that reads the table is gated on the compared message being on the candidate's bus, and
+    `densePtrReductions` keys on the queried form's own variables, so no other entry is read. -/
 def denseAddrSlotVars (memShape : Nat → Option MemoryBusShape)
     (bis : List (BusInteraction (DenseExpr p))) : Std.HashSet VarId :=
-  let slots := (((bis.map (·.busId)).dedup.filterMap memShape).flatMap
-    MemoryBusShape.addressFields).dedup
   bis.foldl (fun s bi =>
-    slots.foldl (fun s slot =>
-      match bi.payload[slot]? with
-      | some e => e.vars.foldl (fun s v => s.insert v) s
-      | none => s) s) ∅
+    match memShape bi.busId with
+    | some shape =>
+      shape.addressFields.foldl (fun s slot =>
+        match bi.payload[slot]? with
+        | some e => e.vars.foldl (fun s v => s.insert v) s
+        | none => s) s
+    | none => s) ∅
 
-/-- The two-root map over just the constraints mentioning an address-slot variable. Every entry a
-    lookup can reach is unchanged: an entry for `v` is only ever inserted by a constraint mentioning
-    `v` (`addVars` folds over `c.vars`), and only address-slot variables are looked up
-    (`densePtrReductions` keys on the queried form's own variables). -/
+/-- The two-root map over just the constraints mentioning an address-slot variable, and only for
+    those variables. Every entry a lookup can reach is unchanged: an entry for `v` is only ever
+    inserted by a constraint mentioning `v` (`addVars` folds over `c.vars`), and only address-slot
+    variables are looked up (`densePtrReductions` keys on the queried form's own variables). -/
 def DenseTwoRootMap.buildForAddrs (memShape : Nat → Option MemoryBusShape)
     (bis : List (BusInteraction (DenseExpr p))) (constraints : List (DenseExpr p)) :
     DenseTwoRootMap p :=
   let vars := denseAddrSlotVars memShape bis
-  DenseTwoRootMap.build (constraints.filter (fun c => c.mentionsAny vars))
+  DenseTwoRootMap.buildFor vars (constraints.filter (fun c => c.mentionsAny vars))
 
 /-- Both address-disequality certificate tables, bundled so they thread through a pass as one
     memoized value. -/
