@@ -4,12 +4,12 @@ import ApcOptimizer.Implementation.OptimizerPasses.Proofs.FlagUnify
 
 set_option autoImplicit false
 
-/-! # Soundness for the dense flagFold drop sub-passes
+/-! # Soundness for the dense flagFold drop certificates
 
-`DensePassCorrect` for `denseBoxTautoDropF` (part B) and `densePointwiseDupDropF` (part C) of the
-`flagFold` composite (`FlagFold.lean`), plus their `DenseVerifiedPassW` values. Part B is a
-constraint-map pass (`ofEnvEq`, same environment); part C a bus-filter pass whose dropped
-interaction is accepted via its provably-kept first-of-class twin (`denseFilterBusEntailed`). -/
+`DensePassCorrect` for the box-tautology replacement (part C of `flagFold`) and the
+pointwise-duplicate bus filter (part D); `Proofs/FlagFold.lean` instantiates both. The first is a
+constraint map (`ofEnvEq`, same environment); the second a bus filter whose dropped interaction is
+accepted via its provably-kept first-of-class twin (`denseFilterBusEntailed`). -/
 
 namespace ApcOptimizer.Dense
 
@@ -35,58 +35,6 @@ theorem denseSingleVar_mem_boxTautoReplace (d : DenseConstraintSystem p)
   rw [denseBtCert_of_lt_two (by have := of_decide_eq_true hs; omega)]
   simp
 
-/-! ### The domain memo table reports only bucket-justified domains
-
-`denseBtDomCache` inserts `denseFindDomainAlg (bucket v) v` under `v` on first sight and never
-overwrites, so every entry it reports is that bucket's own verdict. This is what lets
-`denseBtCert` — whose `domOf` is otherwise untrusted — carry the box justification. -/
-
-/-- Fold invariant: every key the accumulator reports maps to its bucket's `denseFindDomainAlg`. -/
-theorem denseBtDomCacheGo_sound (domIdx : Std.HashMap VarId (List (DenseExpr p))) :
-    ∀ (vs : List VarId) (m : Std.HashMap VarId (Option (List (ZMod p)))),
-      (∀ k o, m[k]? = some o → o = denseFindDomainAlg (denseVarBucketLookup domIdx k) k) →
-      ∀ k o, (vs.foldl (fun (m : Std.HashMap VarId (Option (List (ZMod p)))) v =>
-                 if m.contains v then m
-                 else m.insert v (denseFindDomainAlg (denseVarBucketLookup domIdx v) v)) m)[k]?
-               = some o →
-        o = denseFindDomainAlg (denseVarBucketLookup domIdx k) k := by
-  intro vs
-  induction vs with
-  | nil => intro m hm k o h; exact hm k o h
-  | cons v rest ih =>
-    intro m hm k o h
-    rw [List.foldl_cons] at h
-    by_cases hc : m.contains v = true
-    · exact ih m hm k o (by rwa [if_pos hc] at h)
-    · refine ih _ ?_ k o (by rwa [if_neg hc] at h)
-      intro k' o' hk'
-      rw [Std.HashMap.getElem?_insert] at hk'
-      by_cases hvk : (v == k') = true
-      · rw [if_pos hvk] at hk'
-        have : k' = v := (eq_of_beq hvk).symm
-        subst this
-        exact (Option.some.inj hk').symm
-      · rw [if_neg hvk] at hk'
-        exact hm k' o' hk'
-
-/-- Every domain `denseBtDomCache` reports is the corresponding bucket's `denseFindDomainAlg`. -/
-theorem denseBtDomCache_sound (domIdx : Std.HashMap VarId (List (DenseExpr p)))
-    (vs : List VarId) (v : VarId) (dm : List (ZMod p))
-    (h : (denseBtDomCache domIdx vs).getD v none = some dm) :
-    denseFindDomainAlg (denseVarBucketLookup domIdx v) v = some dm := by
-  unfold denseBtDomCache at h
-  rw [Std.HashMap.getD_eq_getD_getElem?] at h
-  cases hk : (vs.foldl (fun (m : Std.HashMap VarId (Option (List (ZMod p)))) w =>
-      if m.contains w then m
-      else m.insert w (denseFindDomainAlg (denseVarBucketLookup domIdx w) w)) ∅)[v]? with
-  | none => rw [hk] at h; simp at h
-  | some o =>
-    rw [hk] at h
-    simp only [Option.getD_some] at h
-    subst h
-    exact (denseBtDomCacheGo_sound domIdx vs ∅
-      (by intro k o hko; simp at hko) v (some dm) hk).symm
-
 /-- Box-tautology replacement correctness: every replaced constraint is a tautology over its box.
 The domains come from `domOf`, which is untrusted — `hdomOf` re-derives each reported domain as the
 verdict of `denseFindDomainAlg` on `v`'s bucket, and `hidx` places that bucket inside the
@@ -95,12 +43,10 @@ satisfaction. Satisfaction is then preserved on the same environment and bus eff
 untouched. -/
 theorem DenseConstraintSystem.boxTautoReplace_denseCorrect [Fact p.Prime]
     (d : DenseConstraintSystem p) (bs : BusSemantics p) (isInput : VarId → Bool)
-    (domIdx : Std.HashMap VarId (List (DenseExpr p)))
-    (hidx : ∀ v, ∀ c ∈ denseVarBucketLookup domIdx v,
-      c ∈ denseSingleVarCs d.algebraicConstraints)
+    (bucketOf : VarId → List (DenseExpr p))
+    (hidx : ∀ v, ∀ c ∈ bucketOf v, c ∈ denseSingleVarCs d.algebraicConstraints)
     (domOf : VarId → Option (List (ZMod p)))
-    (hdomOf : ∀ v dm, domOf v = some dm →
-      denseFindDomainAlg (denseVarBucketLookup domIdx v) v = some dm) :
+    (hdomOf : ∀ v dm, domOf v = some dm → denseFindDomainAlg (bucketOf v) v = some dm) :
     DensePassCorrect isInput d (d.boxTautoReplaceWith domOf) [] bs := by
   have hzero : ∀ denv, (d.boxTautoReplaceWith domOf).satisfies bs denv →
       ∀ c ∈ d.algebraicConstraints, denseBtCert domOf c = true → c.eval denv = 0 := by
@@ -117,7 +63,7 @@ theorem DenseConstraintSystem.boxTautoReplace_denseCorrect [Fact p.Prime]
         have h := (List.mem_filter.1 hc').2
         rwa [HashedDedup.hashedEraseDups_eq] at h
       exact hsat.1 c' (denseSingleVar_mem_boxTautoReplace d domOf c' hmem hsingle)
-    have hbucket : ∀ v, ∀ c' ∈ denseVarBucketLookup domIdx v, c'.eval denv = 0 :=
+    have hbucket : ∀ v, ∀ c' ∈ bucketOf v, c'.eval denv = 0 :=
       fun v c' hc' => hdom c' (hidx v c' hc')
     have hmemdoms : ∀ vd ∈ c.vars.eraseDups.filterMap (fun v =>
         (domOf v).map (fun dm => (v, dm))), denv vd.1 ∈ vd.2 := by
@@ -129,8 +75,7 @@ theorem DenseConstraintSystem.boxTautoReplace_denseCorrect [Fact p.Prime]
           rw [hfd] at hvd'
           simp only [Option.map_some, Option.some.injEq] at hvd'
           obtain rfl := hvd'.symm
-          exact denseFindDomainAlg_sound denv (denseVarBucketLookup domIdx v) v dm
-            (hdomOf v dm hfd) (hbucket v)
+          exact denseFindDomainAlg_sound denv (bucketOf v) v dm (hdomOf v dm hfd) (hbucket v)
     have hpt := mem_denseAssignments (c.vars.eraseDups.filterMap (fun v =>
       (domOf v).map (fun dm => (v, dm)))) denv hmemdoms
     have hptz := of_decide_eq_true (List.all_eq_true.mp hall _ hpt)
@@ -190,34 +135,6 @@ theorem DenseConstraintSystem.boxTautoReplaceWith_covered {reg : VarRegistry}
   by_cases hcond : denseBtCert domOf c = true
   · rw [if_pos hcond]; intro i hi; simp [DenseExpr.vars] at hi
   · rw [if_neg hcond]; exact hc.1 c hcm
-
-/-- The part-B transform is covered. -/
-theorem denseBoxTautoDropF_covered (pw : PrimeWitness p) (reg : VarRegistry) (bs : BusSemantics p)
-    (d : DenseConstraintSystem p) (hcov : d.CoveredBy reg) :
-    (denseBoxTautoDropF pw bs d).CoveredBy reg := by
-  unfold denseBoxTautoDropF
-  split_ifs with hp
-  · exact DenseConstraintSystem.boxTautoReplaceWith_covered _ hcov
-  · exact hcov
-
-/-- The part-B transform is `DensePassCorrect`. -/
-theorem denseBoxTautoDropF_correct (pw : PrimeWitness p) (reg : VarRegistry) (bs : BusSemantics p)
-    (d : DenseConstraintSystem p) (_hcov : d.CoveredBy reg) :
-    DensePassCorrect reg.isInput d (denseBoxTautoDropF pw bs d) [] bs := by
-  unfold denseBoxTautoDropF
-  split_ifs with hp
-  · haveI : Fact p.Prime := ⟨pw.correct hp⟩
-    exact DenseConstraintSystem.boxTautoReplace_denseCorrect d bs reg.isInput _
-      (denseVarBucket_mem DenseExpr.vars (denseSingleVarCs d.algebraicConstraints)) _
-      (fun v dm h => denseBtDomCache_sound _ _ v dm h)
-  · exact DensePassCorrect.refl reg.isInput d bs
-
-/-- The dense box-tautology drop pass (part B of the flagFold composite). -/
-def denseBoxTautoDropPass (pw : PrimeWitness p) : DenseVerifiedPassW p :=
-  DenseVerifiedPassW.of (fun bs _ d => denseBoxTautoDropF pw bs d) (fun _ _ _ => [])
-    (fun reg bs _ d hcov => denseBoxTautoDropF_covered pw reg bs d hcov)
-    (fun _ _ _ _ _ => by intro x hx; simp at hx)
-    (fun reg bs _ d hcov => denseBoxTautoDropF_correct pw reg bs d hcov)
 
 /-! ## Part C: pointwise-duplicate stateless-check removal -/
 
@@ -369,7 +286,7 @@ theorem densePdFirst_keep (bs : BusSemantics p) (domIdx : Std.HashMap VarId (Lis
 
 /-- Pointwise-duplicate drop correctness, over an arbitrary keep-predicate that only drops
     certified-droppable interactions (`hkeep`). A dropped interaction's first-of-class twin is kept,
-    so it is accepted. `densePointwiseDupDropF` instantiates `keep` with the verdict map. -/
+    so it is accepted. `ffPdDropWith` instantiates `keep` with the verdict map. -/
 theorem DensePassCorrect.densePointwiseDupDrop [Fact p.Prime]
     (d : DenseConstraintSystem p) (bs : BusSemantics p) (isInput : VarId → Bool)
     (keep : BusInteraction (DenseExpr p) → Bool)
@@ -423,33 +340,5 @@ theorem DensePassCorrect.densePointwiseDupDrop [Fact p.Prime]
         have hob := hsat.2 b hbout
         rw [heq] at hob
         exact hob hm
-
-/-- The part-C transform is covered (bus filter keeps a subset; constraints untouched). -/
-theorem densePointwiseDupDropF_covered (pw : PrimeWitness p) (reg : VarRegistry) (bs : BusSemantics p)
-    (d : DenseConstraintSystem p) (hcov : d.CoveredBy reg) :
-    (densePointwiseDupDropF pw bs d).CoveredBy reg := by
-  unfold densePointwiseDupDropF
-  split_ifs with hp
-  · exact DenseConstraintSystem.filterBus_covered hcov
-  · exact hcov
-
-/-- The part-C transform is `DensePassCorrect`. -/
-theorem densePointwiseDupDropF_correct (pw : PrimeWitness p) (reg : VarRegistry) (bs : BusSemantics p)
-    (d : DenseConstraintSystem p) (_hcov : d.CoveredBy reg) :
-    DensePassCorrect reg.isInput d (densePointwiseDupDropF pw bs d) [] bs := by
-  unfold densePointwiseDupDropF
-  split_ifs with hp
-  · haveI : Fact p.Prime := ⟨pw.correct hp⟩
-    refine DensePassCorrect.densePointwiseDupDrop d bs reg.isInput _ ?_
-    intro bi _ hkf
-    exact densePdVerdictKeep_false _ bi hkf
-  · exact DensePassCorrect.refl reg.isInput d bs
-
-/-- The dense pointwise-duplicate drop pass (part C of the flagFold composite). -/
-def densePointwiseDupDropPass (pw : PrimeWitness p) : DenseVerifiedPassW p :=
-  DenseVerifiedPassW.of (fun bs _ d => densePointwiseDupDropF pw bs d) (fun _ _ _ => [])
-    (fun reg bs _ d hcov => densePointwiseDupDropF_covered pw reg bs d hcov)
-    (fun _ _ _ _ _ => by intro x hx; simp at hx)
-    (fun reg bs _ d hcov => densePointwiseDupDropF_correct pw reg bs d hcov)
 
 end ApcOptimizer.Dense

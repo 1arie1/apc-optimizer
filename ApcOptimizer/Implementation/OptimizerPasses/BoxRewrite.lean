@@ -5,9 +5,10 @@ set_option autoImplicit false
 
 /-! # Dense box-certified multilinear rewriting — flagFold's `boxRewritePass` sub-pass
 
-Runtime definitions for `boxRewrite` (proof in `Proofs/BoxRewrite.lean`). `denseBoxRewriteF` takes its
-OWN `DegreeBound` (to decide "over-bound" and rewrite payloads), not the outer `guardDegree`
-wrapper's.
+Runtime definitions for `boxRewrite` (proof in `Proofs/BoxRewrite.lean`; assembled into `flagFold`
+in `FlagFold.lean`). `boxRewriteWith` takes its OWN `DegreeBound` — to decide "over-bound" and to
+rewrite payloads — not the outer `guardDegree` wrapper's, and its `domOf` is untrusted (the caller
+justifies the domains it reports, `denseBrCert_sound`'s `hdomOf`).
 
 `denseMulMono` and `denseCanonEq` each `List.mergeSort` on `VarId.index` only to turn equal
 multisets into syntactically equal lists, regardless of construction order; the exact key is
@@ -82,16 +83,18 @@ def denseCanonEq (l1 l2 : DenseLinExpr p) : Bool :=
     == l2.terms.mergeSort (fun a b => decide (a.1.index ≤ b.1.index))
 
 /-- Certificate: on every point of the joint small-domain box, both expressions partially evaluate
-    to the same affine form in the remaining symbolic variables. -/
-def denseBrCert (singles : List (DenseExpr p)) (e e' : DenseExpr p) : Bool :=
+    to the same affine form in the remaining symbolic variables. `domOf` is untrusted here —
+    soundness comes from the caller's justification of the domains it reports
+    (`denseBrCert_sound`'s `hdomOf`). -/
+def denseBrCert (domOf : VarId → Option (List (ZMod p))) (e e' : DenseExpr p) : Bool :=
   2 ≤ e.vars.eraseDups.length &&
   (let jv := (e.vars ++ e'.vars).eraseDups
    let boxed := jv.filter (fun v =>
-     match denseFindDomainAlg singles v with
+     match domOf v with
      | some d => d.length ≤ 2
      | none => false)
    let doms := boxed.filterMap (fun v =>
-     (denseFindDomainAlg singles v).map (fun d => (v, d)))
+     (domOf v).map (fun d => (v, d)))
    decide (doms.map Prod.fst = boxed) &&
    decide ((doms.map (fun vd => vd.2.length)).prod ≤ 16) &&
    (denseAssignments doms).all (fun pt =>
@@ -103,39 +106,33 @@ def denseBrCert (singles : List (DenseExpr p)) (e e' : DenseExpr p) : Bool :=
 
 /-- Per-expression rewrite: only over-bound expressions, only when the reduction is within bound,
     introduces no variable, and is certified. -/
-def denseBrRw (singles : List (DenseExpr p)) (bound : Nat) (e : DenseExpr p) : DenseExpr p :=
+def denseBrRw (domOf : VarId → Option (List (ZMod p))) (bound : Nat) (e : DenseExpr p) :
+    DenseExpr p :=
   if e.degree ≤ bound then e
   else
     let boolSet := e.vars.eraseDups.filter (fun v =>
-      match denseFindDomainAlg singles v with
+      match domOf v with
       | some d => d.length ≤ 2
       | none => false)
     match denseReduceExpr boolSet e with
     | some e' =>
-      if e'.degree ≤ bound && e'.vars.all (fun v => v ∈ e.vars) && denseBrCert singles e e'
+      if e'.degree ≤ bound && e'.vars.all (fun v => v ∈ e.vars) && denseBrCert domOf e e'
       then e' else e
     | none => e
 
 /-- The per-interaction rewrite (bus id untouched). -/
-def denseBrBi (singles : List (DenseExpr p)) (db : DegreeBound)
+def denseBrBi (domOf : VarId → Option (List (ZMod p))) (db : DegreeBound)
     (bi : BusInteraction (DenseExpr p)) : BusInteraction (DenseExpr p) :=
   { busId := bi.busId,
-    multiplicity := denseBrRw singles db.busInteractions bi.multiplicity,
-    payload := bi.payload.map (denseBrRw singles db.busInteractions) }
+    multiplicity := denseBrRw domOf db.busInteractions bi.multiplicity,
+    payload := bi.payload.map (denseBrRw domOf db.busInteractions) }
 
 /-- Rewrites every over-bound expression to a certified lower-degree equivalent by reducing
     multilinearly over small-domain (boxed) variables — e.g. for a boolean `x`, `x * x` collapses to
     `x`. The reduction is heuristic; `denseBrCert` re-verifies it pointwise. -/
-def DenseConstraintSystem.boxRewrite (d : DenseConstraintSystem p) (b : DegreeBound) :
-    DenseConstraintSystem p :=
-  let singles := denseSingleVarCs d.algebraicConstraints
-  { algebraicConstraints := d.algebraicConstraints.map (denseBrRw singles b.identities),
-    busInteractions := d.busInteractions.map (denseBrBi singles b) }
-
-/-- The rewriter as a standalone pass runtime: guarded on `p` prime (re-checked at runtime),
-    identity otherwise. -/
-def denseBoxRewriteF (pw : PrimeWitness p) (b : DegreeBound) (_bs : BusSemantics p)
-    (d : DenseConstraintSystem p) : DenseConstraintSystem p :=
-  if pw.isPrime = true then d.boxRewrite b else d
+def DenseConstraintSystem.boxRewriteWith (d : DenseConstraintSystem p)
+    (domOf : VarId → Option (List (ZMod p))) (b : DegreeBound) : DenseConstraintSystem p :=
+  { algebraicConstraints := d.algebraicConstraints.map (denseBrRw domOf b.identities),
+    busInteractions := d.busInteractions.map (denseBrBi domOf b) }
 
 end ApcOptimizer.Dense

@@ -6014,3 +6014,82 @@ left-nested append over ~283 invocations, on a list that reaches ~25 k entries a
 variables) and then `decodeDerivs` over the whole thing at the exit. Neither is timed anywhere.
 
 **Worked: yes.**
+
+### 165. Runtime: flagFold rebuilt — one shared domain table, gated certificates, a proposing sweep (0.17–0.32x on the pass, sha256 total 0.92x, SP1 keccak 0.67x)
+
+The #1 pass on three of four representatives after entry 164 re-based the numbers: sha256
+`apc_001` 3 966 ms (9.8 % of the run), keccak 425 ms (11.2 %), openvm-eth `apc_067` 157 ms (21.5 %),
+SP1 keccak 914 ms (39 %). `flagFold` is four `DenseVerifiedPassW`s under one `guardDegree`; this
+entry fuses them into one transform and rebuilds what they were each recomputing.
+
+**Where the time was** (`IO` phase probe in `Main.lean`, summed over cleanup invocations, sha256
+`apc_001`): A `fxSubst` 512 ms, B `boxRewrite` 343, C `boxTautoDrop` 1 057, D `pointwiseDupDrop`
+1 969 (sweep 914, **re-verification 772**, `domIdx` 217, filter 66). `perf` said 43 % of the pass
+was allocator + refcount + closure application — a representation problem, and these five findings
+said which:
+
+1. **Part D's re-verification refuted work its own sweep manufactured.** `densePdKeep` is
+   *value*-scoped — `bis.findIdx? (· == bi)` locates the **first position holding that value** — so
+   an exact duplicate can never be dropped by it: the earlier copy *is* the position it tests at.
+   The positional sweep proposed every later exact duplicate anyway, and each was refuted by a
+   whole-list deep-equality scan plus a prefix of `denseMsgEqCert`s. sha256 cycle 8: 310 proposals,
+   **0 accepted, 522 ms**; across the run `nverd = 0` everywhere.
+2. **Part D built a per-slot signature array for every interaction** (one `Array` plus one boxed
+   `(UInt64 × UInt64)` per slot, from two tree walks) and compared them through `Array.isEqv`'s
+   closure. 83 564 interactions × ~5 slots in cycle 0; the probe that consumes them needs slot 0.
+3. **Part A built a `denseVarBucket` over every constraint on every invocation** (201 036 of them)
+   for `denseFuPairData?`, which is reached only when two interactions match on the scaled-check
+   key. `solved = 0` on every invocation of every OpenVM case measured.
+4. **`denseSingleVarCs` ran three times per invocation** (parts B, C, D), each time building a
+   `Std.HashMap` per constraint to ask whether it has one distinct variable, plus a fourth
+   whole-system walk (`flatMap DenseExpr.vars`, 710 146 elements) to seed part C's domain memo.
+5. **Part C's certificate front-loaded its most expensive test**: `hashedEraseDups c.vars` for every
+   constraint before it could reject on "some variable has no finite domain", which is what rejects
+   almost all of them and which the first variable usually decides.
+
+**What it is now.** One `VarId.index`-keyed domain table per constraint-list version, built by a
+scalar fail-fast walk plus one `denseRootsIn` per single-variable bucket, serving parts B, C and D.
+Part A's index is a `Thunk` and its candidates come from an allocation-free coefficient walk
+(`ffCoeffAt`) behind a "slot 0 has ≥ 2 distinct variables" gate. Part B is skipped whole when
+nothing is over its bound. Part C rejects on `ffAllBoxed`, an allocation-free walk that is one of
+`denseBtCert`'s own conjuncts. Part D's sweep memoizes one verdict per *distinct value*, keys its
+representative index on a **rigid payload hash** (the structural hash of every variable-free slot,
+wildcarding the rest) together with the slot-0 hash and each slot-0 **carrier**, and fills carrier
+Blooms in only on first comparison.
+
+MEASURED (this box, serial, interleaved, 3 reps best-of; sha256 and SP1 keccak single-shot),
+pass / total, all against `origin/main`'s binary:
+
+| case | pass | ratio | total | ratio |
+|---|---|---:|---|---:|
+| sha256 `apc_001` | 3 966 → **1 278** | **0.32x** | 40 415 → 37 203 | **0.92x** |
+| SP1 keccak `apc_001` | 914 → **157** | **0.17x** | 2 350 → 1 581 | **0.67x** |
+| keccak `apc_001` | 425 → **101** | 0.24x | 3 776 → 3 387 | 0.90x |
+| wasm-eth `apc_012` | 392 → **72** | 0.18x | 4 984 → 4 658 | 0.93x |
+| wasm-eth `apc_063` | 299 → **70** | 0.23x | 4 187 → 3 901 | 0.93x |
+| wasm-eth `apc_036` | 295 → **70** | 0.24x | 4 115 → 3 840 | 0.93x |
+| openvm-eth `apc_067` | 157 → **86** | 0.55x | 731 → 662 | 0.91x |
+| openvm-eth `apc_006` | 54 → **13** | 0.24x | 528 → 479 | 0.91x |
+
+No other pass regressed. `opt-export` is **byte-identical to `origin/main`** on 11 OpenVM and 3 SP1
+cases — by construction, since every certificate the pass adopts is one of the originals.
+
+**The proof strategy is the finding worth keeping: nothing new is trusted.** The sweep, the
+candidate generator and the carrier analysis are *proposal generators*; the decisions are still
+`denseBtCert`, `denseBrCert`, `denseFxCheckWith` and `densePdKeep`. That made ~370 new proof lines
+(and deleted 130) rather than the ~1 000 a re-proved sweep would need, and it is what keeps the
+output identical. Two generalisations carry it: `denseBrCert_sound` and
+`boxTautoReplace_denseCorrect` now take an arbitrary `bucketOf : VarId → List (DenseExpr p)` instead
+of the `singles` list, so the table's buckets need only *contain single-variable constraints of the
+system* — they need not be the exact mention-filtered sublists. A wrong bucket costs domains, never
+soundness.
+
+**Measured dead ends** (all built, all rejected): a `Thunk`-per-variable *lazy* domain table moves
+the cost from the build into part C and loses 4 % — `ffAllBoxed` forces essentially every entry, so
+the eager build is right; deferring the per-slot hash arrays alongside the carrier Blooms is slower
+(the hashes are a by-product of the value hash every interaction needs anyway); and a first version
+that deleted `densePdKeep` outright, making the sweep's own rule the semantics, was the same speed
+everywhere but `apc_067` while needing its own soundness proof over a mutable loop *and* giving up
+byte-identical output.
+
+**Worked: yes.**
