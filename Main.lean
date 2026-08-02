@@ -262,9 +262,14 @@ def cmdOptExport (vm inFile outFile : String) : IO Unit :=
 The whole pipeline runs over the dense `VarId` representation (`ApcOptimizer/Implementation/`
 `OptimizerPasses/`), so the profiler steps the dense `preludePasses` / `cleanupPasses` / `codaPasses`
 lists the optimizer actually runs: it encodes once at the pipeline entry, threads a `⟨reg, dense
-system, coverage⟩` bundle from pass to pass and iteration to iteration, forces per-pass output with
-the **dense** count helpers (no decode), and decodes once at the pipeline output. Encode/decode are
-reported on their own lines and never charged to any pass. -/
+system, coverage⟩` bundle from pass to pass and iteration to iteration, and decodes once at the
+pipeline output. Encode/decode are reported on their own lines and never charged to any pass.
+
+A pass's reported time is the pass and nothing else: `denseApplyTimed` adds no work of its own
+(see its note on why the output needs no forcing), so the only shared cost inside it is the
+`guardDegree` wrapper `cleanupPasses` puts on every entry. What the profiler does *not* see is the
+derivation list — it threads `reg`/`out`/`coverage` and drops `derivs`, while `pipeline` appends
+them at every `andThen` and decodes them at the exit. -/
 
 /-- The threaded dense cleanup state: the registry, the dense system, and its coverage proof (erased
     at runtime — it just lets `DenseVerifiedPassW` application typecheck). -/
