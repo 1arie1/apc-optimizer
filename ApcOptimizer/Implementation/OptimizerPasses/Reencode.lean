@@ -2319,15 +2319,23 @@ def denseRncDfs (zero : ZMod p) (doms : Array (Array (ZMod p)))
 
 /-! ### The candidate -/
 
-/-- Everything an accept needs about a candidate group, computed once. -/
+/-- Everything an accept needs about a candidate group. The interpolation polynomials, the bit
+    patterns and the image table are `Thunk`s: the degree pre-gate rejects nearly every candidate
+    (13.5 k of 13.6 k on sha256 `apc_001`) and decides without them (`denseRncDegRW`), so building
+    them there is the pass's largest piece of wasted work. -/
 structure DenseRncCand (p : ℕ) where
   bits : List VarId
-  hm : Std.HashMap VarId (DenseExpr p)
-  patts : List (List (VarId × ZMod p))
-  pattsA : Array (List (VarId × ZMod p))
-  /-- Per pattern, the interpolation image of each group variable (group order). A `Thunk`: only the
-      certificate and the derivations read it, and nearly every candidate is rejected by the degree
-      pre-gate before that. -/
+  /-- `|bits|`, the degree of every interpolation polynomial. -/
+  k : Nat
+  /-- The padded survivor table: per bit pattern, the group's values in group order. The image of
+      the group under the interpolation at pattern `t` is row `t` (the indicators are `δ` on the
+      patterns), which is what lets the pre-gate work off values alone. -/
+  vals : Array (Array (ZMod p))
+  hm : Thunk (Std.HashMap VarId (DenseExpr p))
+  patts : Thunk (List (List (VarId × ZMod p)))
+  pattsA : Thunk (Array (List (VarId × ZMod p)))
+  /-- Per pattern, the interpolation image of each group variable, evaluated from `hm` — the
+      certificate checks it against `vals` rather than assuming it. -/
   imgs : Thunk (Array (Array (ZMod p)))
   /-- The covered constraints compiled over the group (`.ix` = group index), in position order. -/
   ces : List (IExpr p)
@@ -2353,8 +2361,8 @@ def denseRncInterp (ctx : DenseRncCtx p) (inds : Array (DenseExpr p))
     decreasing_by omega
   (go 0 (.const ctx.ops.zero)).fold
 
-/-- Build the candidate: covered set, domains, box, survivors, bits, interpolations, images.
-    Proof-free — `denseRncCert` re-verifies. -/
+/-- Build the candidate: covered set, domains, box, survivors, bits. Proof-free — `denseRncCert`
+    re-verifies. -/
 def denseRncBuild (ctx : DenseRncCtx p) (reg : VarRegistry) (st : DenseRncState p)
     (xs : List VarId) (freshBase : String) :
     VarRegistry × Option (DenseRncCand p) × DenseRncState p :=
@@ -2382,17 +2390,20 @@ def denseRncBuild (ctx : DenseRncCtx p) (reg : VarRegistry) (st : DenseRncState 
             if k ≥ xs.length then (reg, none, st)
             else
               let (reg1, bits) := denseRegisterBits reg freshBase k
-              let patts := denseAssignments (denseBitBox bits)
-              let pattsA := patts.toArray
-              let vals := survs ++ Array.replicate (pattsA.size - survs.size) (survs.getD 0 #[])
-              let inds := pattsA.map denseIndicatorExpr
-              let hm := Std.HashMap.ofList (xs.zipIdx.map
-                (fun xj => (xj.1, denseRncInterp ctx inds vals xj.2)))
-              let imgs := Thunk.mk (fun _ => pattsA.map (fun aβ =>
+              let vals := survs ++ Array.replicate (2 ^ k - survs.size) (survs.getD 0 #[])
+              let patts : Thunk (List (List (VarId × ZMod p))) :=
+                Thunk.mk (fun _ => denseAssignments (denseBitBox bits))
+              let pattsA : Thunk (Array (List (VarId × ZMod p))) :=
+                Thunk.mk (fun _ => patts.get.toArray)
+              let hm : Thunk (Std.HashMap VarId (DenseExpr p)) := Thunk.mk (fun _ =>
+                let inds := pattsA.get.map denseIndicatorExpr
+                Std.HashMap.ofList (xs.zipIdx.map
+                  (fun xj => (xj.1, denseRncInterp ctx inds vals xj.2))))
+              let imgs := Thunk.mk (fun _ => pattsA.get.map (fun aβ =>
                 let env := denseEnvOfFast aβ
-                (xs.toArray).map (fun x => ((hm[x]?).getD (.var x)).evalFast env)))
-              (reg1, some { bits := bits, hm := hm, patts := patts, pattsA := pattsA, imgs := imgs,
-                            ces := ces, survs := survs }, st)
+                (xs.toArray).map (fun x => ((hm.get[x]?).getD (.var x)).evalFast env)))
+              (reg1, some { bits := bits, k := k, vals := vals, hm := hm, patts := patts,
+                            pattsA := pattsA, imgs := imgs, ces := ces, survs := survs }, st)
 
 /-! ### The checked certificate
 
@@ -2404,7 +2415,7 @@ def denseRncCert (ctx : DenseRncCtx p) (st : DenseRncState p) (xs : List VarId)
   let n := xs.length
   decide (cd.bits.length < n) &&
   decide (cd.bits.Nodup) &&
-  xs.all (fun x => ((cd.hm[x]?).getD (.var x)).vars.all (fun v => cd.bits.contains v)) &&
+  xs.all (fun x => ((cd.hm.get[x]?).getD (.var x)).vars.all (fun v => cd.bits.contains v)) &&
   -- completeness: every survivor is the image of some bit pattern
   cd.survs.all (fun s => cd.imgs.get.any (fun img =>
     denseRncAllLt n (fun j =>
@@ -2416,31 +2427,61 @@ def denseRncCert (ctx : DenseRncCtx p) (st : DenseRncState p) (xs : List VarId)
   -- freshness
   cd.bits.all (fun b => !denseRncSeen st b)
 
-/-! ### The degree pre-gate -/
+/-! ### The degree pre-gate
+
+The gate needs the *degree* of each candidate position's rewrite, not the rewrite. A maximal
+in-group node becomes its interpolation over the bit patterns — `denseCandSelect` always takes it
+(its variables are the bits, and it agrees with the substitution at every pattern because the
+indicators are `δ` there) — and after `DenseExpr.fold` that interpolation is a constant exactly when
+the node takes one value across the padded survivor table, otherwise its surviving terms keep a full
+`|bits|`-factor indicator. So the degree follows from values alone, and the interpolation
+polynomials (and the substitution map they feed) are never built for a rejected candidate. -/
+
+/-- The degree of a maximal in-group node's rewrite: `0` if it is constant across the survivor
+    table, `|bits|` otherwise. -/
+def denseRncCandDeg (zero : ZMod p) (k : Nat) (vals : Array (Array (ZMod p))) (xs : List VarId)
+    (e : DenseExpr p) : Nat :=
+  match denseCompileE xs e with
+  | none => k
+  | some ie =>
+    match vals[0]? with
+    | none => 0
+    | some r0 =>
+      let v0 := denseRncEvalA zero r0 ie
+      if vals.all (fun r => zmodIsZero (zmodAddP (denseRncEvalA zero r ie) (zmodNegP v0)))
+      then 0 else k
+
+/-- `(denseGroupRewrite xs bits σ patts e).degree`, without building the rewrite. -/
+def denseRncDegRW (zero : ZMod p) (k : Nat) (vals : Array (Array (ZMod p))) (xs : List VarId) :
+    DenseExpr p → Nat
+  | .const _ => 0
+  | .var y =>
+      if denseContainsFast xs y then denseRncCandDeg zero k vals xs (.var y) else 1
+  | .add a b =>
+      if (DenseExpr.add a b).varsInF xs then denseRncCandDeg zero k vals xs (.add a b)
+      else max (denseRncDegRW zero k vals xs a) (denseRncDegRW zero k vals xs b)
+  | .mul a b =>
+      if (DenseExpr.mul a b).varsInF xs then denseRncCandDeg zero k vals xs (.mul a b)
+      else denseRncDegRW zero k vals xs a + denseRncDegRW zero k vals xs b
 
 /-- Untrusted degree pre-gate: fire when a candidate position's rewrite already exceeds the bound.
     Only positions mentioning a group variable are visited (the buckets are complete), and each
     position's current content is re-tested, so stale bucket entries are harmless. -/
 def denseRncDegPre (ctx : DenseRncCtx p) (st : DenseRncState p) (xs : List VarId)
     (cd : DenseRncCand p) : Bool :=
-  let σ := denseGroupSubst xs cd.hm
+  let deg : DenseExpr p → Nat := denseRncDegRW ctx.ops.zero cd.k cd.vals xs
   let useC := (match st.useCs with | some m => m | none => #[])
   let useB := (match st.useBis with | some m => m | none => #[])
   (denseRncBucketAny useC xs (fun i =>
     match st.cs[i]?, st.cvs[i]? with
     | some c, some vs =>
-      denseRncShares xs vs c && !denseRncCovered xs vs &&
-        decide (ctx.dmaxC < (denseGroupRewrite xs cd.bits σ cd.patts c).degree)
+      denseRncShares xs vs c && !denseRncCovered xs vs && decide (ctx.dmaxC < deg c)
     | _, _ => false)) ||
   (denseRncBucketAny useB xs (fun i =>
     match st.bis[i]? with
     | some bi =>
-      (bi.multiplicity.sharesVarIn xs &&
-        decide (ctx.dmaxB
-          < (denseGroupRewrite xs cd.bits σ cd.patts bi.multiplicity).degree)) ||
-      bi.payload.any (fun e =>
-        e.sharesVarIn xs &&
-          decide (ctx.dmaxB < (denseGroupRewrite xs cd.bits σ cd.patts e).degree))
+      (bi.multiplicity.sharesVarIn xs && decide (ctx.dmaxB < deg bi.multiplicity)) ||
+      bi.payload.any (fun e => e.sharesVarIn xs && decide (ctx.dmaxB < deg e))
     | none => false))
 
 /-! ### The accept
@@ -2460,7 +2501,8 @@ inductive DenseRncEdit (p : ℕ) where
     within the degree bound. Read-only in `st`. -/
 def denseRncEdits (ctx : DenseRncCtx p) (st : DenseRncState p) (xs : List VarId)
     (cd : DenseRncCand p) : Array (DenseRncEdit p) × Bool :=
-  let σ := denseGroupSubst xs cd.hm
+  let σ := denseGroupSubst xs cd.hm.get
+  let patts := cd.patts.get
   let foldC := (match st.foldCs with | some s => s | none => ∅)
   let useC := (match st.useCs with | some m => m | none => #[])
   let rc := (denseRncUnion useC xs foldC.toArray).foldl
@@ -2469,7 +2511,7 @@ def denseRncEdits (ctx : DenseRncCtx p) (st : DenseRncState p) (xs : List VarId)
       | some c, some vs =>
         if denseRncCovered xs vs then (acc.1.push (.tomb i), acc.2)
         else if denseRncShares xs vs c || denseRncHasFold c then
-          let c' := denseGroupRewrite xs cd.bits σ cd.patts c
+          let c' := denseGroupRewrite xs cd.bits σ patts c
           let cv' := denseRncCapVars c'
           (acc.1.push (.cst i c' cv' (denseRncFullVars c' cv')),
            acc.2 && decide (c'.degree ≤ ctx.dmaxC))
@@ -2484,8 +2526,8 @@ def denseRncEdits (ctx : DenseRncCtx p) (st : DenseRncState p) (xs : List VarId)
         if bi.multiplicity.sharesVarIn xs || denseRncHasFold bi.multiplicity
             || bi.payload.any (fun e => e.sharesVarIn xs || denseRncHasFold e) then
           let bi' : BusInteraction (DenseExpr p) :=
-            { bi with multiplicity := denseGroupRewrite xs cd.bits σ cd.patts bi.multiplicity,
-                      payload := bi.payload.map (denseGroupRewrite xs cd.bits σ cd.patts) }
+            { bi with multiplicity := denseGroupRewrite xs cd.bits σ patts bi.multiplicity,
+                      payload := bi.payload.map (denseGroupRewrite xs cd.bits σ patts) }
           (acc.1.push (.bus i bi'),
            acc.2 && decide (bi'.multiplicity.degree ≤ ctx.dmaxB)
              && bi'.payload.all (fun e => decide (e.degree ≤ ctx.dmaxB)))
@@ -2524,12 +2566,12 @@ def denseRncMatchCM (img : Array (ZMod p)) (thenM elseM : DenseComputationMethod
 
 def denseRncBitCMGo (ctx : DenseRncCtx p) (cd : DenseRncCand p) (xs : List VarId) (b : VarId)
     (t : Nat) : DenseComputationMethod p :=
-  if h : t < cd.pattsA.size then
+  if h : t < cd.pattsA.get.size then
     denseRncMatchCM (cd.imgs.get.getD t #[])
-      (.const (denseEnvOfFast cd.pattsA[t] b))
+      (.const (denseEnvOfFast cd.pattsA.get[t] b))
       (denseRncBitCMGo ctx cd xs b (t + 1)) xs 0
   else .const ctx.ops.zero
-  termination_by cd.pattsA.size - t
+  termination_by cd.pattsA.get.size - t
   decreasing_by omega
 
 /-! ### The step, loop and pass -/
