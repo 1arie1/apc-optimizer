@@ -391,8 +391,13 @@ def denseBusPairCancelPass (pw : PrimeWitness p) (aggressive : Bool) : DenseVeri
     let ops : DenseZModOps p := denseZModOps
     let idx := denseRecvIndexAll facts aggressive ops arr
     let alive : Array Bool := Array.replicate arr.size true
+    -- Every index below is built eagerly exactly when a candidate can reach the acceptance test,
+    -- and left lazy otherwise: `Thunk.get` marks its value multi-threaded (`denseThunkIf`), and an
+    -- invocation with no candidate must not pay for a build it never reads.
+    let eager := denseAnyCandidate facts aggressive ops idx arr
     let T : Thunk (DenseAddrCerts p) :=
-      Thunk.mk fun _ => DenseAddrCerts.build facts.memShape d.busInteractions d.algebraicConstraints
+      denseThunkIf eager fun _ =>
+        DenseAddrCerts.build facts.memShape d.busInteractions d.algebraicConstraints
     let M : Thunk (DenseEqConstraintMap p) :=
       Thunk.mk fun _ =>
         if aggressive then DenseEqConstraintMap.build d.algebraicConstraints
@@ -402,31 +407,37 @@ def denseBusPairCancelPass (pw : PrimeWitness p) (aggressive : Bool) : DenseVeri
     -- identically without a per-query scan of the whole list.
     let domIdxT : Thunk { m : Std.HashMap VarId (List (DenseExpr p)) //
         ∀ v, ∀ c ∈ denseVarBucketLookup m v, c ∈ d.algebraicConstraints } :=
-      Thunk.mk fun _ =>
+      denseThunkIf eager fun _ =>
         ⟨denseVarBucket DenseExpr.vars (d.algebraicConstraints.filter DenseExpr.isSingleVar),
          fun v c hc => List.mem_of_mem_filter
            (denseVarBucket_mem DenseExpr.vars _ v c hc)⟩
     let candsT : Thunk (DenseVarCsIdx p) :=
-      Thunk.mk fun _ => DenseVarCsIdx.build d.algebraicConstraints
+      denseThunkIf eager fun _ => DenseVarCsIdx.build d.algebraicConstraints
     have hsz : alive.size = arr.size := by simp only [alive, Array.size_replicate]
     have halltrue : ∀ k, k < arr.size → alive[k]?.getD false = true := by
       intro k hk
       simp only [alive, Array.getElem?_replicate, hk, if_true, Option.getD_some]
-    have hTtworoot : T.get.tworoot.Sound d.algebraicConstraints :=
-      DenseTwoRootMap.buildForAddrs_sound facts.memShape d.busInteractions d.algebraicConstraints
-    have hTnonzero : T.get.nonzero = DenseNonzeroWits.build d.algebraicConstraints := rfl
+    have hTget : T.get = DenseAddrCerts.build facts.memShape d.busInteractions
+        d.algebraicConstraints := denseThunkIf_get _ _
+    have hTtworoot : T.get.tworoot.Sound d.algebraicConstraints := by
+      rw [hTget]
+      exact DenseTwoRootMap.buildForAddrs_sound facts.memShape d.busInteractions
+        d.algebraicConstraints
+    have hTnonzero : T.get.nonzero = DenseNonzeroWits.build d.algebraicConstraints := by
+      rw [hTget]; rfl
     have hM : M.get.Sound d.algebraicConstraints := by
       show (if aggressive then DenseEqConstraintMap.build d.algebraicConstraints
         else DenseEqConstraintMap.empty).Sound d.algebraicConstraints
       split
       · exact DenseEqConstraintMap.build_sound d.algebraicConstraints
       · exact DenseEqConstraintMap.empty_sound d.algebraicConstraints
-    have hcands : ∀ x, ∀ c ∈ candsT.get.lookup x, c ∈ d.algebraicConstraints :=
-      fun x => DenseVarCsIdx.lookup_mem (DenseVarCsIdx.build_sound d.algebraicConstraints) x
+    have hcands : ∀ x, ∀ c ∈ candsT.get.lookup x, c ∈ d.algebraicConstraints := by
+      rw [show candsT.get = DenseVarCsIdx.build d.algebraicConstraints from denseThunkIf_get _ _]
+      exact fun x => DenseVarCsIdx.lookup_mem (DenseVarCsIdx.build_sound d.algebraicConstraints) x
     let nvars := reg.byId.size
-    let fidxT : Thunk (Array (List Nat)) := Thunk.mk fun _ => denseBuildFormIdx bs nvars arr
+    let fidxT : Thunk (Array (List Nat)) := denseThunkIf eager fun _ => denseBuildFormIdx bs nvars arr
     let bidxT : Thunk (Array (List Nat)) :=
-      Thunk.mk fun _ => denseBuildBoundIdx bs facts nvars arr
+      denseThunkIf eager fun _ => denseBuildBoundIdx bs facts nvars arr
     let bcBus? := busIds.findSome? (fun k => match facts.byteXorSpec k with
       | some spec => if spec.bound = 256 then some (k, spec) else none
       | none => none)
@@ -434,8 +445,8 @@ def denseBusPairCancelPass (pw : PrimeWitness p) (aggressive : Bool) : DenseVeri
     -- resume of this invocation (the thunk is forced only when a matched pair reaches a scan).
     let preBuses : List (Nat × Thunk (Array (DenseAddrPre p)) × Thunk (DenseKeyIdx p)) :=
       busIds.filterMap (fun busId => (facts.memShape busId).map (fun shape =>
-        (busId, Thunk.pure (arr.map (denseAddrPrep shape T.get.tworoot)),
-         Thunk.pure (denseKeyIdxBuild shape busId arr))))
+        (busId, denseThunkIf eager (fun _ => arr.map (denseAddrPrep shape T.get.tworoot)),
+         denseThunkIf eager (fun _ => denseKeyIdxBuild shape busId arr))))
     have hpreBuses : ∀ busId t kt, (busId, t, kt) ∈ preBuses → ∀ shape,
         facts.memShape busId = some shape →
         t.get = arr.map (denseAddrPrep shape T.get.tworoot) ∧
@@ -451,7 +462,7 @@ def denseBusPairCancelPass (pw : PrimeWitness p) (aggressive : Bool) : DenseVeri
           subst hb
           rw [hshape] at hms
           obtain rfl := Option.some.inj hms
-          exact ⟨by rw [← ht]; rfl, by rw [← hkt]; rfl⟩
+          exact ⟨by rw [← ht]; exact denseThunkIf_get _ _, by rw [← hkt]; exact denseThunkIf_get _ _⟩
     have hcur0 : ∀ (isInput : VarId → Bool) (reg : VarRegistry), d.CoveredBy reg →
         DensePassCorrect isInput d (denseMkCs d arr alive []) [] bs :=
       fun isInput _ _ => by

@@ -41,6 +41,32 @@ def denseRecvIndexAll {bs : BusSemantics p} (facts : BusFacts p bs) (aggressive 
       else m
     | none => m) ∅
 
+/-- Does any position hold a send whose receive bucket is non-empty? A cheap over-approximation of
+    "this invocation can accept a drop", short-circuiting at the first hit. It decides only whether
+    the per-invocation indexes are built eagerly (`denseThunkIf`), so it carries no obligation: a
+    wrong answer costs time, never soundness. -/
+def denseAnyCandGo {bs : BusSemantics p} (facts : BusFacts p bs) (aggressive : Bool)
+    (ops : DenseZModOps p) (idx : Std.HashMap UInt64 (List Nat))
+    (arr : Array (BusInteraction (DenseExpr p))) : Nat → Bool
+  | 0 => false
+  | n + 1 =>
+    (match arr[n]? with
+     | some bi =>
+       match facts.memShape bi.busId with
+       | some shape =>
+         decide (denseMultConst bi = some (denseSetNewMult ops shape)) &&
+           !(idx.getD (mixHash (hash bi.busId)
+               (if aggressive then denseAddrHash shape bi.payload
+                else densePayloadHash bi.payload)) []).isEmpty
+       | none => false
+     | none => false)
+      || denseAnyCandGo facts aggressive ops idx arr n
+
+def denseAnyCandidate {bs : BusSemantics p} (facts : BusFacts p bs) (aggressive : Bool)
+    (ops : DenseZModOps p) (idx : Std.HashMap UInt64 (List Nat))
+    (arr : Array (BusInteraction (DenseExpr p))) : Bool :=
+  denseAnyCandGo facts aggressive ops idx arr arr.size
+
 /-- A per-variable candidate-constraint index: for each variable, the constraints (in traversal
     order) known to mention it. -/
 structure DenseVarCsIdx (p : ℕ) where

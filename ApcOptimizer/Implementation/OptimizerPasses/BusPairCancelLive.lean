@@ -75,6 +75,18 @@ theorem denseLiveSeg_mem (arr : Array (BusInteraction (DenseExpr p))) (alive : A
   rw [denseLiveSeg_peel arr alive (lo + d) e a halive hget]
   exact List.mem_cons.2 (Or.inl rfl)
 
+/-- `Thunk.pure` when `eager`, `Thunk.mk` otherwise. Both have the same `.get`
+    (`denseThunkIf_get`), so the choice is invisible to every proof; it decides only whether the
+    value is built up front or on first force. `Thunk.get` on an unforced thunk calls
+    `lean_mark_mt` on the computed value — an `O(value)` graph walk that also makes every object in
+    it multi-threaded, so a value that will certainly be forced is cheaper built eagerly. -/
+@[inline] def denseThunkIf {α : Type} (eager : Bool) (f : Unit → α) : Thunk α :=
+  if eager then Thunk.pure (f ()) else Thunk.mk f
+
+@[simp] theorem denseThunkIf_get {α : Type} (eager : Bool) (f : Unit → α) :
+    (denseThunkIf eager f).get = f () := by
+  cases eager <;> rfl
+
 /-- Tombstone two positions. Applied by the cancel loop on the liveness array it owns, so the two
     writes hit a uniquely-referenced array and mutate in place. -/
 def denseTombstone (alive : Array Bool) (i j : Nat) : Array Bool :=
