@@ -1,5 +1,6 @@
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.BoxRewrite
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.FxSubst
+import ApcOptimizer.Implementation.OptimizerPasses.HashedDedup
 
 set_option autoImplicit false
 
@@ -12,9 +13,11 @@ One fused transform, `denseFlagFoldF`, running the four flagFold parts over shar
 * **C** box-tautology constraints replaced by `0` (`ffBoxTauto`);
 * **D** pointwise-duplicate stateless interactions dropped (`ffPdDropF`).
 
-Parts B, C and D all ask `denseFindDomainAlg` over the *single-variable* constraints. That lives in
-one `VarId.index`-keyed table (`FfTab`) built once per constraint-list version: the certificates
-read it through `ffTabGet`, and its soundness is `ffTabGet_eq` — every entry is its own bucket's
+Parts C and D bring their own certificates (`denseBtCert`, `densePdKeep`); A's and B's live with
+their shared machinery in `FxSubst.lean` and `BoxRewrite.lean`. Every one of them consults
+`denseFindDomainAlg` over the *single-variable* constraints, and that lives in one
+`VarId.index`-keyed table (`FfTab`) built once per constraint-list version: the certificates read it
+through `ffTabGet`, and its soundness is `ffTabGet_eq` — every entry is its own bucket's
 `denseFindDomainAlg` verdict, and every bucket holds single-variable constraints of the system.
 
 Unguarded here — box-rewrite intermediates legitimately exceed the bound — so the whole chain runs
@@ -66,6 +69,52 @@ def ffTabOf (B : Array (List (DenseExpr p))) : FfTab p :=
 
 @[inline] def ffTabGet (T : FfTab p) (v : VarId) : Option (List (ZMod p)) := T.getD v.index none
 
+/-! ## Part B's skip gate
+
+`denseBrRw` is the identity on a within-bound expression, so a system with nothing over its bound
+needs neither the rewrite nor the domain table it would consult. -/
+
+def ffAnyOverBound (b : DegreeBound) (d : DenseConstraintSystem p) : Bool :=
+  d.algebraicConstraints.any (fun c => !(c.degree ≤ b.identities)) ||
+  d.busInteractions.any (fun bi =>
+    !(bi.multiplicity.degree ≤ b.busInteractions) ||
+    bi.payload.any (fun e => !(e.degree ≤ b.busInteractions)))
+
+/-! ## Part C's certificate: box tautology
+
+`domOf` is untrusted — soundness comes from the caller's justification of the domains it reports
+(`boxTautoReplace_denseCorrect`'s `hdomOf`). -/
+
+def denseBtCertImpl (domOf : VarId → Option (List (ZMod p))) (c : DenseExpr p) : Bool :=
+  let vs := HashedDedup.hashedEraseDups (hash ·) c.vars
+  2 ≤ vs.length &&
+  (let doms := vs.filterMap (fun v => (domOf v).map (fun d => (v, d)))
+   decide (doms.map Prod.fst = vs) &&
+   decide ((doms.map (fun vd => vd.2.length)).prod ≤ 32) &&
+   (denseAssignments doms).all (fun pt => zmodIsZero (c.eval (denseEnvOfFast pt))))
+
+/-- Certificate: `c` mentions ≥ 2 distinct variables, `domOf` reports a finite domain for every
+    one of them, the joint box is small, and `c` vanishes on all of it. `domOf` is untrusted here —
+    soundness comes from the caller's justification of the domains it reports
+    (`boxTautoReplace_denseCorrect`'s `hdomOf`). -/
+def denseBtCert (domOf : VarId → Option (List (ZMod p))) (c : DenseExpr p) : Bool :=
+  let vs := HashedDedup.hashedEraseDups (hash ·) c.vars
+  2 ≤ vs.length &&
+  (let doms := vs.filterMap (fun v => (domOf v).map (fun d => (v, d)))
+   decide (doms.map Prod.fst = vs) &&
+   decide ((doms.map (fun vd => vd.2.length)).prod ≤ 32) &&
+   (denseAssignments doms).all (fun pt => decide (c.eval (denseEnvOfFast pt) = 0)))
+
+@[csimp] theorem denseBtCert_eq_impl : @denseBtCert = @denseBtCertImpl := by
+  funext q domOf c
+  simp [denseBtCert, denseBtCertImpl]
+
+/-- Replace certified box tautologies by the trivial constraint `0`. -/
+def DenseConstraintSystem.boxTautoReplaceWith (d : DenseConstraintSystem p)
+    (domOf : VarId → Option (List (ZMod p))) : DenseConstraintSystem p :=
+  { d with algebraicConstraints := d.algebraicConstraints.map (fun c =>
+      if denseBtCert domOf c then DenseExpr.const 0 else c) }
+
 /-! ## Part C's rejection gate
 
 `denseBtCert` builds a deduplicated variable list and a domain association list before it can
@@ -89,18 +138,74 @@ def DenseConstraintSystem.ffBoxTauto (d : DenseConstraintSystem p) (T : FfTab p)
   { d with algebraicConstraints := d.algebraicConstraints.map (fun c =>
       if ffBtCert T c then DenseExpr.const 0 else c) }
 
-/-! ## Part B's skip gate
+/-! ## Part D's certificate: pointwise-duplicate stateless checks
 
-`denseBrRw` is the identity on a within-bound expression, so a system with nothing over its bound
-needs neither the rewrite nor the domain table it would consult. -/
+`domIdx` is untrusted for the same reason (`DensePassCorrect.densePointwiseDupDrop`'s `hkeep`). -/
 
-def ffAnyOverBound (b : DegreeBound) (d : DenseConstraintSystem p) : Bool :=
-  d.algebraicConstraints.any (fun c => !(c.degree ≤ b.identities)) ||
-  d.busInteractions.any (fun bi =>
-    !(bi.multiplicity.degree ≤ b.busInteractions) ||
-    bi.payload.any (fun e => !(e.degree ≤ b.busInteractions)))
+/-- Joint-box agreement: every joint variable of `R`/`R'` has a proven finite domain, the box is
+    small, and the two expressions agree at every box point. -/
+def denseBoxAgree (domIdx : Std.HashMap VarId (List (DenseExpr p))) (R R' : DenseExpr p) : Bool :=
+  let jv := (R.vars ++ R'.vars).eraseDups
+  let doms := jv.filterMap (fun v =>
+    (denseFindDomainAlg (denseVarBucketLookup domIdx v) v).map (fun d => (v, d)))
+  decide (doms.map Prod.fst = jv) &&
+  decide ((doms.map (fun vd => vd.2.length)).prod ≤ 32) &&
+  (denseAssignments doms).all (fun pt =>
+    decide (R.eval (denseEnvOfFast pt) = R'.eval (denseEnvOfFast pt)))
 
-/-! ## Part D: the duplicate-proposal sweep
+/-- Slot-pair certificate: the two expressions are syntactically equal, or decompose over the same
+    carrier with the same constant coefficient and offsets agreeing on the joint domain box. -/
+def denseSlotEqCert (domIdx : Std.HashMap VarId (List (DenseExpr p))) (e e' : DenseExpr p) : Bool :=
+  e == e' ||
+  e.vars.eraseDups.any (fun x =>
+    e'.mentions x &&
+    match e.splitAt x, e'.splitAt x with
+    | some (k, R), some (k2, R') => k2 == k && denseBoxAgree domIdx R R'
+    | _, _ => false)
+
+/-- Full-message certificate: same bus, same constant multiplicity, pointwise-equal payloads. -/
+def denseMsgEqCert (domIdx : Std.HashMap VarId (List (DenseExpr p)))
+    (bi bi' : BusInteraction (DenseExpr p)) : Bool :=
+  bi.busId == bi'.busId &&
+  (match bi.multiplicity.constValue?, bi'.multiplicity.constValue? with
+   | some m, some m' => m == m'
+   | _, _ => false) &&
+  bi.payload.length == bi'.payload.length &&
+  (bi.payload.zip bi'.payload).all (fun ee => denseSlotEqCert domIdx ee.1 ee.2)
+
+/-- Is `bi` the first of its pointwise class (no earlier certified twin)? -/
+def densePdFirst (bs : BusSemantics p) (domIdx : Std.HashMap VarId (List (DenseExpr p)))
+    (bis : List (BusInteraction (DenseExpr p))) (bi : BusInteraction (DenseExpr p)) : Bool :=
+  match bis.findIdx? (fun b => b == bi) with
+  | none => true
+  | some i => (bis.take i).all (fun b => bs.isStateful b.busId || !(denseMsgEqCert domIdx b bi))
+
+/-- Keep unless a *first-of-class* earlier stateless twin exists (depth-1 rule: the twin that
+    justifies a drop is itself provably kept, so no chain induction is needed). -/
+def densePdKeep (bs : BusSemantics p) (domIdx : Std.HashMap VarId (List (DenseExpr p)))
+    (bis : List (BusInteraction (DenseExpr p))) (bi : BusInteraction (DenseExpr p)) : Bool :=
+  bs.isStateful bi.busId ||
+  (match bis.findIdx? (fun b => b == bi) with
+   | none => true
+   | some i =>
+     !((bis.take i).any (fun b => !bs.isStateful b.busId && denseMsgEqCert domIdx b bi
+         && densePdFirst bs domIdx bis b)))
+
+/-- Full-value hash of an interaction, for the dropped-value buckets. -/
+def densePdValHash (bi : BusInteraction (DenseExpr p)) : UInt64 :=
+  mixHash (hash bi.busId) (mixHash bi.multiplicity.bHash
+    (bi.payload.foldl (fun h e => mixHash h e.bHash) 7))
+
+/-- Drop `bi` iff its value bucket holds a certified dropped twin. The `{b // densePdKeep … = false}`
+    subtype is load-bearing: each stored entry carries its own `densePdKeep = false` proof. -/
+def densePdVerdictKeep {p : ℕ} {P : BusInteraction (DenseExpr p) → Prop}
+    (verdicts : Std.HashMap UInt64 (List { b : BusInteraction (DenseExpr p) // P b }))
+    (bi : BusInteraction (DenseExpr p)) : Bool :=
+  match verdicts[densePdValHash bi]? with
+  | some l => !(l.any (fun b => decide (b.val = bi)))
+  | none => true
+
+/-! ## Part D's proposal sweep
 
 Everything in this section is a *proposal generator*: `ffPdDropF` re-verifies every proposal with
 `densePdKeep` before it drops anything, so none of it carries a soundness obligation. What it must

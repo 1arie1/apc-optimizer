@@ -1,5 +1,5 @@
 import ApcOptimizer.Implementation.OptimizerPasses.SubsumedCheck
-import ApcOptimizer.Implementation.OptimizerPasses.Proofs.FlagFoldDrops
+import ApcOptimizer.Implementation.OptimizerPasses.Proofs.EntailedCheck
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.RootPairUnify
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DomainTable
 

@@ -1,4 +1,4 @@
-import ApcOptimizer.Implementation.OptimizerPasses.FlagFoldDrops
+import ApcOptimizer.Implementation.OptimizerPasses.DomainFold
 import ApcOptimizer.Implementation.OptimizerPasses.SubstMap
 
 set_option autoImplicit false

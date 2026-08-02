@@ -1,5 +1,6 @@
 import ApcOptimizer.Implementation.OptimizerPasses.BoxRewrite
-import ApcOptimizer.Implementation.OptimizerPasses.Proofs.FlagFoldDrops
+import ApcOptimizer.Implementation.OptimizerPasses.Proofs.EntailedCheck
+import ApcOptimizer.Implementation.OptimizerPasses.Proofs.FlagUnify
 
 set_option autoImplicit false
 
