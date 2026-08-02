@@ -154,6 +154,44 @@ theorem denseProbedSlotBoundAt_sound (bs : BusSemantics p) (facts : BusFacts p b
     rw [beq_iff_eq, hdenvi, ← hpay, ← hfun, heval]
   exact probeMax_lt _ B₀ (denv i).val hbase htest
 
+/-! ## The hoisted per-interaction derivations are the originals
+
+The prep derives nothing when the multiplicity is not constant, so both equalities split on
+`bi.multiplicity.constValue?` first; on the `some` branch `pat` is the canonical pattern and the
+rest is the pattern-vs-payload correspondence (`List.length_map`, `List.getElem?_map`,
+`List.map_map`). -/
+
+/-- The prep's pattern, on the branch where it is derived at all. -/
+theorem denseBiPrepOf_pat (bi : BusInteraction (DenseExpr p)) (mval : ZMod p)
+    (h : bi.multiplicity.constValue? = some mval) :
+    (denseBiPrepOf bi).mval? = some mval ∧
+      (denseBiPrepOf bi).pat = bi.payload.map DenseExpr.constValue? := by
+  unfold denseBiPrepOf
+  rw [h]
+  exact ⟨rfl, rfl⟩
+
+/-- The hoisted interaction bound at the canonical arguments is `denseInteractionBound`. -/
+theorem denseSlotBoundAt_eq (bs : BusSemantics p) (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) (i : VarId) :
+    denseSlotBoundAt bs facts bi (denseBiPrepOf bi).mval? (denseBiPrepOf bi).pat
+      (denseVarSlot i bi.payload) = denseInteractionBound bs facts bi i := by
+  unfold denseSlotBoundAt denseInteractionBound
+  cases hm : bi.multiplicity.constValue? with
+  | none => simp only [denseBiPrepOf, hm]
+  | some mval => simp only [(denseBiPrepOf_pat bi mval hm).1, (denseBiPrepOf_pat bi mval hm).2]
+
+/-- The hoisted probed bound at the canonical arguments is `denseProbedSlotBoundAt`. -/
+theorem denseProbedSlotBoundAtP_eq (bs : BusSemantics p) (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) (i : VarId) (j : Nat) :
+    denseProbedSlotBoundAtP bs facts bi (denseBiPrepOf bi) i (denseVarSlot i bi.payload) j
+      = denseProbedSlotBoundAt bs facts bi i j := by
+  unfold denseProbedSlotBoundAtP denseProbedSlotBoundAt
+  cases hm : bi.multiplicity.constValue? with
+  | none => simp only [denseBiPrepOf, hm]
+  | some mval =>
+    obtain ⟨hmv, hpat⟩ := denseBiPrepOf_pat bi mval hm
+    rw [hmv, hpat]
+
 /-! ## The fixed-`denv` build invariant and its induction -/
 
 /-- At a fixed environment, every stored bound is a strict upper bound on the environment's
@@ -173,13 +211,16 @@ theorem denseInsertEntry_soundAt {denv : VarId → ZMod p} {T : Std.HashMap VarI
     DenseBMSoundAt denv (denseInsertEntry T i0 b0) := by
   grind [DenseBMSoundAt, denseInsertEntry]
 
-/-- `goCands` preserves the invariant (probed bounds sound by `denseProbedSlotBoundAt_sound`). -/
+/-- `goCands` preserves the invariant (probed bounds sound by `denseProbedSlotBoundAt_sound`,
+    reached through `denseProbedSlotBoundAtP_eq`). -/
 theorem denseGoCands_soundAt (bs : BusSemantics p) (facts : BusFacts p bs)
     (bi : BusInteraction (DenseExpr p)) (i : VarId) (denv : VarId → ZMod p)
     (hob : (denseBIEval bi denv).multiplicity ≠ 0 →
       bs.accepts (denseBIEval bi denv)) :
     ∀ (cl : List (VarId × Nat)) (T : Std.HashMap VarId Nat),
-      DenseBMSoundAt denv T → DenseBMSoundAt denv (denseGoCands bs facts bi i cl T) := by
+      DenseBMSoundAt denv T →
+      DenseBMSoundAt denv
+        (denseGoCands bs facts bi (denseBiPrepOf bi) i (denseVarSlot i bi.payload) cl T) := by
   intro cl
   induction cl with
   | nil => intro T hT; exact hT
@@ -188,34 +229,38 @@ theorem denseGoCands_soundAt (bs : BusSemantics p) (facts : BusFacts p bs)
       obtain ⟨y, j⟩ := c
       unfold denseGoCands
       split
-      · split
+      · rw [denseProbedSlotBoundAtP_eq]
+        split
         · rename_i b hb
           exact ih _ (denseInsertEntry_soundAt
             (denseProbedSlotBoundAt_sound bs facts bi i j b hb denv hob) hT)
         · exact ih _ hT
       · exact ih _ hT
 
-/-- `addVars` preserves the invariant (interaction bounds sound by `denseInteractionBound_sound`,
-    then probed bounds via `goCands`). -/
+/-- `addVars` preserves the invariant (interaction bounds sound by `denseInteractionBound_sound`
+    through `denseSlotBoundAt_eq`, then probed bounds via `goCands`). -/
 theorem denseAddVars_soundAt (bs : BusSemantics p) (facts : BusFacts p bs)
     (bi : BusInteraction (DenseExpr p)) (denv : VarId → ZMod p)
     (hob : (denseBIEval bi denv).multiplicity ≠ 0 →
-      bs.accepts (denseBIEval bi denv)) (cands : List (VarId × Nat)) :
+      bs.accepts (denseBIEval bi denv)) :
     ∀ (xs : List VarId) (T : Std.HashMap VarId Nat),
-      DenseBMSoundAt denv T → DenseBMSoundAt denv (denseAddVars bs facts bi cands xs T) := by
+      DenseBMSoundAt denv T →
+      DenseBMSoundAt denv (denseAddVars bs facts bi (denseBiPrepOf bi) xs T) := by
   intro xs
   induction xs with
   | nil => intro T hT; exact hT
   | cons i xs ih =>
       intro T hT
-      have hT1 : DenseBMSoundAt denv (match denseInteractionBound bs facts bi i with
+      have hT1 : DenseBMSoundAt denv (match denseSlotBoundAt bs facts bi (denseBiPrepOf bi).mval?
+          (denseBiPrepOf bi).pat (denseVarSlot i bi.payload) with
           | some b => denseInsertEntry T i b | none => T) := by
+        rw [denseSlotBoundAt_eq]
         split
         · rename_i bd hib
           exact denseInsertEntry_soundAt
             (denseInteractionBound_sound bs facts bi i bd hib denv hob) hT
         · exact hT
-      exact ih _ (denseGoCands_soundAt bs facts bi i denv hob cands _ hT1)
+      exact ih _ (denseGoCands_soundAt bs facts bi i denv hob (denseBiPrepOf bi).cands _ hT1)
 
 /-- `addAll` preserves the invariant across every interaction. -/
 theorem denseAddAll_soundAt (bs : BusSemantics p) (facts : BusFacts p bs) (denv : VarId → ZMod p) :
@@ -235,8 +280,7 @@ theorem denseAddAll_soundAt (bs : BusSemantics p) (facts : BusFacts p bs) (denv 
           bs.accepts (denseBIEval b denv) :=
         fun b hb => hob b (List.mem_cons_of_mem _ hb)
       unfold denseAddAll
-      exact ih hrest _ (denseAddVars_soundAt bs facts bi denv hbi (denseProbeCandidatesOf bi)
-        (denseRawVarsOf bi) T hT)
+      exact ih hrest _ (denseAddVars_soundAt bs facts bi denv hbi (denseRawVarsOf bi) T hT)
 
 /-! ## The bounds-map soundness capstone -/
 
