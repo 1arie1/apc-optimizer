@@ -162,26 +162,19 @@ theorem addVars_of_none {c : DenseExpr p} (h : ∀ v, denseTwoRootOf? c v = none
               rw [← addVarsLins_eq h1 h2 T vs]
               simp [addVarsFast, h1, h2]
 
-/-- Fold `addVars` over a constraint list. -/
-def addAll : DenseTwoRootMap p → (pending : List (DenseExpr p)) → DenseTwoRootMap p
-  | T, [] => T
-  | T, c :: rest => addAll (addVars c T c.vars.eraseDups) rest
-
-/-- `addAll` with the candidate variables of each constraint restricted to `vars`: an entry for a
-    variable outside `vars` is never looked up (`buildForAddrs`), and `denseTwoRootOfLins` normalizes
-    both factors per candidate variable, so this is the whole cost of the build. -/
+/-- Fold `addVars` over a constraint list, with the candidate variables of each constraint
+    restricted to `vars`: an entry for a variable outside `vars` is never looked up
+    (`buildForAddrs`), and `denseTwoRootOfLins` normalizes both factors per candidate variable, so
+    this is the whole cost of the build. -/
 def addAllFor (vars : Std.HashSet VarId) :
     DenseTwoRootMap p → (pending : List (DenseExpr p)) → DenseTwoRootMap p
   | T, [] => T
   | T, c :: rest => addAllFor vars (addVars c T (c.vars.filter vars.contains).eraseDups) rest
 
-/-- `build` restricted to the candidate variables `vars`. -/
+/-- Build the map for a constraint list, indexing only the variables in `vars` (empty on
+    composite `p`). -/
 def buildFor (vars : Std.HashSet VarId) (constraints : List (DenseExpr p)) : DenseTwoRootMap p :=
   if Nat.Prime p then addAllFor vars empty constraints else empty
-
-/-- Build the map for a constraint list (empty on composite `p`). -/
-def build (constraints : List (DenseExpr p)) : DenseTwoRootMap p :=
-  if Nat.Prime p then addAll empty constraints else empty
 
 end DenseTwoRootMap
 

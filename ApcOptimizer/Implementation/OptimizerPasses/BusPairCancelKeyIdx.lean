@@ -151,14 +151,17 @@ Both walks re-check the window at every entry, so the bounds only need to be sou
         | some v => v
         | none => denseShieldEarly P Q preArr alive b s bound fuel nb (ns - 1)
 
-/-- Descending early-exit shield over the whole segment `[0, n)` — the symbolic-key fallback, which
-    has no index to walk. -/
-@[specialize] def denseShieldEarlySeg {α : Type} (P Q : α → Bool) (preArr : Array α) (alive : Array Bool)
-    (bound : Nat) : Nat → Bool
-  | 0 => true
-  | n + 1 =>
-    match denseShieldDecide P Q preArr alive bound n with
-    | some v => v
-    | none => denseShieldEarlySeg P Q preArr alive bound n
+/-- Both region tests for one candidate over its two scan arrays: the mid walk over the index range
+    the window `[i + 1, j)` maps to, and the descending shield below `i`. The shield's bounds sit
+    inside the `&&`, so a failed mid test skips them. -/
+@[inline] def denseScanDecide {α : Type} (Pmid Ppre Q : α → Bool) (preArr : Array α)
+    (alive : Array Bool) (b s : Array Nat) (i j : Nat) : Bool :=
+  (denseLiveAllGated Pmid preArr alive b (i + 1) j (denseLowerBound b (i + 1))
+      (denseLowerBound b j)
+    && denseLiveAllGated Pmid preArr alive s (i + 1) j (denseLowerBound s (i + 1))
+        (denseLowerBound s j))
+  && (let nb := denseLowerBound b i
+      let ns := denseLowerBound s i
+      denseShieldEarly Ppre Q preArr alive b s i (nb + ns) nb ns)
 
 end ApcOptimizer.Dense
