@@ -5974,3 +5974,43 @@ the scan is already cheap. Also sized but not implemented: **busPairCancel build
 over-scoped, cubic table and pays 31 % of its runtime for it on wasm-eth `apc_012`** (R10b).
 
 **Worked: yes.**
+
+### 164. Measurement: `profile` was charging every pass a whole-system `varCount` of its own (numbers drop ~23 %)
+
+**This entry changes no optimizer code and no output — only what `profile` reports.** Per-pass
+numbers in entries before this one are ~23 % higher than the same code measures now, unevenly, so
+**do not compare a pre-164 per-pass number with a post-164 one.** Ratios inside a single entry
+(A/B on one binary pair) are unaffected.
+
+`denseApplyTimed` timed each pass as `IO.lazyPure (pass …)` followed by a second `IO.lazyPure`
+forcing `r.out.varCount + lengths`, on the theory that the pass output had to be forced to be
+measured. It does not: `IO.lazyPure fn` is `pure (fn ())` — plain Lean in the toolchain, no extern,
+no thunk — so applying it runs the pass to completion, and Lean is strict, so the returned
+`out` is an already-built `DenseConstraintSystem` (two `List`s of `DenseExpr`; no `Thunk` occurs
+anywhere in the type, and the result's other fields are `Prop`s, erased). The forcing was a
+whole-system hash-set build over every variable occurrence, discarded, inside the stopwatch, once
+per pass per cycle — 283 times on keccak, 310 on sha256.
+
+**The distortion was in the ranking, not just the scale**, because the walk costs the same whatever
+the pass did. keccak (main, 5508 → 4223 ms total): `zeroMultBus` 55 → 10, `tautoBus` 58 → 14,
+`trivialConstr` 60 → 16, `oneHotAnnihilate` 55 → 15, `xorEqExtract` 118 → 53, `degenRange` 145 → 83
+— i.e. the cheap passes were reported at up to **5.5x** their real cost, while `flagFold` 475 → 425
+moved 11 %. sha256 `apc_001` total 54.9 → 40.8 s (26 %); wasm-eth `apc_012` 6.8 → 5.1 s (25 %).
+
+**Falsification test.** If the work were merely deferred rather than eliminated, it would resurface
+in whichever pass touched the value next: some column would grow and the total would hold. All 30
+keccak columns fell, none grew, and the total fell by the amount a separate timer had attributed to
+the `varCount` call (1124 ms direct; 1285 observed — the excess is the allocator pressure the
+hash-set builds were adding). `run` wall time and `run`/`profile` output are unchanged.
+
+**Consequences.** `ranked_passes.md` (untracked) must be regenerated before it is used to pick a
+target again; on the old numbers the trivial passes ranked near real ones. A `Runtime Bench` A/B is
+only meaningful with this on *both* sides, so it lands alone.
+
+**Still unattributed, and now the bigger measurement gap:** `run` on keccak is a reproducible
+4470-4880 ms against a 3790-4220 ms profile total. The profiler threads `reg`/`out`/`covered` and
+**discards `derivs`**, while `pipeline` does `r1.derivs ++ r2.derivs` in every `andThen` (a
+left-nested append over ~283 invocations, on a list that reaches ~25 k entries as keccak eliminates
+variables) and then `decodeDerivs` over the whole thing at the exit. Neither is timed anywhere.
+
+**Worked: yes.**

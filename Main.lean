@@ -262,25 +262,32 @@ def cmdOptExport (vm inFile outFile : String) : IO Unit :=
 The whole pipeline runs over the dense `VarId` representation (`ApcOptimizer/Implementation/`
 `OptimizerPasses/`), so the profiler steps the dense `preludePasses` / `cleanupPasses` / `codaPasses`
 lists the optimizer actually runs: it encodes once at the pipeline entry, threads a `⟨reg, dense
-system, coverage⟩` bundle from pass to pass and iteration to iteration, forces per-pass output with
-the **dense** count helpers (no decode), and decodes once at the pipeline output. Encode/decode are
-reported on their own lines and never charged to any pass. -/
+system, coverage⟩` bundle from pass to pass and iteration to iteration, and decodes once at the
+pipeline output. Encode/decode are reported on their own lines and never charged to any pass.
+
+A pass's reported time is the pass and nothing else: `denseApplyTimed` adds no work of its own
+(see its note on why the output needs no forcing), so the only shared cost inside it is the
+`guardDegree` wrapper `cleanupPasses` puts on every entry. What the profiler does *not* see is the
+derivation list — it threads `reg`/`out`/`coverage` and drops `derivs`, while `pipeline` appends
+them at every `andThen` and decodes them at the exit. -/
 
 /-- The threaded dense cleanup state: the registry, the dense system, and its coverage proof (erased
     at runtime — it just lets `DenseVerifiedPassW` application typecheck). -/
 abbrev DenseProfState (p : ℕ) :=
   Σ' (reg : VarRegistry) (d : DenseConstraintSystem p), d.CoveredBy reg
 
-/-- Apply one dense pass, forcing its output with the dense count helpers (no decode), and return the
-    threaded state plus elapsed milliseconds. -/
+/-- Apply one dense pass and return the threaded state plus elapsed milliseconds.
+
+    `IO.lazyPure fn` is `pure (fn ())`, so the application — and with it the whole pass — runs
+    between the two clock reads; that is all it is here for (a plain `let` the compiler may float
+    across an IO action would not be timed at all). Nothing further needs forcing: Lean is strict,
+    so the returned `DensePassResult`'s `out` is already a fully built `DenseConstraintSystem`
+    (two `List`s of `DenseExpr`, no `Thunk` anywhere in the type), and its remaining fields are
+    `Prop`s, erased at runtime. -/
 def denseApplyTimed {p : ℕ} (pass : DenseVerifiedPassW p) (st : DenseProfState p)
     (bs : BusSemantics p) (facts : BusFacts p bs) : IO (DenseProfState p × Nat) := do
   let t0 ← IO.monoMsNow
   let r ← IO.lazyPure (fun _ => pass st.1 st.2.1 st.2.2 bs facts)
-  -- Force the whole dense output (dense varCount traverses every expression node), on the dense
-  -- system, without ever decoding.
-  let _ ← IO.lazyPure (fun _ =>
-    r.out.varCount + r.out.algebraicConstraints.length + r.out.busInteractions.length)
   let t1 ← IO.monoMsNow
   pure (⟨r.reg', r.out, r.covered⟩, t1 - t0)
 
