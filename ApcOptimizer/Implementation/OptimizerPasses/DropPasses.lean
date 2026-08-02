@@ -11,8 +11,33 @@ variable {p : ℕ}
 
 /-! ## Tautology-lookup removal (dense) -/
 
+/-- PROBE (unproven): `constValue?` without materializing `e.fold`. -/
+def DenseExpr.constValueImpl : DenseExpr p → Option (ZMod p)
+  | .const n => some n
+  | .var _ => none
+  | .add a b =>
+    match a.constValueImpl with
+    | none => none
+    | some x =>
+      match b.constValueImpl with
+      | none => none
+      | some y => some (zmodAdd x y)
+  | .mul a b =>
+    match a.constValueImpl with
+    | some x =>
+      if zmodIsZero x then some x
+      else
+        match b.constValueImpl with
+        | none => none
+        | some y => some (zmodMul x y)
+    | none =>
+      match b.constValueImpl with
+      | some y => if zmodIsZero y then some y else none
+      | none => none
+
 /-- Constant value of a dense expression (fold then require a literal). -/
-def DenseExpr.constValue? (e : DenseExpr p) : Option (ZMod p) :=
+@[implemented_by DenseExpr.constValueImpl] def DenseExpr.constValue? (e : DenseExpr p) :
+    Option (ZMod p) :=
   match e.fold with
   | .const c => some c
   | _ => none

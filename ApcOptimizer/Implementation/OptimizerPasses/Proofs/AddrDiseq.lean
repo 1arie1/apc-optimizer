@@ -162,6 +162,19 @@ theorem DenseTwoRootMap.Sound.addAll {dcs : List (DenseExpr p)} (hp : Nat.Prime 
       exact ih _ (fun c' h => hmem c' (List.mem_cons_of_mem _ h))
         (DenseTwoRootMap.Sound.addVars hp (hmem c (List.mem_cons_self ..)) T _ hT)
 
+theorem DenseTwoRootMap.Sound.addAllFor {dcs : List (DenseExpr p)} (hp : Nat.Prime p)
+    (vars : Std.HashSet VarId) :
+    ∀ (T : DenseTwoRootMap p) (pending : List (DenseExpr p)), (∀ c ∈ pending, c ∈ dcs) →
+      T.Sound dcs → (DenseTwoRootMap.addAllFor vars T pending).Sound dcs := by
+  intro T pending
+  induction pending generalizing T with
+  | nil => intro _ hT; exact hT
+  | cons c rest ih =>
+      intro hmem hT
+      rw [DenseTwoRootMap.addAllFor]
+      exact ih _ (fun c' h => hmem c' (List.mem_cons_of_mem _ h))
+        (DenseTwoRootMap.Sound.addVars hp (hmem c (List.mem_cons_self ..)) T _ hT)
+
 /-- `Sound` only asserts the existence of a witnessing constraint, so it survives passing to a
     superset of the indexed list. -/
 theorem DenseTwoRootMap.Sound.mono {l1 l2 : List (DenseExpr p)} {T : DenseTwoRootMap p}
@@ -179,11 +192,20 @@ theorem DenseTwoRootMap.build_sound (dcs : List (DenseExpr p)) :
       (DenseTwoRootMap.empty_sound dcs)
   · rw [if_neg hp]; exact DenseTwoRootMap.empty_sound dcs
 
+theorem DenseTwoRootMap.buildFor_sound (vars : Std.HashSet VarId) (dcs : List (DenseExpr p)) :
+    (DenseTwoRootMap.buildFor vars dcs).Sound dcs := by
+  rw [DenseTwoRootMap.buildFor]
+  by_cases hp : Nat.Prime p
+  · rw [if_pos hp]
+    exact DenseTwoRootMap.Sound.addAllFor hp vars DenseTwoRootMap.empty dcs (fun _ h => h)
+      (DenseTwoRootMap.empty_sound dcs)
+  · rw [if_neg hp]; exact DenseTwoRootMap.empty_sound dcs
+
 /-- The address-restricted build is sound for the whole constraint list. -/
 theorem DenseTwoRootMap.buildForAddrs_sound (memShape : Nat → Option MemoryBusShape)
     (bis : List (BusInteraction (DenseExpr p))) (dcs : List (DenseExpr p)) :
     (DenseTwoRootMap.buildForAddrs memShape bis dcs).Sound dcs :=
-  (DenseTwoRootMap.build_sound _).mono (fun _ hc => List.mem_of_mem_filter hc)
+  (DenseTwoRootMap.buildFor_sound _ _).mono (fun _ hc => List.mem_of_mem_filter hc)
 
 /-! ## Two-root decomposition soundness (value-level)
 

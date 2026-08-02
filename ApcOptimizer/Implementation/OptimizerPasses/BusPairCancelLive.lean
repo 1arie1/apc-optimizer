@@ -75,6 +75,11 @@ theorem denseLiveSeg_mem (arr : Array (BusInteraction (DenseExpr p))) (alive : A
   rw [denseLiveSeg_peel arr alive (lo + d) e a halive hget]
   exact List.mem_cons.2 (Or.inl rfl)
 
+/-- Tombstone two positions. Applied by the cancel loop on the liveness array it owns, so the two
+    writes hit a uniquely-referenced array and mutate in place. -/
+def denseTombstone (alive : Array Bool) (i j : Nat) : Array Bool :=
+  (alive.setIfInBounds i false).setIfInBounds j false
+
 /-! On accepting a pair `(iP, jP)`, the live projection factors as `A ++ S :: B ++ R :: C'`
 (`denseLiveSeg_split`); tombstoning the two positions changes it to `A ++ B ++ C'`
 (`denseLiveSeg_drop`) — the shape `denseDropPair_correct` produces. -/

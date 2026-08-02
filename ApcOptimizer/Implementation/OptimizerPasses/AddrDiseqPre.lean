@@ -24,7 +24,7 @@ structure DenseSlotPre (p : ℕ) where
   reds : Thunk (List (DenseLinExpr p × DenseLinExpr p))
 
 def denseSlotPrep (T : DenseTwoRootMap p) (e : DenseExpr p) : DenseSlotPre p :=
-  ⟨e, Thunk.mk fun _ => e.constValue?, Thunk.mk fun _ => denseLinearize e,
+  ⟨e, Thunk.pure e.constValue?, Thunk.mk fun _ => denseLinearize e,
    Thunk.mk fun _ => densePtrReductions T e⟩
 
 /-- Prepared per-interaction address data relative to one memory-bus shape: the bus id, the
