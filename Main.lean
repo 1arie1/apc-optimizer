@@ -271,16 +271,18 @@ reported on their own lines and never charged to any pass. -/
 abbrev DenseProfState (p : ℕ) :=
   Σ' (reg : VarRegistry) (d : DenseConstraintSystem p), d.CoveredBy reg
 
-/-- Apply one dense pass, forcing its output with the dense count helpers (no decode), and return the
-    threaded state plus elapsed milliseconds. -/
+/-- Apply one dense pass and return the threaded state plus elapsed milliseconds.
+
+    `IO.lazyPure fn` is `pure (fn ())`, so the application — and with it the whole pass — runs
+    between the two clock reads; that is all it is here for (a plain `let` the compiler may float
+    across an IO action would not be timed at all). Nothing further needs forcing: Lean is strict,
+    so the returned `DensePassResult`'s `out` is already a fully built `DenseConstraintSystem`
+    (two `List`s of `DenseExpr`, no `Thunk` anywhere in the type), and its remaining fields are
+    `Prop`s, erased at runtime. -/
 def denseApplyTimed {p : ℕ} (pass : DenseVerifiedPassW p) (st : DenseProfState p)
     (bs : BusSemantics p) (facts : BusFacts p bs) : IO (DenseProfState p × Nat) := do
   let t0 ← IO.monoMsNow
   let r ← IO.lazyPure (fun _ => pass st.1 st.2.1 st.2.2 bs facts)
-  -- Force the whole dense output (dense varCount traverses every expression node), on the dense
-  -- system, without ever decoding.
-  let _ ← IO.lazyPure (fun _ =>
-    r.out.varCount + r.out.algebraicConstraints.length + r.out.busInteractions.length)
   let t1 ← IO.monoMsNow
   pure (⟨r.reg', r.out, r.covered⟩, t1 - t0)
 
