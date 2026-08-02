@@ -2035,12 +2035,25 @@ theorem denseReencodeF_props (pw : PrimeWitness p) (b : DegreeBound) (reg : VarR
     refine ⟨VarRegistry.Extends.refl reg, hcov, ?_, DensePassCorrect.refl reg.isInput d bs⟩
     intro x hx; simp at hx
 
-/-- The registered witness re-encoding pass (see `denseReencodeF` in `Reencode.lean`). -/
+/-- **Unproven on this branch (measurement).** The array-backed engine's obligations, in the shape
+    `denseReencodeF_props` discharges for the list engine. -/
+theorem denseRncF_props (pw : PrimeWitness p) (b : DegreeBound) (reg : VarRegistry)
+    (bs : BusSemantics p) (facts : BusFacts p bs) (d : DenseConstraintSystem p)
+    (hcov : d.CoveredBy reg) :
+    reg.Extends (denseRncF pw b reg bs facts d).1
+    ∧ (denseRncF pw b reg bs facts d).2.1.CoveredBy (denseRncF pw b reg bs facts d).1
+    ∧ DenseDerivations.CoveredBy (denseRncF pw b reg bs facts d).1
+        (denseRncF pw b reg bs facts d).2.2
+    ∧ DensePassCorrect (denseRncF pw b reg bs facts d).1.isInput d
+        (denseRncF pw b reg bs facts d).2.1 (denseRncF pw b reg bs facts d).2.2 bs := by
+  sorry
+
+/-- The registered witness re-encoding pass (see `denseRncF` in `Reencode.lean`). -/
 def denseReencodePass (pw : PrimeWitness p) (b : DegreeBound) : DenseVerifiedPassW p :=
-  DenseVerifiedPassW.ofExtending (denseReencodeF pw b)
-    (fun reg bs facts d hcov => (denseReencodeF_props pw b reg bs facts d hcov).1)
-    (fun reg bs facts d hcov => (denseReencodeF_props pw b reg bs facts d hcov).2.1)
-    (fun reg bs facts d hcov => (denseReencodeF_props pw b reg bs facts d hcov).2.2.1)
-    (fun reg bs facts d hcov => (denseReencodeF_props pw b reg bs facts d hcov).2.2.2)
+  DenseVerifiedPassW.ofExtending (denseRncF pw b)
+    (fun reg bs facts d hcov => (denseRncF_props pw b reg bs facts d hcov).1)
+    (fun reg bs facts d hcov => (denseRncF_props pw b reg bs facts d hcov).2.1)
+    (fun reg bs facts d hcov => (denseRncF_props pw b reg bs facts d hcov).2.2.1)
+    (fun reg bs facts d hcov => (denseRncF_props pw b reg bs facts d hcov).2.2.2)
 
 end ApcOptimizer.Dense

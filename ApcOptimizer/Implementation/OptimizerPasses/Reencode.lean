@@ -1903,12 +1903,760 @@ def denseWorkSeed (d : DenseConstraintSystem p) : DenseReencodeWork p :=
   { cs := d.algebraicConstraints, bis := d.busInteractions, bools := [], bitSet := ∅,
     lastPos := ∅, lastFold := 0, bounded := false }
 
+/-! ## The array-backed engine
+
+One position-stable `Array` per item list, `VarId.index`-keyed buckets, and per-invocation memos for
+the quantities that are provably target-independent. Everything here is untrusted: the certificate
+(`denseRncCert`) re-verifies
+each candidate, so an index that over- or under-reports only costs a decision. -/
+
+/-- Distinct variables of `e` appended to `acc`, abandoning the walk once `cap` are known — so a
+    result of size `cap` means "at least `cap` distinct variables". Every consumer of the cheap path
+    only distinguishes counts below 9: a constraint covered by an ≤ 8-variable group has ≤ 8
+    variables. -/
+def denseRncCapGo (cap : Nat) : DenseExpr p → Array VarId → Array VarId
+  | .const _, acc => acc
+  | .var y, acc => if cap ≤ acc.size || acc.contains y then acc else acc.push y
+  | .add a b, acc =>
+      let acc := denseRncCapGo cap a acc
+      if cap ≤ acc.size then acc else denseRncCapGo cap b acc
+  | .mul a b, acc =>
+      let acc := denseRncCapGo cap a acc
+      if cap ≤ acc.size then acc else denseRncCapGo cap b acc
+
+def denseRncCapVars (c : DenseExpr p) : Array VarId := denseRncCapGo 9 c #[]
+
+/-- All distinct variables, reusing the capped array when it is already exact. -/
+def denseRncFullVars (c : DenseExpr p) (vs : Array VarId) : Array VarId :=
+  if vs.size ≤ 8 then vs else (HashedDedup.hashedDedup (hash ·) c.vars).toArray
+
+/-- `(hasVar, hasConstFoldableNode)` in one walk. `DenseExpr.hasConstFoldableNode` re-derives
+    `hasVar` at every composite node, so it is quadratic in the depth. -/
+def denseRncFoldPair : DenseExpr p → Bool × Bool
+  | .const _ => (false, false)
+  | .var _ => (true, false)
+  | .add a b =>
+      let (va, fa) := denseRncFoldPair a
+      let (vb, fb) := denseRncFoldPair b
+      (va || vb, !(va || vb) || fa || fb)
+  | .mul a b =>
+      let (va, fa) := denseRncFoldPair a
+      let (vb, fb) := denseRncFoldPair b
+      (va || vb, !(va || vb) || fa || fb)
+
+def denseRncHasFold (e : DenseExpr p) : Bool := (denseRncFoldPair e).2
+
+def denseRncBiHasFold (bi : BusInteraction (DenseExpr p)) : Bool :=
+  denseRncHasFold bi.multiplicity || bi.payload.any denseRncHasFold
+
+def denseRncBGet (bs : Array (Array Nat)) (v : VarId) : Array Nat := bs.getD v.index #[]
+
+def denseRncBAdd (bs : Array (Array Nat)) (v : VarId) (i : Nat) : Array (Array Nat) :=
+  bs.modify v.index (fun a => a.push i)
+
+def denseRncMark (bs : Array Bool) (v : VarId) : Array Bool := bs.setIfInBounds v.index true
+
+def denseRncGetB (bs : Array Bool) (v : VarId) : Bool := bs.getD v.index false
+
+/-- Drop adjacent duplicates; the input is sorted (`denseRncSortPos`). -/
+def denseRncDedup (a : Array Nat) : Array Nat :=
+  (a.foldl (fun (acc : Array Nat × Option Nat) x =>
+    if acc.2 == some x then acc else (acc.1.push x, some x)) (#[], none)).1
+
+def denseRncSortPos (a : Array Nat) : Array Nat := denseRncDedup (a.qsort Nat.blt)
+
+/-- The union of the buckets of `xs`, ascending and duplicate-free. -/
+def denseRncUnion (bs : Array (Array Nat)) (xs : List VarId) (extra : Array Nat) : Array Nat :=
+  denseRncSortPos (xs.foldl (fun acc x => acc ++ denseRncBGet bs x) extra)
+
+/-- Whether every variable of the capped array lies in `xs` (exact for sizes below 9). -/
+def denseRncSubset (xs : List VarId) (vs : Array VarId) : Bool :=
+  vs.all (fun v => denseContainsFast xs v)
+
+/-- `denseCoveredBy` off the capped variable array: a covered constraint has a variable and at most
+    `|xs| ≤ 8` of them. -/
+def denseRncCovered (xs : List VarId) (vs : Array VarId) : Bool :=
+  1 ≤ vs.size && vs.size ≤ 8 && denseRncSubset xs vs
+
+/-- `DenseExpr.sharesVarIn` off the capped array where it is exact, by tree walk otherwise. -/
+def denseRncShares (xs : List VarId) (vs : Array VarId) (c : DenseExpr p) : Bool :=
+  if vs.size ≤ 8 then vs.any (fun v => denseContainsFast xs v) else c.sharesVarIn xs
+
+/-! ### The threaded state -/
+
+/-- Per-invocation immutable context: the dictionary-free field operations and the shared `.const 0`
+    tombstone (the plain literal rebuilds the whole `CommRing (ZMod p)` chain per tombstoned
+    position — visible in the generated C of the list splice this engine replaces). -/
+structure DenseRncCtx (p : ℕ) where
+  ops : DenseZModOps p
+  zeroE : DenseExpr p
+  b : DegreeBound
+
+def DenseRncCtx.dmaxC (ctx : DenseRncCtx p) : Nat := ctx.b.identities
+def DenseRncCtx.dmaxB (ctx : DenseRncCtx p) : Nat := ctx.b.busInteractions
+
+/-- `f` holds at some position of the buckets of `xs`; short-circuits. -/
+def denseRncBucketAny (bs : Array (Array Nat)) (xs : List VarId) (f : Nat → Bool) : Bool :=
+  xs.any (fun x => (denseRncBGet bs x).any f)
+
+/-- `f` holds at every `i < n`, without materialising the range. -/
+def denseRncAllLt (n : Nat) (f : Nat → Bool) : Bool :=
+  let rec go (i : Nat) : Bool :=
+    if h : i < n then (if f i then go (i + 1) else false) else true
+    termination_by n - i
+    decreasing_by omega
+  go 0
+
+/-- The working system and its indexes, on stable positions. Dropped constraints become the shared
+    `.const 0`; the booleanity constraints of every accept are pushed onto `cs`, so the output list
+    is one filtered pass over it. Structures that only the near-accept path reads are `Option`s,
+    built on first use (`denseRncEnsure*`). -/
+structure DenseRncState (p : ℕ) where
+  cs : Array (DenseExpr p)
+  /-- Per position, its distinct variables capped at 9 (`denseRncCapVars`). -/
+  cvs : Array (Array VarId)
+  bis : Array (BusInteraction (DenseExpr p))
+  /-- Non-tombstone entries of `cs` (feeds the fresh-name prefix only). -/
+  live : Nat
+  bisN : Nat
+  /-- Each ≤ 8-variable position under its *first* variable only: `vars c ⊆ xs` implies the first
+      variable is in `xs`, so this is complete for the covered query, and no position is listed
+      twice under one target. -/
+  anchor : Array (Array Nat)
+  /-- Each position under *every* variable it mentions — what the rewrite and the degree pre-gate
+      need. -/
+  useCs : Option (Array (Array Nat))
+  useBis : Option (Array (Array Nat))
+  foldCs : Option (Std.HashSet Nat)
+  foldBis : Option (Std.HashSet Nat)
+  /-- Variables occurring in the system at pass entry; with `minted`, an over-approximation of the
+      live variables, which is what decides bit freshness in `O(|bits|)`. -/
+  varSeen : Option (Array Bool)
+  minted : Std.HashSet VarId
+  /-- Per-variable domain memo. A variable's domain is the roots of the lowest-positioned constraint
+      whose variable set is exactly `{v}` and whose root plan resolves; a root plan resolves for `v`
+      only for such a constraint, and such a constraint is covered by *every* group containing `v`,
+      so the answer does not depend on the target. Computed once per invocation, dropped on each
+      accept (a rewrite can change which constraint is lowest). -/
+  domVal : Array (Option (List (ZMod p)))
+  domKnown : Array Bool
+  /-- Per variable, `position + 1` of the constraint its domain came from (`0` if unknown). Such a
+      constraint vanishes on every point of the variable's own domain — the plan's roots *are* its
+      factors' roots — so the enumeration below never tests it. -/
+  domSrc : Array Nat
+  domTouched : List VarId
+  dWithin : Bool
+  nVar : Nat
+
+/-! ### Field updates
+
+Every write destructures the state first, so the array being written is uniquely owned:
+`{ st with f := g st.f }` leaves `st.f` shared and copies the whole array (the same trap
+`Gauss.lean` documents, measured at 7× there and at ~10× on the accept path here). -/
+
+def DenseRncState.setDom (st : DenseRncState p) (v : VarId)
+    (r : Option (Nat × List (ZMod p))) : DenseRncState p :=
+  let ⟨cs, cvs, bis, live, bisN, anchor, useCs, useBis, foldCs, foldBis, varSeen, minted,
+        domVal, domKnown, domSrc, domTouched, dWithin, nVar⟩ := st
+  { cs, cvs, bis, live, bisN, anchor, useCs, useBis, foldCs, foldBis, varSeen, minted,
+    domVal := domVal.setIfInBounds v.index (r.map Prod.snd),
+    domKnown := domKnown.setIfInBounds v.index true,
+    domSrc := domSrc.setIfInBounds v.index (match r with | some (q, _) => q + 1 | none => 0),
+    domTouched := v :: domTouched, dWithin, nVar }
+
+/-- Drop the memo (an accept rewrites positions, so a memoized domain may no longer be the lowest
+    one); only the entries actually filled are reset. -/
+def DenseRncState.domReset (st : DenseRncState p) : DenseRncState p :=
+  let ⟨cs, cvs, bis, live, bisN, anchor, useCs, useBis, foldCs, foldBis, varSeen, minted,
+        domVal, domKnown, domSrc, domTouched, dWithin, nVar⟩ := st
+  { cs, cvs, bis, live, bisN, anchor, useCs, useBis, foldCs, foldBis, varSeen, minted, domVal,
+    domKnown := domTouched.foldl (fun m v => m.setIfInBounds v.index false) domKnown, domSrc,
+    domTouched := [], dWithin, nVar }
+
+/-- Drop the constraint at `i`: covered by the group, so the re-encoding replaces it. -/
+def DenseRncState.tombstone (st : DenseRncState p) (zeroE : DenseExpr p) (i : Nat) :
+    DenseRncState p :=
+  let ⟨cs, cvs, bis, live, bisN, anchor, useCs, useBis, foldCs, foldBis, varSeen, minted,
+        domVal, domKnown, domSrc, domTouched, dWithin, nVar⟩ := st
+  { cs := cs.setIfInBounds i zeroE, cvs := cvs.setIfInBounds i #[], bis, live := live - 1, bisN,
+    anchor, useCs, useBis, foldCs := foldCs.map (·.erase i), foldBis, varSeen, minted,
+    domVal, domKnown, domSrc, domTouched, dWithin, nVar }
+
+/-- Install the rewritten constraint at `i` and extend the indexes for its new variables. -/
+def DenseRncState.rewriteAt (st : DenseRncState p) (i : Nat) (c' : DenseExpr p)
+    (cv' full : Array VarId) : DenseRncState p :=
+  let ⟨cs, cvs, bis, live, bisN, anchor, useCs, useBis, foldCs, foldBis, varSeen, minted,
+        domVal, domKnown, domSrc, domTouched, dWithin, nVar⟩ := st
+  { cs := cs.setIfInBounds i c', cvs := cvs.setIfInBounds i cv', bis,
+    live := if denseIsZero c' then live - 1 else live, bisN,
+    anchor := if 1 ≤ cv'.size && cv'.size ≤ 8 then
+        (match cv'[0]? with | some v => denseRncBAdd anchor v i | none => anchor)
+      else anchor,
+    useCs := useCs.map (fun m => full.foldl (fun m v => denseRncBAdd m v i) m), useBis,
+    foldCs := foldCs.map (fun s => if denseRncHasFold c' then s.insert i else s.erase i),
+    foldBis, varSeen, minted, domVal, domKnown, domSrc, domTouched, dWithin, nVar }
+
+def DenseRncState.rewriteBiAt (st : DenseRncState p) (i : Nat)
+    (bi' : BusInteraction (DenseExpr p)) : DenseRncState p :=
+  let ⟨cs, cvs, bis, live, bisN, anchor, useCs, useBis, foldCs, foldBis, varSeen, minted,
+        domVal, domKnown, domSrc, domTouched, dWithin, nVar⟩ := st
+  { cs, cvs, bis := bis.setIfInBounds i bi', live, bisN, anchor, useCs,
+    useBis := useBis.map (fun m => (denseBIVars bi').foldl (fun m v => denseRncBAdd m v i) m),
+    foldCs, foldBis := foldBis.map (fun s => if denseRncBiHasFold bi' then s.insert i else s.erase i),
+    varSeen, minted, domVal, domKnown, domSrc, domTouched, dWithin, nVar }
+
+/-- Append one booleanity constraint. -/
+def DenseRncState.pushBool (st : DenseRncState p) (b : VarId) : DenseRncState p :=
+  let ⟨cs, cvs, bis, live, bisN, anchor, useCs, useBis, foldCs, foldBis, varSeen, minted,
+        domVal, domKnown, domSrc, domTouched, _, nVar⟩ := st
+  { cs := cs.push (denseBoolConstraint b), cvs := cvs.push #[b], bis, live := live + 1, bisN,
+    anchor, useCs, useBis, foldCs, foldBis, varSeen, minted := minted.insert b,
+    domVal, domKnown, domSrc, domTouched, dWithin := true, nVar }
+
+def denseRncEnsureUse (st : DenseRncState p) : DenseRncState p :=
+  match st.useCs with
+  | some _ => st
+  | none =>
+    let rec go (i : Nat) (acc : Array (Array Nat)) : Array (Array Nat) :=
+      if h : i < st.cs.size then
+        let vs := denseRncFullVars st.cs[i] (st.cvs.getD i #[])
+        go (i + 1) (vs.foldl (fun m v => denseRncBAdd m v i) acc)
+      else acc
+      termination_by st.cs.size - i
+      decreasing_by omega
+    { st with useCs := some (go 0 (Array.replicate st.nVar #[])) }
+
+def denseRncEnsureUseBis (st : DenseRncState p) : DenseRncState p :=
+  match st.useBis with
+  | some _ => st
+  | none =>
+    let rec go (i : Nat) (acc : Array (Array Nat)) : Array (Array Nat) :=
+      if h : i < st.bis.size then
+        go (i + 1) ((denseBIVars st.bis[i]).foldl (fun m v => denseRncBAdd m v i) acc)
+      else acc
+      termination_by st.bis.size - i
+      decreasing_by omega
+    { st with useBis := some (go 0 (Array.replicate st.nVar #[])) }
+
+def denseRncEnsureFoldCs (st : DenseRncState p) : DenseRncState p :=
+  match st.foldCs with
+  | some _ => st
+  | none =>
+    let rec go (i : Nat) (acc : Std.HashSet Nat) : Std.HashSet Nat :=
+      if h : i < st.cs.size then
+        go (i + 1) (if denseRncHasFold st.cs[i] then acc.insert i else acc)
+      else acc
+      termination_by st.cs.size - i
+      decreasing_by omega
+    { st with foldCs := some (go 0 ∅) }
+
+def denseRncEnsureFoldBis (st : DenseRncState p) : DenseRncState p :=
+  match st.foldBis with
+  | some _ => st
+  | none =>
+    let rec go (i : Nat) (acc : Std.HashSet Nat) : Std.HashSet Nat :=
+      if h : i < st.bis.size then
+        go (i + 1) (if denseRncBiHasFold st.bis[i] then acc.insert i else acc)
+      else acc
+      termination_by st.bis.size - i
+      decreasing_by omega
+    { st with foldBis := some (go 0 ∅) }
+
+def denseRncEnsureSeen (st : DenseRncState p) : DenseRncState p :=
+  match st.varSeen with
+  | some _ => st
+  | none =>
+    let m := st.cs.foldl (fun m c => c.foldVars (fun m v => denseRncMark m v) m)
+      (Array.replicate st.nVar false)
+    let m := st.bis.foldl (fun m bi =>
+      bi.payload.foldl (fun m e => e.foldVars (fun m v => denseRncMark m v) m)
+        (bi.multiplicity.foldVars (fun m v => denseRncMark m v) m)) m
+    { st with varSeen := some m }
+
+/-- Whether `v` may still occur in the system (over-approximate: entry occurrences plus minted
+    bits). Assumes `denseRncEnsureSeen`. -/
+def denseRncSeen (st : DenseRncState p) (v : VarId) : Bool :=
+  (match st.varSeen with | some m => denseRncGetB m v | none => true) || st.minted.contains v
+
+/-! ### Domains
+
+The affine root `-(a⁻¹ · c)` costs a field inversion, and the plan of a booleanity or range
+constraint asks for one per factor. At `a = ±1` — which is every constraint the domains actually
+come from — the inverse is `a` itself, so the root is `∓c` with no inversion; the general case keeps
+`denseRootsOfTerms`. -/
+
+def denseRncRootsOfTerms (ops : DenseZModOps p) (i : VarId) (c : ZMod p) :
+    List (VarId × ZMod p) → Option (List (ZMod p))
+  | [] => if zmodIsZero c then none else some []
+  | [(j, a)] =>
+      if j == i && (zmodIsOne a || zmodIsZero (ops.add a ops.one)) then
+        let r := if zmodIsOne a then zmodNegP c else c
+        if zmodIsZero (ops.add (ops.mul a r) c) then some [r] else none
+      else denseRootsOfTerms i c [(j, a)]
+  | _ :: _ :: _ => none
+
+def denseRncRootPlan (ops : DenseZModOps p) : DenseExpr p → Option (DenseReencodeRootPlan p)
+  | .mul a b =>
+      match denseRncRootPlan ops a, denseRncRootPlan ops b with
+      | some left, some right => denseReencodeRootPlanMul left right
+      | _, _ => none
+  | e =>
+      match denseLinearize e with
+      | none => none
+      | some l =>
+          let l := l.norm
+          match l.terms with
+          | [] => if zmodIsZero l.const then none else some (.any [])
+          | [(i, a)] => (denseRncRootsOfTerms ops i l.const [(i, a)]).map (.one i)
+          | _ => none
+
+/-- The first single-variable position resolving a root plan for `v`, scanning ascending. -/
+def denseRncFirstRoots (ops : DenseZModOps p) (cs : Array (DenseExpr p)) (v : VarId)
+    (cands : Array Nat) (i : Nat) : Option (Nat × List (ZMod p)) :=
+  if h : i < cands.size then
+    match cs[cands[i]]? with
+    | some c =>
+      match (denseRncRootPlan ops c).bind (denseReencodeRootPlanLookup v) with
+      | some roots => some (cands[i], roots)
+      | none => denseRncFirstRoots ops cs v cands (i + 1)
+    | none => denseRncFirstRoots ops cs v cands (i + 1)
+  else none
+  termination_by cands.size - i
+  decreasing_by omega
+
+/-- `v`'s domain: the roots of the lowest-positioned constraint whose variable set is exactly `{v}`
+    and whose root plan resolves. Memoized per variable. -/
+def denseRncDomOf (ops : DenseZModOps p) (st : DenseRncState p) (v : VarId) :
+    Option (List (ZMod p)) × DenseRncState p :=
+  if denseRncGetB st.domKnown v then (st.domVal.getD v.index none, st)
+  else
+    let cands := denseRncSortPos ((denseRncBGet st.anchor v).filter (fun q =>
+      match st.cvs[q]? with
+      | some vs => vs.size == 1
+      | none => false))
+    let r := denseRncFirstRoots ops st.cs v cands 0
+    (r.map Prod.snd, st.setDom v r)
+
+/-- Every group variable's domain, in group order; `none` if any is missing. -/
+def denseRncDoms (ops : DenseZModOps p) (st : DenseRncState p) :
+    List VarId → Array (Array (ZMod p)) →
+    Option (Array (Array (ZMod p))) × DenseRncState p
+  | [], acc => (some acc, st)
+  | v :: rest, acc =>
+    match denseRncDomOf ops st v with
+    | (some ds, st) => denseRncDoms ops st rest (acc.push ds.toArray)
+    | (none, st) => (none, st)
+
+/-! ### Enumeration
+
+Points are `Array (ZMod p)` in group order; compiled constraints are evaluated by index. Each
+constraint is filed under the *smallest* group index it mentions, and the DFS assigns indices
+`n-1 … 0` — which is `denseAssignments`' order (its head variable varies fastest) — so a constraint
+is tested as soon as its last variable is assigned and a violation prunes the whole subtree. -/
+
+def denseRncEvalA (zero : ZMod p) (env : Array (ZMod p)) : IExpr p → ZMod p
+  | .const n => n
+  | .ix i => env.getD i zero
+  | .add a b => zmodAddP (denseRncEvalA zero env a) (denseRncEvalA zero env b)
+  | .mul a b => zmodMulP (denseRncEvalA zero env a) (denseRncEvalA zero env b)
+
+def denseRncIxMin : IExpr p → Nat → Nat
+  | .const _, m => m
+  | .ix i, m => min i m
+  | .add a b, m => denseRncIxMin b (denseRncIxMin a m)
+  | .mul a b, m => denseRncIxMin b (denseRncIxMin a m)
+
+/-- Whether the constraint at `i` is the domain source of its (single) variable, hence zero at every
+    point of the box. -/
+def denseRncIsDomSrc (st : DenseRncState p) (i : Nat) : Bool :=
+  match st.cvs[i]? with
+  | some vs =>
+    vs.size == 1 && (match vs[0]? with
+      | some v => st.domSrc.getD v.index 0 == i + 1
+      | none => false)
+  | none => false
+
+/-- The compiled covered constraints filed by the smallest group index they mention, dropping the
+    domain sources. -/
+def denseRncChecks (st : DenseRncState p) (n : Nat) (pos : Array Nat) (ces : List (IExpr p)) :
+    Array (Array (IExpr p)) :=
+  (ces.toArray.zip pos).foldl (fun acc iep =>
+    if denseRncIsDomSrc st iep.2 then acc
+    else
+      let m := denseRncIxMin iep.1 n
+      acc.modify (if m < n then m else 0) (fun a => a.push iep.1)) (Array.replicate n #[])
+
+/-- Enumerate the box depth-first, keeping the points that zero every constraint; `none` as soon as
+    a `cap + 1`-st survivor appears (mirroring `denseFilterCap`: above the cap the `k < |xs|` gate
+    must fail anyway). -/
+def denseRncDfs (zero : ZMod p) (doms : Array (Array (ZMod p)))
+    (checks : Array (Array (IExpr p))) (cap : Nat) :
+    Nat → Array (ZMod p) → Option (Array (Array (ZMod p))) →
+      Array (ZMod p) × Option (Array (Array (ZMod p)))
+  | 0, env, acc? => (env, acc?)
+  | 1, env, acc? =>
+      -- the innermost level emits directly: recursing per point would cost a call and a tuple each
+      let chk := checks.getD 0 #[]
+      (doms.getD 0 #[]).foldl (fun ea v =>
+        match ea with
+        | (env, none) => (env, none)
+        | (env, some acc) =>
+          let env := env.setIfInBounds 0 v
+          if chk.all (fun ie => zmodIsZero (denseRncEvalA zero env ie)) then
+            (if acc.size < cap then (env, some (acc.push (env.extract 0 env.size)))
+             else (env, none))
+          else (env, some acc)) (env, acc?)
+  | i + 1, env, acc? =>
+      let chk := checks.getD i #[]
+      (doms.getD i #[]).foldl (fun ea v =>
+        match ea with
+        | (env, none) => (env, none)
+        | (env, some acc) =>
+          let env := env.setIfInBounds i v
+          if chk.all (fun ie => zmodIsZero (denseRncEvalA zero env ie)) then
+            denseRncDfs zero doms checks cap i env (some acc)
+          else (env, some acc)) (env, acc?)
+
+/-! ### The candidate -/
+
+/-- Everything an accept needs about a candidate group, computed once. -/
+structure DenseRncCand (p : ℕ) where
+  bits : List VarId
+  hm : Std.HashMap VarId (DenseExpr p)
+  patts : List (List (VarId × ZMod p))
+  pattsA : Array (List (VarId × ZMod p))
+  /-- Per pattern, the interpolation image of each group variable (group order). A `Thunk`: only the
+      certificate and the derivations read it, and nearly every candidate is rejected by the degree
+      pre-gate before that. -/
+  imgs : Thunk (Array (Array (ZMod p)))
+  /-- The covered constraints compiled over the group (`.ix` = group index), in position order. -/
+  ces : List (IExpr p)
+  survs : Array (Array (ZMod p))
+
+/-- The covered constraints of `xs`, ascending by position, off the anchor index. -/
+def denseRncGather (st : DenseRncState p) (xs : List VarId) : Array Nat × Array (DenseExpr p) :=
+  (denseRncUnion st.anchor xs #[]).foldl
+    (fun (acc : Array Nat × Array (DenseExpr p)) i =>
+      match st.cs[i]?, st.cvs[i]? with
+      | some c, some vs => if denseRncCovered xs vs then (acc.1.push i, acc.2.push c) else acc
+      | _, _ => acc) (#[], #[])
+
+/-- The interpolation polynomial of the group variable at index `j`: `Σ_t indicator_t · value_t`,
+    with the per-pattern indicators shared across the group (they depend only on the bits). -/
+def denseRncInterp (ctx : DenseRncCtx p) (inds : Array (DenseExpr p))
+    (vals : Array (Array (ZMod p))) (j : Nat) : DenseExpr p :=
+  let rec go (t : Nat) (acc : DenseExpr p) : DenseExpr p :=
+    if h : t < inds.size then
+      go (t + 1) (.add acc (.mul inds[t] (.const ((vals.getD t #[]).getD j ctx.ops.zero))))
+    else acc
+    termination_by inds.size - t
+    decreasing_by omega
+  (go 0 (.const ctx.ops.zero)).fold
+
+/-- Build the candidate: covered set, domains, box, survivors, bits, interpolations, images.
+    Proof-free — `denseRncCert` re-verifies. -/
+def denseRncBuild (ctx : DenseRncCtx p) (reg : VarRegistry) (st : DenseRncState p)
+    (xs : List VarId) (freshBase : String) :
+    VarRegistry × Option (DenseRncCand p) × DenseRncState p :=
+  let (pos, es) := denseRncGather st xs
+  match denseRncDoms ctx.ops st xs #[] with
+  | (none, st) => (reg, none, st)
+  | (some doms, st) =>
+    let boxSize := doms.foldl (fun n dd => n * dd.size) 1
+    if boxSize > 256 then (reg, none, st)
+    else if es.size == xs.length
+        && pos.all (fun i => (st.cvs.getD i #[]).size == 1)
+        && xs.length ≤ Nat.clog 2 boxSize then (reg, none, st)
+    else
+      match denseCompileEs xs es.toList with
+      | none => (reg, none, st)
+      | some ces =>
+        let n := doms.size
+        match (denseRncDfs ctx.ops.zero doms (denseRncChecks st n pos ces) (2 ^ (xs.length - 1)) n
+            (Array.replicate n ctx.ops.zero) (some #[])).2 with
+        | none => (reg, none, st)
+        | some survs =>
+          if survs.size < 2 then (reg, none, st)
+          else
+            let k := Nat.clog 2 survs.size
+            if k ≥ xs.length then (reg, none, st)
+            else
+              let (reg1, bits) := denseRegisterBits reg freshBase k
+              let patts := denseAssignments (denseBitBox bits)
+              let pattsA := patts.toArray
+              let vals := survs ++ Array.replicate (pattsA.size - survs.size) (survs.getD 0 #[])
+              let inds := pattsA.map denseIndicatorExpr
+              let hm := Std.HashMap.ofList (xs.zipIdx.map
+                (fun xj => (xj.1, denseRncInterp ctx inds vals xj.2)))
+              let imgs := Thunk.mk (fun _ => pattsA.map (fun aβ =>
+                let env := denseEnvOfFast aβ
+                (xs.toArray).map (fun x => ((hm[x]?).getD (.var x)).evalFast env)))
+              (reg1, some { bits := bits, hm := hm, patts := patts, pattsA := pattsA, imgs := imgs,
+                            ces := ces, survs := survs }, st)
+
+/-! ### The checked certificate
+
+Same conjuncts as `denseCheckReencode`, read off the candidate: the covered set the build step
+gathered (index completeness is what makes it the filter), the survivors it enumerated, and the
+per-pattern image table. Freshness is the `O(|bits|)` `varSeen` test. -/
+def denseRncCert (ctx : DenseRncCtx p) (st : DenseRncState p) (xs : List VarId)
+    (cd : DenseRncCand p) : Bool :=
+  let n := xs.length
+  decide (cd.bits.length < n) &&
+  decide (cd.bits.Nodup) &&
+  xs.all (fun x => ((cd.hm[x]?).getD (.var x)).vars.all (fun v => cd.bits.contains v)) &&
+  -- completeness: every survivor is the image of some bit pattern
+  cd.survs.all (fun s => cd.imgs.get.any (fun img =>
+    denseRncAllLt n (fun j =>
+      zmodIsZero (ctx.ops.add (img.getD j ctx.ops.zero)
+        (zmodNegP (s.getD j ctx.ops.zero)))))) &&
+  -- soundness: every pattern's image satisfies the covered constraints
+  cd.imgs.get.all (fun img =>
+    cd.ces.all (fun ie => zmodIsZero (denseRncEvalA ctx.ops.zero img ie))) &&
+  -- freshness
+  cd.bits.all (fun b => !denseRncSeen st b)
+
+/-! ### The degree pre-gate -/
+
+/-- Untrusted degree pre-gate: fire when a candidate position's rewrite already exceeds the bound.
+    Only positions mentioning a group variable are visited (the buckets are complete), and each
+    position's current content is re-tested, so stale bucket entries are harmless. -/
+def denseRncDegPre (ctx : DenseRncCtx p) (st : DenseRncState p) (xs : List VarId)
+    (cd : DenseRncCand p) : Bool :=
+  let σ := denseGroupSubst xs cd.hm
+  let useC := (match st.useCs with | some m => m | none => #[])
+  let useB := (match st.useBis with | some m => m | none => #[])
+  (denseRncBucketAny useC xs (fun i =>
+    match st.cs[i]?, st.cvs[i]? with
+    | some c, some vs =>
+      denseRncShares xs vs c && !denseRncCovered xs vs &&
+        decide (ctx.dmaxC < (denseGroupRewrite xs cd.bits σ cd.patts c).degree)
+    | _, _ => false)) ||
+  (denseRncBucketAny useB xs (fun i =>
+    match st.bis[i]? with
+    | some bi =>
+      (bi.multiplicity.sharesVarIn xs &&
+        decide (ctx.dmaxB
+          < (denseGroupRewrite xs cd.bits σ cd.patts bi.multiplicity).degree)) ||
+      bi.payload.any (fun e =>
+        e.sharesVarIn xs &&
+          decide (ctx.dmaxB < (denseGroupRewrite xs cd.bits σ cd.patts e).degree))
+    | none => false))
+
+/-! ### The accept
+
+Computing the rewrite and writing it are separate steps: the degree decision is taken on the
+computed edits, so the write consumes the state linearly (a rejected candidate never touches it, and
+an accepted one never needs the old copy alive). -/
+
+/-- One position's new content. -/
+inductive DenseRncEdit (p : ℕ) where
+  | tomb (i : Nat)
+  | cst (i : Nat) (c : DenseExpr p) (cv full : Array VarId)
+  | bus (i : Nat) (bi : BusInteraction (DenseExpr p))
+
+/-- The accepted rewrite's edits, over the only positions it can touch — the group's `useCs`/`useBis`
+    buckets plus the recorded foldable positions — paired with whether every rewritten item stayed
+    within the degree bound. Read-only in `st`. -/
+def denseRncEdits (ctx : DenseRncCtx p) (st : DenseRncState p) (xs : List VarId)
+    (cd : DenseRncCand p) : Array (DenseRncEdit p) × Bool :=
+  let σ := denseGroupSubst xs cd.hm
+  let foldC := (match st.foldCs with | some s => s | none => ∅)
+  let useC := (match st.useCs with | some m => m | none => #[])
+  let rc := (denseRncUnion useC xs foldC.toArray).foldl
+    (fun (acc : Array (DenseRncEdit p) × Bool) i =>
+      match st.cs[i]?, st.cvs[i]? with
+      | some c, some vs =>
+        if denseRncCovered xs vs then (acc.1.push (.tomb i), acc.2)
+        else if denseRncShares xs vs c || denseRncHasFold c then
+          let c' := denseGroupRewrite xs cd.bits σ cd.patts c
+          let cv' := denseRncCapVars c'
+          (acc.1.push (.cst i c' cv' (denseRncFullVars c' cv')),
+           acc.2 && decide (c'.degree ≤ ctx.dmaxC))
+        else acc
+      | _, _ => acc) (#[], true)
+  let foldB := (match st.foldBis with | some s => s | none => ∅)
+  let useB := (match st.useBis with | some m => m | none => #[])
+  (denseRncUnion useB xs foldB.toArray).foldl
+    (fun (acc : Array (DenseRncEdit p) × Bool) i =>
+      match st.bis[i]? with
+      | some bi =>
+        if bi.multiplicity.sharesVarIn xs || denseRncHasFold bi.multiplicity
+            || bi.payload.any (fun e => e.sharesVarIn xs || denseRncHasFold e) then
+          let bi' : BusInteraction (DenseExpr p) :=
+            { bi with multiplicity := denseGroupRewrite xs cd.bits σ cd.patts bi.multiplicity,
+                      payload := bi.payload.map (denseGroupRewrite xs cd.bits σ cd.patts) }
+          (acc.1.push (.bus i bi'),
+           acc.2 && decide (bi'.multiplicity.degree ≤ ctx.dmaxB)
+             && bi'.payload.all (fun e => decide (e.degree ≤ ctx.dmaxB)))
+        else acc
+      | none => acc) rc
+
+/-- Install the edits and the booleanity constraints. Consumes `st`. -/
+def denseRncWrite (ctx : DenseRncCtx p) (st : DenseRncState p) (bits : List VarId)
+    (edits : Array (DenseRncEdit p)) : DenseRncState p :=
+  let st := edits.foldl (fun st e =>
+    match e with
+    | .tomb i => st.tombstone ctx.zeroE i
+    | .cst i c' cv' full => st.rewriteAt i c' cv' full
+    | .bus i bi' => st.rewriteBiAt i bi') st
+  (bits.foldl (fun st b => st.pushBool b) st).domReset
+
+/-- Whether the current system is within the degree bound. Discharges the side condition that makes
+    the edit-level degree test agree with measuring the rewritten system outright; the pipeline's
+    degree guard makes it true at every pass entry, so it is computed once per invocation. -/
+def denseRncWithinNow (ctx : DenseRncCtx p) (st : DenseRncState p) : Bool :=
+  st.cs.all (fun c => decide (c.degree ≤ ctx.dmaxC)) &&
+    st.bis.all (fun bi => decide (bi.multiplicity.degree ≤ ctx.dmaxB) &&
+      bi.payload.all (fun e => decide (e.degree ≤ ctx.dmaxB)))
+
+/-! ### The bits' derivations
+
+`denseBitCM`'s decision tree, with the group's per-pattern image values read from the shared table
+instead of re-evaluating an interpolation polynomial per (bit, pattern, variable). -/
+
+def denseRncMatchCM (img : Array (ZMod p)) (thenM elseM : DenseComputationMethod p) :
+    List VarId → Nat → DenseComputationMethod p
+  | [], _ => thenM
+  | x :: rest, j =>
+      .ifEqZero (.add (.var x) (.const (zmodNegP (img.getD j (zmodZeroP p)))))
+        (denseRncMatchCM img thenM elseM rest (j + 1)) elseM
+
+def denseRncBitCMGo (ctx : DenseRncCtx p) (cd : DenseRncCand p) (xs : List VarId) (b : VarId)
+    (t : Nat) : DenseComputationMethod p :=
+  if h : t < cd.pattsA.size then
+    denseRncMatchCM (cd.imgs.get.getD t #[])
+      (.const (denseEnvOfFast cd.pattsA[t] b))
+      (denseRncBitCMGo ctx cd xs b (t + 1)) xs 0
+  else .const ctx.ops.zero
+  termination_by cd.pattsA.size - t
+  decreasing_by omega
+
+/-! ### The step, loop and pass -/
+
+def denseRncView (st : DenseRncState p) : DenseConstraintSystem p :=
+  { algebraicConstraints := (st.cs.filter (fun c => !denseIsZero c)).toList,
+    busInteractions := st.bis.toList }
+
+/-- One checked re-encoding step on the array state. Same gate sequence as `denseWorkStep`. -/
+def denseRncStep (ctx : DenseRncCtx p) (reg : VarRegistry) (st : DenseRncState p)
+    (xs : List VarId) (freshBase : String) :
+    VarRegistry × DenseRncState p × DenseDerivations p :=
+  if !xs.all (fun x => reg.isInput x) then (reg, st, [])
+  else if xs.any (fun x => st.minted.contains x) then (reg, st, [])
+  else
+    let (skip, st) :=
+      match reg.idOf? ({ name := freshBase ++ "_0" } : Variable) with
+      | some i => let st := denseRncEnsureSeen st; (denseRncSeen st i, st)
+      | none => (false, st)
+    if skip then (reg, st, [])
+    else
+      match denseRncBuild ctx reg st xs freshBase with
+      | (reg1, none, st) => (reg1, st, [])
+      | (reg1, some cd, st) =>
+        if cd.bits.any (fun b => st.minted.contains b) then (reg1, st, [])
+        else
+          let st := denseRncEnsureUseBis (denseRncEnsureUse st)
+          if denseRncDegPre ctx st xs cd then (reg1, st, [])
+          else
+            let st := denseRncEnsureSeen st
+            if !xs.all (fun x => denseRncSeen st x) then (reg1, st, [])
+            else if !xs.all (fun x => decide (x ∉ cd.bits)) then (reg1, st, [])
+            else if !cd.bits.all (fun b => decide ((reg1.resolve b).powdrId? = none)) then
+              (reg1, st, [])
+            else if !denseRncCert ctx st xs cd then (reg1, st, [])
+            else
+              let st0 := denseRncEnsureFoldBis (denseRncEnsureFoldCs st)
+              let (edits, ok) := denseRncEdits ctx st0 xs cd
+              if (if st0.dWithin then ok else ok && denseRncWithinNow ctx st0) then
+                (reg1, denseRncWrite ctx st0 cd.bits edits,
+                 cd.bits.map (fun b => (b, denseRncBitCMGo ctx cd xs b 0)))
+              else (reg1, st0, [])
+
+/-- The fresh-name prefix depends only on the item counts, which change only on an accept, so it is
+    threaded rather than rebuilt per target (`Nat.toString` twice per target otherwise). -/
+def denseRncLoop (ctx : DenseRncCtx p) :
+    List (List VarId) → Nat → VarRegistry → DenseRncState p → String →
+      VarRegistry × DenseRncState p × DenseDerivations p
+  | [], _, reg, st, _ => (reg, st, [])
+  | xs :: rest, idx, reg, st, pre =>
+    let (reg1, st1, derivs1) := denseRncStep ctx reg st xs (pre ++ toString idx)
+    let pre1 := if derivs1.isEmpty then pre else s!"rnc{st1.live}_{st1.bisN}_"
+    let (reg2, st2, derivs2) := denseRncLoop ctx rest (idx + 1) reg1 st1 pre1
+    (reg2, st2, derivs1 ++ derivs2)
+
+/-! ### The setup walk
+
+One walk over the constraint array yields every position's capped variable array, the live count and
+the single-variable set; the targets follow from that array alone. Nothing else is built when there
+are no targets, and the remaining structures are `Option`s built on the path that reads them. -/
+
+/-- Per-position capped variables, and the number of non-tombstone positions. -/
+def denseRncScan (cs : Array (DenseExpr p)) : Array (Array VarId) × Nat :=
+  cs.foldl (fun (acc : Array (Array VarId) × Nat) c =>
+    (acc.1.push (denseRncCapVars c), if denseIsZero c then acc.2 else acc.2 + 1)) (#[], 0)
+
+/-- Variables carrying a single-variable constraint. -/
+def denseRncSvSet (nVar : Nat) (cvs : Array (Array VarId)) : Array Bool :=
+  cvs.foldl (fun s vs =>
+    if vs.size == 1 then (match vs[0]? with | some v => denseRncMark s v | none => s) else s)
+    (Array.replicate nVar false)
+
+/-- The candidate groups: the variable sets of size 2–8 all of whose members carry a
+    single-variable constraint, sorted by the resolved `Variable` (the accept sequence is greedy and
+    order-sensitive, so the group order is part of the result) and deduped. -/
+def denseRncTargets (reg : VarRegistry) (sv : Array Bool) (cvs : Array (Array VarId)) :
+    List (List VarId) :=
+  dedupHash (cvs.toList.filterMap (fun vs =>
+    if 2 ≤ vs.size && vs.size ≤ 8 && vs.all (fun v => denseRncGetB sv v) then
+      some (vs.toList.mergeSort (fun a b => compare (reg.resolve a) (reg.resolve b) != .gt))
+    else none))
+
+/-- Each ≤ 8-variable position under its first variable, ascending. -/
+def denseRncAnchorBuild (nVar : Nat) (cvs : Array (Array VarId)) : Array (Array Nat) :=
+  let rec go (i : Nat) (acc : Array (Array Nat)) : Array (Array Nat) :=
+    if h : i < cvs.size then
+      let vs := cvs[i]
+      go (i + 1)
+        (if 1 ≤ vs.size && vs.size ≤ 8 then
+          (match vs[0]? with | some v => denseRncBAdd acc v i | none => acc)
+         else acc)
+    else acc
+    termination_by cvs.size - i
+    decreasing_by omega
+  go 0 (Array.replicate nVar #[])
+
 /-- Witness re-encoding. When a group of variables `xs` is so constrained that only a few value
     combinations survive, mint `Nat.clog 2 #survivors` fresh boolean bits, rewrite each group
     variable as an interpolation polynomial over the bits, drop the now-covered constraints, and add
     booleanity constraints — e.g. a group with 3 surviving combinations becomes 2 bits, cutting the
     variable count. The transform is shaped for `DenseVerifiedPassW.ofExtending`; `facts` is unused
     (reencode is fact-free). -/
+def denseRncF (pw : PrimeWitness p) (b : DegreeBound) (reg : VarRegistry)
+    (bsem : BusSemantics p) (_facts : BusFacts p bsem) (d : DenseConstraintSystem p) :
+    VarRegistry × DenseConstraintSystem p × DenseDerivations p :=
+  if pw.isPrime = true then
+    let csArr := d.algebraicConstraints.toArray
+    let (cvs, live) := denseRncScan csArr
+    let nVar := reg.byId.size
+    let targets := denseRncTargets reg (denseRncSvSet nVar cvs) cvs
+    match targets with
+    | [] => (reg, d, [])
+    | _ :: _ =>
+      let ops : DenseZModOps p := denseZModOps
+      let ctx : DenseRncCtx p := { ops := ops, zeroE := .const ops.zero, b := b }
+      let bisArr := d.busInteractions.toArray
+      let st : DenseRncState p :=
+        { cs := csArr, cvs := cvs, bis := bisArr, live := live, bisN := bisArr.size,
+          anchor := denseRncAnchorBuild nVar cvs,
+          useCs := none, useBis := none, foldCs := none, foldBis := none, varSeen := none,
+          minted := ∅,
+          domVal := Array.replicate nVar none, domKnown := Array.replicate nVar false,
+          domSrc := Array.replicate nVar 0, domTouched := [], dWithin := false, nVar := nVar }
+      let r := denseRncLoop ctx targets 0 reg st s!"rnc{live}_{bisArr.size}_" 
+      (r.1, denseRncView r.2.1, r.2.2)
+  else (reg, d, [])
+
 def denseReencodeF (pw : PrimeWitness p) (b : DegreeBound) (reg : VarRegistry)
     (bsem : BusSemantics p) (_facts : BusFacts p bsem) (d : DenseConstraintSystem p) :
     VarRegistry × DenseConstraintSystem p × DenseDerivations p :=
