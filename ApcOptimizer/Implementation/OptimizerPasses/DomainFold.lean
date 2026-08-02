@@ -50,6 +50,11 @@ def denseFindDomainAlg (all : List (DenseExpr p)) (i : VarId) : Option (List (ZM
       | none => denseFindDomainAlg rest i
     else denseFindDomainAlg rest i
 
+/-- The single-variable constraints of a list — the only `denseFindDomainAlg` sources, so the
+    passes that trust a domain re-derive it from these. -/
+def denseSingleVarCs (all : List (DenseExpr p)) : List (DenseExpr p) :=
+  all.filter (fun c => (HashedDedup.hashedEraseDups (hash ·) c.vars).length == 1)
+
 /-- Whether `c` mentions a variable, and every variable it mentions lies in `xs`. -/
 def denseCoveredBy (xs : List VarId) (c : DenseExpr p) : Bool :=
   c.hasVar && c.varsInF xs

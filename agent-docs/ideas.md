@@ -197,11 +197,10 @@ these need no new proof.
      busPairCancel 90 → 50 s. ~~`flagFoldDrops`~~ **done (entry 157)**: its box-tautology
      certificate re-derived the domains from the unbucketed single-variable list per candidate —
      9.2 s of a 13.7 s pass on sha256 `apc_001` — while the bucket built in the same function served
-     only the prefilter in front of it. `flagUnify`, `boxRewrite`, `fxSubst` and `rootPairUnify`
-     still call `denseFindDomainAlg` on whole lists; same fix applies if they show up in a profile
-     (rootPairUnify 9 s is the candidate, and `boxRewrite`'s `denseBrRw`/`denseBrCert` call it up to
-     three times per variable — 0.7 s on sha256, but 32 % of openvm-eth `apc_067`'s flagFold in one
-     cycle).
+     only the prefilter in front of it. ~~`boxRewrite`, `fxSubst`~~ **done (entry 165)**: all of
+     `flagFold` now reads one `VarId.index`-keyed table built once per invocation. `flagUnify` and
+     `rootPairUnify` still call `denseFindDomainAlg` on whole lists; same fix applies if they show
+     up in a profile (rootPairUnify 9 s is the candidate).
    - `busPairCancel`: ~~`liveArr` materialization per candidate~~ **done (#210)** — see R8.
      The O(B²) *certificate* scans remain (R8 design (b)); in coda mode the `addrHash`
      bucket is O(B) per hot address — add a position cursor. ~~`dropWits` from-0 array scan per
@@ -715,20 +714,24 @@ and in `run` alike. Consequences, all measured on busPairCancel:
   where the verifier is expensive on sha256 `apc_001` (88 and 84 ms) are 12 % all-constant
   addresses, while the two cycles that are 96 % all-constant cost 30 and 39 ms. The index would
   help exactly where the scan is already cheap.
-- **Indexing `densePdKeep`'s re-verification** (flagFold part C): `findIdx?` deep-equality scans and
-  `List.take` prefixes replaced by a `densePdValHash` position index over an array — **0.98x on
-  flagFold, sub-bar** (entry 157). The cost it targets is real (866 ms on sha256 `apc_001`, 574 of it
-  in cycle 8 across 268 proposed value buckets, and `nverd = 0` everywhere, so it is all
-  false-positive rejection) but only ~a third is recoverable this way. Worth ~11.5 % of the
-  *post*-entry-157 pass when bundled with the prologue item below; not on its own.
-- **flagFold's `boxTautoDrop` prologue, standalone**: an allocation-free capped distinct-variable
-  walk replacing `hashedEraseDups`'s per-constraint `Std.HashMap`, a nested fold replacing the
-  710 146-element `flatMap DenseExpr.vars`, and a cache seeded only from queryable constraints —
-  **0.93x, sub-bar** (entry 157). ~1.1 s together, each piece 0.2-0.35 s.
-- **Dropping flagFold's domain memo** in favour of per-query bucket lookups: **regression**, 4 970 vs
-  4 747 ms (entry 157). It would delete the one non-trivial proof obligation of that entry, but
-  `denseFindDomainAlg` then re-runs per (constraint, variable) and `denseRootsIn` reallocates each
-  domain list. An index is not a substitute for a memo when the query *count* is the problem.
+- ~~**Indexing `densePdKeep`'s re-verification**~~, ~~**flagFold's `boxTautoDrop` prologue**~~ and
+  ~~**dropping flagFold's domain memo**~~: all three superseded by **entry 165**, which rebuilt the
+  pass (0.17–0.32x). The re-verification was not worth indexing — it was worth *not triggering*: it
+  was refuting the sweep's own exact-duplicate proposals, which `densePdKeep` can never accept
+  (it is value-scoped, so the earlier copy is the position it tests at). The prologue's pieces landed
+  as one shared table plus an allocation-free rejection gate. The memo question was re-measured and
+  the answer flipped for the same reason as before: a `Thunk`-per-variable *lazy* table loses 4 %,
+  because the gate forces essentially every entry — an eager build over the buckets is right.
+- **flagFold's remaining `denseRootsIn`** (entry 165): 292 ms of the post-rebuild 1 278 ms on sha256
+  `apc_001`, 23 489 single-variable constraints at ~2.8 µs each, essentially all consumed. A
+  specialized single-variable root finder (a direct `(a, c)` walk instead of `denseLinearize` +
+  `norm` + `denseRootsOfTerms`, three times over for a product) would cut most of it, but it must
+  return the *identical* list and `denseRootsIn` is shared with domainFold/rootPairUnify — its own
+  change, with its own proof.
+- **Short-circuiting flagFold's re-verification with the sweep's witness**: `densePdKeep bi = false`
+  follows from one `densePdFirst` check on the representative that matched, instead of a prefix
+  scan. ~25 ms, and only on invocations that drop something — openvm-eth `apc_067` is the only
+  measured case (its pass is 0.55x where the others are 0.17–0.24x).
 
 - **Retiring domainBatch's task fan-out** (`parallel := false`): 0.96× sha256 / 0.91× keccak against
   the pre-entry-155 baseline, but **+700 ms on top of entry 155** (measured twice) and a wash on

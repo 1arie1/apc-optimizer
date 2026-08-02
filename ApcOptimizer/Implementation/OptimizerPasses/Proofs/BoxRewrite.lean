@@ -1,5 +1,6 @@
 import ApcOptimizer.Implementation.OptimizerPasses.BoxRewrite
-import ApcOptimizer.Implementation.OptimizerPasses.Proofs.FlagFoldDrops
+import ApcOptimizer.Implementation.OptimizerPasses.Proofs.EntailedCheck
+import ApcOptimizer.Implementation.OptimizerPasses.Proofs.FlagUnify
 
 set_option autoImplicit false
 
@@ -42,29 +43,32 @@ theorem denseEnvF_ptFun_self (doms : List (VarId × List (ZMod p))) (denv : VarI
 /-- Certificate soundness: on every point of the small-domain box both expressions partially
     evaluate to the same affine form, so they agree on every assignment zeroing the single-variable
     constraints. The candidate `e'` is opaque; only the certificate is trusted. -/
-theorem denseBrCert_sound [Fact p.Prime] (singles : List (DenseExpr p)) (e e' : DenseExpr p)
-    (h : denseBrCert singles e e' = true) (denv : VarId → ZMod p)
-    (hdom : ∀ c ∈ singles, c.eval denv = 0) : e.eval denv = e'.eval denv := by
+theorem denseBrCert_sound [Fact p.Prime] (bucketOf : VarId → List (DenseExpr p))
+    (domOf : VarId → Option (List (ZMod p)))
+    (hdomOf : ∀ v dm, domOf v = some dm → denseFindDomainAlg (bucketOf v) v = some dm)
+    (e e' : DenseExpr p)
+    (h : denseBrCert domOf e e' = true) (denv : VarId → ZMod p)
+    (hdom : ∀ v, ∀ c ∈ bucketOf v, c.eval denv = 0) : e.eval denv = e'.eval denv := by
   unfold denseBrCert at h
   rw [Bool.and_eq_true, Bool.and_eq_true, Bool.and_eq_true] at h
   obtain ⟨_h2, ⟨⟨_hcover, _hcap⟩, hall⟩⟩ := h
   set boxed := ((e.vars ++ e'.vars).eraseDups.filter (fun v =>
-    match denseFindDomainAlg singles v with
+    match domOf v with
     | some d => d.length ≤ 2
     | none => false)) with hboxed
   set doms := (boxed.filterMap (fun v =>
-    (denseFindDomainAlg singles v).map (fun d => (v, d)))) with hdoms
+    (domOf v).map (fun d => (v, d)))) with hdoms
   have hmemdoms : ∀ vd ∈ doms, denv vd.1 ∈ vd.2 := by
     intro vd hvd
     rw [hdoms] at hvd
     obtain ⟨v, _hv, hvd'⟩ := List.mem_filterMap.1 hvd
-    cases hfd : denseFindDomainAlg singles v with
+    cases hfd : domOf v with
     | none => rw [hfd] at hvd'; simp at hvd'
     | some d =>
       rw [hfd] at hvd'
       simp only [Option.map_some, Option.some.injEq] at hvd'
       obtain rfl := hvd'.symm
-      exact denseFindDomainAlg_sound denv singles v d hfd hdom
+      exact denseFindDomainAlg_sound denv (bucketOf v) v d (hdomOf v d hfd) (hdom v)
   have hpt := mem_denseAssignments doms denv hmemdoms
   have hcond := List.all_eq_true.mp hall _ hpt
   cases hl1 : denseLinearize (e.substF (densePtFun (doms.map (fun vd => (vd.1, denv vd.1))))) with
@@ -105,10 +109,12 @@ theorem denseBrCert_sound [Fact p.Prime] (singles : List (DenseExpr p)) (e e' : 
 
 /-- Per-expression rewrite soundness: rewriting preserves evaluation on every assignment zeroing the
     single-variable constraints. -/
-theorem denseBrRw_sound [Fact p.Prime] (singles : List (DenseExpr p)) (bound : Nat)
-    (e : DenseExpr p) (denv : VarId → ZMod p)
-    (hdom : ∀ c ∈ singles, c.eval denv = 0) :
-    (denseBrRw singles bound e).eval denv = e.eval denv := by
+theorem denseBrRw_sound [Fact p.Prime] (bucketOf : VarId → List (DenseExpr p))
+    (domOf : VarId → Option (List (ZMod p)))
+    (hdomOf : ∀ v dm, domOf v = some dm → denseFindDomainAlg (bucketOf v) v = some dm)
+    (bound : Nat) (e : DenseExpr p) (denv : VarId → ZMod p)
+    (hdom : ∀ v, ∀ c ∈ bucketOf v, c.eval denv = 0) :
+    (denseBrRw domOf bound e).eval denv = e.eval denv := by
   simp only [denseBrRw]
   split_ifs with hd
   · rfl
@@ -116,13 +122,13 @@ theorem denseBrRw_sound [Fact p.Prime] (singles : List (DenseExpr p)) (bound : N
     next e' _heq =>
       split_ifs with hok
       · rw [Bool.and_eq_true, Bool.and_eq_true] at hok
-        exact (denseBrCert_sound singles e e' hok.2 denv hdom).symm
+        exact (denseBrCert_sound bucketOf domOf hdomOf e e' hok.2 denv hdom).symm
       · rfl
     next _heq => rfl
 
 /-- The per-expression rewrite introduces no variable. -/
-theorem denseBrRw_vars (singles : List (DenseExpr p)) (bound : Nat) (e : DenseExpr p) :
-    ∀ v ∈ (denseBrRw singles bound e).vars, v ∈ e.vars := by
+theorem denseBrRw_vars (domOf : VarId → Option (List (ZMod p))) (bound : Nat) (e : DenseExpr p) :
+    ∀ v ∈ (denseBrRw domOf bound e).vars, v ∈ e.vars := by
   intro v hv
   simp only [denseBrRw] at hv
   split_ifs at hv with hd
@@ -137,9 +143,9 @@ theorem denseBrRw_vars (singles : List (DenseExpr p)) (bound : Nat) (e : DenseEx
 
 /-- A single-variable expression is never rewritten (the certificate's ≥ 2-variables guard), so the
     domain sources survive verbatim. -/
-theorem denseBrRw_singleVar (singles : List (DenseExpr p)) (bound : Nat) (c : DenseExpr p)
-    (hs : c.vars.eraseDups.length ≤ 1) : denseBrRw singles bound c = c := by
-  have hcert : ∀ e' : DenseExpr p, denseBrCert singles c e' = false := by
+theorem denseBrRw_singleVar (domOf : VarId → Option (List (ZMod p))) (bound : Nat)
+    (c : DenseExpr p) (hs : c.vars.eraseDups.length ≤ 1) : denseBrRw domOf bound c = c := by
+  have hcert : ∀ e' : DenseExpr p, denseBrCert domOf c e' = false := by
     intro e'
     unfold denseBrCert
     have h2 : (2 ≤ c.vars.eraseDups.length : Bool) = false := by
@@ -158,35 +164,38 @@ theorem denseBrRw_singleVar (singles : List (DenseExpr p)) (bound : Nat) (c : De
 
 /-- The rewritten interaction evaluates to the same message on every assignment zeroing the
     single-variable constraints. -/
-theorem denseBrBi_eval [Fact p.Prime] (singles : List (DenseExpr p)) (db : DegreeBound)
+theorem denseBrBi_eval [Fact p.Prime] (bucketOf : VarId → List (DenseExpr p))
+    (domOf : VarId → Option (List (ZMod p)))
+    (hdomOf : ∀ v dm, domOf v = some dm → denseFindDomainAlg (bucketOf v) v = some dm)
+    (db : DegreeBound)
     (bi : BusInteraction (DenseExpr p)) (denv : VarId → ZMod p)
-    (hdom : ∀ c ∈ singles, c.eval denv = 0) :
-    denseBIEval (denseBrBi singles db bi) denv = denseBIEval bi denv := by
+    (hdom : ∀ v, ∀ c ∈ bucketOf v, c.eval denv = 0) :
+    denseBIEval (denseBrBi domOf db bi) denv = denseBIEval bi denv := by
   unfold denseBrBi denseBIEval
   simp only [BusInteraction.mk.injEq]
-  refine ⟨trivial, denseBrRw_sound singles _ _ denv hdom, ?_⟩
+  refine ⟨trivial, denseBrRw_sound bucketOf domOf hdomOf _ _ denv hdom, ?_⟩
   rw [List.map_map]
-  exact List.map_congr_left (fun e _ => denseBrRw_sound singles _ e denv hdom)
+  exact List.map_congr_left (fun e _ => denseBrRw_sound bucketOf domOf hdomOf _ e denv hdom)
 
 /-- The rewritten interaction carries only input variables (`denseBrRw_vars` lifted through
     `denseBrBi`). -/
-theorem denseBrBi_vars (singles : List (DenseExpr p)) (db : DegreeBound)
+theorem denseBrBi_vars (domOf : VarId → Option (List (ZMod p))) (db : DegreeBound)
     (bi : BusInteraction (DenseExpr p)) :
-    ∀ i ∈ denseBIVars (denseBrBi singles db bi), i ∈ denseBIVars bi := by
+    ∀ i ∈ denseBIVars (denseBrBi domOf db bi), i ∈ denseBIVars bi := by
   intro i hi
   simp only [denseBIVars, denseBrBi, List.mem_append, List.mem_flatMap] at hi ⊢
   rcases hi with hm | ⟨e', he', hie⟩
-  · exact Or.inl (denseBrRw_vars singles _ _ i hm)
+  · exact Or.inl (denseBrRw_vars domOf _ _ i hm)
   · obtain ⟨e, he, rfl⟩ := List.mem_map.1 he'
-    exact Or.inr ⟨e, he, denseBrRw_vars singles _ e i hie⟩
+    exact Or.inr ⟨e, he, denseBrRw_vars domOf _ e i hie⟩
 
 /-! ## Coverage preservation -/
 
 /-- Coverage is preserved: rewrites introduce no variable, so every leaf of the output is a leaf of
     the input, and the registry covers those. -/
 theorem DenseConstraintSystem.boxRewrite_covered {reg : VarRegistry}
-    {d : DenseConstraintSystem p} (b : DegreeBound) (hc : d.CoveredBy reg) :
-    (d.boxRewrite b).CoveredBy reg := by
+    {d : DenseConstraintSystem p} (domOf : VarId → Option (List (ZMod p))) (b : DegreeBound)
+    (hc : d.CoveredBy reg) : (d.boxRewriteWith domOf b).CoveredBy reg := by
   refine ⟨fun e he => ?_, fun bi hbi => ?_⟩
   · obtain ⟨c, hcm, rfl⟩ := List.mem_map.1 he
     intro i hi
@@ -204,11 +213,15 @@ theorem DenseConstraintSystem.boxRewrite_covered {reg : VarRegistry}
     environment and side effects / admissibility are unchanged. -/
 theorem DenseConstraintSystem.boxRewrite_denseCorrect [Fact p.Prime]
     (d : DenseConstraintSystem p) (bs : BusSemantics p) (isInput : VarId → Bool)
+    (bucketOf : VarId → List (DenseExpr p))
+    (hidx : ∀ v, ∀ c ∈ bucketOf v, c ∈ denseSingleVarCs d.algebraicConstraints)
+    (domOf : VarId → Option (List (ZMod p)))
+    (hdomOf : ∀ v dm, domOf v = some dm → denseFindDomainAlg (bucketOf v) v = some dm)
     (b : DegreeBound) :
-    DensePassCorrect isInput d (d.boxRewrite b) [] bs := by
+    DensePassCorrect isInput d (d.boxRewriteWith domOf b) [] bs := by
   -- single-variable domain sources survive verbatim
   have hsingle : ∀ c ∈ denseSingleVarCs d.algebraicConstraints,
-      c ∈ (d.boxRewrite b).algebraicConstraints := by
+      c ∈ (d.boxRewriteWith domOf b).algebraicConstraints := by
     intro c hc
     have hmem := List.mem_of_mem_filter hc
     have hs : c.vars.eraseDups.length ≤ 1 := by
@@ -217,62 +230,61 @@ theorem DenseConstraintSystem.boxRewrite_denseCorrect [Fact p.Prime]
       have h2 : c.vars.eraseDups.length = 1 := by simpa using h1
       omega
     exact List.mem_map.2 ⟨c, hmem, denseBrRw_singleVar _ _ c hs⟩
-  have hdomOut : ∀ denv, (d.boxRewrite b).satisfies bs denv →
-      ∀ c ∈ denseSingleVarCs d.algebraicConstraints, c.eval denv = 0 :=
-    fun denv hsat c hc => hsat.1 c (hsingle c hc)
-  have hdomIn : ∀ denv, d.satisfies bs denv →
-      ∀ c ∈ denseSingleVarCs d.algebraicConstraints, c.eval denv = 0 :=
-    fun denv hsat c hc => hsat.1 c (List.mem_of_mem_filter hc)
+  have hdomOut : ∀ denv, (d.boxRewriteWith domOf b).satisfies bs denv →
+      ∀ v, ∀ c ∈ bucketOf v, c.eval denv = 0 :=
+    fun denv hsat v c hc => hsat.1 c (hsingle c (hidx v c hc))
+  have hdomIn : ∀ denv, d.satisfies bs denv → ∀ v, ∀ c ∈ bucketOf v, c.eval denv = 0 :=
+    fun denv hsat v c hc => hsat.1 c (List.mem_of_mem_filter (hidx v c hc))
   -- satisfaction equivalence on the SAME environment
-  have hiff : ∀ denv, (d.boxRewrite b).satisfies bs denv ↔ d.satisfies bs denv := by
+  have hiff : ∀ denv, (d.boxRewriteWith domOf b).satisfies bs denv ↔ d.satisfies bs denv := by
     intro denv
     constructor
     · intro hsat
       have hdom := hdomOut denv hsat
       refine ⟨fun c hc => ?_, fun bi hbim => ?_⟩
       · have h0 := hsat.1 _ (List.mem_map.2 ⟨c, hc, rfl⟩)
-        rw [denseBrRw_sound _ _ c denv hdom] at h0
+        rw [denseBrRw_sound bucketOf domOf hdomOf _ c denv hdom] at h0
         exact h0
       · have h0 := hsat.2 _ (List.mem_map.2 ⟨bi, hbim, rfl⟩)
-        rw [denseBrBi_eval _ _ bi denv hdom] at h0
+        rw [denseBrBi_eval bucketOf domOf hdomOf _ bi denv hdom] at h0
         exact h0
     · intro hsat
       have hdom := hdomIn denv hsat
       refine ⟨fun c' hc' => ?_, fun bi' hbi' => ?_⟩
       · obtain ⟨c, hc, rfl⟩ := List.mem_map.1 hc'
-        rw [denseBrRw_sound _ _ c denv hdom]
+        rw [denseBrRw_sound bucketOf domOf hdomOf _ c denv hdom]
         exact hsat.1 c hc
       · obtain ⟨bi, hbim, rfl⟩ := List.mem_map.1 hbi'
-        show (denseBIEval (denseBrBi (denseSingleVarCs d.algebraicConstraints) b bi) denv).multiplicity
+        show (denseBIEval (denseBrBi domOf b bi) denv).multiplicity
             ≠ 0 → _
-        rw [denseBrBi_eval _ _ bi denv hdom]
+        rw [denseBrBi_eval bucketOf domOf hdomOf _ bi denv hdom]
         exact hsat.2 bi hbim
   -- side effects agree given the domain hypothesis
-  have hside : ∀ denv, (∀ c ∈ denseSingleVarCs d.algebraicConstraints, c.eval denv = 0) →
-      (d.boxRewrite b).sideEffects bs denv = d.sideEffects bs denv := by
+  have hside : ∀ denv, (∀ v, ∀ c ∈ bucketOf v, c.eval denv = 0) →
+      (d.boxRewriteWith domOf b).sideEffects bs denv = d.sideEffects bs denv := by
     intro denv hdom
     unfold DenseConstraintSystem.sideEffects
     refine funext (fun message => congrArg (multiplicitySum message) ?_)
-    rw [show (d.boxRewrite b).busInteractions
-          = d.busInteractions.map (denseBrBi (denseSingleVarCs d.algebraicConstraints) b) from rfl,
+    rw [show (d.boxRewriteWith domOf b).busInteractions
+          = d.busInteractions.map (denseBrBi domOf b) from rfl,
         filter_map_busId_comm d.busInteractions
-          (denseBrBi (denseSingleVarCs d.algebraicConstraints) b) bs (fun _ => rfl), List.map_map]
+          (denseBrBi domOf b) bs (fun _ => rfl), List.map_map]
     refine List.map_congr_left (fun bi _ => ?_)
     simp only [Function.comp_apply,
-      denseBrBi_eval (denseSingleVarCs d.algebraicConstraints) b bi denv hdom]
+      denseBrBi_eval bucketOf domOf hdomOf b bi denv hdom]
   -- admissibility agrees given the domain hypothesis
-  have hadmEq : ∀ denv, (∀ c ∈ denseSingleVarCs d.algebraicConstraints, c.eval denv = 0) →
-      ((d.boxRewrite b).admissible bs denv ↔ d.admissible bs denv) := by
+  have hadmEq : ∀ denv, (∀ v, ∀ c ∈ bucketOf v, c.eval denv = 0) →
+      ((d.boxRewriteWith domOf b).admissible bs denv ↔ d.admissible bs denv) := by
     intro denv hdom
     unfold DenseConstraintSystem.admissible
-    have hmap : (d.boxRewrite b).busInteractions.map (fun bi => denseBIEval bi denv)
+    have hmap : (d.boxRewriteWith domOf b).busInteractions.map (fun bi => denseBIEval bi denv)
         = d.busInteractions.map (fun bi => denseBIEval bi denv) := by
-      rw [show (d.boxRewrite b).busInteractions
-            = d.busInteractions.map (denseBrBi (denseSingleVarCs d.algebraicConstraints) b) from rfl,
+      rw [show (d.boxRewriteWith domOf b).busInteractions
+            = d.busInteractions.map (denseBrBi domOf b) from rfl,
           List.map_map]
       refine List.map_congr_left (fun bi _ => ?_)
       simp only [Function.comp_apply]
-      exact denseBrBi_eval (denseSingleVarCs d.algebraicConstraints) b bi denv hdom
+      exact denseBrBi_eval bucketOf domOf hdomOf b bi denv hdom
     rw [hmap]
   refine DensePassCorrect.ofEnvEq ?_ ?_ ?_ ?_
   · -- soundness
@@ -282,9 +294,9 @@ theorem DenseConstraintSystem.boxRewrite_denseCorrect [Fact p.Prime]
   · -- invariant preservation
     intro hgi denv hsat bi hbi
     obtain ⟨bi0, hbi0, rfl⟩ := List.mem_map.1 hbi
-    show (denseBIEval (denseBrBi (denseSingleVarCs d.algebraicConstraints) b bi0) denv).multiplicity
-        ≠ 0 → bs.maintainsInvariants (denseBIEval (denseBrBi (denseSingleVarCs d.algebraicConstraints) b bi0) denv)
-    rw [denseBrBi_eval _ _ bi0 denv (hdomOut denv hsat)]
+    show (denseBIEval (denseBrBi domOf b bi0) denv).multiplicity
+        ≠ 0 → bs.maintainsInvariants (denseBIEval (denseBrBi domOf b bi0) denv)
+    rw [denseBrBi_eval bucketOf domOf hdomOf _ bi0 denv (hdomOut denv hsat)]
     exact hgi denv ((hiff denv).1 hsat) bi0 hbi0
   · -- output occurrences are input occurrences
     intro i hi
@@ -299,32 +311,5 @@ theorem DenseConstraintSystem.boxRewrite_denseCorrect [Fact p.Prime]
     have hdom := hdomIn denv hsat
     refine ⟨(hiff denv).2 hsat, (hadmEq denv hdom).2 hadm, ?_⟩
     rw [hside denv hdom]
-
-/-! ## The dense box-rewrite pass -/
-
-theorem denseBoxRewriteF_covered (pw : PrimeWitness p) (b : DegreeBound) (reg : VarRegistry)
-    (bs : BusSemantics p) (d : DenseConstraintSystem p) (hcov : d.CoveredBy reg) :
-    (denseBoxRewriteF pw b bs d).CoveredBy reg := by
-  unfold denseBoxRewriteF
-  split_ifs with hp
-  · exact DenseConstraintSystem.boxRewrite_covered b hcov
-  · exact hcov
-
-theorem denseBoxRewriteF_correct (pw : PrimeWitness p) (b : DegreeBound) (reg : VarRegistry)
-    (bs : BusSemantics p) (d : DenseConstraintSystem p) (_hcov : d.CoveredBy reg) :
-    DensePassCorrect reg.isInput d (denseBoxRewriteF pw b bs d) [] bs := by
-  unfold denseBoxRewriteF
-  split_ifs with hp
-  · haveI : Fact p.Prime := ⟨pw.correct hp⟩
-    exact DenseConstraintSystem.boxRewrite_denseCorrect d bs reg.isInput b
-  · exact DensePassCorrect.refl reg.isInput d bs
-
-/-- The dense box-rewrite pass (second sub-pass of the flagFold composite; see
-    `DenseConstraintSystem.boxRewrite`). -/
-def denseBoxRewritePass (pw : PrimeWitness p) (b : DegreeBound) : DenseVerifiedPassW p :=
-  DenseVerifiedPassW.of (fun bs _ d => denseBoxRewriteF pw b bs d) (fun _ _ _ => [])
-    (fun reg bs _ d hcov => denseBoxRewriteF_covered pw b reg bs d hcov)
-    (fun _ _ _ _ _ => by intro x hx; simp at hx)
-    (fun reg bs _ d hcov => denseBoxRewriteF_correct pw b reg bs d hcov)
 
 end ApcOptimizer.Dense

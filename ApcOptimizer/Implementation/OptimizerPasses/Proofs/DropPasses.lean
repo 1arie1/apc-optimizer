@@ -1,5 +1,5 @@
 import ApcOptimizer.Implementation.OptimizerPasses.DropPasses
-import ApcOptimizer.Implementation.OptimizerPasses.Proofs.FlagFoldDrops
+import ApcOptimizer.Implementation.OptimizerPasses.Proofs.EntailedCheck
 
 set_option autoImplicit false
 

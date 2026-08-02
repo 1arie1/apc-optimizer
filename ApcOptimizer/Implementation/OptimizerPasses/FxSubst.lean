@@ -69,35 +69,93 @@ def denseFxCheck (bs : BusSemantics p) (facts : BusFacts p bs)
   | some d => denseFxCheckWith d E vy
   | none => false
 
+/-! ## Fast scaled-check candidate generation
+
+Heuristic: the scan's soundness never reads the candidate list (`denseFxLoop_sound` only uses it to
+place a seen-entry's interaction in the system), so this carries no obligation. -/
+
+@[inline] def ffPushVar (acc : Array VarId) (v : VarId) : Array VarId :=
+  if acc.contains v then acc else acc.push v
+
+/-- Distinct variables in first-occurrence order — `e.vars.eraseDups` with no intermediate list. -/
+def ffVarsAcc : DenseExpr p → Array VarId → Array VarId
+  | .const _, acc => acc
+  | .var i, acc => ffPushVar acc i
+  | .add a b, acc => ffVarsAcc b (ffVarsAcc a acc)
+  | .mul a b, acc => ffVarsAcc b (ffVarsAcc a acc)
+
+@[inline] def ffVars (e : DenseExpr p) : Array VarId := ffVarsAcc e #[]
+
+/-- The coefficient of `x` in `e` — `DenseExpr.splitAt` with the remainder deleted, so reading a
+    candidate's coefficient does not allocate a rebuilt copy of `e`. -/
+def ffCoeffAt (x : VarId) : DenseExpr p → Option (ZMod p)
+  | .const _ => some (zmodZeroP p)
+  | .var y => if y == x then some (zmodOneP p) else some (zmodZeroP p)
+  | .add a b =>
+    match ffCoeffAt x a, ffCoeffAt x b with
+    | some ca, some cb => some (zmodAddP ca cb)
+    | _, _ => none
+  | .mul a b =>
+    if a.mentions x || b.mentions x then
+      match a.constValue? with
+      | some k => (ffCoeffAt x b).map (zmodMulP k)
+      | none =>
+        match b.constValue? with
+        | some k => (ffCoeffAt x a).map (zmodMulP k)
+        | none => none
+    else some (zmodZeroP p)
+
+/-- Scaled-check candidates of one interaction: each carrier variable of the first payload slot
+    with a constant-coefficient decomposition, keyed by `(busId, slot-1 constant, k, x)` and
+    pre-hashed for the `seen` buckets. A slot 0 with fewer than two distinct variables has an
+    empty offset part for every carrier, so it is skipped before any per-variable work. -/
+def ffFuCandidates (bi : BusInteraction (DenseExpr p)) :
+    List (UInt64 × VarId × (Nat × Option (ZMod p) × ZMod p × VarId)) :=
+  match bi.payload with
+  | [] => []
+  | O :: rest =>
+    let vs := ffVars O
+    if vs.size < 2 then []
+    else
+      let c1 := (rest.head?).bind DenseExpr.constValue?
+      (vs.foldr (init := []) fun x acc =>
+        match ffCoeffAt x O with
+        | some k =>
+          let key := (bi.busId, c1, k, x)
+          (denseFuKeyHash key, x, key) :: acc
+        | none => acc)
+
 /-! ## The scan loop and the substitution pass (dense) -/
 
 /-- Scan for matched scaled-check pairs and adopt every certified interpolation `vy := E`. -/
 def denseFxLoop (bs : BusSemantics p) (facts : BusFacts p bs)
-    (domIdx : Std.HashMap VarId (List (DenseExpr p))) :
+    (domIdx : Thunk (Std.HashMap VarId (List (DenseExpr p)))) :
     List (BusInteraction (DenseExpr p)) → Std.HashMap UInt64 (List (DenseFUSeen p)) →
       DenseSolved p → DenseSolved p
   | [], _, σ => σ
   | c :: rest, seen, σ =>
-    let cands := denseFuCandidates c
+    let cands := ffFuCandidates c
     match cands.findSome? (fun xk =>
-        (seen.getD (denseFuKeyHash xk.2) []).findSome? (fun e =>
-          if e.key == xk.2 then some (e, xk.1) else none)) with
+        (seen.getD xk.1 []).findSome? (fun e =>
+          if e.key == xk.2.2 then some (e, xk.2.1) else none)) with
     | some ex =>
-        -- pair-level work once per match; per-target checks share it (see `denseFxCheck`)
-        match denseFuPairData? bs facts domIdx ex.1.bi c ex.2 with
+        -- pair-level work once per match; per-target checks share it (see `denseFxCheck`).
+        -- `domIdx` is forced here and nowhere else: an invocation with no matched pair never
+        -- builds the whole-constraint bucket.
+        match denseFuPairData? bs facts domIdx.get ex.1.bi c ex.2 with
         | none =>
             denseFxLoop bs facts domIdx rest
-              (denseFuInsertAll seen (cands.map (fun xk => (⟨c, xk.1, xk.2⟩ : DenseFUSeen p)))) σ
+              (denseFuInsertAll seen (cands.map (fun xk => (⟨c, xk.2.1, xk.2.2⟩ : DenseFUSeen p)))) σ
         | some d =>
         let pairs := (d.ryVars.eraseDups.filter (fun v => !(v ∈ d.rxVars))).filterMap (fun vy =>
-          if denseFxCheckWith d (denseBuildE d vy) vy
-          then some (vy, denseBuildE d vy) else none)
+          let ev := denseBuildE d vy
+          if denseFxCheckWith d ev vy then some (vy, ev) else none)
         denseFxLoop bs facts domIdx rest
-          (denseFuInsertAll seen (cands.map (fun xk => (⟨c, xk.1, xk.2⟩ : DenseFUSeen p))))
+          (denseFuInsertAll seen (cands.map (fun xk => (⟨c, xk.2.1, xk.2.2⟩ : DenseFUSeen p))))
           (σ.insertAll pairs)
     | none =>
         denseFxLoop bs facts domIdx rest
-          (denseFuInsertAll seen (cands.map (fun xk => (⟨c, xk.1, xk.2⟩ : DenseFUSeen p)))) σ
+          (denseFuInsertAll seen (cands.map (fun xk => (⟨c, xk.2.1, xk.2.2⟩ : DenseFUSeen p)))) σ
 
 /-- Entailed nonlinear substitution. When two bus interactions match up to a scaled range check,
     a survivor-side flag `vy` is often pinned to an interpolation `E` over the other flags (e.g.
@@ -107,8 +165,8 @@ def denseFxSubstF (pw : PrimeWitness p) (bs : BusSemantics p) (facts : BusFacts 
     (d : DenseConstraintSystem p) : DenseConstraintSystem p :=
   if pw.isPrime = true then
     let σ := denseFxLoop bs facts
-        (denseVarBucket DenseExpr.vars d.algebraicConstraints) d.busInteractions ∅
-        DenseSolved.empty
+        (Thunk.mk (fun _ => denseVarBucket DenseExpr.vars d.algebraicConstraints))
+        d.busInteractions ∅ DenseSolved.empty
     if σ.map.isEmpty then d else d.substF σ.fn
   else d
 

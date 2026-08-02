@@ -25,6 +25,7 @@ import ApcOptimizer.Implementation.OptimizerPasses.Proofs.IdentitySubst
 import ApcOptimizer.Implementation.OptimizerPasses.DenseUmbrella
 import ApcOptimizer.Implementation.OptimizerPasses.HashedDedup
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DomainBatch
+import ApcOptimizer.Implementation.OptimizerPasses.Proofs.FlagFold
 
 set_option autoImplicit false
 

@@ -42,14 +42,13 @@ import ApcOptimizer.Implementation.OptimizerPasses.RootPairUnify
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.RootPairUnify
 import ApcOptimizer.Implementation.OptimizerPasses.FlagUnify
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.FlagUnify
-import ApcOptimizer.Implementation.OptimizerPasses.FlagFoldDrops
-import ApcOptimizer.Implementation.OptimizerPasses.Proofs.FlagFoldDrops
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DropPasses
 import ApcOptimizer.Implementation.OptimizerPasses.FxSubst
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.FxSubst
 import ApcOptimizer.Implementation.OptimizerPasses.BoxRewrite
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.BoxRewrite
 import ApcOptimizer.Implementation.OptimizerPasses.FlagFold
+import ApcOptimizer.Implementation.OptimizerPasses.Proofs.FlagFold
 import ApcOptimizer.Implementation.OptimizerPasses.BusPairCancelJustify
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.BusPairCancelJustify
 import ApcOptimizer.Implementation.OptimizerPasses.BusPairCancelCore

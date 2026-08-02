@@ -1,7 +1,7 @@
 import ApcOptimizer.Implementation.OptimizerPasses.RedundantByteDrop
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.ByteCheckPack
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.BusPairCancelJustify
-import ApcOptimizer.Implementation.OptimizerPasses.Proofs.FlagFoldDrops
+import ApcOptimizer.Implementation.OptimizerPasses.Proofs.EntailedCheck
 
 set_option autoImplicit false
 
