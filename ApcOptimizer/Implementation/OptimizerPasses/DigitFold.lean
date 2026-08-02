@@ -306,10 +306,10 @@ def denseSlotBoundAtImpl (bs : BusSemantics p) (facts : BusFacts p bs)
   simp [denseSlotBoundAt, denseSlotBoundAtImpl]
 
 /-- `denseProbedSlotBoundAt` on the hoisted per-interaction values (the constant multiplicity and
-    payload pattern) and the variable's payload slot. The probe payload is derived from the pattern
-    and its `j`-zeroed form hoisted out of the value scan, which the original rebuilt — with a fresh
-    `constValue?` walk per payload slot — once per probed value. `denseProbedSlotBoundAtP_eq` is the
-    equality at the canonical arguments. -/
+    payload pattern) and the variable's payload slot; `denseProbedSlotBoundAtP_eq` is the equality
+    at the canonical arguments. Everything past the two `facts` lookups is left as the original
+    computes it: dropping the barren `.var`-at-first-slot candidates leaves almost no probe reaching
+    that far (keccak cycle 1: 24 630 probe calls → 1), so hoisting there buys nothing. -/
 def denseProbedSlotBoundAtP (bs : BusSemantics p) (facts : BusFacts p bs)
     (bi : BusInteraction (DenseExpr p)) (pr : DenseBiPrep p) (i : VarId) (slot? : Option Nat)
     (j : Nat) : Option Nat :=
@@ -341,11 +341,12 @@ def denseProbedSlotBoundAtP (bs : BusSemantics p) (facts : BusFacts p bs)
                   | some l =>
                     match l.terms with
                     | [(y, c)] =>
-                      if y = i ∧ (List.range pr.pat.length).all (fun k =>
-                          k == s || k == j || ((pr.pat[k]?.map Option.isSome).getD false)) then
-                        let bj := (pr.pat.map (fun cv => cv.getD 0)).set j 0
+                      if y = i ∧ (List.range bi.payload.length).all (fun k =>
+                          k == s || k == j ||
+                            ((bi.payload[k]?.map
+                              (fun e' => (DenseExpr.constValue? e').isSome)).getD false)) then
                         capBound (probeMax (fun v =>
-                          f (bj.set s ((v : ℕ) : ZMod p))
+                          f ((denseProbeBase bi.payload s ((v : ℕ) : ZMod p)).set j 0)
                             == l.const + c * ((v : ℕ) : ZMod p)) B₀) B₀
                       else none
                     | _ => none

@@ -154,21 +154,43 @@ theorem denseProbedSlotBoundAt_sound (bs : BusSemantics p) (facts : BusFacts p b
     rw [beq_iff_eq, hdenvi, ← hpay, ← hfun, heval]
   exact probeMax_lt _ B₀ (denv i).val hbase htest
 
-/-! ## The hoisted per-interaction derivations are the originals -/
+/-! ## The hoisted per-interaction derivations are the originals
+
+The prep derives nothing when the multiplicity is not constant, so both equalities split on
+`bi.multiplicity.constValue?` first; on the `some` branch `pat` is the canonical pattern and the
+rest is the pattern-vs-payload correspondence (`List.length_map`, `List.getElem?_map`,
+`List.map_map`). -/
+
+/-- The prep's pattern, on the branch where it is derived at all. -/
+theorem denseBiPrepOf_pat (bi : BusInteraction (DenseExpr p)) (mval : ZMod p)
+    (h : bi.multiplicity.constValue? = some mval) :
+    (denseBiPrepOf bi).mval? = some mval ∧
+      (denseBiPrepOf bi).pat = bi.payload.map DenseExpr.constValue? := by
+  unfold denseBiPrepOf
+  rw [h]
+  exact ⟨rfl, rfl⟩
 
 /-- The hoisted interaction bound at the canonical arguments is `denseInteractionBound`. -/
 theorem denseSlotBoundAt_eq (bs : BusSemantics p) (facts : BusFacts p bs)
     (bi : BusInteraction (DenseExpr p)) (i : VarId) :
     denseSlotBoundAt bs facts bi (denseBiPrepOf bi).mval? (denseBiPrepOf bi).pat
       (denseVarSlot i bi.payload) = denseInteractionBound bs facts bi i := by
-  sorry
+  unfold denseSlotBoundAt denseInteractionBound
+  cases hm : bi.multiplicity.constValue? with
+  | none => simp only [denseBiPrepOf, hm]
+  | some mval => simp only [(denseBiPrepOf_pat bi mval hm).1, (denseBiPrepOf_pat bi mval hm).2]
 
 /-- The hoisted probed bound at the canonical arguments is `denseProbedSlotBoundAt`. -/
 theorem denseProbedSlotBoundAtP_eq (bs : BusSemantics p) (facts : BusFacts p bs)
     (bi : BusInteraction (DenseExpr p)) (i : VarId) (j : Nat) :
     denseProbedSlotBoundAtP bs facts bi (denseBiPrepOf bi) i (denseVarSlot i bi.payload) j
       = denseProbedSlotBoundAt bs facts bi i j := by
-  sorry
+  unfold denseProbedSlotBoundAtP denseProbedSlotBoundAt
+  cases hm : bi.multiplicity.constValue? with
+  | none => simp only [denseBiPrepOf, hm]
+  | some mval =>
+    obtain ⟨hmv, hpat⟩ := denseBiPrepOf_pat bi mval hm
+    rw [hmv, hpat]
 
 /-! ## The fixed-`denv` build invariant and its induction -/
 
