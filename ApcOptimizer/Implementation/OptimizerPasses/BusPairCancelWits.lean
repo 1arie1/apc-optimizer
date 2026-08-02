@@ -55,8 +55,8 @@ def denseInteractionBoundPat (bs : BusSemantics p) (facts : BusFacts p bs)
 /-- Candidate positions of bound-deriving interactions, per variable (ascending), built once per
     invocation. Untrusted — `denseDropWitsIdxGo` re-checks liveness, the dropped pair, and the bound
     at every use. -/
-def denseBuildBoundIdx (bs : BusSemantics p) (facts : BusFacts p bs)
-    (arr : Array (BusInteraction (DenseExpr p))) : Std.HashMap VarId (List Nat) :=
+def denseBuildBoundIdx (bs : BusSemantics p) (facts : BusFacts p bs) (nvars : Nat)
+    (arr : Array (BusInteraction (DenseExpr p))) : Array (List Nat) :=
   (arr.toList.zipIdx).foldr (fun bik m =>
     let bi := bik.1
     let mval? := bi.multiplicity.constValue?
@@ -65,12 +65,12 @@ def denseBuildBoundIdx (bs : BusSemantics p) (facts : BusFacts p bs)
       match e with
       | .var v =>
         -- skip repeated occurrences of the same variable within one payload
-        if (m.getD v []).head? = some bik.2 then m
+        if ((m[v.index]?).getD []).head? = some bik.2 then m
         else
           match denseInteractionBoundPat bs facts bi mval? pat v with
-          | some _ => m.insert v (bik.2 :: m.getD v [])
+          | some _ => m.modify v.index (bik.2 :: ·)
           | none => m
-      | _ => m) m) ∅
+      | _ => m) m) (Array.replicate nvars [])
 
 /-- The scan behind `denseDropWits`: the first of `v`'s indexed candidate positions (ascending,
     skipping dead entries and the dropped pair) that still derives a `denseInteractionBound` for
@@ -103,12 +103,12 @@ def denseFirstBoundIn {bs : BusSemantics p} (facts : BusFacts p bs) (v : VarId) 
     dropped pair — first among the live stable-array entries (via `bidx`), then among the
     previously-emitted checks `checksOld` — followed by this drop's emitted checks. -/
 def denseDropWits {bs : BusSemantics p} (facts : BusFacts p bs)
-    (bidx : Std.HashMap VarId (List Nat))
+    (bidx : Array (List Nat))
     (arr : Array (BusInteraction (DenseExpr p))) (alive : Array Bool)
     (S R : BusInteraction (DenseExpr p))
     (checksOld emitted : List (BusInteraction (DenseExpr p))) (v : VarId) :
     List (BusInteraction (DenseExpr p)) :=
-  match denseDropWitsIdxGo facts arr alive S R v (bidx.getD v []) with
+  match denseDropWitsIdxGo facts arr alive S R v ((bidx[v.index]?).getD []) with
   | some bi => bi :: emitted
   | none =>
     match denseFirstBoundIn facts v checksOld with
@@ -118,8 +118,8 @@ def denseDropWits {bs : BusSemantics p} (facts : BusFacts p bs)
 /-- Candidate positions for range-checked forms, per variable: interactions on a *stateless* bus
     carrying a compound payload slot mentioning the variable, at most four per variable. Untrusted —
     `denseDropFormWits` re-checks liveness and the dropped pair at every use. -/
-def denseBuildFormIdx (bs : BusSemantics p) (arr : Array (BusInteraction (DenseExpr p))) :
-    Std.HashMap VarId (List Nat) :=
+def denseBuildFormIdx (bs : BusSemantics p) (nvars : Nat)
+    (arr : Array (BusInteraction (DenseExpr p))) : Array (List Nat) :=
   (arr.toList.zipIdx).foldl (fun m bik =>
     if bs.isStateful bik.1.busId then m
     else
@@ -127,17 +127,18 @@ def denseBuildFormIdx (bs : BusSemantics p) (arr : Array (BusInteraction (DenseE
         if e.isSingleVar then m
         else
           e.vars.dedup.foldl (fun m v =>
-            let cur := m.getD v []
-            if cur.length < 4 then m.insert v (bik.2 :: cur) else m) m) m) ∅
+            let cur := (m[v.index]?).getD []
+            if cur.length < 4 then m.modify v.index (bik.2 :: ·) else m) m) m)
+      (Array.replicate nvars [])
 
 /-- The range-checked-form witness lookup for a candidate drop: the indexed candidate positions
     for `v`, re-checked live and distinct from the dropped pair — the interactions
     `denseBasisJustified` mines for bounded linear forms. -/
-def denseDropFormWits (fidx : Std.HashMap VarId (List Nat))
+def denseDropFormWits (fidx : Array (List Nat))
     (arr : Array (BusInteraction (DenseExpr p))) (alive : Array Bool)
     (S R : BusInteraction (DenseExpr p)) (v : VarId) :
     List (BusInteraction (DenseExpr p)) :=
-  (fidx.getD v []).filterMap (fun k =>
+  ((fidx[v.index]?).getD []).filterMap (fun k =>
     if h : k < arr.size then
       if alive[k]?.getD false && !decide (arr[k] = S) && !decide (arr[k] = R) then
         some arr[k]
@@ -202,7 +203,7 @@ theorem denseFirstBoundIn_mem {bs : BusSemantics p} (facts : BusFacts p bs) (v :
     entries other than the dropped pair are in `A ++ B ++ C`, and so are the previously-emitted
     checks `checksOld`. -/
 theorem denseDropWits_mem {bs : BusSemantics p} (facts : BusFacts p bs)
-    (bidx : Std.HashMap VarId (List Nat))
+    (bidx : Array (List Nat))
     (arr : Array (BusInteraction (DenseExpr p))) (alive : Array Bool)
     (S R : BusInteraction (DenseExpr p))
     (checksOld emitted : List (BusInteraction (DenseExpr p)))
@@ -213,7 +214,7 @@ theorem denseDropWits_mem {bs : BusSemantics p} (facts : BusFacts p bs)
       bi ∈ A ++ B ++ C ++ emitted := by
   intro v bi hbi
   unfold denseDropWits at hbi
-  cases hgo : denseDropWitsIdxGo facts arr alive S R v (bidx.getD v []) with
+  cases hgo : denseDropWitsIdxGo facts arr alive S R v ((bidx[v.index]?).getD []) with
   | some bi' =>
     rw [hgo] at hbi
     rcases List.mem_cons.1 hbi with rfl | hbi
@@ -233,7 +234,7 @@ theorem denseDropWits_mem {bs : BusSemantics p} (facts : BusFacts p bs)
       exact List.mem_append_right _ hbi
 
 /-- Every form witness is in the remaining region (the index entry is re-checked at use). -/
-theorem denseDropFormWits_mem (fidx : Std.HashMap VarId (List Nat))
+theorem denseDropFormWits_mem (fidx : Array (List Nat))
     (arr : Array (BusInteraction (DenseExpr p))) (alive : Array Bool)
     (S R : BusInteraction (DenseExpr p))
     {A B C : List (BusInteraction (DenseExpr p))}

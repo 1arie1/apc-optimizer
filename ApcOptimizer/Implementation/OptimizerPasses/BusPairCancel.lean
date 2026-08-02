@@ -80,7 +80,7 @@ def denseMkDropResult (cs0 : DenseConstraintSystem p) (bs : BusSemantics p) (fac
     (hdomIdx : ∀ v, ∀ c ∈ denseVarBucketLookup domIdx v, c ∈ cs0.algebraicConstraints)
     (candsOf : VarId → List (DenseExpr p))
     (hcands : ∀ x, ∀ c ∈ candsOf x, c ∈ cs0.algebraicConstraints)
-    (fidxT bidxT : Thunk (Std.HashMap VarId (List Nat)))
+    (fidxT bidxT : Thunk (Array (List Nat)))
     (arr : Array (BusInteraction (DenseExpr p))) (alive : Array Bool)
     (checksOld : List (BusInteraction (DenseExpr p))) (hsz : alive.size = arr.size)
     (iP jP : Nat) (S R : BusInteraction (DenseExpr p)) (slots : List Nat) (bound : Nat)
@@ -184,7 +184,7 @@ def denseFindCancelGoIdx (cs0 : DenseConstraintSystem p) (bs : BusSemantics p) (
     (candsT : Thunk (DenseVarCsIdx p))
     (hcands : ∀ x, ∀ c ∈ candsT.get.lookup x, c ∈ cs0.algebraicConstraints)
     (bcBus? : Option (Nat × ByteXorSpec p))
-    (fidxT bidxT : Thunk (Std.HashMap VarId (List Nat)))
+    (fidxT bidxT : Thunk (Array (List Nat)))
     (arr : Array (BusInteraction (DenseExpr p))) (alive : Array Bool)
     (checksOld : List (BusInteraction (DenseExpr p))) (hsz : alive.size = arr.size)
     (idx : Std.HashMap UInt64 (List Nat))
@@ -284,7 +284,7 @@ def denseFindCancel (cs0 : DenseConstraintSystem p) (bs : BusSemantics p) (facts
       ∀ v, ∀ c ∈ denseVarBucketLookup m v, c ∈ cs0.algebraicConstraints })
     (candsT : Thunk (DenseVarCsIdx p))
     (hcands : ∀ x, ∀ c ∈ candsT.get.lookup x, c ∈ cs0.algebraicConstraints)
-    (fidxT bidxT : Thunk (Std.HashMap VarId (List Nat)))
+    (fidxT bidxT : Thunk (Array (List Nat)))
     (arr : Array (BusInteraction (DenseExpr p))) (alive : Array Bool)
     (checksOld : List (BusInteraction (DenseExpr p))) (hsz : alive.size = arr.size)
     (idx : Std.HashMap UInt64 (List Nat))
@@ -340,7 +340,7 @@ def denseCancelLoop (cs0 : DenseConstraintSystem p) (bs : BusSemantics p) (facts
     (hcands : ∀ x, ∀ c ∈ candsT.get.lookup x, c ∈ cs0.algebraicConstraints)
     (bcBus? : Option (Nat × ByteXorSpec p))
     (preBuses : List (Nat × Thunk (Array (DenseAddrPre p)) × Thunk (DenseKeyIdx p)))
-    (fidxT bidxT : Thunk (Std.HashMap VarId (List Nat)))
+    (fidxT bidxT : Thunk (Array (List Nat)))
     (arr : Array (BusInteraction (DenseExpr p)))
     (idx : Std.HashMap UInt64 (List Nat))
     (hpre : ∀ busId t kt, (busId, t, kt) ∈ preBuses → ∀ shape,
@@ -423,9 +423,10 @@ def denseBusPairCancelPass (pw : PrimeWitness p) (aggressive : Bool) : DenseVeri
       · exact DenseEqConstraintMap.empty_sound d.algebraicConstraints
     have hcands : ∀ x, ∀ c ∈ candsT.get.lookup x, c ∈ d.algebraicConstraints :=
       fun x => DenseVarCsIdx.lookup_mem (DenseVarCsIdx.build_sound d.algebraicConstraints) x
-    let fidxT : Thunk (Std.HashMap VarId (List Nat)) := Thunk.mk fun _ => denseBuildFormIdx bs arr
-    let bidxT : Thunk (Std.HashMap VarId (List Nat)) :=
-      Thunk.mk fun _ => denseBuildBoundIdx bs facts arr
+    let nvars := reg.byId.size
+    let fidxT : Thunk (Array (List Nat)) := Thunk.mk fun _ => denseBuildFormIdx bs nvars arr
+    let bidxT : Thunk (Array (List Nat)) :=
+      Thunk.mk fun _ => denseBuildBoundIdx bs facts nvars arr
     let bcBus? := busIds.findSome? (fun k => match facts.byteXorSpec k with
       | some spec => if spec.bound = 256 then some (k, spec) else none
       | none => none)
