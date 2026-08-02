@@ -97,7 +97,7 @@ Both walks re-check the window at every entry, so the bounds only need to be sou
 /-- `P` at every live entry of `a` (indices `[start, n)`) whose position lies in `[lo, hi)`. The
     caller passes `start = denseLowerBound a lo` and `n = denseLowerBound a hi`, so the walk covers
     exactly the entries the window gate can accept. -/
-def denseLiveAllGated {α : Type} (P : α → Bool) (preArr : Array α) (alive : Array Bool)
+@[specialize] def denseLiveAllGated {α : Type} (P : α → Bool) (preArr : Array α) (alive : Array Bool)
     (a : Array Nat) (lo hi start : Nat) : Nat → Bool
   | 0 => true
   | n + 1 =>
@@ -127,7 +127,7 @@ def denseLiveAllGated {α : Type} (P : α → Bool) (preArr : Array α) (alive :
 /-- Descending early-exit shield over the entries of the two ascending arrays below `bound`: the
     larger of the two current tails is tested first, so entries are visited in descending position
     order and the walk stops at the topmost deciding one. `fuel` bounds the walk (`nb + ns`). -/
-def denseShieldEarly {α : Type} (P Q : α → Bool) (preArr : Array α) (alive : Array Bool)
+@[specialize] def denseShieldEarly {α : Type} (P Q : α → Bool) (preArr : Array α) (alive : Array Bool)
     (b s : Array Nat) (bound : Nat) : Nat → Nat → Nat → Bool
   | 0, _, _ => true
   | fuel + 1, nb, ns =>
@@ -153,7 +153,7 @@ def denseShieldEarly {α : Type} (P Q : α → Bool) (preArr : Array α) (alive 
 
 /-- Descending early-exit shield over the whole segment `[0, n)` — the symbolic-key fallback, which
     has no index to walk. -/
-def denseShieldEarlySeg {α : Type} (P Q : α → Bool) (preArr : Array α) (alive : Array Bool)
+@[specialize] def denseShieldEarlySeg {α : Type} (P Q : α → Bool) (preArr : Array α) (alive : Array Bool)
     (bound : Nat) : Nat → Bool
   | 0 => true
   | n + 1 =>
