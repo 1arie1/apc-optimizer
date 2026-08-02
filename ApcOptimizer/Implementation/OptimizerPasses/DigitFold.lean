@@ -211,7 +211,14 @@ def denseProbedSlotBoundAt (bs : BusSemantics p) (facts : BusFacts p bs)
                       else none
                     | _ => none
 
-/-! ## Dense bounds map (`Std.HashMap VarId Nat`); soundness in `Proofs/DigitFold.lean`. -/
+/-! ## Dense bounds map (`Std.HashMap VarId Nat`); soundness in `Proofs/DigitFold.lean`.
+
+Everything an interaction's bound derivations need that does not depend on the payload variable —
+the constant multiplicity, the payload's constant pattern, the pattern's non-constant slot indices
+and the probe payload's constant base — is derived once per interaction into a `DenseBiPrep` and
+threaded down, instead of being re-derived once per raw variable (and, for the probe base, once per
+probed value). The soundness proof only constrains *which* bounds are inserted
+(`denseSlotBoundAt_eq`, `denseProbedSlotBoundAtP_eq`), never how the candidates are enumerated. -/
 
 /-- Keep the smaller of two bounds for `i`. -/
 def denseInsertEntry (T : Std.HashMap VarId Nat) (i : VarId) (b : Nat) : Std.HashMap VarId Nat :=
@@ -224,49 +231,156 @@ def denseInsertEntry (T : Std.HashMap VarId Nat) (i : VarId) (b : Nat) : Std.Has
 def denseRawVarsOf (bi : BusInteraction (DenseExpr p)) : List VarId :=
   bi.payload.filterMap (fun e => match e with | .var i => some i | _ => none)
 
+/-- Payload slots whose affine form is a single term, as `(variable, slot)` from `j` on, with
+    `seen` the variables of the earlier raw slots.
+
+    A `.var` or `.const` slot is decided by shape, so the linearization runs only on compound slots.
+    A `.var y` slot at `y`'s *first* occurrence is dropped: the probe looks the bound up at
+    `denseVarSlot y`, which is then this very slot, and `denseProbedSlotBoundAtP` rejects `s = j`.
+    Candidates are unconstrained by soundness — dropping one can only lose a bound, and this one
+    was never derivable. -/
+def denseProbeCandsGo (seen : List VarId) (j : Nat) :
+    List (DenseExpr p) → List (VarId × Nat)
+  | [] => []
+  | e :: rest =>
+    match e with
+    | .var y =>
+      if seen.any (fun v => v == y) then (y, j) :: denseProbeCandsGo (y :: seen) (j + 1) rest
+      else denseProbeCandsGo (y :: seen) (j + 1) rest
+    | .const _ => denseProbeCandsGo seen (j + 1) rest
+    | _ =>
+      match denseLinearize e with
+      | some l =>
+        match l.terms with
+        | [(y, _)] => (y, j) :: denseProbeCandsGo seen (j + 1) rest
+        | _ => denseProbeCandsGo seen (j + 1) rest
+      | none => denseProbeCandsGo seen (j + 1) rest
+
 /-- The probed-bound candidate `(VarId, slot)` pairs. -/
 def denseProbeCandidatesOf (bi : BusInteraction (DenseExpr p)) : List (VarId × Nat) :=
-  if (bi.multiplicity.constValue?).isSome then
-    (List.range bi.payload.length).filterMap (fun j =>
-      match bi.payload[j]? with
-      | some e =>
-        match denseLinearize e with
-        | some l => match l.terms with
-          | [(y, _)] => some (y, j)
-          | _ => none
-        | none => none
-      | none => none)
-  else []
+  if (bi.multiplicity.constValue?).isSome then denseProbeCandsGo [] 0 bi.payload else []
+
+/-- The per-interaction values the bound derivations would otherwise re-derive per payload
+    variable. Nothing is derived when the multiplicity is not constant: every bound below then
+    returns `none` regardless of the payload, and that is the common case in the first cleanup
+    cycle. -/
+structure DenseBiPrep (p : ℕ) where
+  mval? : Option (ZMod p)
+  pat : List (Option (ZMod p))
+  cands : List (VarId × Nat)
+
+def denseBiPrepOf (bi : BusInteraction (DenseExpr p)) : DenseBiPrep p :=
+  match bi.multiplicity.constValue? with
+  | none => ⟨none, [], []⟩
+  | some mval =>
+    ⟨some mval, bi.payload.map DenseExpr.constValue?, denseProbeCandsGo [] 0 bi.payload⟩
+
+/-- `denseInteractionBound` with the per-interaction values and the variable's payload slot hoisted
+    out of the caller's loop; `denseSlotBoundAt_eq` is the equality at the canonical arguments. -/
+def denseSlotBoundAt (bs : BusSemantics p) (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) (mval? : Option (ZMod p)) (pat : List (Option (ZMod p)))
+    (slot? : Option Nat) : Option Nat :=
+  match mval? with
+  | none => none
+  | some mval =>
+    if mval = 0 then none
+    else
+      match slot? with
+      | none => none
+      | some slot => facts.slotBound bi.busId mval pat slot
+
+def denseSlotBoundAtImpl (bs : BusSemantics p) (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) (mval? : Option (ZMod p)) (pat : List (Option (ZMod p)))
+    (slot? : Option Nat) : Option Nat :=
+  match mval? with
+  | none => none
+  | some mval =>
+    if zmodIsZero mval then none
+    else
+      match slot? with
+      | none => none
+      | some slot => facts.slotBound bi.busId mval pat slot
+
+@[csimp] theorem denseSlotBoundAt_eq_impl : @denseSlotBoundAt = @denseSlotBoundAtImpl := by
+  funext q bs facts bi m pat s
+  simp [denseSlotBoundAt, denseSlotBoundAtImpl]
+
+/-- `denseProbedSlotBoundAt` on the hoisted per-interaction values (the constant multiplicity and
+    payload pattern) and the variable's payload slot. The probe payload is derived from the pattern
+    and its `j`-zeroed form hoisted out of the value scan, which the original rebuilt — with a fresh
+    `constValue?` walk per payload slot — once per probed value. `denseProbedSlotBoundAtP_eq` is the
+    equality at the canonical arguments. -/
+def denseProbedSlotBoundAtP (bs : BusSemantics p) (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) (pr : DenseBiPrep p) (i : VarId) (slot? : Option Nat)
+    (j : Nat) : Option Nat :=
+  if p = 0 then none
+  else
+  match pr.mval? with
+  | none => none
+  | some mval =>
+    if mval = 0 then none
+    else
+      match slot? with
+      | none => none
+      | some s =>
+        if s = j then none
+        else
+          match facts.slotBound bi.busId mval pr.pat s with
+          | none => none
+          | some B₀ =>
+            if 256 < B₀ then none
+            else
+              match facts.slotFun bi.busId pr.pat j with
+              | none => none
+              | some f =>
+                match bi.payload[j]? with
+                | none => none
+                | some e =>
+                  match denseLinearize e with
+                  | none => none
+                  | some l =>
+                    match l.terms with
+                    | [(y, c)] =>
+                      if y = i ∧ (List.range pr.pat.length).all (fun k =>
+                          k == s || k == j || ((pr.pat[k]?.map Option.isSome).getD false)) then
+                        let bj := (pr.pat.map (fun cv => cv.getD 0)).set j 0
+                        capBound (probeMax (fun v =>
+                          f (bj.set s ((v : ℕ) : ZMod p))
+                            == l.const + c * ((v : ℕ) : ZMod p)) B₀) B₀
+                      else none
+                    | _ => none
 
 /-- For candidate `(y, j)`s matching `i`, insert the probed bound. -/
 def denseGoCands (bs : BusSemantics p) (facts : BusFacts p bs) (bi : BusInteraction (DenseExpr p))
-    (i : VarId) : List (VarId × Nat) → Std.HashMap VarId Nat → Std.HashMap VarId Nat
+    (pr : DenseBiPrep p) (i : VarId) (slot? : Option Nat) :
+    List (VarId × Nat) → Std.HashMap VarId Nat → Std.HashMap VarId Nat
   | [], T => T
   | (y, j) :: cl, T =>
     if y = i then
-      match denseProbedSlotBoundAt bs facts bi i j with
-      | some b => denseGoCands bs facts bi i cl (denseInsertEntry T i b)
-      | none => denseGoCands bs facts bi i cl T
-    else denseGoCands bs facts bi i cl T
+      match denseProbedSlotBoundAtP bs facts bi pr i slot? j with
+      | some b => denseGoCands bs facts bi pr i slot? cl (denseInsertEntry T i b)
+      | none => denseGoCands bs facts bi pr i slot? cl T
+    else denseGoCands bs facts bi pr i slot? cl T
 
-/-- For each raw variable `i`, insert its interaction bound then its probed bounds. -/
+/-- For each raw variable `i`, insert its interaction bound then its probed bounds. Its payload
+    slot is resolved once and shared by both. -/
 def denseAddVars (bs : BusSemantics p) (facts : BusFacts p bs) (bi : BusInteraction (DenseExpr p))
-    (cands : List (VarId × Nat)) :
+    (pr : DenseBiPrep p) :
     List VarId → Std.HashMap VarId Nat → Std.HashMap VarId Nat
   | [], T => T
   | i :: xs, T =>
-    let T1 := match denseInteractionBound bs facts bi i with
+    let slot? := denseVarSlot i bi.payload
+    let T1 := match denseSlotBoundAt bs facts bi pr.mval? pr.pat slot? with
       | some b => denseInsertEntry T i b
       | none => T
-    denseAddVars bs facts bi cands xs (denseGoCands bs facts bi i cands T1)
+    denseAddVars bs facts bi pr xs (denseGoCands bs facts bi pr i slot? pr.cands T1)
 
 /-- Collect bounds from every interaction's fact-bounded raw payload slots. -/
 def denseAddAll (bs : BusSemantics p) (facts : BusFacts p bs) :
     List (BusInteraction (DenseExpr p)) → Std.HashMap VarId Nat → Std.HashMap VarId Nat
   | [], T => T
   | bi :: rest, T =>
-    denseAddAll bs facts rest (denseAddVars bs facts bi (denseProbeCandidatesOf bi)
-      (denseRawVarsOf bi) T)
+    denseAddAll bs facts rest (denseAddVars bs facts bi (denseBiPrepOf bi) (denseRawVarsOf bi) T)
 
 /-- Dense bounds-map build. -/
 def denseBuild (bs : BusSemantics p) (facts : BusFacts p bs)
