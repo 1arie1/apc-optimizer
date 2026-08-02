@@ -2035,6 +2035,1313 @@ theorem denseReencodeF_props (pw : PrimeWitness p) (b : DegreeBound) (reg : VarR
     refine ⟨VarRegistry.Extends.refl reg, hcov, ?_, DensePassCorrect.refl reg.isInput d bs⟩
     intro x hx; simp at hx
 
+/-! ## The array engine
+
+The engine of `Reencode.lean` keeps the system on stable array positions with `VarId`-keyed indexes.
+Everything it computes off those indexes is *untrusted*: the certificate below is the audited
+`denseCheckReencode` on the covered set the index gathered, and the accept's edits are re-derived
+from each position's current content, so an index that over-reports costs a decision and never
+soundness. Two facts carry the correctness: the gathered covered set *is* the filter
+(`denseRncEs_eq`, from anchor completeness), and the written state's view *is*
+`denseReencodeOut` of the old view with trivially-true constraints dropped (`denseRncWrite_view`) —
+the same two facts the list engine established with `denseWorkView_check` and `denseWorkOut_view`. -/
+
+/-! ### Expression predicate characterisations -/
+
+theorem denseHasVar_iff (e : DenseExpr p) : e.hasVar = true ↔ e.vars ≠ [] := by
+  induction e with
+  | const n => simp [DenseExpr.hasVar, DenseExpr.vars]
+  | var y => simp [DenseExpr.hasVar, DenseExpr.vars]
+  | add a b iha ihb | mul a b iha ihb =>
+      simp only [DenseExpr.hasVar, DenseExpr.vars, Bool.or_eq_true, iha, ihb,
+        ne_eq, List.append_eq_nil_iff, not_and_or]
+
+theorem denseVarsInF_iff (xs : List VarId) (e : DenseExpr p) :
+    e.varsInF xs = true ↔ ∀ v ∈ e.vars, v ∈ xs := by
+  induction e with
+  | const n => simp [DenseExpr.varsInF, DenseExpr.vars]
+  | var y =>
+      simp only [DenseExpr.varsInF, DenseExpr.vars, List.mem_cons, List.not_mem_nil, or_false]
+      constructor
+      · intro h v hv; rw [hv]; exact denseContainsFast_sound xs y h
+      · intro h; exact denseContainsFast_of_mem xs y (h y rfl)
+  | add a b iha ihb | mul a b iha ihb =>
+      simp only [DenseExpr.varsInF, DenseExpr.vars, Bool.and_eq_true, iha, ihb, List.mem_append]
+      exact ⟨fun ⟨ha, hb⟩ v hv => hv.elim (ha v) (hb v),
+        fun h => ⟨fun v hv => h v (Or.inl hv), fun v hv => h v (Or.inr hv)⟩⟩
+
+theorem denseSharesVarIn_iff (xs : List VarId) (e : DenseExpr p) :
+    e.sharesVarIn xs = true ↔ ∃ v ∈ e.vars, v ∈ xs := by
+  induction e with
+  | const n => simp [DenseExpr.sharesVarIn, DenseExpr.vars]
+  | var y =>
+      simp only [DenseExpr.sharesVarIn, DenseExpr.vars, List.mem_cons, List.not_mem_nil, or_false]
+      constructor
+      · intro h; exact ⟨y, rfl, denseContainsFast_sound xs y h⟩
+      · rintro ⟨v, hv, hx⟩; rw [hv] at hx; exact denseContainsFast_of_mem xs y hx
+  | add a b iha ihb | mul a b iha ihb =>
+      simp only [DenseExpr.sharesVarIn, DenseExpr.vars, Bool.or_eq_true, iha, ihb, List.mem_append]
+      constructor
+      · rintro (⟨v, hv, hx⟩ | ⟨v, hv, hx⟩)
+        · exact ⟨v, Or.inl hv, hx⟩
+        · exact ⟨v, Or.inr hv, hx⟩
+      · rintro ⟨v, hv | hv, hx⟩
+        · exact Or.inl ⟨v, hv, hx⟩
+        · exact Or.inr ⟨v, hv, hx⟩
+
+/-! ### The capped variable arrays
+
+`denseRncCapVars` stops at nine distinct variables, so it is exact below the cap; every consumer
+either stays below it or falls back to the tree walk. -/
+
+theorem denseRncCapGo_mono (cap : Nat) :
+    ∀ (e : DenseExpr p) (acc : Array VarId),
+      (∀ v ∈ acc, v ∈ denseRncCapGo cap e acc) ∧ acc.size ≤ (denseRncCapGo cap e acc).size := by
+  intro e
+  induction e with
+  | const n => intro acc; exact ⟨fun v hv => hv, Nat.le_refl _⟩
+  | var y =>
+      intro acc
+      rw [denseRncCapGo]
+      split
+      · exact ⟨fun v hv => hv, Nat.le_refl _⟩
+      · exact ⟨fun v hv => by simp [hv], by simp⟩
+  | add a b iha ihb | mul a b iha ihb =>
+      intro acc
+      rw [denseRncCapGo]
+      obtain ⟨hma, hsa⟩ := iha acc
+      split
+      · exact ⟨hma, hsa⟩
+      · obtain ⟨hmb, hsb⟩ := ihb (denseRncCapGo cap a acc)
+        exact ⟨fun v hv => hmb v (hma v hv), Nat.le_trans hsa hsb⟩
+
+theorem denseRncCapGo_sound (cap : Nat) :
+    ∀ (e : DenseExpr p) (acc : Array VarId) (v : VarId),
+      v ∈ denseRncCapGo cap e acc → v ∈ acc ∨ v ∈ e.vars := by
+  intro e
+  induction e with
+  | const n => intro acc v hv; exact Or.inl hv
+  | var y =>
+      intro acc v hv
+      rw [denseRncCapGo] at hv
+      split at hv
+      · exact Or.inl hv
+      · rcases Array.mem_push.1 hv with h | h
+        · exact Or.inl h
+        · exact Or.inr (by simp [DenseExpr.vars, h])
+  | add a b iha ihb | mul a b iha ihb =>
+      intro acc v hv
+      rw [denseRncCapGo] at hv
+      split at hv
+      · rcases iha acc v hv with h | h
+        · exact Or.inl h
+        · exact Or.inr (by simp [DenseExpr.vars, h])
+      · rcases ihb _ v hv with h | h
+        · rcases iha acc v h with h' | h'
+          · exact Or.inl h'
+          · exact Or.inr (by simp [DenseExpr.vars, h'])
+        · exact Or.inr (by simp [DenseExpr.vars, h])
+
+/-- Below the cap the walk never bailed out, so every variable of the expression is present. -/
+theorem denseRncCapGo_complete (cap : Nat) :
+    ∀ (e : DenseExpr p) (acc : Array VarId),
+      (denseRncCapGo cap e acc).size < cap → ∀ v ∈ e.vars, v ∈ denseRncCapGo cap e acc := by
+  intro e
+  induction e with
+  | const n => intro acc _ v hv; simp [DenseExpr.vars] at hv
+  | var y =>
+      intro acc hlt v hv
+      have hy : v = y := by simpa [DenseExpr.vars] using hv
+      subst hy
+      rw [denseRncCapGo] at hlt ⊢
+      split at hlt
+      · next hc =>
+          rw [if_pos hc]
+          have hc' : cap ≤ acc.size ∨ acc.contains v = true := by simpa using hc
+          rcases hc' with h | h
+          · omega
+          · exact Array.mem_of_contains_eq_true h
+      · next hc =>
+          rw [if_neg hc]
+          simp
+  | add a b iha ihb | mul a b iha ihb =>
+      intro acc hlt v hv
+      rw [denseRncCapGo] at hlt ⊢
+      split at hlt
+      · next hsplit => rw [if_pos hsplit]; omega
+      · next hsplit =>
+        rw [if_neg hsplit]
+        have hva : ∀ w ∈ a.vars, w ∈ denseRncCapGo cap a acc := iha acc (by omega)
+        have hmono := (denseRncCapGo_mono cap b (denseRncCapGo cap a acc)).1
+        rcases List.mem_append.1 (by simpa [DenseExpr.vars] using hv) with h | h
+        · exact hmono v (hva v h)
+        · exact ihb _ hlt v h
+
+/-- The capped array is exact when it stayed below the cap. -/
+theorem denseRncCapVars_mem_iff {c : DenseExpr p} (h : (denseRncCapVars c).size ≤ 8) (v : VarId) :
+    v ∈ denseRncCapVars c ↔ v ∈ c.vars := by
+  constructor
+  · intro hv
+    rcases denseRncCapGo_sound 9 c #[] v hv with h' | h'
+    · simp at h'
+    · exact h'
+  · intro hv
+    exact denseRncCapGo_complete 9 c #[] (by simpa [denseRncCapVars] using Nat.lt_succ_of_le h) v hv
+
+theorem denseRncCapVars_size_pos_iff {c : DenseExpr p} (h : (denseRncCapVars c).size ≤ 8) :
+    1 ≤ (denseRncCapVars c).size ↔ c.hasVar = true := by
+  rw [denseHasVar_iff]
+  constructor
+  · intro hpos hnil
+    have hmem : (denseRncCapVars c)[0] ∈ denseRncCapVars c := Array.getElem_mem (by omega)
+    rw [denseRncCapVars_mem_iff h, hnil] at hmem
+    simp at hmem
+  · intro hne
+    obtain ⟨v, hv⟩ := List.exists_mem_of_ne_nil _ hne
+    have hmem : v ∈ denseRncCapVars c := (denseRncCapVars_mem_iff h v).2 hv
+    simpa using Array.size_pos_of_mem hmem
+
+theorem denseRncSubset_eq {xs : List VarId} {c : DenseExpr p}
+    (h : (denseRncCapVars c).size ≤ 8) :
+    denseRncSubset xs (denseRncCapVars c) = c.varsInF xs := by
+  unfold denseRncSubset
+  cases hv : c.varsInF xs with
+  | true =>
+      have hall := (denseVarsInF_iff xs c).1 hv
+      refine Array.all_eq_true'.2 (fun w hw => ?_)
+      exact denseContainsFast_of_mem xs w (hall w ((denseRncCapVars_mem_iff h w).1 hw))
+  | false =>
+      have hnot : ¬ (∀ w ∈ c.vars, w ∈ xs) := fun hall => by
+        rw [(denseVarsInF_iff xs c).2 hall] at hv; exact Bool.noConfusion hv
+      by_contra hcon
+      rw [Bool.not_eq_false] at hcon
+      exact hnot (fun w hw => denseContainsFast_sound xs w
+        (Array.all_eq_true'.1 hcon w ((denseRncCapVars_mem_iff h w).2 hw)))
+
+/-- The array-level covered test is `denseCoveredBy`. -/
+theorem denseRncCovered_eq (xs : List VarId) (c : DenseExpr p) :
+    denseRncCovered xs (denseRncCapVars c) c = denseCoveredBy xs c := by
+  unfold denseRncCovered
+  split
+  · next h =>
+      rw [denseCoveredBy, denseRncSubset_eq h]
+      cases hv : c.hasVar with
+      | true => simp [(denseRncCapVars_size_pos_iff h).2 hv]
+      | false =>
+          have hz : ¬ (1 ≤ (denseRncCapVars c).size) := fun hpos => by
+            rw [(denseRncCapVars_size_pos_iff h).1 hpos] at hv; exact Bool.noConfusion hv
+          simp [hz]
+  · rfl
+
+/-- The array-level `sharesVarIn` test. -/
+theorem denseRncShares_eq (xs : List VarId) (c : DenseExpr p) :
+    denseRncShares xs (denseRncCapVars c) c = c.sharesVarIn xs := by
+  unfold denseRncShares
+  split
+  · next h =>
+      cases hs : c.sharesVarIn xs with
+      | true =>
+          obtain ⟨w, hw, hx⟩ := (denseSharesVarIn_iff xs c).1 hs
+          exact Array.any_eq_true'.2
+            ⟨w, (denseRncCapVars_mem_iff h w).2 hw, denseContainsFast_of_mem xs w hx⟩
+      | false =>
+          by_contra hcon
+          rw [Bool.not_eq_false] at hcon
+          obtain ⟨w, hw, hx⟩ := Array.any_eq_true'.1 hcon
+          have := (denseSharesVarIn_iff xs c).2
+            ⟨w, (denseRncCapVars_mem_iff h w).1 hw, denseContainsFast_sound xs w hx⟩
+          rw [hs] at this
+          exact Bool.noConfusion this
+  · rfl
+
+/-! ### State invariants
+
+Each says the index over-approximates nothing it must find. All are maintained by the write and
+consumed either by the covered gather or by the accept's edit list. -/
+
+/-- `cvs` mirrors `cs` positionwise. -/
+def DenseRncCvsOk (st : DenseRncState p) : Prop :=
+  ∀ (i : Nat) (c : DenseExpr p), st.cs[i]? = some c → st.cvs[i]? = some (denseRncCapVars c)
+
+/-- Every position is listed under its first variable. -/
+def DenseRncAnchorOk (st : DenseRncState p) : Prop :=
+  ∀ (i : Nat) (c : DenseExpr p), st.cs[i]? = some c →
+    ∀ v ∈ denseRncAnchorVars c, i ∈ st.anchor.buckets.getD v []
+
+/-- Every position is listed under each of its variables, and every foldable one is recorded. -/
+def DenseRncUseOk (st : DenseRncState p) : Prop :=
+  (∀ m, st.useCs = some m → ∀ (i : Nat) (c : DenseExpr p), st.cs[i]? = some c →
+    ∀ v ∈ c.vars, i ∈ denseRncBGet m v) ∧
+  (∀ s, st.foldCs = some s → ∀ (i : Nat) (c : DenseExpr p), st.cs[i]? = some c →
+    denseRncHasFold c = true → s.contains i = true)
+
+def DenseRncBusOk (st : DenseRncState p) : Prop :=
+  (∀ m, st.useBis = some m → ∀ (i : Nat) (bi : BusInteraction (DenseExpr p)),
+    st.bis[i]? = some bi → ∀ v ∈ denseBIVars bi, i ∈ denseRncBGet m v) ∧
+  (∀ s, st.foldBis = some s → ∀ (i : Nat) (bi : BusInteraction (DenseExpr p)),
+    st.bis[i]? = some bi → denseRncBiHasFold bi = true → s.contains i = true)
+
+/-- Every live variable is `denseRncSeen` — what decides bit freshness in `O(|bits|)`. -/
+def DenseRncVarsOk (st : DenseRncState p) : Prop :=
+  ∀ v ∈ (denseRncView st).occ, denseRncSeen st v = true
+
+/-! ### The gathered covered set is the filter -/
+
+theorem denseCoveredIdxPos_map_snd (idx : DenseCovIndex) (arr : Array (DenseExpr p))
+    (xs : List VarId) :
+    (denseCoveredIdxPos idx arr xs).map Prod.snd
+      = denseCoveredIdx idx arr (denseCoveredBy xs) xs := by
+  unfold denseCoveredIdxPos denseCoveredIdx
+  rw [List.map_filterMap]
+  refine List.filterMap_congr (fun i _ => ?_)
+  by_cases h : i < arr.size
+  · simp only [dif_pos h]
+    by_cases hq : denseCoveredBy xs arr[i] = true <;> simp [hq]
+  · simp only [dif_neg h, Option.map_none]
+
+/-- A constraint with a variable has a first capped variable, so it is anchored. -/
+theorem denseRncAnchorVars_of_hasVar {c : DenseExpr p} (h : c.hasVar = true) :
+    ∃ v, denseRncAnchorVars c = [v] ∧ v ∈ c.vars := by
+  have hpos : 0 < (denseRncCapVars c).size := by
+    by_cases hcap : (denseRncCapVars c).size ≤ 8
+    · exact (denseRncCapVars_size_pos_iff hcap).2 h
+    · omega
+  refine ⟨(denseRncCapVars c)[0], ?_, ?_⟩
+  · unfold denseRncAnchorVars
+    rw [Array.getElem?_eq_getElem hpos]
+  · rcases denseRncCapGo_sound 9 c #[] _ (Array.getElem_mem hpos) with h' | h'
+    · simp at h'
+    · exact h'
+
+/-- The covered constraints the index gathers are exactly the covered constraints of the view. -/
+theorem denseRncEs_eq {st : DenseRncState p} (hanchor : DenseRncAnchorOk st) (xs : List VarId) :
+    (denseCoveredIdxPos st.anchor st.cs xs).map Prod.snd
+      = denseCoveredCsOf (denseRncView st) xs := by
+  rw [denseCoveredIdxPos_map_snd]
+  have hcomplete : ∀ (i : Nat) (hi : i < st.cs.toList.length),
+      denseCoveredBy xs st.cs.toList[i] = true → i ∈ denseCandidates st.anchor xs := by
+    intro i hi hcov
+    have hget : st.cs[i]? = some st.cs.toList[i] := by
+      rw [← Array.getElem?_toList, List.getElem?_eq_getElem hi]
+    have hhv : (st.cs.toList[i]).hasVar = true := by
+      rw [denseCoveredBy, Bool.and_eq_true] at hcov; exact hcov.1
+    obtain ⟨v, hav, hvmem⟩ := denseRncAnchorVars_of_hasVar hhv
+    have hvxs : v ∈ xs := by
+      rw [denseCoveredBy, Bool.and_eq_true] at hcov
+      exact (denseVarsInF_iff xs _).1 hcov.2 v hvmem
+    exact denseMem_candidates st.anchor xs v i hvxs
+      (hanchor i _ hget v (by rw [hav]; exact List.mem_singleton_self v))
+  have hfilter := denseCoveredIdx_eq_filter_of_complete st.anchor st.cs.toList
+    (denseCoveredBy xs) xs hcomplete
+  rw [Array.toArray_toList] at hfilter
+  rw [hfilter]
+  show st.cs.toList.filter (denseCoveredBy xs) = _
+  unfold denseCoveredCsOf denseRncView
+  show _ = ((st.cs.filter (fun c => !denseIsZero c)).toList).filter (denseCoveredBy xs)
+  rw [Array.toList_filter]
+  exact (List.filter_filter_of st.cs.toList _ _
+    (fun c _ hz => denseIsZero_not_covered (by simpa using hz))).symm
+
+/-- The one-pass `(hasVar, hasConstFoldableNode)` walk computes both. -/
+theorem denseRncFoldPair_eq (e : DenseExpr p) :
+    denseRncFoldPair e = (e.hasVar, e.hasConstFoldableNode) := by
+  induction e with
+  | const n => rfl
+  | var y => rfl
+  | add a b iha ihb | mul a b iha ihb =>
+      simp only [denseRncFoldPair, iha, ihb, DenseExpr.hasVar, DenseExpr.hasConstFoldableNode]
+
+theorem denseRncHasFold_eq (e : DenseExpr p) : denseRncHasFold e = e.hasConstFoldableNode := by
+  rw [denseRncHasFold, denseRncFoldPair_eq]
+
+theorem denseRncBiHasFold_eq (bi : BusInteraction (DenseExpr p)) :
+    denseRncBiHasFold bi = denseBiHasFold bi := by
+  unfold denseRncBiHasFold denseBiHasFold
+  rw [denseRncHasFold_eq]
+  have : ∀ (l : List (DenseExpr p)), l.any denseRncHasFold
+      = l.any (fun e => e.hasConstFoldableNode) := by
+    intro l
+    induction l with
+    | nil => rfl
+    | cons e rest ih => rw [List.any_cons, List.any_cons, denseRncHasFold_eq, ih]
+  rw [this]
+
+/-! ### The certificate
+
+`denseRncCert` is the audited `denseCheckReencode` with two substitutions: the covered set comes from
+the index (`denseRncEs_eq`) and freshness from `varSeen` (the invariant plus
+`denseFreshScan_of_notMemOcc`). -/
+
+theorem denseRncCert_sound {st : DenseRncState p} {xs : List VarId} {cd : DenseRncCand p}
+    (hanchor : DenseRncAnchorOk st) (hvars : DenseRncVarsOk st)
+    (hes : cd.es = (denseCoveredIdxPos st.anchor st.cs xs).map Prod.snd)
+    (h : denseRncCert st xs cd = true) :
+    denseCheckReencode (denseRncView st) xs cd.bits cd.hm.get = true := by
+  rw [denseRncCert, Bool.and_eq_true] at h
+  obtain ⟨hfresh, hchk⟩ := h
+  refine denseCheckReencode_of_parts _ xs cd.bits cd.hm.get ?_ ?_
+  · rw [denseCheckReencodeNoFresh_eq_Es, ← denseRncEs_eq hanchor xs, ← hes]
+    exact hchk
+  · refine denseFreshScan_of_notMemOcc _ cd.bits ?_
+    intro b hb hmem
+    have hseen := hvars b hmem
+    have hnb := List.all_eq_true.mp hfresh b hb
+    rw [hseen] at hnb
+    exact Bool.noConfusion hnb
+
+/-! ### Writing a list of positional edits into an array
+
+The accept installs its edits by folding `Array.setIfInBounds` over distinct positions. These three
+lemmas are what turn that fold into a positionwise map. -/
+
+section ArrFold
+variable {α : Type}
+
+def denseArrSet (a : Array α) (q : Nat × α) : Array α := a.setIfInBounds q.1 q.2
+
+theorem denseArrFold_size (l : List (Nat × α)) :
+    ∀ (a : Array α), (l.foldl denseArrSet a).size = a.size := by
+  induction l with
+  | nil => intro a; rfl
+  | cons q rest ih => intro a; rw [List.foldl_cons, ih]; simp [denseArrSet]
+
+theorem denseArrFold_stable (l : List (Nat × α)) :
+    ∀ (a : Array α) (j : Nat), j ∉ l.map Prod.fst → (l.foldl denseArrSet a)[j]? = a[j]? := by
+  induction l with
+  | nil => intro a j _; rfl
+  | cons q rest ih =>
+      intro a j hj
+      simp only [List.map_cons, List.mem_cons, not_or] at hj
+      rw [List.foldl_cons, ih _ j hj.2, denseArrSet,
+        Array.getElem?_setIfInBounds_ne (fun h => hj.1 h.symm)]
+
+theorem denseArrFold_hit (l : List (Nat × α)) :
+    ∀ (a : Array α) (i : Nat) (x : α), (l.map Prod.fst).Nodup → (i, x) ∈ l → i < a.size →
+      (l.foldl denseArrSet a)[i]? = some x := by
+  induction l with
+  | nil => intro a i x _ hmem _; simp at hmem
+  | cons q rest ih =>
+      intro a i x hnd hmem hlt
+      rw [List.map_cons, List.nodup_cons] at hnd
+      rcases List.mem_cons.1 hmem with heq | hmem'
+      · subst heq
+        rw [List.foldl_cons, denseArrFold_stable rest _ i hnd.1, denseArrSet,
+          Array.getElem?_setIfInBounds_self_of_lt hlt]
+      · rw [List.foldl_cons]
+        exact ih _ i x hnd.2 hmem' (by rw [denseArrSet]; simpa using hlt)
+
+end ArrFold
+
+/-! ### The accept's write
+
+`denseRncWrite` installs the constraint edits, the bus edits and the booleanity constraints. Each
+setter touches one field at one position, so the fold is the positionwise `denseTombify` map — and
+from there `denseTombify_filter` (the list engine's lemma) finishes the view. -/
+
+theorem denseRncCsStep_cs (ctx : DenseRncCtx p) (st : DenseRncState p) (e : DenseRncCsEdit p) :
+    (denseRncCsStep ctx st e).cs = st.cs.setIfInBounds e.pos (e.content ctx) := by
+  cases e <;> rfl
+
+theorem denseRncCsFold_cs (ctx : DenseRncCtx p) :
+    ∀ (es : List (DenseRncCsEdit p)) (st : DenseRncState p),
+      (es.foldl (denseRncCsStep ctx) st).cs
+        = (es.map (fun e => (e.pos, e.content ctx))).foldl denseArrSet st.cs := by
+  intro es
+  induction es with
+  | nil => intro st; rfl
+  | cons e rest ih =>
+      intro st
+      rw [List.foldl_cons, ih, List.map_cons, List.foldl_cons, denseRncCsStep_cs]
+      rfl
+
+theorem denseRncBiFold_bis :
+    ∀ (es : List (Nat × BusInteraction (DenseExpr p))) (st : DenseRncState p),
+      (es.foldl (fun st ib => st.rewriteBiAt ib.1 ib.2) st).bis = es.foldl denseArrSet st.bis := by
+  intro es
+  induction es with
+  | nil => intro st; rfl
+  | cons e rest ih => intro st; rw [List.foldl_cons, ih, List.foldl_cons]; rfl
+
+theorem denseRncCsFold_bis (ctx : DenseRncCtx p) :
+    ∀ (es : List (DenseRncCsEdit p)) (st : DenseRncState p),
+      (es.foldl (denseRncCsStep ctx) st).bis = st.bis := by
+  intro es
+  induction es with
+  | nil => intro st; rfl
+  | cons e rest ih => intro st; rw [List.foldl_cons, ih]; cases e <;> rfl
+
+theorem denseRncBiFold_cs :
+    ∀ (es : List (Nat × BusInteraction (DenseExpr p))) (st : DenseRncState p),
+      (es.foldl (fun st ib => st.rewriteBiAt ib.1 ib.2) st).cs = st.cs := by
+  intro es
+  induction es with
+  | nil => intro st; rfl
+  | cons e rest ih => intro st; rw [List.foldl_cons, ih]; rfl
+
+theorem denseRncBoolFold_cs :
+    ∀ (bits : List VarId) (st : DenseRncState p),
+      (bits.foldl (fun st b => st.pushBool b) st).cs
+        = st.cs ++ (bits.map (denseBoolConstraint (p := p))).toArray := by
+  intro bits
+  induction bits with
+  | nil => intro st; simp
+  | cons b rest ih =>
+      intro st
+      rw [List.foldl_cons, ih, List.map_cons]
+      show (st.cs.push (denseBoolConstraint b)) ++ _ = _
+      simp
+
+theorem denseRncBoolFold_bis :
+    ∀ (bits : List VarId) (st : DenseRncState p),
+      (bits.foldl (fun st b => st.pushBool b) st).bis = st.bis := by
+  intro bits
+  induction bits with
+  | nil => intro st; rfl
+  | cons b rest ih => intro st; rw [List.foldl_cons, ih]; rfl
+
+/-! ### What the edit builders produce
+
+Three facts per builder: the positions are a sublist of the (duplicate-free) candidate list, each
+edit installs the positionwise `denseTombify` (resp. the gated bus rewrite), and every position the
+rewrite can change is listed. -/
+
+theorem denseRncPosList_nodup (bs : Array (Array Nat)) (xs : List VarId) (extra : List Nat) :
+    (denseRncPosList bs xs extra).Nodup :=
+  Std.HashSet.distinct_toList.imp (fun {a b} h => by simpa using h)
+
+theorem denseRncPosList_mem (bs : Array (Array Nat)) (xs : List VarId) (extra : List Nat)
+    (i : Nat) (h : (∃ v ∈ xs, i ∈ denseRncBGet bs v) ∨ i ∈ extra) :
+    i ∈ denseRncPosList bs xs extra := by
+  rw [denseRncPosList, Std.HashSet.mem_toList, mem_foldl_insert]
+  refine Or.inr ?_
+  rw [List.mem_append]
+  rcases h with ⟨v, hv, hi⟩ | hi
+  · exact Or.inl (List.mem_flatMap.2 ⟨v, hv, by simpa using hi⟩)
+  · exact Or.inr hi
+
+section CsEdits
+variable (ctx : DenseRncCtx p) (st : DenseRncState p) (xs : List VarId) (cd : DenseRncCand p)
+
+/-- The builder's per-position body, as a standalone function so the three lemmas share it. -/
+private def csBody (i : Nat) (acc : List (DenseRncCsEdit p) × Bool) :
+    List (DenseRncCsEdit p) × Bool :=
+  match st.cs[i]?, st.cvs[i]? with
+  | some c, some vs =>
+    if denseRncCovered xs vs c then (.tomb i :: acc.1, acc.2)
+    else if denseRncShares xs vs c || denseRncHasFold c then
+      let c' := denseGroupRewrite xs cd.bits (denseGroupSubst xs cd.hm.get) cd.patts.get c
+      let cv' := denseRncCapVars c'
+      (.cst i c' cv' (denseRncFullVars c' cv') :: acc.1,
+        acc.2 && decide (c'.degree ≤ ctx.dmaxC))
+    else acc
+  | _, _ => acc
+
+private theorem csEdits_eq_foldr :
+    (denseRncCsEdits ctx st xs cd).1
+      = ((denseRncPosList (match st.useCs with | some m => m | none => #[]) xs
+          (match st.foldCs with | some s => s | none => ∅).toList).foldr (csBody ctx st xs cd)
+          ([], true)).1 := rfl
+
+private theorem csBody_sublist (l : List Nat) :
+    ((l.foldr (csBody ctx st xs cd) ([], true)).1.map DenseRncCsEdit.pos).Sublist l := by
+  induction l with
+  | nil => exact List.Sublist.refl []
+  | cons i rest ih =>
+      rw [List.foldr_cons]
+      cases hc : st.cs[i]? with
+      | none => simpa only [csBody, hc] using ih.trans (List.sublist_cons_self i rest)
+      | some c =>
+        cases hvs : st.cvs[i]? with
+        | none => simpa only [csBody, hc, hvs] using ih.trans (List.sublist_cons_self i rest)
+        | some vs =>
+          simp only [csBody, hc, hvs]
+          by_cases hcov : denseRncCovered xs vs c = true
+          · rw [if_pos hcov]
+            simpa only [List.map_cons, DenseRncCsEdit.pos] using List.cons_sublist_cons.2 ih
+          · rw [if_neg hcov]
+            by_cases hg : denseRncShares xs vs c || denseRncHasFold c
+            · rw [if_pos hg]
+              simpa only [List.map_cons, DenseRncCsEdit.pos] using List.cons_sublist_cons.2 ih
+            · rw [if_neg hg]
+              exact ih.trans (List.sublist_cons_self i rest)
+
+private theorem csBody_content (hcvs : DenseRncCvsOk st)
+    (hzero : ctx.zeroE = (DenseExpr.const 0 : DenseExpr p)) (l : List Nat) :
+    ∀ e ∈ (l.foldr (csBody ctx st xs cd) ([], true)).1, ∃ c, st.cs[e.pos]? = some c ∧
+      e.content ctx
+        = denseTombify xs cd.bits (denseGroupSubst xs cd.hm.get) cd.patts.get c := by
+  induction l with
+  | nil => intro e he; simp at he
+  | cons i rest ih =>
+      intro e he
+      rw [List.foldr_cons] at he
+      cases hc : st.cs[i]? with
+      | none => exact ih e (by simpa only [csBody, hc] using he)
+      | some c =>
+        have hvs : st.cvs[i]? = some (denseRncCapVars c) := hcvs i c hc
+        simp only [csBody, hc, hvs] at he
+        rw [denseRncCovered_eq] at he
+        by_cases hcov : denseCoveredBy xs c = true
+        · rw [if_pos hcov] at he
+          rcases List.mem_cons.1 he with rfl | he'
+          · exact ⟨c, by simpa [DenseRncCsEdit.pos] using hc,
+              by simp [DenseRncCsEdit.content, hzero, denseTombify, hcov]⟩
+          · exact ih e he'
+        · rw [if_neg hcov] at he
+          by_cases hg : denseRncShares xs (denseRncCapVars c) c || denseRncHasFold c
+          · rw [if_pos hg] at he
+            rcases List.mem_cons.1 he with rfl | he'
+            · refine ⟨c, by simpa [DenseRncCsEdit.pos] using hc, ?_⟩
+              have hcov' : denseCoveredBy xs c = false := by simpa using hcov
+              simp only [DenseRncCsEdit.content, denseTombify, hcov', if_false,
+                Bool.false_eq_true]
+            · exact ih e he'
+          · rw [if_neg hg] at he
+            exact ih e he
+
+private theorem csBody_complete (hcvs : DenseRncCvsOk st) (l : List Nat) (j : Nat)
+    (c : DenseExpr p) (hj : j ∈ l) (hc : st.cs[j]? = some c)
+    (hfires : denseCoveredBy xs c = true ∨ c.sharesVarIn xs = true ∨
+      c.hasConstFoldableNode = true) :
+    j ∈ (l.foldr (csBody ctx st xs cd) ([], true)).1.map DenseRncCsEdit.pos := by
+  induction l with
+  | nil => simp at hj
+  | cons i rest ih =>
+      rw [List.foldr_cons]
+      rcases List.mem_cons.1 hj with rfl | hj'
+      · have hvs : st.cvs[j]? = some (denseRncCapVars c) := hcvs j c hc
+        simp only [csBody, hc, hvs]
+        rw [denseRncCovered_eq]
+        by_cases hcov : denseCoveredBy xs c = true
+        · rw [if_pos hcov]; simp [DenseRncCsEdit.pos]
+        · rw [if_neg hcov, denseRncShares_eq, denseRncHasFold_eq]
+          have hg : (c.sharesVarIn xs || c.hasConstFoldableNode) = true := by
+            rcases hfires with h | h | h
+            · exact absurd h hcov
+            · simp [h]
+            · simp [h]
+          rw [if_pos hg]
+          simp [DenseRncCsEdit.pos]
+      · have hrec := ih hj'
+        cases hc0 : st.cs[i]? with
+        | none => simpa only [csBody, hc0] using hrec
+        | some c0 =>
+          cases hvs0 : st.cvs[i]? with
+          | none => simpa only [csBody, hc0, hvs0] using hrec
+          | some vs0 =>
+            simp only [csBody, hc0, hvs0]
+            by_cases hcov : denseRncCovered xs vs0 c0 = true
+            · rw [if_pos hcov]; simpa using Or.inr hrec
+            · rw [if_neg hcov]
+              by_cases hg : denseRncShares xs vs0 c0 || denseRncHasFold c0
+              · rw [if_pos hg]; simpa using Or.inr hrec
+              · rw [if_neg hg]; exact hrec
+
+end CsEdits
+
+section BiEdits
+variable (ctx : DenseRncCtx p) (st : DenseRncState p) (xs : List VarId) (cd : DenseRncCand p)
+
+private def biBody (i : Nat) (acc : List (Nat × BusInteraction (DenseExpr p)) × Bool) :
+    List (Nat × BusInteraction (DenseExpr p)) × Bool :=
+  match st.bis[i]? with
+  | some bi =>
+    if bi.multiplicity.sharesVarIn xs || denseRncHasFold bi.multiplicity
+        || bi.payload.any (fun e => e.sharesVarIn xs || denseRncHasFold e) then
+      let bi' : BusInteraction (DenseExpr p) :=
+        { bi with
+          multiplicity := denseGroupRewrite xs cd.bits (denseGroupSubst xs cd.hm.get)
+            cd.patts.get bi.multiplicity,
+          payload := bi.payload.map
+            (denseGroupRewrite xs cd.bits (denseGroupSubst xs cd.hm.get) cd.patts.get) }
+      ((i, bi') :: acc.1,
+        acc.2 && decide (bi'.multiplicity.degree ≤ ctx.dmaxB)
+          && bi'.payload.all (fun e => decide (e.degree ≤ ctx.dmaxB)))
+    else acc
+  | none => acc
+
+private theorem biEdits_eq_foldr :
+    (denseRncBiEdits ctx st xs cd).1
+      = ((denseRncPosList (match st.useBis with | some m => m | none => #[]) xs
+          (match st.foldBis with | some s => s | none => ∅).toList).foldr (biBody ctx st xs cd)
+          ([], true)).1 := rfl
+
+/-- The gate test the builder uses is `denseBiGateFires`. -/
+private theorem biBody_fires (bi : BusInteraction (DenseExpr p)) :
+    (bi.multiplicity.sharesVarIn xs || denseRncHasFold bi.multiplicity
+      || bi.payload.any (fun e => e.sharesVarIn xs || denseRncHasFold e))
+      = denseBiGateFires xs bi := by
+  unfold denseBiGateFires
+  rw [denseRncHasFold_eq]
+  have hp : ∀ (l : List (DenseExpr p)),
+      l.any (fun e => e.sharesVarIn xs || denseRncHasFold e)
+        = l.any (fun e => e.sharesVarIn xs || e.hasConstFoldableNode) := by
+    intro l
+    induction l with
+    | nil => rfl
+    | cons e rest ih => rw [List.any_cons, List.any_cons, denseRncHasFold_eq, ih]
+  rw [hp]
+
+private theorem biBody_sublist (l : List Nat) :
+    ((l.foldr (biBody ctx st xs cd) ([], true)).1.map Prod.fst).Sublist l := by
+  induction l with
+  | nil => exact List.Sublist.refl []
+  | cons i rest ih =>
+      rw [List.foldr_cons]
+      cases hb : st.bis[i]? with
+      | none => simpa only [biBody, hb] using ih.trans (List.sublist_cons_self i rest)
+      | some bi =>
+        simp only [biBody, hb]
+        split
+        · simpa only [List.map_cons] using List.cons_sublist_cons.2 ih
+        · exact ih.trans (List.sublist_cons_self i rest)
+
+private theorem biBody_content (l : List Nat) :
+    ∀ q ∈ (l.foldr (biBody ctx st xs cd) ([], true)).1, ∃ bi, st.bis[q.1]? = some bi ∧
+      q.2 = denseBIRewriteGate xs cd.bits (denseGroupSubst xs cd.hm.get) cd.patts.get bi := by
+  induction l with
+  | nil => intro q hq; simp at hq
+  | cons i rest ih =>
+      intro q hq
+      rw [List.foldr_cons] at hq
+      cases hb : st.bis[i]? with
+      | none => exact ih q (by simpa only [biBody, hb] using hq)
+      | some bi =>
+        simp only [biBody, hb] at hq
+        split at hq
+        · next hgate =>
+            rcases List.mem_cons.1 hq with rfl | hq'
+            · refine ⟨bi, hb, ?_⟩
+              have hgate' : (bi.multiplicity.sharesVarIn xs || bi.multiplicity.hasConstFoldableNode
+                  || bi.payload.any (fun e => e.sharesVarIn xs || e.hasConstFoldableNode)) = true := by
+                rw [biBody_fires (p := p) xs bi] at hgate
+                simpa [denseBiGateFires] using hgate
+              unfold denseBIRewriteGate
+              rw [if_pos (by simpa using hgate')]
+              simp only [denseGroupRewriteGate_eq]
+            · exact ih q hq'
+        · exact ih q hq
+
+private theorem biBody_complete (l : List Nat) (j : Nat) (bi : BusInteraction (DenseExpr p))
+    (hj : j ∈ l) (hb : st.bis[j]? = some bi) (hfires : denseBiGateFires xs bi = true) :
+    j ∈ (l.foldr (biBody ctx st xs cd) ([], true)).1.map Prod.fst := by
+  induction l with
+  | nil => simp at hj
+  | cons i rest ih =>
+      rw [List.foldr_cons]
+      rcases List.mem_cons.1 hj with rfl | hj'
+      · simp only [biBody, hb]
+        rw [if_pos (by rw [biBody_fires]; exact hfires)]
+        simp
+      · have hrec := ih hj'
+        cases hb0 : st.bis[i]? with
+        | none => simpa only [biBody, hb0] using hrec
+        | some bi0 =>
+          simp only [biBody, hb0]
+          split
+          · simpa using Or.inr hrec
+          · exact hrec
+
+end BiEdits
+
+/-! ### The write installs the positionwise `denseTombify` -/
+
+theorem denseRncCsEdits_nodup (ctx : DenseRncCtx p) (st : DenseRncState p) (xs : List VarId)
+    (cd : DenseRncCand p) : ((denseRncCsEdits ctx st xs cd).1.map DenseRncCsEdit.pos).Nodup := by
+  rw [csEdits_eq_foldr]
+  exact (denseRncPosList_nodup _ xs _).sublist (csBody_sublist ctx st xs cd _)
+
+theorem denseRncBiEdits_nodup (ctx : DenseRncCtx p) (st : DenseRncState p) (xs : List VarId)
+    (cd : DenseRncCand p) : ((denseRncBiEdits ctx st xs cd).1.map Prod.fst).Nodup := by
+  rw [biEdits_eq_foldr]
+  exact (denseRncPosList_nodup _ xs _).sublist (biBody_sublist ctx st xs cd _)
+
+theorem denseRncCsEdits_complete {ctx : DenseRncCtx p} {st : DenseRncState p} {xs : List VarId}
+    {cd : DenseRncCand p} {m : Array (Array Nat)} {sf : Std.HashSet Nat}
+    (hcvs : DenseRncCvsOk st) (huse : DenseRncUseOk st)
+    (hm : st.useCs = some m) (hs : st.foldCs = some sf) :
+    ∀ (j : Nat) (c : DenseExpr p), st.cs[j]? = some c →
+      (denseCoveredBy xs c = true ∨ c.sharesVarIn xs = true ∨ c.hasConstFoldableNode = true) →
+      j ∈ (denseRncCsEdits ctx st xs cd).1.map DenseRncCsEdit.pos := by
+  intro j c hc hfires
+  rw [csEdits_eq_foldr]
+  refine csBody_complete ctx st xs cd hcvs _ j c ?_ hc hfires
+  rw [hm, hs]
+  refine denseRncPosList_mem _ _ _ j ?_
+  rcases hfires with hcov | hsh | hfd
+  · obtain ⟨v, hv, hx⟩ := (denseSharesVarIn_iff xs c).1 (denseCoveredBy_sharesVarIn hcov)
+    exact Or.inl ⟨v, hx, huse.1 m hm j c hc v hv⟩
+  · obtain ⟨v, hv, hx⟩ := (denseSharesVarIn_iff xs c).1 hsh
+    exact Or.inl ⟨v, hx, huse.1 m hm j c hc v hv⟩
+  · refine Or.inr ?_
+    have hcontains := huse.2 sf hs j c hc (by rw [denseRncHasFold_eq]; exact hfd)
+    rw [Std.HashSet.mem_toList, Std.HashSet.mem_iff_contains]
+    exact hcontains
+
+theorem denseRncBiEdits_complete {ctx : DenseRncCtx p} {st : DenseRncState p} {xs : List VarId}
+    {cd : DenseRncCand p} {m : Array (Array Nat)} {sf : Std.HashSet Nat}
+    (hbus : DenseRncBusOk st) (hm : st.useBis = some m) (hs : st.foldBis = some sf) :
+    ∀ (j : Nat) (bi : BusInteraction (DenseExpr p)), st.bis[j]? = some bi →
+      denseBiGateFires xs bi = true → j ∈ (denseRncBiEdits ctx st xs cd).1.map Prod.fst := by
+  intro j bi hb hfires
+  rw [biEdits_eq_foldr]
+  refine biBody_complete ctx st xs cd _ j bi ?_ hb hfires
+  rw [hm, hs]
+  refine denseRncPosList_mem _ _ _ j ?_
+  rw [denseBiGateFires, Bool.or_eq_true, Bool.or_eq_true] at hfires
+  rcases hfires with (hmul | hfd) | hpl
+  · obtain ⟨v, hv, hx⟩ := (denseSharesVarIn_iff xs _).1 hmul
+    exact Or.inl ⟨v, hx, hbus.1 m hm j bi hb v (by simp [denseBIVars, hv])⟩
+  · refine Or.inr ?_
+    have hcontains := hbus.2 sf hs j bi hb (by
+      rw [denseRncBiHasFold_eq]; simp [denseBiHasFold, hfd])
+    rw [Std.HashSet.mem_toList, Std.HashSet.mem_iff_contains]
+    exact hcontains
+  · rw [List.any_eq_true] at hpl
+    obtain ⟨e, he, hor⟩ := hpl
+    rw [Bool.or_eq_true] at hor
+    rcases hor with hsh | hfd
+    · obtain ⟨v, hv, hx⟩ := (denseSharesVarIn_iff xs e).1 hsh
+      refine Or.inl ⟨v, hx, hbus.1 m hm j bi hb v ?_⟩
+      simp only [denseBIVars, List.mem_append, List.mem_flatMap]
+      exact Or.inr ⟨e, he, hv⟩
+    · refine Or.inr ?_
+      have hcontains := hbus.2 sf hs j bi hb (by
+        rw [denseRncBiHasFold_eq]
+        simp only [denseBiHasFold, Bool.or_eq_true, List.any_eq_true]
+        exact Or.inr ⟨e, he, hfd⟩)
+      rw [Std.HashSet.mem_toList, Std.HashSet.mem_iff_contains]
+      exact hcontains
+
+/-- The constraint array after the write: the positionwise tombify, then the booleanity
+    constraints. -/
+theorem denseRncWrite_cs_toList {ctx : DenseRncCtx p} {st : DenseRncState p} {xs : List VarId}
+    {cd : DenseRncCand p} {m : Array (Array Nat)} {sf : Std.HashSet Nat}
+    (hzero : ctx.zeroE = (DenseExpr.const 0 : DenseExpr p))
+    (hcvs : DenseRncCvsOk st) (huse : DenseRncUseOk st)
+    (hm : st.useCs = some m) (hs : st.foldCs = some sf) :
+    (denseRncWrite ctx st cd.bits (denseRncCsEdits ctx st xs cd).1
+        (denseRncBiEdits ctx st xs cd).1).cs.toList
+      = st.cs.toList.map (denseTombify xs cd.bits (denseGroupSubst xs cd.hm.get) cd.patts.get)
+        ++ cd.bits.map denseBoolConstraint := by
+  set σ := denseGroupSubst xs cd.hm.get with hσ
+  set patts := cd.patts.get with hpatts
+  set es := (denseRncCsEdits ctx st xs cd).1 with hes
+  have hcs : (denseRncWrite ctx st cd.bits es (denseRncBiEdits ctx st xs cd).1).cs
+      = (es.map (fun e => (e.pos, e.content ctx))).foldl denseArrSet st.cs
+        ++ (cd.bits.map (denseBoolConstraint (p := p))).toArray := by
+    show ((cd.bits.foldl (fun st b => st.pushBool b)
+      (((denseRncBiEdits ctx st xs cd).1).foldl (fun st ib => st.rewriteBiAt ib.1 ib.2)
+        (es.foldl (denseRncCsStep ctx) st))).domReset).cs = _
+    show (cd.bits.foldl (fun st b => st.pushBool b)
+      (((denseRncBiEdits ctx st xs cd).1).foldl (fun st ib => st.rewriteBiAt ib.1 ib.2)
+        (es.foldl (denseRncCsStep ctx) st))).cs = _
+    rw [denseRncBoolFold_cs, denseRncBiFold_cs, denseRncCsFold_cs]
+  rw [hcs]
+  have hlen : ((es.map (fun e => (e.pos, e.content ctx))).foldl denseArrSet st.cs).size
+      = st.cs.size := denseArrFold_size _ _
+  rw [Array.toList_append, List.toList_toArray]
+  refine congrArg (· ++ cd.bits.map denseBoolConstraint) ?_
+  refine List.ext_getElem? (fun j => ?_)
+  rw [Array.getElem?_toList, List.getElem?_map, Array.getElem?_toList]
+  by_cases hj : j < st.cs.size
+  · have hcget : st.cs[j]? = some st.cs[j] := Array.getElem?_eq_getElem hj
+    rw [hcget, Option.map_some]
+    by_cases hedit : j ∈ es.map DenseRncCsEdit.pos
+    · obtain ⟨e, hemem, hepos⟩ := List.mem_map.1 hedit
+      obtain ⟨c0, hc0, hcontent⟩ := csBody_content ctx st xs cd hcvs hzero _ e
+        (by rwa [hes, csEdits_eq_foldr] at hemem)
+      have hc0' : c0 = st.cs[j] := by rw [hepos] at hc0; rw [hcget] at hc0; exact (Option.some.inj hc0).symm
+      subst hc0'
+      have := denseArrFold_hit (es.map (fun e => (e.pos, e.content ctx))) st.cs e.pos
+        (e.content ctx)
+        (by simpa [List.map_map, Function.comp_def] using denseRncCsEdits_nodup ctx st xs cd)
+        (List.mem_map.2 ⟨e, hemem, rfl⟩) (by rw [hepos]; exact hj)
+      rw [hepos] at this
+      rw [this, hcontent]
+    · have hstable := denseArrFold_stable (es.map (fun e => (e.pos, e.content ctx))) st.cs j
+        (by simpa [List.map_map, Function.comp_def] using hedit)
+      rw [hstable, hcget]
+      have hnf : ¬ (denseCoveredBy xs st.cs[j] = true ∨ st.cs[j].sharesVarIn xs = true ∨
+          st.cs[j].hasConstFoldableNode = true) := fun hfires =>
+        hedit (denseRncCsEdits_complete hcvs huse hm hs j st.cs[j] hcget hfires)
+      rw [not_or, not_or] at hnf
+      obtain ⟨h1, h2, h3⟩ := hnf
+      simp only [denseTombify, Bool.not_eq_true] at *
+      rw [if_neg (by simpa using h1),
+        denseGroupRewrite_eq_self (by simpa using h2) (by simpa using h3)]
+  · have hnone : st.cs[j]? = none := Array.getElem?_eq_none (by omega)
+    rw [hnone, Option.map_none, Array.getElem?_eq_none (by omega)]
+
+/-- The interaction array after the write: the positionwise gated rewrite. -/
+theorem denseRncWrite_bis_toList {ctx : DenseRncCtx p} {st : DenseRncState p} {xs : List VarId}
+    {cd : DenseRncCand p} {m : Array (Array Nat)} {sf : Std.HashSet Nat}
+    (hbus : DenseRncBusOk st) (hm : st.useBis = some m) (hs : st.foldBis = some sf) :
+    (denseRncWrite ctx st cd.bits (denseRncCsEdits ctx st xs cd).1
+        (denseRncBiEdits ctx st xs cd).1).bis.toList
+      = st.bis.toList.map
+          (denseBIRewriteGate xs cd.bits (denseGroupSubst xs cd.hm.get) cd.patts.get) := by
+  set es := (denseRncBiEdits ctx st xs cd).1 with hes
+  have hbis : (denseRncWrite ctx st cd.bits (denseRncCsEdits ctx st xs cd).1 es).bis
+      = es.foldl denseArrSet st.bis := by
+    show (cd.bits.foldl (fun st b => st.pushBool b)
+      (es.foldl (fun st ib => st.rewriteBiAt ib.1 ib.2)
+        ((denseRncCsEdits ctx st xs cd).1.foldl (denseRncCsStep ctx) st))).bis = _
+    rw [denseRncBoolFold_bis, denseRncBiFold_bis, denseRncCsFold_bis]
+  rw [hbis]
+  refine List.ext_getElem? (fun j => ?_)
+  rw [Array.getElem?_toList, List.getElem?_map, Array.getElem?_toList]
+  by_cases hj : j < st.bis.size
+  · have hbget : st.bis[j]? = some st.bis[j] := Array.getElem?_eq_getElem hj
+    rw [hbget, Option.map_some]
+    by_cases hedit : j ∈ es.map Prod.fst
+    · obtain ⟨q, hqmem, hqpos⟩ := List.mem_map.1 hedit
+      obtain ⟨bi0, hb0, hcontent⟩ := biBody_content ctx st xs cd _ q
+        (by rwa [hes, biEdits_eq_foldr] at hqmem)
+      have hb0' : bi0 = st.bis[j] := by
+        rw [hqpos] at hb0; rw [hbget] at hb0; exact (Option.some.inj hb0).symm
+      subst hb0'
+      have := denseArrFold_hit es st.bis q.1 q.2 (denseRncBiEdits_nodup ctx st xs cd)
+        (by simpa using hqmem) (by rw [hqpos]; exact hj)
+      rw [hqpos] at this
+      rw [this, hcontent]
+    · rw [denseArrFold_stable es st.bis j (by simpa using hedit), hbget]
+      have hnf : denseBiGateFires xs st.bis[j] = false := by
+        cases hf : denseBiGateFires xs st.bis[j] with
+        | false => rfl
+        | true => exact absurd (denseRncBiEdits_complete hbus hm hs j st.bis[j] hbget hf) hedit
+      unfold denseBIRewriteGate
+      rw [if_neg (by simpa [denseBiGateFires] using hnf)]
+  · have hsz : (es.foldl denseArrSet st.bis).size = st.bis.size := denseArrFold_size _ _
+    rw [Array.getElem?_eq_none (by omega), Array.getElem?_eq_none (by omega), Option.map_none]
+
+/-- The written state's view is the re-encoded system with trivially-true constraints dropped —
+    the array engine's counterpart of `denseWorkOut_view`. -/
+theorem denseRncWrite_view {ctx : DenseRncCtx p} {st : DenseRncState p} {xs : List VarId}
+    {cd : DenseRncCand p} {m mB : Array (Array Nat)} {sf sfB : Std.HashSet Nat}
+    (hzero : ctx.zeroE = (DenseExpr.const 0 : DenseExpr p))
+    (hpatts : cd.patts.get = denseAssignments (denseBitBox cd.bits))
+    (hcvs : DenseRncCvsOk st) (huse : DenseRncUseOk st) (hbus : DenseRncBusOk st)
+    (hm : st.useCs = some m) (hs : st.foldCs = some sf)
+    (hmB : st.useBis = some mB) (hsB : st.foldBis = some sfB) :
+    denseRncView (denseRncWrite ctx st cd.bits (denseRncCsEdits ctx st xs cd).1
+        (denseRncBiEdits ctx st xs cd).1)
+      = (denseReencodeOut (denseRncView st) xs cd.bits cd.hm.get).filterConstraints
+          (fun c => !denseIsZero c) := by
+  have hcsL := denseRncWrite_cs_toList (xs := xs) (cd := cd) hzero hcvs huse hm hs
+  have hbisL := denseRncWrite_bis_toList (ctx := ctx) (xs := xs) (cd := cd) hbus hmB hsB
+  rw [hpatts] at hcsL hbisL
+  unfold denseRncView DenseConstraintSystem.filterConstraints denseReencodeOut
+  dsimp only
+  refine congrArg₂ DenseConstraintSystem.mk ?_ ?_
+  · rw [Array.toList_filter, hcsL, List.filter_append, denseBoolConstraints_not_zero,
+      List.filter_append, denseBoolConstraints_not_zero, Array.toList_filter, denseTombify_filter]
+  · rw [hbisL, denseBIRewriteGate_eq]
+
+/-! ### The indexes survive the write
+
+Every setter writes one position of one array and only ever *adds* index entries, so each invariant
+is preserved pointwise. The bundled `DenseRncOk` is what the loop threads. -/
+
+structure DenseRncOk (st : DenseRncState p) : Prop where
+  sizes : st.cvs.size = st.cs.size
+  cvs : DenseRncCvsOk st
+  anchor : DenseRncAnchorOk st
+  use : DenseRncUseOk st
+  bus : DenseRncBusOk st
+
+theorem denseRncCapVars_const_zero : denseRncCapVars (DenseExpr.const 0 : DenseExpr p) = #[] := rfl
+
+theorem denseRncCapVars_bool (b : VarId) :
+    denseRncCapVars (denseBoolConstraint b : DenseExpr p) = #[b] := by
+  simp [denseRncCapVars, denseRncCapGo, denseBoolConstraint]
+
+theorem denseRncAnchorVars_const_zero :
+    denseRncAnchorVars (DenseExpr.const 0 : DenseExpr p) = [] := rfl
+
+/-- Growing an array does not change any existing entry. -/
+theorem denseArrEnsure_getD {α : Type} (a : Array α) (i j : Nat) (d : α) :
+    (denseArrEnsure a i d).getD j d = a.getD j d := by
+  unfold denseArrEnsure
+  split
+  · rfl
+  · rw [Array.getD_eq_getD_getElem?, Array.getD_eq_getD_getElem?]
+    by_cases hj : j < a.size
+    · rw [Array.getElem?_append_left hj]
+    · have hR : a[j]? = none := Array.getElem?_eq_none (by omega)
+      have hL : ((a ++ Array.replicate (max (i + 1) (2 * a.size) - a.size) d)[j]?).getD d = d := by
+        rw [Array.getElem?_append_right (by omega), Array.getElem?_replicate]
+        split <;> rfl
+      rw [hL, hR]
+      rfl
+
+theorem denseArrEnsure_size {α : Type} (a : Array α) (i : Nat) (d : α) :
+    i < (denseArrEnsure a i d).size := by
+  unfold denseArrEnsure
+  split
+  · omega
+  · rw [Array.size_append, Array.size_replicate]
+    omega
+
+theorem denseRncBAdd_mono (m : Array (Array Nat)) (w : VarId) (i j : Nat) (v : VarId)
+    (h : j ∈ denseRncBGet m v) : j ∈ denseRncBGet (denseRncBAdd m w i) v := by
+  have hkeep : (denseArrEnsure m w.index #[]).getD v.index #[] = m.getD v.index #[] :=
+    denseArrEnsure_getD m w.index v.index #[]
+  unfold denseRncBGet denseRncBAdd at *
+  rw [← hkeep] at h
+  rw [Array.getD_eq_getD_getElem?, Array.getElem?_modify]
+  rw [Array.getD_eq_getD_getElem?] at h
+  by_cases hw : w.index = v.index
+  · rw [if_pos hw]
+    cases hget : (denseArrEnsure m w.index #[])[v.index]? with
+    | none => rw [hget] at h; simp at h
+    | some a =>
+        rw [hget] at h
+        simp only [Option.map_some, Option.getD_some] at h ⊢
+        exact Array.mem_push.2 (Or.inl h)
+  · rw [if_neg hw]
+    exact h
+
+theorem denseRncBAdd_self (m : Array (Array Nat)) (w : VarId) (i : Nat) :
+    i ∈ denseRncBGet (denseRncBAdd m w i) w := by
+  unfold denseRncBGet denseRncBAdd
+  rw [Array.getD_eq_getD_getElem?, Array.getElem?_modify, if_pos rfl,
+    Array.getElem?_eq_getElem (denseArrEnsure_size m w.index #[])]
+  simp
+
+theorem denseRncAnchorAdd_mono (idx : DenseCovIndex) (ks : List VarId) (i j : Nat) (v : VarId)
+    (h : j ∈ idx.buckets.getD v []) : j ∈ (denseRncAnchorAdd idx ks i).buckets.getD v [] := by
+  unfold denseRncAnchorAdd
+  cases ks with
+  | nil => exact h
+  | cons w rest =>
+      by_cases hw : v = w
+      · subst hw
+        show j ∈ (idx.buckets.insert v (i :: idx.buckets.getD v [])).getD v []
+        rw [Std.HashMap.getD_insert_self]
+        exact List.mem_cons_of_mem i h
+      · show j ∈ (idx.buckets.insert w (i :: idx.buckets.getD w [])).getD v []
+        rw [Std.HashMap.getD_insert, if_neg (by simpa using fun hh => hw hh.symm)]
+        exact h
+
+theorem denseRncAnchorAdd_self (idx : DenseCovIndex) (v : VarId) (rest : List VarId) (i : Nat) :
+    i ∈ (denseRncAnchorAdd idx (v :: rest) i).buckets.getD v [] := by
+  show i ∈ (idx.buckets.insert v (i :: idx.buckets.getD v [])).getD v []
+  rw [Std.HashMap.getD_insert_self]
+  exact List.mem_cons_self
+
+theorem denseRncBFoldL_mono (i : Nat) :
+    ∀ (vs : List VarId) (m : Array (Array Nat)) (v : VarId) (j : Nat), j ∈ denseRncBGet m v →
+      j ∈ denseRncBGet (vs.foldl (fun m w => denseRncBAdd m w i) m) v := by
+  intro vs
+  induction vs with
+  | nil => intro m v j h; exact h
+  | cons w rest ih => intro m v j h; exact ih _ v j (denseRncBAdd_mono m w i j v h)
+
+theorem denseRncBFoldL_self (i : Nat) :
+    ∀ (vs : List VarId) (m : Array (Array Nat)) (v : VarId), v ∈ vs →
+      i ∈ denseRncBGet (vs.foldl (fun m w => denseRncBAdd m w i) m) v := by
+  intro vs
+  induction vs with
+  | nil => intro m v hv; simp at hv
+  | cons w rest ih =>
+      intro m v hv
+      rcases List.mem_cons.1 hv with rfl | hv'
+      · exact denseRncBFoldL_mono i rest _ v i (denseRncBAdd_self m v i)
+      · exact ih _ v hv'
+
+theorem denseRncFullVars_mem {c : DenseExpr p} {v : VarId} (h : v ∈ c.vars) :
+    v ∈ denseRncFullVars c (denseRncCapVars c) := by
+  unfold denseRncFullVars
+  split
+  · next hle => exact (denseRncCapVars_mem_iff hle v).2 h
+  · rw [HashedDedup.hashedDedup_eq]
+    simpa using List.mem_dedup.2 h
+
+theorem denseRncSet_getElem?_ne {α : Type} (a : Array α) (i j : Nat) (x : α) (h : i ≠ j) :
+    (a.setIfInBounds i x)[j]? = a[j]? := Array.getElem?_setIfInBounds_ne h
+
+theorem denseRncSet_getElem?_self {α : Type} (a : Array α) (i : Nat) (x y : α)
+    (h : (a.setIfInBounds i x)[i]? = some y) : i < a.size ∧ y = x := by
+  by_cases hlt : i < a.size
+  · rw [Array.getElem?_setIfInBounds_self_of_lt hlt] at h
+    exact ⟨hlt, (Option.some.inj h).symm⟩
+  · rw [Array.getElem?_eq_none (by rw [Array.size_setIfInBounds]; omega)] at h
+    exact absurd h (by simp)
+
+/-- The constraint write preserves every index invariant: it only ever adds bucket entries, and it
+    keeps `cvs`, the anchor and the use index in step with the new content. -/
+theorem denseRncOk_rewriteAt {st : DenseRncState p} {i : Nat} {c' : DenseExpr p}
+    {cv' full : Array VarId} (h : DenseRncOk st) (hcv : cv' = denseRncCapVars c')
+    (hfull : ∀ v ∈ c'.vars, v ∈ full) : DenseRncOk (st.rewriteAt i c' cv' full) := by
+  have hcs : (st.rewriteAt i c' cv' full).cs = st.cs.setIfInBounds i c' := rfl
+  have hcvs : (st.rewriteAt i c' cv' full).cvs = st.cvs.setIfInBounds i cv' := rfl
+  have hanch : (st.rewriteAt i c' cv' full).anchor
+      = denseRncAnchorAdd st.anchor (denseRncAnchorVars c') i := rfl
+  have huse : (st.rewriteAt i c' cv' full).useCs
+      = st.useCs.map (fun m => full.foldl (fun m v => denseRncBAdd m v i) m) := rfl
+  have hfold : (st.rewriteAt i c' cv' full).foldCs
+      = st.foldCs.map (fun s => if denseRncHasFold c' then s.insert i else s.erase i) := rfl
+  refine ⟨?_, ?_, ?_, ⟨?_, ?_⟩, ?_⟩
+  · rw [hcs, hcvs, Array.size_setIfInBounds, Array.size_setIfInBounds]; exact h.sizes
+  · intro j c hj
+    rw [hcs] at hj
+    rw [hcvs]
+    by_cases hij : i = j
+    · subst hij
+      obtain ⟨hlt, hcc⟩ := denseRncSet_getElem?_self st.cs i c' c hj
+      subst hcc
+      rw [Array.getElem?_setIfInBounds_self_of_lt (by rw [h.sizes]; exact hlt), hcv]
+    · rw [denseRncSet_getElem?_ne _ _ _ _ hij] at hj
+      rw [denseRncSet_getElem?_ne _ _ _ _ hij]
+      exact h.cvs j c hj
+  · intro j c hj v hv
+    rw [hcs] at hj
+    rw [hanch]
+    by_cases hij : i = j
+    · subst hij
+      obtain ⟨_, hcc⟩ := denseRncSet_getElem?_self st.cs i c' c hj
+      subst hcc
+      cases hav : denseRncAnchorVars c with
+      | nil => rw [hav] at hv; simp at hv
+      | cons w rest =>
+          have hvw : v = w := by
+            rw [hav] at hv
+            rcases List.mem_cons.1 hv with h1 | h1
+            · exact h1
+            · exact absurd h1 (by
+                unfold denseRncAnchorVars at hav
+                split at hav <;> simp_all)
+          subst hvw
+          exact denseRncAnchorAdd_self st.anchor v rest i
+    · rw [denseRncSet_getElem?_ne _ _ _ _ hij] at hj
+      exact denseRncAnchorAdd_mono _ _ i j v (h.anchor j c hj v hv)
+  · intro m hm j c hj v hv
+    rw [huse] at hm
+    obtain ⟨m0, hm0, rfl⟩ := Option.map_eq_some_iff.1 hm
+    rw [hcs] at hj
+    have hfl : full.foldl (fun m v => denseRncBAdd m v i) m0
+        = full.toList.foldl (fun m v => denseRncBAdd m v i) m0 := by
+      conv_lhs => rw [← Array.toArray_toList (xs := full)]
+      rw [List.foldl_toArray]
+    rw [hfl]
+    by_cases hij : i = j
+    · subst hij
+      obtain ⟨_, hcc⟩ := denseRncSet_getElem?_self st.cs i c' c hj
+      subst hcc
+      exact denseRncBFoldL_self i full.toList m0 v (by simpa using hfull v hv)
+    · rw [denseRncSet_getElem?_ne _ _ _ _ hij] at hj
+      exact denseRncBFoldL_mono i full.toList m0 v j (h.use.1 m0 hm0 j c hj v hv)
+  · intro sf hsf j c hj hfd
+    rw [hfold] at hsf
+    obtain ⟨s0, hs0, rfl⟩ := Option.map_eq_some_iff.1 hsf
+    rw [hcs] at hj
+    by_cases hij : i = j
+    · subst hij
+      obtain ⟨_, hcc⟩ := denseRncSet_getElem?_self st.cs i c' c hj
+      subst hcc
+      rw [if_pos hfd]
+      simp
+    · rw [denseRncSet_getElem?_ne _ _ _ _ hij] at hj
+      have hmem := h.use.2 s0 hs0 j c hj hfd
+      split
+      · rw [Std.HashSet.contains_insert]; simp [hmem]
+      · rw [Std.HashSet.contains_erase]; simp [hmem, hij]
+  · exact h.bus
+
+theorem denseRncHasFold_bool (b : VarId) :
+    denseRncHasFold (denseBoolConstraint b : DenseExpr p) = false := rfl
+
+theorem denseBoolConstraint_vars (b : VarId) :
+    ∀ v ∈ (denseBoolConstraint b : DenseExpr p).vars, v = b := by
+  intro v hv
+  simpa [denseBoolConstraint, DenseExpr.vars] using hv
+
+theorem denseRncAnchorVars_bool (b : VarId) :
+    denseRncAnchorVars (denseBoolConstraint b : DenseExpr p) = [b] := by
+  unfold denseRncAnchorVars
+  rw [denseRncCapVars_bool]
+  rfl
+
+/-- Appending a booleanity constraint preserves every index invariant. -/
+theorem denseRncOk_pushBool {st : DenseRncState p} (h : DenseRncOk st) (b : VarId) :
+    DenseRncOk (st.pushBool b) := by
+  have hcs : (st.pushBool b).cs = st.cs.push (denseBoolConstraint b) := rfl
+  have hcvs : (st.pushBool b).cvs = st.cvs.push #[b] := rfl
+  have hanch : (st.pushBool b).anchor = denseRncAnchorAdd st.anchor [b] st.cs.size := rfl
+  have huse : (st.pushBool b).useCs = st.useCs.map (fun m => denseRncBAdd m b st.cs.size) := rfl
+  have hfold : (st.pushBool b).foldCs = st.foldCs := rfl
+  refine ⟨?_, ?_, ?_, ⟨?_, ?_⟩, ?_⟩
+  · rw [hcs, hcvs, Array.size_push, Array.size_push, h.sizes]
+  · intro j c hj
+    rw [hcs, Array.getElem?_push] at hj
+    rw [hcvs, Array.getElem?_push, h.sizes]
+    by_cases heq : j = st.cs.size
+    · rw [if_pos heq] at hj ⊢
+      rw [← Option.some.inj hj, denseRncCapVars_bool]
+    · rw [if_neg heq] at hj ⊢
+      exact h.cvs j c hj
+  · intro j c hj v hv
+    rw [hcs, Array.getElem?_push] at hj
+    rw [hanch]
+    by_cases heq : j = st.cs.size
+    · rw [if_pos heq] at hj
+      have hc : c = denseBoolConstraint b := (Option.some.inj hj).symm
+      subst hc
+      rw [denseRncAnchorVars_bool] at hv
+      have hvb : v = b := by simpa using hv
+      subst hvb
+      subst heq
+      exact denseRncAnchorAdd_self st.anchor v [] st.cs.size
+    · rw [if_neg heq] at hj
+      exact denseRncAnchorAdd_mono _ _ _ j v (h.anchor j c hj v hv)
+  · intro m hm j c hj v hv
+    rw [huse] at hm
+    obtain ⟨m0, hm0, rfl⟩ := Option.map_eq_some_iff.1 hm
+    rw [hcs, Array.getElem?_push] at hj
+    by_cases heq : j = st.cs.size
+    · rw [if_pos heq] at hj
+      have hc : c = denseBoolConstraint b := (Option.some.inj hj).symm
+      subst hc
+      have hvb : v = b := denseBoolConstraint_vars b v hv
+      subst hvb
+      subst heq
+      exact denseRncBAdd_self m0 v st.cs.size
+    · rw [if_neg heq] at hj
+      exact denseRncBAdd_mono m0 b st.cs.size j v (h.use.1 m0 hm0 j c hj v hv)
+  · intro sf hsf j c hj hfd
+    rw [hfold] at hsf
+    rw [hcs, Array.getElem?_push] at hj
+    by_cases heq : j = st.cs.size
+    · rw [if_pos heq] at hj
+      have hc : c = denseBoolConstraint b := (Option.some.inj hj).symm
+      subst hc
+      rw [denseRncHasFold_bool] at hfd
+      exact absurd hfd (by simp)
+    · rw [if_neg heq] at hj
+      exact h.use.2 sf hsf j c hj hfd
+  · exact h.bus
+
+/-- The bus write preserves the invariants: the constraint side is untouched and the bus index only
+    grows. -/
+theorem denseRncOk_rewriteBiAt {st : DenseRncState p} (h : DenseRncOk st) (i : Nat)
+    (bi' : BusInteraction (DenseExpr p)) : DenseRncOk (st.rewriteBiAt i bi') := by
+  have hbis : (st.rewriteBiAt i bi').bis = st.bis.setIfInBounds i bi' := rfl
+  have huse : (st.rewriteBiAt i bi').useBis
+      = st.useBis.map (fun m => (denseBIVars bi').foldl (fun m v => denseRncBAdd m v i) m) := rfl
+  have hfold : (st.rewriteBiAt i bi').foldBis
+      = st.foldBis.map (fun s => if denseRncBiHasFold bi' then s.insert i else s.erase i) := rfl
+  refine ⟨h.sizes, h.cvs, h.anchor, h.use, ⟨?_, ?_⟩⟩
+  · intro m hm j bi hj v hv
+    rw [huse] at hm
+    obtain ⟨m0, hm0, rfl⟩ := Option.map_eq_some_iff.1 hm
+    rw [hbis] at hj
+    by_cases hij : i = j
+    · subst hij
+      obtain ⟨_, hbb⟩ := denseRncSet_getElem?_self st.bis i bi' bi hj
+      subst hbb
+      exact denseRncBFoldL_self i (denseBIVars bi) m0 v hv
+    · rw [denseRncSet_getElem?_ne _ _ _ _ hij] at hj
+      exact denseRncBFoldL_mono i (denseBIVars bi') m0 v j (h.bus.1 m0 hm0 j bi hj v hv)
+  · intro sf hsf j bi hj hfd
+    rw [hfold] at hsf
+    obtain ⟨s0, hs0, rfl⟩ := Option.map_eq_some_iff.1 hsf
+    rw [hbis] at hj
+    by_cases hij : i = j
+    · subst hij
+      obtain ⟨_, hbb⟩ := denseRncSet_getElem?_self st.bis i bi' bi hj
+      subst hbb
+      rw [if_pos hfd]
+      simp
+    · rw [denseRncSet_getElem?_ne _ _ _ _ hij] at hj
+      have hmem := h.bus.2 s0 hs0 j bi hj hfd
+      split
+      · rw [Std.HashSet.contains_insert]; simp [hmem]
+      · rw [Std.HashSet.contains_erase]; simp [hmem, hij]
+
+theorem denseRncOk_domReset {st : DenseRncState p} (h : DenseRncOk st) :
+    DenseRncOk st.domReset := ⟨h.sizes, h.cvs, h.anchor, h.use, h.bus⟩
+
+/-- What the constraint-edit builder guarantees about each edit's payload. -/
+def DenseRncEditOk : DenseRncCsEdit p → Prop
+  | .tomb _ => True
+  | .cst _ c' cv' full => cv' = denseRncCapVars c' ∧ ∀ v ∈ c'.vars, v ∈ full
+
+theorem denseRncOk_csStep {ctx : DenseRncCtx p} {st : DenseRncState p} {e : DenseRncCsEdit p}
+    (hzero : ctx.zeroE = (DenseExpr.const 0 : DenseExpr p))
+    (h : DenseRncOk st) (he : DenseRncEditOk e) : DenseRncOk (denseRncCsStep ctx st e) := by
+  cases e with
+  | tomb i =>
+      refine denseRncOk_rewriteAt h ?_ ?_
+      · rw [hzero, denseRncCapVars_const_zero]
+      · intro v hv; rw [hzero] at hv; simp [DenseExpr.vars] at hv
+  | cst i c' cv' full => exact denseRncOk_rewriteAt h he.1 he.2
+
+theorem denseRncOk_csFold {ctx : DenseRncCtx p}
+    (hzero : ctx.zeroE = (DenseExpr.const 0 : DenseExpr p)) :
+    ∀ (es : List (DenseRncCsEdit p)) (st : DenseRncState p), DenseRncOk st →
+      (∀ e ∈ es, DenseRncEditOk e) → DenseRncOk (es.foldl (denseRncCsStep ctx) st) := by
+  intro es
+  induction es with
+  | nil => intro st h _; exact h
+  | cons e rest ih =>
+      intro st h he
+      exact ih _ (denseRncOk_csStep hzero h (he e List.mem_cons_self))
+        (fun e' he' => he e' (List.mem_cons_of_mem e he'))
+
+theorem denseRncOk_biFold :
+    ∀ (es : List (Nat × BusInteraction (DenseExpr p))) (st : DenseRncState p), DenseRncOk st →
+      DenseRncOk (es.foldl (fun st ib => st.rewriteBiAt ib.1 ib.2) st) := by
+  intro es
+  induction es with
+  | nil => intro st h; exact h
+  | cons e rest ih => intro st h; exact ih _ (denseRncOk_rewriteBiAt h e.1 e.2)
+
+theorem denseRncOk_boolFold :
+    ∀ (bits : List VarId) (st : DenseRncState p), DenseRncOk st →
+      DenseRncOk (bits.foldl (fun st b => st.pushBool b) st) := by
+  intro bits
+  induction bits with
+  | nil => intro st h; exact h
+  | cons b rest ih => intro st h; exact ih _ (denseRncOk_pushBool h b)
+
+/-- The whole write preserves the index invariants. -/
+theorem denseRncOk_write {ctx : DenseRncCtx p} {st : DenseRncState p} {bits : List VarId}
+    {csEdits : List (DenseRncCsEdit p)} {biEdits : List (Nat × BusInteraction (DenseExpr p))}
+    (hzero : ctx.zeroE = (DenseExpr.const 0 : DenseExpr p)) (h : DenseRncOk st)
+    (he : ∀ e ∈ csEdits, DenseRncEditOk e) :
+    DenseRncOk (denseRncWrite ctx st bits csEdits biEdits) :=
+  denseRncOk_domReset (denseRncOk_boolFold bits _
+    (denseRncOk_biFold biEdits _ (denseRncOk_csFold hzero csEdits st h he)))
+
+/-- The builder's edits carry the payload the invariants need. -/
+theorem denseRncCsEdits_editOk (ctx : DenseRncCtx p) (st : DenseRncState p) (xs : List VarId)
+    (cd : DenseRncCand p) : ∀ e ∈ (denseRncCsEdits ctx st xs cd).1, DenseRncEditOk e := by
+  rw [csEdits_eq_foldr]
+  generalize (denseRncPosList (match st.useCs with | some m => m | none => #[]) xs
+    (match st.foldCs with | some s => s | none => ∅).toList) = l
+  induction l with
+  | nil => intro e he; simp at he
+  | cons i rest ih =>
+      intro e he
+      rw [List.foldr_cons] at he
+      cases hc : st.cs[i]? with
+      | none => exact ih e (by simpa only [csBody, hc] using he)
+      | some c =>
+        cases hvs : st.cvs[i]? with
+        | none => exact ih e (by simpa only [csBody, hc, hvs] using he)
+        | some vs =>
+          simp only [csBody, hc, hvs] at he
+          split at he
+          · rcases List.mem_cons.1 he with rfl | he'
+            · trivial
+            · exact ih e he'
+          · split at he
+            · rcases List.mem_cons.1 he with rfl | he'
+              · exact ⟨rfl, fun v hv => denseRncFullVars_mem hv⟩
+              · exact ih e he'
+            · exact ih e he
+
 /-- **Unproven on this branch (measurement).** The array-backed engine's obligations, in the shape
     `denseReencodeF_props` discharges for the list engine. -/
 theorem denseRncF_props (pw : PrimeWitness p) (b : DegreeBound) (reg : VarRegistry)
