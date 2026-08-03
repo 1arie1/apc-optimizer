@@ -6496,3 +6496,91 @@ three cycles that adopt — ~190 ms — and needs a first-yield sweep-equality l
 `denseFindVarBound`. `substF` is the pass's own output and is ruled out by entry 169's dead end.
 
 **Worked: yes.**
+
+### 171. Runtime: normalize rebuilt — a leaf-inlined accumulator walk with fused materialization (0.39–0.56x on the pass, sha256 total 0.95x)
+
+Full redesign of the affine-normalization pass (`normalizeRedesign.md` has the design, the
+attribution and the rejected alternatives). `normalize1`+`normalize2` are the same pass run twice
+per cleanup cycle and together the largest item in the corpus profile (3.82 s + 2.89 s of 59 s,
+ranks 5 and 9); `DenseExpr.normalize`'s twin is also called by busPairCancel's constraint index and
+by bytePack.
+
+WHAT THE MEASUREMENT SAID (throwaway `IO` probe in `denseRunCycleTimed`, per invocation, on the
+pass's own input). keccak `apc_001` cycle 0: 97 546 expressions, 1 247 180 nodes, 150 233
+materialization points holding 238 874 pre-merge terms — **largest merged affine form in the whole
+corpus: 24 terms, mean 1.6**. So there was no superlinearity to kill: every quadratic in the pass
+(the `denseAddCoeff` list fold, `toExpr`'s left fold) runs on 1–2 elements. What the probe also
+measured is the floor: an allocation-free node walk costs **7 ms**, allocating a *fresh identical
+copy of every node* costs **17 ms**, and the pass cost **78 ms**. The cost was a per-node constant
+factor, 4.6x above the cost of simply rebuilding the tree. Counting allocations per affine `add`
+node in the C: two `DenseNormRes.lin?With` calls each allocating an `Option` (and for a `.var`
+child also a `DenseLinExpr`, a cons and a pair — 4 allocations per variable occurrence), a
+`lean_apply_2` on `ops.add` (the `DenseZModOps` record stores *closures*), `List.appendTR`, a
+`DenseLinExpr`, a `DenseNormRes`, and `lean_inc_ref_n(ops, 2)` of refcount traffic per node.
+`++` copying alone was 824 k copy-conses against 239 k final terms.
+
+THE REBUILD (`Normalize.lean`, one file — the spec `DenseExpr.normalize`/`DenseLinExpr.norm`/
+`denseMergeTerms` are untouched; the whole `DenseNormRes`/`denseNormalizeFused` layer is deleted):
+1. **A two-constructor result with the linear form inlined and a term count.**
+   `DenseNrm = lin (c) (n) (ts) | opq (e)`, where `ts` is the node's terms consed onto the caller's
+   accumulator and `n` how many are its own. No `Option`, no `DenseLinExpr` per node.
+2. **Leaf children are handled inline at the parent**, so a `.const`/`.var` child costs no result
+   object — and the `var` constructor `DenseNormRes` needed (a bare variable normalizes to itself,
+   not to `0 + 1·x`) disappears with it.
+3. **The accumulator kills the `++`**: right child first, left child threaded onto its list, one
+   cons per term whether the region is left- or right-nested. `n` is what makes it work when the
+   *left* child turns out opaque and the right one has to be materialized anyway (`x·y − a − b`,
+   the common constraint shape): its terms are the first `n` cells, so materialization consumes a
+   counted prefix and never needs `List.take`.
+4. **Materialization is fused**: `denseNrmMat` has allocation-free arms for the 0- and 1-term forms
+   (which is nearly all of them) and otherwise merges and folds the `toExpr` spine while dropping
+   zeros, so neither the merged list's zero-drop copy nor an intermediate expression is built.
+5. **No `ops` record**: the walk calls `zmodAdd`/`zmodMul`/`zmodOneP` directly — same
+   dictionary-free primitives, but static calls instead of closure applications on a shared record.
+6. **The pass maps `DenseExpr.normalize` itself** instead of `(denseNormalizeFused e).1`, whose
+   discarded `.2` cost a pair plus an `Option` per expression.
+
+PROOF SURFACE. `denseNrmMat_eq` (the materializer is `norm.toExpr` over a counted prefix) and
+`denseNrmGo_eq` (the walk is (`denseLinearize`, `normalize`)), then one `funext`. The walk's arms
+inspect their children's constructors, which would make the induction a 9-way bash per node;
+`denseNrmAddU`/`denseNrmMulU` are the same arms with every child taken through `denseNrmGo`, equal
+to them by `denseNrmGo_add`/`denseNrmGo_mul` — `cases a <;> cases b <;> rw [..] <;> simp`, pure
+`ZMod`/`Nat` arithmetic — so the induction only ever sees the uniform shape. The two leaf-arm
+`rfl` lemmas the bridge needs are in `unused-theorems.txt`'s `[ignore]` (they rewrite by `rfl`, so
+they leave no trace in the proof term).
+
+NUMBERS (this 20-core box, serial, interleaved, 3 reps; `profile` per-pass ms; sha256 one shot):
+keccak `apc_001` **206 → 109 / 154 → 77 (0.53x / 0.50x)**, run total 2898 → 2642 (0.91x);
+wasm-eth `apc_012` 268 → 135 / 223 → 117 (0.50x / 0.52x), 3382 → 3072 (0.91x); wasm-eth `apc_036`
+220 → 114 / 181 → 90 (0.52x / 0.50x), 2817 → 2635 (0.94x); openvm-eth `apc_006` 33 → 14 / 25 → 10
+(0.42x / 0.39x), 396 → 370 (0.93x); sha256 `apc_001` **1757 → 987 / 1306 → 711 (0.56x / 0.54x)**,
+28 380 → 26 964 (0.95x). busPairCancel and bytePack, which share the walk, are flat — they
+normalize few and small expressions.
+VERIFIED: `opt-export` **byte-identical** on 10 cases — openvm-eth `apc_006` / `apc_037` /
+`apc_100`, wasm-eth `apc_012` / `apc_036` / `apc_063`, OpenVM keccak `apc_001`, SP1 keccak
+`apc_001`, SP1 rsp `apc_001` / `apc_002`; `lake build` clean, no warnings;
+`check-proof-integrity` passes.
+
+DEAD ENDS / NOT PURSUED, all measured or sized:
+* **An in-place `Array` merge buffer** (linear scan + `Array.set`, folded straight into the spine).
+  Implemented and measured: 5–8 % better on the pass than the shipped list merge (keccak 101 vs
+  110 ms, wasm-eth `apc_012` 131 vs 145) — real, but below the land bar on its own and it costs
+  ~150 lines of `take`/`drop`/`set` index proof. Merging over a *counted prefix* in list form
+  (`denseNrmMergePre`, no `List.take` copy) measures the same as `take` — the win is the in-place
+  update, not the copy.
+* **Sharing unchanged input subtrees**: entry 169's dead end applies unchanged (the fixpoint loop
+  holds the pre-cycle state, so sharing keeps refcounts above one for a whole cycle).
+* **A separate allocation-free affineness pre-pass** then a top-down build: each node would be
+  re-walked once per opaque ancestor, and the corpus's trees are mostly deep product skeleton with
+  small affine regions hanging off them.
+* Residual, each sized at 5–15 % of the walk (≈ 1 % of the run): threading `(const, count)` down
+  the left spine so an affine chain returns the bottom's `.lin` unchanged; a `c·x` peephole in the
+  `.add` arm; an `n = 2` arm in `denseNrmMat`.
+
+ONE NUMBER FOR THE ALREADY-TRACKED `guardDegree` ITEM (ideas.md R5): timing the guard's
+`withinDegreeB` for every pass of a whole run puts it at **239 ms of keccak `apc_001`'s 2801 ms
+(8.5 %)** — consistent with the 6–7 % the delete-the-guard A/B measured — and after this rebuild it
+is **~22 % of what `normalize1` reports**. Nothing new is proposed here; the plan and its rejected
+alternatives are in R5.
+
+**Worked: yes.**

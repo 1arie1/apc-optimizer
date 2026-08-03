@@ -341,11 +341,15 @@ index gate**  ·  domainFold **done (entry 167)**, reencode open:
      values in the fully-applied pass body and pass them as parameters** (the `FlagFold`
      comment's pattern); when a pass's profile makes no sense relative to its work, suspect this
      first and bisect with a skip-the-body experiment.
-   - ~~`normalize` linearize fusion~~ **done (entries 115, 135)**: `normalizePass` uses
-     `normalizeFused`, while Gauss keeps every affine source row, stored solution, touched-row
-     rewrite, and Markowitz cache in canonical `DenseLinExpr` form. Expression trees survive only
-     for genuinely nonlinear subtrees and at the final `substF` boundary, so pivot sweeps no
-     longer rebuild affine trees merely to linearize them again.
+   - ~~`normalize` linearize fusion~~ **done (entries 115, 135)**, then ~~the walk itself~~ **done
+     (entry 171)**: Gauss keeps every affine source row, stored solution, touched-row rewrite and
+     Markowitz cache in canonical `DenseLinExpr` form, so expression trees survive only for
+     genuinely nonlinear subtrees and at the final `substF` boundary. Entry 171 rebuilt the walk
+     itself (0.39–0.56x on both invocations): a two-constructor result with the linear form
+     inlined, leaf children handled at the parent, a term accumulator instead of `++`, and a fused
+     merge/drop-zero/`toExpr` materializer. Its residual is ~2.2x an identical-copy rebuild of the
+     tree, i.e. one `DenseNrm` plus one cons+pair per term above the floor; the sized-but-unpursued
+     items are in `normalizeRedesign.md`.
    - ~~`iterateToFixpoint` sizeKey recomputation~~ **done (entry 115)**: the input's key is
      threaded (`iterateToFixpointFrom`), halving the per-cycle occurrence-list walks (~6 % of
      whole-run samples).
@@ -720,6 +724,14 @@ are non-survivors" argument (`a·y + b = 0` has at most one root when `a ≠ 0`)
 
 ### Runtime dead ends (measured; do not re-propose without new evidence)
 
+- **An in-place `Array` like-term merge in normalize's materializer** (entry 171): a linear scan +
+  `Array.set` buffer folded straight into the `toExpr` spine, instead of the shipped
+  `denseMergeTerms` over a counted prefix. Implemented and measured **5–8 % better on the pass**
+  (keccak 101 vs 110 ms, wasm-eth `apc_012` 131 vs 145, identical output) — real, but below the
+  land bar alone and ~150 lines of `take`/`drop`/`set` index proof. Merging the prefix *in list
+  form* without the `List.take` copy (`denseNrmMergePre`) measures the same as `take`: the win is
+  the in-place update, not the copy. Revisit only if a corpus appears with large affine forms (the
+  present maximum is 24 terms, mean 1.6).
 - **An eager raw-slot bound index over every variable** (entry 170, rootPairUnify): a sweep building
   `VarId → List (busId, mult, Thunk pattern, slot)` so a raw bound query costs one `BusFacts` call
   with no payload walk and no re-derived slot pattern. Worse on **every** case — sha256 `apc_001`

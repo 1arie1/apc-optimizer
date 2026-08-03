@@ -22,4 +22,8 @@ ApcOptimizer.SP1.sp1Optimizer_maintainsCorrectness
 # `(Task.spawn f).get = f ()`, used in `denseCollectForcedV_eq_serial` (Proofs/DomainBatch.lean);
 # `Task.get` is opaque, so the `simp only` needs the lemma even though it rewrites by `rfl`.
 ApcOptimizer.Dense.get_spawn
+# `denseNrmGo`'s two leaf arms (Normalize.lean). `denseNrmGo_add`/`_mul` need them to reduce a
+# leaf child *without* unfolding the walk on a compound one; both rewrite by `rfl`.
+ApcOptimizer.Dense.denseNrmGo_const
+ApcOptimizer.Dense.denseNrmGo_var
 

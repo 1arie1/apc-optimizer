@@ -8,8 +8,8 @@ set_option autoImplicit false
 
 `DenseExpr.normalize` replaces every maximal affine subexpression by its merged normal form
 (`denseLinearize` → combine like terms → drop zeros → `DenseLinExpr.toExpr`). The pass
-(`denseNormalizePass`) runs the fused single-pass walk `denseNormalizeFused`; same shape as
-`denseConstantFoldPass` (`ExprOps.lean`). -/
+(`denseNormalizePass`) maps it over the system; same shape as `denseConstantFoldPass`
+(`ExprOps.lean`). Its runtime is the single walk `denseNormalizeFast` below. -/
 
 namespace ApcOptimizer.Dense
 
@@ -535,227 +535,393 @@ theorem DenseExpr.normalize_vars (e : DenseExpr p) : ∀ i ∈ e.normalize.vars,
       · simp only [DenseExpr.vars, List.mem_append] at hi ⊢
         exact hi.imp (iha i) (ihb i)
 
-/-! ## Fused normalization walk
+/-! ## The runtime walk (`@[csimp]` replacement for `DenseExpr.normalize`)
 
-One bottom-up pass returning both the normalized expression and the node's dense linear form, so
-`denseLinearize` is not re-walked at every node. `denseNormalizeFused_eq` pins both components to
-(`normalize`, `denseLinearize`). -/
+`DenseExpr.normalize` re-runs `denseLinearize` over the whole node at every node it visits, which
+is quadratic. The runtime walk visits each node once, carries the affine content of a node as a
+constant plus an *un-merged* term list built onto the caller's accumulator, and materializes
+`norm.toExpr` only where a parent cannot absorb it. -/
 
-def denseNormalizeFused : DenseExpr p → DenseExpr p × Option (DenseLinExpr p)
-  | .const n => (.const n, some ⟨n, []⟩)
-  | .var x => (.var x, some ⟨0, [(x, 1)]⟩)
-  | .add a b =>
-      let ra := denseNormalizeFused a
-      let rb := denseNormalizeFused b
-      match ra.2, rb.2 with
-      | some la, some lb =>
-          let l := la.add lb
-          (l.norm.toExpr, some l)
-      | _, _ => (.add ra.1 rb.1, none)
-  | .mul a b =>
-      let ra := denseNormalizeFused a
-      let rb := denseNormalizeFused b
-      match ra.2, rb.2 with
-      | some la, some lb =>
-          if la.terms.isEmpty then
-            let l := lb.scale la.const
-            (l.norm.toExpr, some l)
-          else if lb.terms.isEmpty then
-            let l := la.scale lb.const
-            (l.norm.toExpr, some l)
-          else (.mul ra.1 rb.1, none)
-      | _, _ => (.mul ra.1 rb.1, none)
-
-/-- The fused pass computes exactly (`normalize`, `denseLinearize`). -/
-theorem denseNormalizeFused_eq (e : DenseExpr p) :
-    denseNormalizeFused e = (e.normalize, denseLinearize e) := by
-  induction e with
-  | const n => rfl
-  | var x => rfl
-  | add a b iha ihb =>
-      simp only [denseNormalizeFused, iha, ihb]
-      cases hla : denseLinearize a with
-      | none => simp [DenseExpr.normalize, denseLinearize, hla]
-      | some la =>
-        cases hlb : denseLinearize b with
-        | none => simp [DenseExpr.normalize, denseLinearize, hla, hlb]
-        | some lb => simp [DenseExpr.normalize, denseLinearize, hla, hlb]
-  | mul a b iha ihb =>
-      simp only [denseNormalizeFused, iha, ihb]
-      cases hla : denseLinearize a with
-      | none => simp [DenseExpr.normalize, denseLinearize, hla]
-      | some la =>
-        cases hlb : denseLinearize b with
-        | none => simp [DenseExpr.normalize, denseLinearize, hla, hlb]
-        | some lb =>
-          by_cases h1 : la.terms.isEmpty
-          · simp [DenseExpr.normalize, denseLinearize, hla, hlb, h1]
-          · by_cases h2 : lb.terms.isEmpty
-            · simp [DenseExpr.normalize, denseLinearize, hla, hlb, h1, h2]
-            · simp [DenseExpr.normalize, denseLinearize, hla, hlb, h1, h2]
-
-theorem denseNormalizeFused_fst (e : DenseExpr p) : (denseNormalizeFused e).1 = e.normalize := by
-  rw [denseNormalizeFused_eq]
-
-/-! ## Deferred materialization (runtime `@[csimp]` replacement for `denseNormalizeFused`)
-
-`denseNormalizeFused` rebuilds `l.norm.toExpr` at *every* affine node, but a parent that is itself
-affine discards it and re-merges the linear form — so a `k`-term affine chain pays `k` merges and
-`k` tree builds over `1..k` terms, i.e. `O(k²)`. `denseNormalizeFusedFast` returns the linear form
-undeveloped (`DenseNormRes.lin`) and materializes only where a parent cannot absorb it. -/
-
-/-- A fused-walk result with the expression left undeveloped while it is still absorbable.
-    `var` is its own case because the walk returns a bare variable unchanged, not its normal form. -/
-inductive DenseNormRes (p : ℕ) where
-  | var (x : VarId)
-  | lin (l : DenseLinExpr p)
+/-- The walk's result for a compound node. In `lin c n ts`, `ts` is this node's terms in
+    left-to-right order consed onto the caller's accumulator and `n` is how many of them are this
+    node's — so a sibling that turns out non-affine can still materialize this node from a counted
+    prefix. Leaves never reach here: a parent handles `.const`/`.var` children inline (a bare
+    variable normalizes to itself, not to `0 + 1·x`). -/
+inductive DenseNrm (p : ℕ) where
+  | lin (c : ZMod p) (n : Nat) (ts : List (VarId × ZMod p))
   | opq (e : DenseExpr p)
 
-/-- The normalized expression of a deferred result — the `.1` of `denseNormalizeFused`. -/
-def DenseNormRes.expr : DenseNormRes p → DenseExpr p
-  | .var x => .var x
-  | .lin l => l.norm.toExpr
+/-- `DenseLinExpr.toExpr`'s spine over merged terms, dropping the zero coefficients on the way, so
+    the zero-drop never builds a list of its own. -/
+def denseNrmSpine (e : DenseExpr p) : List (VarId × ZMod p) → DenseExpr p
+  | [] => e
+  | t :: ts =>
+      denseNrmSpine (if zmodIsZero t.2 then e else .add e (.mul (.const t.2) (.var t.1))) ts
+
+/-- Materialize an affine node from the first `n` cells of `ts`: merge like terms, drop zeros and
+    build the `toExpr` spine. The corpus's affine forms hold 1.6 terms on average, and the constant
+    and single-term arms serve those without touching the merge at all. -/
+def denseNrmMat (c : ZMod p) (n : Nat) (ts : List (VarId × ZMod p)) : DenseExpr p :=
+  match n, ts with
+  | 0, _ => .const c
+  | 1, t :: _ =>
+      if zmodIsZero t.2 then .const c else .add (.const c) (.mul (.const t.2) (.var t.1))
+  | n, ts => denseNrmSpine (.const c) (denseMergeTerms (ts.take n))
+
+def DenseNrm.expr : DenseNrm p → DenseExpr p
+  | .lin c n ts => denseNrmMat c n ts
   | .opq e => e
 
-def DenseNormRes.lin?Impl : DenseNormRes p → Option (DenseLinExpr p)
-  | .var x => some ⟨zmodZeroP p, [(x, zmodOneP p)]⟩
-  | .lin l => some l
-  | .opq _ => none
+/-- `l.map (fun t => (t.1, k * t.2)) ++ rest` on the first `n` cells of `ts`. -/
+def denseNrmScale (k : ZMod p) : Nat → List (VarId × ZMod p) → List (VarId × ZMod p)
+  | 0, ts => ts
+  | _ + 1, [] => []
+  | n + 1, t :: ts => (t.1, zmodMul k t.2) :: denseNrmScale k n ts
 
-/-- The linear form of a deferred result — the `.2` of `denseNormalizeFused`. -/
-def DenseNormRes.lin? : DenseNormRes p → Option (DenseLinExpr p)
-  | .var x => some ⟨0, [(x, 1)]⟩
-  | .lin l => some l
-  | .opq _ => none
+/-- The walk. Called on compound nodes only; each arm inspects its children's constructors so a
+    `.const`/`.var` child costs no result object. -/
+def denseNrmGo : DenseExpr p → List (VarId × ZMod p) → DenseNrm p
+  | .const n, acc => .lin n 0 acc
+  | .var x, acc => .lin (zmodZeroP p) 1 ((x, zmodOneP p) :: acc)
+  | .add a b, acc =>
+      match b with
+      | .const bn =>
+          match a with
+          | .const an => .lin (zmodAdd an bn) 0 acc
+          | .var x => .lin bn 1 ((x, zmodOneP p) :: acc)
+          | _ =>
+              match denseNrmGo a acc with
+              | .lin ca na ts => .lin (zmodAdd ca bn) na ts
+              | .opq ea => .opq (.add ea (.const bn))
+      | .var y =>
+          let acc1 := (y, zmodOneP p) :: acc
+          match a with
+          | .const an => .lin an 1 acc1
+          | .var x => .lin (zmodZeroP p) 2 ((x, zmodOneP p) :: acc1)
+          | _ =>
+              match denseNrmGo a acc1 with
+              | .lin ca na ts => .lin ca (na + 1) ts
+              | .opq ea => .opq (.add ea (.var y))
+      | _ =>
+          match denseNrmGo b acc with
+          | .opq eb =>
+              match a with
+              | .const an => .opq (.add (.const an) eb)
+              | .var x => .opq (.add (.var x) eb)
+              | _ => .opq (.add (denseNrmGo a []).expr eb)
+          | .lin cb nb tsb =>
+              match a with
+              | .const an => .lin (zmodAdd an cb) nb tsb
+              | .var x => .lin cb (nb + 1) ((x, zmodOneP p) :: tsb)
+              | _ =>
+                  match denseNrmGo a tsb with
+                  | .lin ca na tsa => .lin (zmodAdd ca cb) (na + nb) tsa
+                  | .opq ea => .opq (.add ea (denseNrmMat cb nb tsb))
+  | .mul a b, acc =>
+      match a with
+      | .const an =>
+          match b with
+          | .const bn => .lin (zmodMul an bn) 0 acc
+          | .var y => .lin (zmodZeroP p) 1 ((y, an) :: acc)
+          | _ =>
+              match denseNrmGo b acc with
+              | .lin cb nb tsb => .lin (zmodMul an cb) nb (denseNrmScale an nb tsb)
+              | .opq eb => .opq (.mul (.const an) eb)
+      | .var x =>
+          match b with
+          | .const bn => .lin (zmodZeroP p) 1 ((x, bn) :: acc)
+          | .var y => .opq (.mul (.var x) (.var y))
+          | _ =>
+              match denseNrmGo b [] with
+              | .lin cb 0 _ => .lin (zmodZeroP p) 1 ((x, cb) :: acc)
+              | .lin cb nb tsb => .opq (.mul (.var x) (denseNrmMat cb nb tsb))
+              | .opq eb => .opq (.mul (.var x) eb)
+      | _ =>
+          match denseNrmGo a acc with
+          | .opq ea =>
+              match b with
+              | .const bn => .opq (.mul ea (.const bn))
+              | .var y => .opq (.mul ea (.var y))
+              | _ => .opq (.mul ea (denseNrmGo b []).expr)
+          | .lin ca 0 tsa =>
+              match b with
+              | .const bn => .lin (zmodMul ca bn) 0 tsa
+              | .var y => .lin (zmodZeroP p) 1 ((y, ca) :: tsa)
+              | _ =>
+                  match denseNrmGo b tsa with
+                  | .lin cb nb tsb => .lin (zmodMul ca cb) nb (denseNrmScale ca nb tsb)
+                  | .opq eb => .opq (.mul (.const ca) eb)
+          | .lin ca na tsa =>
+              match b with
+              | .const bn => .lin (zmodMul ca bn) na (denseNrmScale bn na tsa)
+              | .var y => .opq (.mul (denseNrmMat ca na tsa) (.var y))
+              | _ =>
+                  match denseNrmGo b [] with
+                  | .lin cb 0 _ => .lin (zmodMul ca cb) na (denseNrmScale cb na tsa)
+                  | .lin cb nb tsb =>
+                      .opq (.mul (denseNrmMat ca na tsa) (denseNrmMat cb nb tsb))
+                  | .opq eb => .opq (.mul (denseNrmMat ca na tsa) eb)
 
-@[csimp] theorem DenseNormRes_lin_q_eq_impl : @DenseNormRes.lin? = @DenseNormRes.lin?Impl := by
-  funext q r
-  simp [DenseNormRes.lin?, DenseNormRes.lin?Impl]
-
-def denseNormalizeFusedFast : DenseExpr p → DenseNormRes p
-  | .const n => .lin ⟨n, []⟩
+/-- Runtime `DenseExpr.normalize`. -/
+def denseNormalizeFast : DenseExpr p → DenseExpr p
+  | .const n => .const n
   | .var x => .var x
-  | .add a b =>
-      let ra := denseNormalizeFusedFast a
-      let rb := denseNormalizeFusedFast b
-      match ra.lin?, rb.lin? with
-      | some la, some lb => .lin (la.add lb)
-      | _, _ => .opq (.add ra.expr rb.expr)
-  | .mul a b =>
-      let ra := denseNormalizeFusedFast a
-      let rb := denseNormalizeFusedFast b
-      match ra.lin?, rb.lin? with
-      | some la, some lb =>
-          if la.terms.isEmpty then .lin (lb.scale la.const)
-          else if lb.terms.isEmpty then .lin (la.scale lb.const)
-          else .opq (.mul ra.expr rb.expr)
-      | _, _ => .opq (.mul ra.expr rb.expr)
+  | e => (denseNrmGo e []).expr
 
-/-- Boxed twin of the deferred walk: `lin?` on a `var` builds `⟨0, [(x, 1)]⟩`, and a parent asks
-    both children for it, so every node otherwise pays two instance chains. -/
-def DenseNormRes.lin?With (ops : DenseZModOps p) : DenseNormRes p → Option (DenseLinExpr p)
-  | .var x => some ⟨ops.zero, [(x, ops.one)]⟩
-  | .lin l => some l
-  | .opq _ => none
+/-! ### The walk computes `DenseExpr.normalize`
 
-theorem DenseNormRes.lin?With_eq (ops : DenseZModOps p) (r : DenseNormRes p) :
-    r.lin?With ops = r.lin? := by
-  cases r <;> simp only [DenseNormRes.lin?With, DenseNormRes.lin?, ops.zero_eq, ops.one_eq]
+`denseNrmMat_eq` pins the materializer to `norm.toExpr` and `denseNrmGo_eq` pins the walk to
+(`denseLinearize`, `normalize`); the `@[csimp]` follows by reading both at the root.
 
-def denseNormalizeResWith (ops : DenseZModOps p) : DenseExpr p → DenseNormRes p
-  | .const n => .lin ⟨n, []⟩
+The walk's arms inspect their children's constructors so a leaf costs no result object, which would
+make the induction a 9-way bash per node. `denseNrmAddU`/`denseNrmMulU` are the same arms with every
+child taken through `denseNrmGo` — equal to them by `denseNrmGo_add`/`denseNrmGo_mul`, which is pure
+`ZMod`/`Nat` arithmetic — so the induction below only ever sees the uniform shape. -/
+
+/-- One `toExpr` step, the body of the `DenseLinExpr.toExpr` fold. -/
+abbrev denseNrmStep (acc : DenseExpr p) (t : VarId × ZMod p) : DenseExpr p :=
+  .add acc (.mul (.const t.2) (.var t.1))
+
+theorem denseNrmSpine_eq (ts : List (VarId × ZMod p)) (e : DenseExpr p) :
+    denseNrmSpine e ts = (ts.filter (fun t => t.2 ≠ 0)).foldl denseNrmStep e := by
+  induction ts generalizing e with
+  | nil => rfl
+  | cons t ts ih =>
+      by_cases h : t.2 = 0
+      · rw [List.filter_cons_of_neg (by simpa using h), denseNrmSpine, ih,
+          if_pos (by simpa using h)]
+      · rw [List.filter_cons_of_pos (by simpa using h), denseNrmSpine, ih,
+          if_neg (by simpa using h), List.foldl_cons]
+
+/-- The materializer builds the merged normal form of `⟨c, terms⟩` out of a counted prefix. -/
+theorem denseNrmMat_eq (c : ZMod p) (terms acc : List (VarId × ZMod p)) :
+    denseNrmMat c terms.length (terms ++ acc) = (DenseLinExpr.mk c terms).norm.toExpr := by
+  have hgen : ∀ (l : List (VarId × ZMod p)),
+      denseNrmSpine (.const c) (denseMergeTerms l) = (DenseLinExpr.mk c l).norm.toExpr := by
+    intro l
+    rw [denseNrmSpine_eq]
+    rfl
+  match terms with
+  | [] => simpa [denseNrmMat] using (hgen []).symm
+  | [t] =>
+      have hm : denseMergeTerms [t] = [t] := by simp [denseMergeTerms, denseAddCoeff]
+      by_cases h : t.2 = 0
+      · rw [show ([t] : List (VarId × ZMod p)).length = 1 from rfl, List.cons_append,
+          denseNrmMat, if_pos (by simpa using h), DenseLinExpr.norm, DenseLinExpr.toExpr, hm,
+          List.filter_cons_of_neg (by simpa using h)]
+        rfl
+      · rw [show ([t] : List (VarId × ZMod p)).length = 1 from rfl, List.cons_append,
+          denseNrmMat, if_neg (by simpa using h), DenseLinExpr.norm, DenseLinExpr.toExpr, hm,
+          List.filter_cons_of_pos (by simpa using h)]
+        rfl
+  | t₁ :: t₂ :: rest =>
+      have hlen : (t₁ :: t₂ :: rest).length = rest.length + 1 + 1 := by simp [Nat.add_comm]
+      rw [hlen,
+        show denseNrmMat c (rest.length + 1 + 1) ((t₁ :: t₂ :: rest) ++ acc)
+            = denseNrmSpine (.const c)
+                (denseMergeTerms (((t₁ :: t₂ :: rest) ++ acc).take (rest.length + 1 + 1)))
+          from rfl,
+        show ((t₁ :: t₂ :: rest) ++ acc).take (rest.length + 1 + 1) = t₁ :: t₂ :: rest by
+          rw [← hlen]; exact List.take_left ..]
+      exact hgen _
+
+theorem denseNrmScale_eq (k : ZMod p) (terms acc : List (VarId × ZMod p)) :
+    denseNrmScale k terms.length (terms ++ acc)
+      = terms.map (fun t => (t.1, k * t.2)) ++ acc := by
+  induction terms with
+  | nil => rfl
+  | cons t ts ih =>
+      simp only [List.length_cons, List.cons_append, denseNrmScale, zmodMul_eq, List.map_cons, ih]
+
+/-- The normal form of a child from its walk result. The *shape* decides, not the linear form: a
+    bare variable normalizes to itself, not to `0 + 1·x`. -/
+def denseNrmChildExpr (e : DenseExpr p) (c : ZMod p) (n : Nat) (ts : List (VarId × ZMod p)) :
+    DenseExpr p :=
+  match e with
   | .var x => .var x
-  | .add a b =>
-      let ra := denseNormalizeResWith ops a
-      let rb := denseNormalizeResWith ops b
-      match ra.lin?With ops, rb.lin?With ops with
-      | some la, some lb => .lin (la.addWith ops lb)
-      | _, _ => .opq (.add ra.expr rb.expr)
-  | .mul a b =>
-      let ra := denseNormalizeResWith ops a
-      let rb := denseNormalizeResWith ops b
-      match ra.lin?With ops, rb.lin?With ops with
-      | some la, some lb =>
-          if la.terms.isEmpty then .lin (lb.scaleWith ops la.const)
-          else if lb.terms.isEmpty then .lin (la.scaleWith ops lb.const)
-          else .opq (.mul ra.expr rb.expr)
-      | _, _ => .opq (.mul ra.expr rb.expr)
+  | _ => denseNrmMat c n ts
 
-theorem denseNormalizeResWith_eq (ops : DenseZModOps p) (e : DenseExpr p) :
-    denseNormalizeResWith ops e = denseNormalizeFusedFast e := by
-  induction e with
+/-- `denseNrmGo`'s `.add` arm with both children taken through `denseNrmGo`. -/
+def denseNrmAddU (a b : DenseExpr p) (acc : List (VarId × ZMod p)) : DenseNrm p :=
+  match denseNrmGo b acc with
+  | .opq eb => .opq (.add (denseNormalizeFast a) eb)
+  | .lin cb nb tsb =>
+      match denseNrmGo a tsb with
+      | .lin ca na tsa => .lin (zmodAdd ca cb) (na + nb) tsa
+      | .opq ea => .opq (.add ea (denseNrmChildExpr b cb nb tsb))
+
+/-- `denseNrmGo`'s `.mul` arm with both children taken through `denseNrmGo`. -/
+def denseNrmMulU (a b : DenseExpr p) (acc : List (VarId × ZMod p)) : DenseNrm p :=
+  match denseNrmGo a acc with
+  | .opq ea => .opq (.mul ea (denseNormalizeFast b))
+  | .lin ca 0 tsa =>
+      match denseNrmGo b tsa with
+      | .lin cb nb tsb => .lin (zmodMul ca cb) nb (denseNrmScale ca nb tsb)
+      | .opq eb => .opq (.mul (denseNrmChildExpr a ca 0 tsa) eb)
+  | .lin ca na tsa =>
+      match denseNrmGo b [] with
+      | .lin cb 0 _ => .lin (zmodMul ca cb) na (denseNrmScale cb na tsa)
+      | .lin cb nb tsb =>
+          .opq (.mul (denseNrmChildExpr a ca na tsa) (denseNrmChildExpr b cb nb tsb))
+      | .opq eb => .opq (.mul (denseNrmChildExpr a ca na tsa) eb)
+
+/-- The leaf arms, as rewrite rules that cannot fire on a compound child. Both rewrite by `rfl`,
+    so the `simp` uses below leave no trace of them in the proof terms (hence the entries in
+    `Scripts/unused-theorems.txt`). -/
+@[simp] theorem denseNrmGo_const (n : ZMod p) (acc : List (VarId × ZMod p)) :
+    denseNrmGo (.const n) acc = .lin n 0 acc := rfl
+
+@[simp] theorem denseNrmGo_var (x : VarId) (acc : List (VarId × ZMod p)) :
+    denseNrmGo (.var x) acc = .lin (zmodZeroP p) 1 ((x, zmodOneP p) :: acc) := rfl
+
+theorem denseNrmGo_add (a b : DenseExpr p) (acc : List (VarId × ZMod p)) :
+    denseNrmGo (.add a b) acc = denseNrmAddU a b acc := by
+  cases a <;> cases b <;> rw [denseNrmGo, denseNrmAddU] <;>
+    simp [denseNrmChildExpr, denseNormalizeFast, denseNrmMat, Nat.add_comm 1]
+
+theorem denseNrmGo_mul (a b : DenseExpr p) (acc : List (VarId × ZMod p)) :
+    denseNrmGo (.mul a b) acc = denseNrmMulU a b acc := by
+  cases a <;> cases b <;> rw [denseNrmGo, denseNrmMulU] <;>
+    simp [denseNrmChildExpr, denseNormalizeFast, denseNrmMat, denseNrmScale]
+
+/-- The walk's contract: on an affine node, the linear form's constant, its term count and its
+    terms consed onto `acc`; otherwise the node's normal form. -/
+def denseNrmSpec (e : DenseExpr p) (acc : List (VarId × ZMod p)) : DenseNrm p :=
+  match denseLinearize e with
+  | some l => .lin l.const l.terms.length (l.terms ++ acc)
+  | none => .opq e.normalize
+
+/-- A child's normal form, read off its linear form — except for a bare variable, which normalizes
+    to itself. -/
+theorem denseNrmChildExpr_eq {b : DenseExpr p} {lb : DenseLinExpr p}
+    (h : denseLinearize b = some lb) (acc : List (VarId × ZMod p)) :
+    denseNrmChildExpr b lb.const lb.terms.length (lb.terms ++ acc) = b.normalize := by
+  cases b with
+  | var x => rfl
+  | const n =>
+      simp only [denseLinearize, Option.some.injEq] at h
+      subst h
+      simp [denseNrmChildExpr, denseNrmMat, DenseExpr.normalize]
+  | add a b =>
+      show denseNrmMat lb.const lb.terms.length (lb.terms ++ acc) = _
+      rw [denseNrmMat_eq, DenseExpr.normalize, h]
+  | mul a b =>
+      show denseNrmMat lb.const lb.terms.length (lb.terms ++ acc) = _
+      rw [denseNrmMat_eq, DenseExpr.normalize, h]
+
+theorem denseNormalizeFast_of {e : DenseExpr p}
+    (h : ∀ acc, denseNrmGo e acc = denseNrmSpec e acc) : denseNormalizeFast e = e.normalize := by
+  cases e with
   | const n => rfl
   | var x => rfl
-  | add a b iha ihb =>
-      simp only [denseNormalizeResWith, denseNormalizeFusedFast, iha, ihb,
-        DenseNormRes.lin?With_eq, DenseLinExpr.addWith_eq]
-  | mul a b iha ihb =>
-      simp only [denseNormalizeResWith, denseNormalizeFusedFast, iha, ihb,
-        DenseNormRes.lin?With_eq, DenseLinExpr.scaleWith_eq]
+  | add a b =>
+      show (denseNrmGo (.add a b) []).expr = _
+      rw [h []]
+      cases hl : denseLinearize (DenseExpr.add a b) with
+      | none => simp [denseNrmSpec, hl, DenseNrm.expr, DenseExpr.normalize]
+      | some l =>
+          simp only [denseNrmSpec, hl, DenseNrm.expr, DenseExpr.normalize]
+          rw [denseNrmMat_eq]
+  | mul a b =>
+      show (denseNrmGo (.mul a b) []).expr = _
+      rw [h []]
+      cases hl : denseLinearize (DenseExpr.mul a b) with
+      | none => simp [denseNrmSpec, hl, DenseNrm.expr, DenseExpr.normalize]
+      | some l =>
+          simp only [denseNrmSpec, hl, DenseNrm.expr, DenseExpr.normalize]
+          rw [denseNrmMat_eq]
 
-def denseNormalizeResFast (e : DenseExpr p) : DenseNormRes p :=
-  denseNormalizeResWith denseZModOps e
-
-@[csimp] theorem denseNormalizeFusedFast_eq_res :
-    @denseNormalizeFusedFast = @denseNormalizeResFast := by
-  funext p e
-  exact (denseNormalizeResWith_eq denseZModOps e).symm
-
-def denseNormalizeFusedPair (e : DenseExpr p) : DenseExpr p × Option (DenseLinExpr p) :=
-  let r := denseNormalizeFusedFast e
-  (r.expr, r.lin?)
-
-/-- Runtime `DenseExpr.normalize`: the spec re-runs `denseLinearize` over the whole node at every
-    node it visits, which is quadratic; the fused walk visits each node once. -/
-def denseNormalizeFast (e : DenseExpr p) : DenseExpr p := (denseNormalizeFusedFast e).expr
-
-@[csimp] theorem denseNormalizeFused_eq_fast :
-    @denseNormalizeFused = @denseNormalizeFusedPair := by
-  funext p e
-  show denseNormalizeFused e = _
+theorem denseNrmGo_eq (e : DenseExpr p) : ∀ acc, denseNrmGo e acc = denseNrmSpec e acc := by
   induction e with
-  | const n => rfl
-  | var x => rfl
+  | const n => intro acc; simp [denseNrmSpec, denseLinearize]
+  | var x => intro acc; simp [denseNrmSpec, denseLinearize]
   | add a b iha ihb =>
-      simp only [denseNormalizeFused, denseNormalizeFusedPair, denseNormalizeFusedFast, iha, ihb]
-      cases denseNormalizeFusedFast a <;> cases denseNormalizeFusedFast b <;> rfl
+      intro acc
+      rw [denseNrmGo_add, denseNrmAddU, ihb acc]
+      cases hlb : denseLinearize b with
+      | none =>
+          cases hla : denseLinearize a with
+          | none =>
+              simp only [denseNrmSpec, hlb, hla, denseNormalizeFast_of iha, denseLinearize,
+                DenseExpr.normalize]
+          | some la =>
+              simp only [denseNrmSpec, hlb, hla, denseNormalizeFast_of iha, denseLinearize,
+                DenseExpr.normalize]
+      | some lb =>
+          simp only [denseNrmSpec, hlb, iha (lb.terms ++ acc), denseNrmChildExpr_eq hlb]
+          cases hla : denseLinearize a with
+          | none => simp only [hla, denseLinearize, hlb, DenseExpr.normalize]
+          | some la =>
+              simp only [hla, denseLinearize, hlb, DenseLinExpr.add,
+                List.length_append, List.append_assoc, zmodAdd_eq]
   | mul a b iha ihb =>
-      simp only [denseNormalizeFused, denseNormalizeFusedPair, denseNormalizeFusedFast, iha, ihb]
-      cases denseNormalizeFusedFast a <;> cases denseNormalizeFusedFast b <;>
-        simp only [DenseNormRes.lin?] <;> first | rfl | (split_ifs <;> rfl)
+      intro acc
+      rw [denseNrmGo_mul, denseNrmMulU, iha acc]
+      cases hla : denseLinearize a with
+      | none =>
+          simp only [denseNrmSpec, hla, denseNormalizeFast_of ihb, denseLinearize,
+            DenseExpr.normalize]
+      | some la =>
+          simp only [denseNrmSpec, hla]
+          by_cases hta : la.terms = []
+          · have hlen : la.terms.length = 0 := by rw [hta]; rfl
+            have hceA : denseNrmChildExpr a la.const 0 (la.terms ++ acc) = a.normalize := by
+              rw [← hlen]; exact denseNrmChildExpr_eq hla acc
+            simp only [hlen, ihb (la.terms ++ acc)]
+            cases hlb : denseLinearize b with
+            | none =>
+                simp only [denseNrmSpec, hlb, hceA, denseLinearize, hla, DenseExpr.normalize]
+            | some lb =>
+                simp only [denseNrmSpec, hlb, denseNrmScale_eq, denseLinearize, hla,
+                  List.isEmpty_iff, hta, if_pos, DenseLinExpr.scale, List.length_map, zmodMul_eq]
+                simp
+          · obtain ⟨t, rest, hta'⟩ := List.exists_cons_of_ne_nil hta
+            have hlen : la.terms.length = rest.length + 1 := by rw [hta']; simp
+            have hceA : denseNrmChildExpr a la.const (rest.length + 1) (la.terms ++ acc)
+                = a.normalize := by rw [← hlen]; exact denseNrmChildExpr_eq hla acc
+            simp only [hlen, ihb []]
+            cases hlb : denseLinearize b with
+            | none =>
+                simp only [denseNrmSpec, hlb, hceA, denseLinearize, hla, DenseExpr.normalize]
+            | some lb =>
+                by_cases htb : lb.terms = []
+                · have hscA : denseNrmScale lb.const (rest.length + 1) (la.terms ++ acc)
+                      = la.terms.map (fun t => (t.1, lb.const * t.2)) ++ acc := by
+                    rw [← hlen]; exact denseNrmScale_eq lb.const la.terms acc
+                  simp only [denseNrmSpec, hlb, htb, List.nil_append, List.length_nil, hscA,
+                    denseLinearize, hla, List.isEmpty_iff, hta, if_neg, if_pos,
+                    DenseLinExpr.scale, List.length_map, zmodMul_eq, mul_comm, hlen,
+                    not_false_eq_true]
+                · obtain ⟨t', rest', htb'⟩ := List.exists_cons_of_ne_nil htb
+                  have hlenb : lb.terms.length = rest'.length + 1 := by rw [htb']; simp
+                  have hceB : denseNrmChildExpr b lb.const (rest'.length + 1) (lb.terms ++ [])
+                      = b.normalize := by rw [← hlenb]; exact denseNrmChildExpr_eq hlb []
+                  simp only [denseNrmSpec, hlb, hlenb, hceA, hceB, denseLinearize, hla,
+                    List.isEmpty_iff, hta, htb, if_neg, DenseExpr.normalize, not_false_eq_true]
+
+theorem denseNormalizeFast_eq (e : DenseExpr p) : denseNormalizeFast e = e.normalize :=
+  denseNormalizeFast_of (denseNrmGo_eq e)
 
 @[csimp] theorem DenseExpr_normalize_eq_fast : @DenseExpr.normalize = @denseNormalizeFast := by
-  funext p e
-  show DenseExpr.normalize e = _
-  rw [← denseNormalizeFused_fst, denseNormalizeFused_eq_fast]
-  rfl
-
-/-- The fused walk is eval-preserving (transported from `DenseExpr.normalize_eval`). -/
-theorem denseNormalizeFused_fst_eval (e : DenseExpr p) (denv : VarId → ZMod p) :
-    ((denseNormalizeFused e).1).eval denv = e.eval denv := by
-  rw [denseNormalizeFused_fst]; exact DenseExpr.normalize_eval e denv
-
-/-- The fused walk introduces no new variables (transported from `DenseExpr.normalize_vars`). -/
-theorem denseNormalizeFused_fst_vars (e : DenseExpr p) :
-    ∀ i ∈ ((denseNormalizeFused e).1).vars, i ∈ e.vars := by
-  rw [denseNormalizeFused_fst]; exact DenseExpr.normalize_vars e
+  funext q e
+  exact (denseNormalizeFast_eq e).symm
 
 /-! ## The dense normalization pass -/
 
 /-- The dense affine-normalization pass (see `DenseExpr.normalize`). -/
 def denseNormalizePass : DenseVerifiedPassW p :=
   DenseVerifiedPassW.of
-    (fun _ _ d => d.mapExpr (fun e => (denseNormalizeFused e).1))
+    (fun _ _ d => d.mapExpr DenseExpr.normalize)
     (fun _ _ _ => [])
     (fun _ _ _ _ hcov =>
-      DenseConstraintSystem.mapExpr_covered denseNormalizeFused_fst_vars hcov)
+      DenseConstraintSystem.mapExpr_covered DenseExpr.normalize_vars hcov)
     (fun _ _ _ _ _ => by intro x hx; simp at hx)
     (fun reg bs _ d _ => by
       have hfe : ∀ (e : DenseExpr p) (denv : VarId → ZMod p),
-          ((denseNormalizeFused e).1).eval denv = e.eval denv :=
-        fun e denv => denseNormalizeFused_fst_eval e denv
+          (DenseExpr.normalize e).eval denv = e.eval denv :=
+        fun e denv => DenseExpr.normalize_eval e denv
       refine ⟨?_, ?_, ?_, ?_⟩
-      · -- soundness: `(mapExpr fused).implies d`
+      · -- soundness: `(mapExpr normalize).implies d`
         intro denv hsat
         refine ⟨denv, (DenseConstraintSystem.mapExpr_satisfies hfe d bs denv).mp hsat, ?_⟩
         rw [DenseConstraintSystem.mapExpr_sideEffects hfe]
@@ -763,13 +929,13 @@ def denseNormalizePass : DenseVerifiedPassW p :=
         exact fun h => DenseConstraintSystem.mapExpr_guaranteesInvariants hfe h
       · -- no new powdr column
         exact fun i hi _ =>
-          DenseConstraintSystem.mapExpr_occ_subset denseNormalizeFused_fst_vars d i hi
+          DenseConstraintSystem.mapExpr_occ_subset DenseExpr.normalize_vars d i hi
       · -- completeness (witness = input env; no derivations)
         intro denv hadm hsat
         refine ⟨denv, (DenseConstraintSystem.mapExpr_satisfies hfe d bs denv).mpr hsat,
           (DenseConstraintSystem.mapExpr_admissible hfe d bs denv).mpr hadm, ?_, fun _ _ => rfl, ?_⟩
         · rw [DenseConstraintSystem.mapExpr_sideEffects hfe]
         · intro _ _ i hi _
-          exact ⟨DenseConstraintSystem.mapExpr_occ_subset denseNormalizeFused_fst_vars d i hi, rfl⟩)
+          exact ⟨DenseConstraintSystem.mapExpr_occ_subset DenseExpr.normalize_vars d i hi, rfl⟩)
 
 end ApcOptimizer.Dense
