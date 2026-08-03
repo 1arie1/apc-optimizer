@@ -628,10 +628,10 @@ eager back-substitution's exponent). What is left, LBR shares of the *new* pass 
 
 - **the constraint walk 28.0 %** — one fail-fast pass over every constraint tree; irreducible unless
   the prologue is fused into it.
-- **output `substF` 28.0 %** — the levers are an unchanged-node-preserving `DenseExpr.substF` twin
-  (return the input node when no descendant changed; most constraints contain no solved variable) and
-  the array-backed lookup the engine already builds. **Cross-cutting**: domainBatch, flagUnify,
-  fxSubst and rootPairUnify all call `substF`, so this is worth more than its gauss share.
+- **output `substF` 28.0 %** — the remaining lever is the **array-backed lookup** (domainBatch's
+  `dbSubstFn`, entry 169: 365 → 318 ms there). The unchanged-node-preserving twin is a **measured
+  dead end** — see the dead-ends list. **Cross-cutting**: domainBatch, flagUnify, fxSubst and
+  rootPairUnify all call `substF`.
 - **`occ`/`prot` prologue 21.8 %** — two array passes over the whole system; fuse into the build walk.
 - develop/merge 6.8 %, adopt 4.9 %, scheduler 3.8 %, pick/solve 1.7 %. The elimination algebra is
   ~13 % of the pass; the rest is three whole-system traversals.
@@ -688,8 +688,38 @@ and in `run` alike. Consequences, all measured on busPairCancel:
    - so the decision belongs at the call site, per invocation (`denseThunkIf`, above). `Thunk.pure`
      and `Thunk.mk` have the same `.get`, so the choice is invisible to every proof.
 
+### domainBatch: a staged evaluator for the box scan  ·  *runtime*  ·  medium value
+
+After entry 169 the box scans are still ~26 % of the pass (594 of 2 285 ms on sha256), and the
+shape that dominates them is a two-key `256 × 256` box whose single item mentions both keys and is
+therefore tested at the innermost depth (`openvm-eth/apc_071`, 85 % scan, improved least; sha256
+cycles 9–10, 6.7 M points each and zero forced). Split each item's expression at its **cut
+points** — the maximal subtrees whose variables are all bound at an outer depth — and evaluate
+those once per outer assignment into a memo array, so the inner loop only re-runs what depends on
+the innermost key. Estimated −150 to −200 ms on sha256 and −25 % on `apc_071`. Needs a parallel
+item type over a staged tree plus its evaluation-equality proof, which is why entry 169 stopped at
+level-attachment (testing each item at the depth of its innermost key) and did not stage the
+expressions.
+
+A sharper variant on the same shape: an item that is **affine in the innermost key** determines it
+— evaluate at two points to recover `a` and `b`, then `y = -b/a` and test only that one point
+instead of 256 (~30× on those scans). It needs a per-item degree analysis and a "the skipped points
+are non-survivors" argument (`a·y + b = 0` has at most one root when `a ≠ 0`).
+
 ### Runtime dead ends (measured; do not re-propose without new evidence)
 
+- **An unchanged-node-preserving `DenseExpr.substF` twin** (entry 169): returning the input node
+  when no descendant changed cut domainBatch by 144 ms and cost **+2.5 s across every other pass**
+  on sha256 `apc_001` (30.4 → 32.9 s, +10–20 % on essentially all of them, identical per-cycle
+  sizes). Sharing keeps the input expressions' refcounts above one, which disables Lean's
+  reset/reuse in-place rebuild in every downstream pass that rewrites expressions. The array-backed
+  lookup is the part that pays; the sharing is not.
+- **A strided-diagonal pre-probe of domainBatch's box** (entry 169): point `i` gives key `d` the
+  element `(i·(2d+1)) mod size_d`, to kill keys before the lexicographic sweep. A loss on every
+  case — sha256 19.44 M → 24.30 M points enumerated, because the probe rarely reaches `live == 0`
+  and the scans it cannot finish pay its full length on top of the sweep. Survivors do not lie on a
+  generic line. Relatedly, *reversing* domainBatch's key order is best on sha256 (11.77 M) but 2.7×
+  worse on keccak; only the stable descending-by-domain-size sort improves every case (shipped).
 - **Applying bytePack's packs positionally into an array** (entry 168): `Array (Option
   BusInteraction)` with `set!` at the two packed positions, then a filtered rebuild. Measures the
   *same* as the shipped re-checking sweep (sha256 `apc_001` 242 vs 254 ms, identical output), but
@@ -850,6 +880,9 @@ and in `run` alike. Consequences, all measured on busPairCancel:
   returning a tuple allocates per node and replaces two allocation-free walks — sha256 4 254 → 4 321
   ms. Same for a flat scalar item table in place of the compiled tree, a fail-fast root miner, and
   sampling the box instead of sweeping it. Restructuring a traversal loses to removing work from it.
+  (Entry 169 *did* fuse the two traversals that each already walk the whole item — item compile with
+  the flag computed alongside it — which is removing a traversal, not restructuring one; and it
+  dropped the compiled tree entirely, which measured neutral but deletes a proof layer.)
 
 ## Working rules (accumulated)
 

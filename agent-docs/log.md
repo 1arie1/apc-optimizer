@@ -6324,3 +6324,80 @@ pair check moves to the closer's position, which changes the output order and wo
 argued as an effectiveness change.
 
 **Worked: yes.**
+
+### 169. Runtime: domainBatch rebuilt again — key order, item levels, a slot-array affine walk and a `busId` fact cache (0.51–0.71x on the pass, sha256 total 0.96x)
+
+**Idea.** `domainBatch` was rank 1 again on `sha256/apc_001` after entries 166–168 (3.15 s of
+30.5 s, 10.4 %). `IO` phase timers put 53 % of it in the per-invocation prologue, 31 % in the box
+scans and 12 % in the exit substitution. Six changes, each measured on its own:
+
+1. **Key order (§2.1 of `domainBatchRedesign.md`).** The mask is an intersection over the box's
+   survivors, so the forced set does not depend on the enumeration order and `live == 0` aborts
+   soundly in any order. In lex order the last key to die is the outermost one, and killing it
+   costs one sweep of `box / size(key 0)` points — so the largest domain now goes outermost. The
+   sort is *untrusted*: its output is used only if it is still a distinct rearrangement of the
+   target's keys (`dbSubsetVars` + `dbNodupVars`), and the domains are re-read from the table so
+   the key/domain pairing holds by `dbDomsOf_get`. Points enumerated over a whole run:
+   sha256 19.44 M → 15.49 M, keccak 985 k → 451 k, wasm-eth `apc_063` 1.36 M → 0.80 M.
+2. **Item levels.** Each gathered item is tested at the depth of the innermost key it mentions
+   (`dbItemLevel?` / `dbAllOkLev`), so a failure prunes a whole subtree and an item that mentions
+   no inner key is not retested per point. The level is an `Option`: an item mentioning a non-key
+   is dropped to `.always`, which makes the placement sound by construction and keeps the gather
+   (and its generation-stamped membership test) entirely outside the theorems.
+3. **Affine roots without a `DenseLinExpr`.** `dbRootPlan` linearized the whole constraint and
+   every factor of its product spine, building and merging a term list each time. The mining only
+   ever runs on constraints with ≤ 3 distinct variables and only ever asks whether the normalized
+   form is a constant or `a·x + b`, so it now accumulates into six `ZMod.val` slots of a
+   uniquely-owned array. 261 → 117 ms.
+4. **Items are the system's own expressions.** The per-invocation `DbTree` compile copied every
+   node of ~900 k expressions per sha256 run; `dbEval` reads `DenseExpr` directly instead
+   (`ZMod.val` at a `const` leaf is a `p`-match and a projection). Runtime-neutral, and it deletes
+   `dbCompile`, `DbTree` and the `dbEval_dbCompile` proof layer.
+5. **`busId`-keyed fact cache.** `isStateful`, `varRangeBus`, `tupleRangeBus`, `byteXorSpec` and
+   `neverViolates` depend on the bus alone and each resolves the bus type through the VM's
+   `busMap`, a `List.lookup`. Answered once per id into `DbBusCache`: −139 ms on sha256, and the
+   largest single win on SP1 keccak.
+6. **Fused prologue + array exit substitution.** Item compile fused with the flag computed
+   alongside it on each side; `zipIdx` replaced by index recursion; the forced constants collected
+   into a `VarId.index`-keyed array (`dbSolvedOf`) that feeds the shared `substF` directly, so
+   `applyσ`'s `Std.HashMap` probe per variable leaf and the `DenseSolved` map are both gone.
+
+**Measured** (interleaved, 2 reps; sha256 and SP1 single-shot):
+
+| case | domainBatch | run total |
+|---|---|---|
+| sha256 `apc_001` | 3155 → **2285 ms** (0.72x) | 30.6 → 29.7 s (0.97x) |
+| wasm-eth `apc_063` | 403 → **197 ms** (0.49x) | 3.46 → 3.20 s (0.93x) |
+| wasm-eth `apc_012` | 429 → **218 ms** (0.51x) | 4.15 → 3.95 s (0.95x) |
+| keccak `apc_001` | 296 → **210 ms** (0.71x) | 3.00 → 2.87 s (0.96x) |
+| openvm-eth `apc_006` | 46 → **31 ms** (0.67x) | 428 → 401 ms |
+| openvm-eth `apc_071` | 100 → **89 ms** (0.89x) | 322 → 304 ms |
+| SP1 keccak | 98 → **68 ms** (0.69x) | 1.49 → 1.45 s |
+
+**Effectiveness: `run` output byte-identical to main on 8 cases** (7 OpenVM + SP1 keccak).
+
+**Two measured dead ends.**
+
+* **Sharing unchanged subtrees in the pass's output.** An exit substitution that returns the input
+  node when no descendant changed cut the pass by 144 ms and cost **+2.5 s across every other
+  pass** on sha256 (30.4 → 32.9 s; +10–20 % on essentially all of them, with identical per-cycle
+  sizes). Sharing keeps the input expressions' refcounts above one, which disables Lean's
+  reset/reuse in-place rebuild in every downstream pass that rewrites expressions. A full rebuild
+  with an array-backed lookup is both faster overall and 47 ms faster in the pass than the
+  `HashMap`-backed `applyσ`.
+* **A strided-diagonal pre-probe of the box** (point `i` gives key `d` the element
+  `(i·(2d+1)) mod size_d`, to kill keys before the lexicographic sweep): a loss on every case;
+  sha256 19.44 M → 24.30 M points, because the probe rarely reaches `live == 0` and the scans it
+  cannot finish pay its full length on top of the sweep. Survivors do not lie on a generic line.
+  Relatedly, *reversing* the key order is best on sha256 (11.77 M) but 2.7× worse on keccak — only
+  the stable descending sort improves every case.
+
+**Residual** (2285 ms): the box scans are still ~26 % of the pass, and the shape that dominates
+them is a two-key `256 × 256` box whose single item mentions both keys and is therefore tested at
+the innermost depth. Splitting each item's expression at its cut points — the maximal subtrees
+whose variables are all bound at an outer depth — and evaluating those once per outer assignment
+would take roughly 40 % of the node visits out of the inner loop (est. −150 to −200 ms on sha256,
+−25 % on `apc_071`). The exit substitution (~14 %) is a full rebuild of every expression and is
+irreducible without the cross-cutting change the dead end above rules out.
+
+**Worked: yes.**

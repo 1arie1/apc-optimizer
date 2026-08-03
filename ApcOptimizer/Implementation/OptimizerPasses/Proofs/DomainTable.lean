@@ -505,26 +505,6 @@ def EntailedMap (d : DenseConstraintSystem p) (bs : BusSemantics p)
     (m : Std.HashMap VarId (DenseExpr p)) : Prop :=
   ∀ i t, m[i]? = some t → EntailedPair d bs i t
 
-theorem EntailedMap_foldl_insert (d : DenseConstraintSystem p) (bs : BusSemantics p) :
-    ∀ (pairs : List (VarId × DenseExpr p)) (m : Std.HashMap VarId (DenseExpr p)),
-      EntailedMap d bs m → (∀ pr ∈ pairs, EntailedPair d bs pr.1 pr.2) →
-      EntailedMap d bs (pairs.foldl (fun m p => m.insert p.1 p.2) m) := by
-  intro pairs
-  induction pairs with
-  | nil => intro m hm _; exact hm
-  | cons pr rest ih =>
-    intro m hm hpairs
-    apply ih
-    · intro i t hit
-      rw [Std.HashMap.getElem?_insert] at hit
-      by_cases hii : pr.1 = i
-      · rw [if_pos (by simpa using hii)] at hit
-        simp only [Option.some.injEq] at hit; subst hii; subst hit
-        exact hpairs pr (List.mem_cons_self ..)
-      · rw [if_neg (by simpa using hii)] at hit
-        exact hm i t hit
-    · exact fun pr' hpr' => hpairs pr' (List.mem_cons_of_mem _ hpr')
-
 /-! ## Reflexive (identity) correctness -/
 
 theorem DensePassCorrect_refl (isInput : VarId → Bool) (d : DenseConstraintSystem p)

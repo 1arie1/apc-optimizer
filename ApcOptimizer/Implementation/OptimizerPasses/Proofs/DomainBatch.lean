@@ -10,7 +10,7 @@ The pass owes one obligation, `dbDomainBatchσ_entailed`: every `var := const` i
 every satisfying assignment. It is discharged in five layers.
 
 1. **Representation.** The scan runs on `ZMod.val`s, so `dbEval` mirrors `DenseExpr.eval` through
-   `ZMod.val` (`dbEval_dbCompile`). Everything above works with field elements again.
+   `ZMod.val` (`dbEval_eval`). Everything above works with field elements again.
 2. **Domains.** Each entry of the table contains the value every satisfying assignment gives its
    variable (`DbTabSound`, established phase by phase).
 3. **Items.** A gathered item's `dbItemOk` holds at such an assignment (`dbCompileBi_ok`).
@@ -48,9 +48,9 @@ theorem dbMulN_val [NeZero p] (a b : ZMod p) : dbMulN p a.val b.val = (a * b).va
 def DbRegsAgree (denv : VarId → ZMod p) (regs : Array ℕ) (vs : List VarId) : Prop :=
   ∀ i ∈ vs, regs.getD i.index 0 = (denv i).val
 
-theorem dbEval_dbCompile [NeZero p] (denv : VarId → ZMod p) (regs : Array ℕ) :
+theorem dbEval_eval [NeZero p] (denv : VarId → ZMod p) (regs : Array ℕ) :
     ∀ (e : DenseExpr p), DbRegsAgree denv regs e.vars →
-      dbEval p regs (dbCompile e) = (e.eval denv).val := by
+      dbEval p regs e = (e.eval denv).val := by
   intro e
   induction e with
   | const c => intro _; rfl
@@ -61,7 +61,7 @@ theorem dbEval_dbCompile [NeZero p] (denv : VarId → ZMod p) (regs : Array ℕ)
       h i (by simp [DenseExpr.vars, hi])
     have hb : DbRegsAgree denv regs b.vars := fun i hi =>
       h i (by simp [DenseExpr.vars, hi])
-    simp only [dbCompile, dbEval, iha ha, ihb hb, DenseExpr.eval]
+    simp only [dbEval, iha ha, ihb hb, DenseExpr.eval]
     exact dbAddN_val _ _
   | mul a b iha ihb =>
     intro h
@@ -69,66 +69,380 @@ theorem dbEval_dbCompile [NeZero p] (denv : VarId → ZMod p) (regs : Array ℕ)
       h i (by simp [DenseExpr.vars, hi])
     have hb : DbRegsAgree denv regs b.vars := fun i hi =>
       h i (by simp [DenseExpr.vars, hi])
-    simp only [dbCompile, dbEval, iha ha, ihb hb, DenseExpr.eval]
+    simp only [dbEval, iha ha, ihb hb, DenseExpr.eval]
     exact dbMulN_val _ _
 
-/-- `dbEval` of a compiled expression is zero exactly when the expression evaluates to zero. -/
-theorem dbEval_dbCompile_zero [NeZero p] (denv : VarId → ZMod p) (regs : Array ℕ)
+/-- `dbEval` is zero exactly when the expression evaluates to zero. -/
+theorem dbEval_zero [NeZero p] (denv : VarId → ZMod p) (regs : Array ℕ)
     (e : DenseExpr p) (h : DbRegsAgree denv regs e.vars) :
-    (dbEval p regs (dbCompile e) == 0) = decide (e.eval denv = 0) := by
-  rw [dbEval_dbCompile denv regs e h]
+    (dbEval p regs e == 0) = decide (e.eval denv = 0) := by
+  rw [dbEval_eval denv regs e h]
   by_cases hz : e.eval denv = 0
   · simp [hz]
   · simp [hz]
 
-/-! ## 2a. Affine roots
+theorem dbGetD_lt {α : Type u} (vs : Array α) (k : ℕ) (dflt : α) (h : k < vs.size) :
+    vs.getD k dflt = vs[k] := by
+  rw [Array.getD_eq_getD_getElem?, Array.getElem?_eq_getElem h]; rfl
 
-The plan linearizes each factor of the product spine once instead of once per queried variable, but
-it answers with the same list, so `denseRootsIn_sound` carries over unchanged. -/
-
-theorem dbRootsOfLin_eq [Fact p.Prime] (i : VarId) (l : DenseLinExpr p) :
-    dbRootsOfLin i l = denseRootsOfTerms i l.const l.terms := by
-  rcases hts : l.terms with _ | ⟨⟨j, a⟩, rest⟩
-  · simp only [dbRootsOfLin, denseRootsOfTerms, hts, zmodIsZero_eq, decide_eq_true_eq]
-  · rcases rest with _ | ⟨t2, rest2⟩
-    · simp only [dbRootsOfLin, denseRootsOfTerms, hts, zmodIsZero_eq, zmodIsOne_eq,
-        zmodAddP_eq, zmodMulP_eq, zmodNegP_eq, decide_eq_true_eq]
-      by_cases hji : j = i
-      · by_cases ha0 : a = 0
-        · simp [hji, ha0]
-        · by_cases ha1 : a = 1
-          · -- the `a = 1` fast path: the root is `-c`, and the residual test cannot fail
-            subst ha1
-            simp [hji, ha0]
-          · simp only [if_neg ha1, hji, true_and, ha0, ne_eq, not_false_eq_true]
-            by_cases hr : a * -(a⁻¹ * l.const) + l.const = 0 <;> simp
-      · simp [hji]
-    · simp only [dbRootsOfLin, denseRootsOfTerms, hts]
-
-theorem dbRootsIn_eq [Fact p.Prime] (i : VarId) :
-    ∀ e : DenseExpr p, dbRootsIn i (dbRootPlan e) = denseRootsIn i e := by
-  have hleaf : ∀ e : DenseExpr p,
-      ((denseLinearize e).map DenseLinExpr.norm).bind (dbRootsOfLin i)
-        = denseAffineRootsIn i e := by
-    intro e
-    rw [denseAffineRootsIn, Option.bind_map]
-    cases denseLinearize e with
-    | none => rfl
-    | some l => simpa using dbRootsOfLin_eq i l.norm
-  intro e
-  induction e with
-  | const n => exact hleaf (.const n)
-  | var y => exact hleaf (.var y)
-  | add a b _ _ => exact hleaf (.add a b)
-  | mul a b iha ihb =>
-    rw [dbRootPlan, dbRootsIn, denseRootsIn, hleaf (.mul a b), iha, ihb]
+theorem zmodOfNatP_eq [NeZero p] (n : ℕ) : zmodOfNatP p n = (n : ZMod p) := by
+  cases p with
+  | zero => exact absurd rfl (NeZero.ne 0)
+  | succ m =>
+    refine ZMod.val_injective (m + 1) ?_
+    rw [ZMod.val_natCast]
     rfl
 
-/-- The roots the table stores for `i` really do contain `denv i` when the constraint vanishes. -/
-theorem dbRootsIn_sound [Fact p.Prime] (i : VarId) (e : DenseExpr p) (roots : List (ZMod p))
-    (h : dbRootsIn i (dbRootPlan e) = some roots) (denv : VarId → ZMod p)
-    (he : e.eval denv = 0) : denv i ∈ roots :=
-  denseRootsIn_sound i e roots (by rwa [dbRootsIn_eq] at h) denv he
+theorem zmodOfNatP_val [NeZero p] (x : ZMod p) : zmodOfNatP p x.val = x := by
+  rw [zmodOfNatP_eq, ZMod.natCast_val, ZMod.cast_id]
+
+/-! ## 2a. Affine roots
+
+The pass reads a constraint's affine form out of six `ZMod.val` slots: `st[1]` the constant,
+`st[2+j]` the coefficient of `vs[j]`, `st[5]` a spill for a variable outside `vs` (which the caller
+rules out) and `st[0]` a "still affine" flag. `dbAffOf` is the form those slots denote, and
+`dbAffAcc_spec` says the walk adds `k · e` to it — so a state that survives with a single live
+coefficient is an affine equation in one variable, whose root is the value every satisfying
+assignment gives it. -/
+
+theorem dbAddN_lt (p a b : ℕ) [NeZero p] (ha : a < p) (hb : b < p) : dbAddN p a b < p := by
+  simp only [dbAddN]; split <;> omega
+
+theorem dbMulN_lt (p a b : ℕ) [NeZero p] : dbMulN p a b < p :=
+  Nat.mod_lt _ (Nat.pos_of_neZero p)
+
+theorem dbAddN_cast [NeZero p] (a b : ℕ) (ha : a < p) (hb : b < p) :
+    ((dbAddN p a b : ℕ) : ZMod p) = (a : ZMod p) + (b : ZMod p) := by
+  rw [dbAddN_eq_mod p a b ha hb, ZMod.natCast_mod, Nat.cast_add]
+
+theorem dbMulN_cast [NeZero p] (a b : ℕ) :
+    ((dbMulN p a b : ℕ) : ZMod p) = (a : ZMod p) * (b : ZMod p) := by
+  rw [dbMulN, ZMod.natCast_mod, Nat.cast_mul]
+
+/-- A `ZMod.val` below `p` casts back to a nonzero element unless it is `0`. -/
+theorem dbCast_ne_zero [NeZero p] (n : ℕ) (hn : n < p) (h0 : n ≠ 0) : (n : ZMod p) ≠ 0 := by
+  intro hz
+  have : (n : ZMod p).val = n := ZMod.val_natCast_of_lt hn
+  rw [hz] at this
+  exact h0 (by simpa using this.symm)
+
+/-- One coefficient's contribution to the form. -/
+def dbAffTerm (vs : Array VarId) (st : Array ℕ) (denv : VarId → ZMod p) (t : ℕ) : ZMod p :=
+  (st.getD (2 + t) 0 : ZMod p) * denv (vs.getD t default)
+
+/-- The affine form the six slots denote. Slots the walk never writes stay `0`, so summing all three
+    coefficient slots is harmless. -/
+def dbAffOf (vs : Array VarId) (st : Array ℕ) (denv : VarId → ZMod p) : ZMod p :=
+  (st.getD 1 0 : ZMod p)
+    + dbAffTerm vs st denv 0 + dbAffTerm vs st denv 1 + dbAffTerm vs st denv 2
+
+/-- Every slot holds a `ZMod.val`. -/
+def DbAffInv (p : ℕ) (st : Array ℕ) : Prop := st.size = 6 ∧ ∀ k, st.getD k 0 < p
+
+theorem dbModify_getD (a : Array ℕ) (i j : ℕ) (f : ℕ → ℕ) (hi : i < a.size) :
+    (a.modify i f).getD j 0 = if i = j then f (a.getD i 0) else a.getD j 0 := by
+  simp only [Array.getD_eq_getD_getElem?, Array.getElem?_modify]
+  split
+  · next h => subst h; rw [Array.getElem?_eq_getElem hi]; rfl
+  · rfl
+
+theorem dbSetD_zero (st : Array ℕ) (hsz : 0 < st.size) : (st.set! 0 0).getD 0 0 = 0 := by
+  rw [Array.set!, Array.getD_eq_getD_getElem?, Array.getElem?_setIfInBounds_self, if_pos hsz]
+  rfl
+
+theorem dbSetD_other (st : Array ℕ) (j : ℕ) (hj : j ≠ 0) :
+    (st.set! 0 0).getD j 0 = st.getD j 0 := by
+  rw [Array.set!, Array.getD_eq_getD_getElem?, Array.getElem?_setIfInBounds_ne (Ne.symm hj),
+    Array.getD_eq_getD_getElem?]
+
+/-- The queried slot of a variable of `vs` names that variable. -/
+theorem dbSlotOf_spec (vs : Array VarId) (i : VarId) :
+    ∀ k, (∃ m, k ≤ m ∧ ∃ h : m < vs.size, vs[m] = i) →
+      dbSlotOf vs i k < vs.size ∧ vs.getD (dbSlotOf vs i k) default = i := by
+  intro k
+  induction hn : vs.size - k generalizing k with
+  | zero => intro ⟨m, hkm, hm, _⟩; omega
+  | succ n ih =>
+    intro hex
+    have hk : k < vs.size := by omega
+    rw [dbSlotOf, dif_pos hk]
+    by_cases hveq : vs[k] == i
+    · rw [if_pos hveq]
+      exact ⟨hk, by rw [dbGetD_lt vs k default hk]; exact eq_of_beq hveq⟩
+    · rw [if_neg hveq]
+      refine ih (k + 1) (by omega) ?_
+      obtain ⟨m, hkm, hm, hvm⟩ := hex
+      refine ⟨m, ?_, hm, hvm⟩
+      rcases Nat.eq_or_lt_of_le hkm with rfl | h
+      · exact absurd (beq_iff_eq.mpr hvm) hveq
+      · omega
+
+theorem dbSlotOf_of_mem (vs : Array VarId) (i : VarId) (h : i ∈ vs) :
+    dbSlotOf vs i 0 < vs.size ∧ vs.getD (dbSlotOf vs i 0) default = i := by
+  obtain ⟨m, hm, hvm⟩ := Array.getElem_of_mem h
+  exact dbSlotOf_spec vs i 0 ⟨m, Nat.zero_le _, hm, hvm⟩
+
+theorem dbAffInv_modify [NeZero p] (st : Array ℕ) (hst : DbAffInv p st) (i : ℕ) (hi : i < st.size)
+    (f : ℕ → ℕ) (hf : ∀ v, v < p → f v < p) : DbAffInv p (st.modify i f) := by
+  obtain ⟨hsz, hlt⟩ := hst
+  refine ⟨by simpa using hsz, fun j => ?_⟩
+  rw [dbModify_getD st i j f hi]
+  split
+  · have h := hlt i
+    rw [dbGetD_lt st i 0 hi] at h
+    exact hf _ h
+  · exact hlt j
+
+/-- Writing into coefficient slot `s` adds `k · denv vs[s]` to the form. -/
+theorem dbAffOf_modify [NeZero p] (vs : Array VarId) (st : Array ℕ) (denv : VarId → ZMod p)
+    (s : ℕ) (hs : s < 3) (hidx : 2 + s < st.size) (k : ℕ)
+    (hlt : st.getD (2 + s) 0 < p) (hk : k < p) :
+    dbAffOf vs (st.modify (2 + s) (fun v => dbAddN p v k)) denv
+      = dbAffOf vs st denv + (k : ZMod p) * denv (vs.getD s default) := by
+  have hsame : dbAffTerm vs (st.modify (2 + s) (fun v => dbAddN p v k)) denv s
+      = dbAffTerm vs st denv s + (k : ZMod p) * denv (vs.getD s default) := by
+    rw [dbAffTerm, dbAffTerm, dbModify_getD st (2 + s) (2 + s) _ hidx,
+      if_pos (rfl : 2 + s = 2 + s), dbAddN_cast _ _ hlt hk]
+    ring
+  have hoth : ∀ t, t ≠ s → dbAffTerm vs (st.modify (2 + s) (fun v => dbAddN p v k)) denv t
+      = dbAffTerm vs st denv t := by
+    intro t ht
+    rw [dbAffTerm, dbAffTerm, dbModify_getD st (2 + s) (2 + t) _ hidx,
+      if_neg (show ¬(2 + s = 2 + t) by omega)]
+  have hc : (st.modify (2 + s) (fun v => dbAddN p v k)).getD 1 0 = st.getD 1 0 := by
+    rw [dbModify_getD st (2 + s) 1 _ hidx, if_neg (show ¬(2 + s = 1) by omega)]
+  rcases (show s = 0 ∨ s = 1 ∨ s = 2 from by omega) with h | h | h <;> subst h
+  · rw [dbAffOf, dbAffOf, hc, hsame, hoth 1 (by omega), hoth 2 (by omega)]; ring
+  · rw [dbAffOf, dbAffOf, hc, hsame, hoth 0 (by omega), hoth 2 (by omega)]; ring
+  · rw [dbAffOf, dbAffOf, hc, hsame, hoth 0 (by omega), hoth 1 (by omega)]; ring
+
+/-- Adding `k` to the coefficient slot of `i` adds `k · denv i` to the form. -/
+theorem dbAffOf_var [NeZero p] (vs : Array VarId) (hvs : vs.size ≤ 3) (st : Array ℕ)
+    (hst : DbAffInv p st) (i : VarId) (hi : i ∈ vs) (k : ℕ) (hk : k < p)
+    (denv : VarId → ZMod p) :
+    dbAffOf vs (st.modify (2 + dbSlotOf vs i 0) (fun v => dbAddN p v k)) denv
+      = dbAffOf vs st denv + (k : ZMod p) * denv i := by
+  obtain ⟨hsz, hlt⟩ := hst
+  obtain ⟨hslt, hsv⟩ := dbSlotOf_of_mem vs i hi
+  rw [dbAffOf_modify vs st denv _ (by omega) (by omega) k (hlt _) hk, hsv]
+
+/-- The walk adds `k · e` to the form, provided the flag survives. -/
+theorem dbAffAcc_spec [NeZero p] (vs : Array VarId) (hvs : vs.size ≤ 3)
+    (denv : VarId → ZMod p) :
+    ∀ (e : DenseExpr p) (k : ℕ) (st : Array ℕ), DbAffInv p st → k < p →
+      (∀ v ∈ e.vars, v ∈ vs) →
+      DbAffInv p (dbAffAcc vs e k st) ∧
+      ((dbAffAcc vs e k st).getD 0 0 ≠ 0 →
+        st.getD 0 0 ≠ 0 ∧
+        dbAffOf vs (dbAffAcc vs e k st) denv
+          = dbAffOf vs st denv + (k : ZMod p) * e.eval denv) := by
+  have hcv : ∀ (c : ZMod p), ((c.val : ℕ) : ZMod p) = c := fun c => by
+    rw [← zmodOfNatP_eq, zmodOfNatP_val]
+  intro e
+  induction e with
+  | const c =>
+    intro k st hst hk _
+    obtain ⟨hsz, hlt⟩ := hst
+    have h1 : (1 : ℕ) < st.size := by omega
+    have hmod : ∀ j, (st.modify 1 (fun v => dbAddN p v (dbMulN p k c.val))).getD j 0
+        = if 1 = j then dbAddN p (st.getD 1 0) (dbMulN p k c.val) else st.getD j 0 :=
+      fun j => dbModify_getD st 1 j _ h1
+    have hcast : ((dbAddN p (st.getD 1 0) (dbMulN p k c.val) : ℕ) : ZMod p)
+        = (st.getD 1 0 : ZMod p) + (k : ZMod p) * c := by
+      rw [dbAddN_cast _ _ (hlt 1) (dbMulN_lt p _ _), dbMulN_cast, hcv]
+    have hinv : DbAffInv p (dbAffAcc vs (DenseExpr.const c) k st) := by
+      rw [dbAffAcc]
+      exact dbAffInv_modify (p := p) st ⟨hsz, hlt⟩ 1 h1 _
+        (fun v hv => dbAddN_lt p v _ hv (dbMulN_lt p _ _))
+    refine ⟨hinv, fun _ => ⟨?_, ?_⟩⟩
+    · rw [dbAffAcc, hmod 0, if_neg (by omega)] at *; assumption
+    · have hterm : ∀ t, dbAffTerm vs (st.modify 1 (fun v => dbAddN p v (dbMulN p k c.val))) denv t
+          = dbAffTerm vs st denv t := by
+        intro t
+        rw [dbAffTerm, dbAffTerm, dbModify_getD st 1 (2 + t) _ h1,
+          if_neg (show ¬(1 = 2 + t) by omega)]
+      have hc1 : (st.modify 1 (fun v => dbAddN p v (dbMulN p k c.val))).getD 1 0
+          = dbAddN p (st.getD 1 0) (dbMulN p k c.val) := by
+        rw [dbModify_getD st 1 1 _ h1, if_pos (rfl : (1 : ℕ) = 1)]
+      rw [dbAffAcc]
+      simp only [dbAffOf, hterm, hc1, hcast, DenseExpr.eval]
+      ring
+  | var i =>
+    intro k st hst hk hsub
+    have hi : i ∈ vs := hsub i (by simp [DenseExpr.vars])
+    obtain ⟨hsz, hlt⟩ := hst
+    obtain ⟨hslt, _⟩ := dbSlotOf_of_mem vs i hi
+    have hidx : 2 + dbSlotOf vs i 0 < st.size := by omega
+    have hmod : ∀ j, (st.modify (2 + dbSlotOf vs i 0) (fun v => dbAddN p v k)).getD j 0
+        = if 2 + dbSlotOf vs i 0 = j then dbAddN p (st.getD (2 + dbSlotOf vs i 0) 0) k
+          else st.getD j 0 := fun j => dbModify_getD st _ j _ hidx
+    have hinv : DbAffInv p (dbAffAcc vs (DenseExpr.var (p := p) i) k st) := by
+      rw [dbAffAcc]
+      exact dbAffInv_modify (p := p) st ⟨hsz, hlt⟩ _ hidx (fun v => dbAddN p v k)
+        (fun v hv => dbAddN_lt p v k hv hk)
+    refine ⟨hinv, fun _ => ⟨?_, ?_⟩⟩
+    · rw [dbAffAcc, hmod 0, if_neg (by omega)] at *; assumption
+    · rw [dbAffAcc, dbAffOf_var vs hvs st ⟨hsz, hlt⟩ i hi k hk denv, DenseExpr.eval]
+  | add a b iha ihb =>
+    intro k st hst hk hsub
+    have hsa : ∀ v ∈ a.vars, v ∈ vs := fun v hv => hsub v (by simp [DenseExpr.vars, hv])
+    have hsb : ∀ v ∈ b.vars, v ∈ vs := fun v hv => hsub v (by simp [DenseExpr.vars, hv])
+    obtain ⟨hia, hea⟩ := iha k st hst hk hsa
+    obtain ⟨hib, heb⟩ := ihb k (dbAffAcc vs a k st) hia hk hsb
+    refine ⟨by rw [dbAffAcc]; exact hib, fun hflag => ?_⟩
+    rw [dbAffAcc] at hflag
+    obtain ⟨hf1, he1⟩ := heb hflag
+    obtain ⟨hf0, he0⟩ := hea hf1
+    refine ⟨hf0, ?_⟩
+    rw [dbAffAcc, he1, he0, DenseExpr.eval]
+    ring
+  | mul a b iha ihb =>
+    intro k st hst hk hsub
+    have hsa : ∀ v ∈ a.vars, v ∈ vs := fun v hv => hsub v (by simp [DenseExpr.vars, hv])
+    have hsb : ∀ v ∈ b.vars, v ∈ vs := fun v hv => hsub v (by simp [DenseExpr.vars, hv])
+    obtain ⟨hsz, hlt⟩ := hst
+    rw [dbAffAcc]
+    rcases hca : a.constValue? with _ | ca
+    · rcases hcb : b.constValue? with _ | cb
+      · -- neither factor is constant: the form is abandoned
+        refine ⟨⟨by simp [Array.set!, hsz], fun j => ?_⟩, fun hflag => ?_⟩
+        · by_cases hj : j = 0
+          · subst hj; rw [dbSetD_zero st (by omega)]; exact Nat.pos_of_neZero p
+          · rw [dbSetD_other st j hj]; exact hlt _
+        · exact absurd (dbSetD_zero st (by omega)) hflag
+      · -- the right factor is constant
+        obtain ⟨hia, hea⟩ := iha (dbMulN p k cb.val) st ⟨hsz, hlt⟩ (dbMulN_lt p _ _) hsa
+        refine ⟨hia, fun hflag => ?_⟩
+        obtain ⟨hf, he⟩ := hea hflag
+        refine ⟨hf, ?_⟩
+        rw [he, DenseExpr.eval, DenseExpr.constValue?_sound b cb hcb denv, dbMulN_cast, hcv]
+        ring
+    · -- the left factor is constant
+      obtain ⟨hib, heb⟩ := ihb (dbMulN p k ca.val) st ⟨hsz, hlt⟩ (dbMulN_lt p _ _) hsb
+      refine ⟨hib, fun hflag => ?_⟩
+      obtain ⟨hf, he⟩ := heb hflag
+      refine ⟨hf, ?_⟩
+      rw [he, DenseExpr.eval, DenseExpr.constValue?_sound a ca hca denv, dbMulN_cast, hcv]
+      ring
+
+/-- The initial state denotes the zero form. -/
+theorem dbAffInit [NeZero p] (hp : 1 < p) (vs : Array VarId) (denv : VarId → ZMod p) :
+    DbAffInv p #[1, 0, 0, 0, 0, 0] ∧ dbAffOf vs (#[1, 0, 0, 0, 0, 0] : Array ℕ) denv = 0 := by
+  refine ⟨⟨rfl, fun k => ?_⟩, by simp [dbAffOf, dbAffTerm]⟩
+  match k with
+  | 0 => simpa using hp
+  | 1 | 2 | 3 | 4 | 5 => simpa using Nat.pos_of_neZero p
+  | _ + 6 => simpa using Nat.pos_of_neZero p
+
+/-- The roots of `c + a·x = 0` contain every `x` that solves it. -/
+theorem dbAffRootsOf_sound [Fact p.Prime] [NeZero p] (an cn : ℕ) (han : an < p) (hcn : cn < p)
+    (x : ZMod p) (hx : (cn : ZMod p) + (an : ZMod p) * x = 0)
+    (roots : List (ZMod p)) (h : dbAffRootsOf p an cn = some roots) : x ∈ roots := by
+  have hcv : ∀ n : ℕ, zmodOfNatP p n = (n : ZMod p) := fun n => zmodOfNatP_eq n
+  rw [dbAffRootsOf] at h
+  by_cases ha0 : an == 0
+  · rw [if_pos ha0] at h
+    have haz : ((an : ℕ) : ZMod p) = 0 := by rw [show an = 0 from by simpa using ha0]; simp
+    rw [haz, zero_mul, add_zero] at hx
+    by_cases hc0 : cn == 0
+    · rw [if_pos hc0] at h; exact absurd h (by simp)
+    · exact absurd hx (dbCast_ne_zero cn hcn (by simpa using hc0))
+  · rw [if_neg ha0] at h
+    have hane : ((an : ℕ) : ZMod p) ≠ 0 := dbCast_ne_zero an han (by simpa using ha0)
+    simp only [hcv] at h
+    by_cases h1 : zmodIsOne ((an : ℕ) : ZMod p)
+    · rw [if_pos h1] at h
+      rw [← Option.some.inj h]
+      have hone : ((an : ℕ) : ZMod p) = 1 := by simpa using h1
+      rw [hone, one_mul] at hx
+      simp only [List.mem_singleton, zmodNegP_eq]
+      linear_combination hx
+    · rw [if_neg h1] at h
+      by_cases hchk : zmodIsZero (zmodAddP (zmodMulP ((an : ℕ) : ZMod p)
+          (zmodNegP (zmodMulP (((an : ℕ) : ZMod p))⁻¹ ((cn : ℕ) : ZMod p))))
+          ((cn : ℕ) : ZMod p))
+      · rw [if_pos hchk] at h
+        rw [← Option.some.inj h]
+        simp only [List.mem_singleton, zmodNegP_eq, zmodMulP_eq]
+        have h2 : (an : ZMod p) * x = -(cn : ZMod p) := by linear_combination hx
+        rw [show x = ((an : ZMod p))⁻¹ * ((an : ZMod p) * x) from
+          (inv_mul_cancel_left₀ hane x).symm, h2]
+        ring
+      · rw [if_neg hchk] at h; exact absurd h (by simp)
+
+/-- The roots `dbAffRoots` reports for `vs[j]` contain the value every satisfying assignment gives
+    it: the surviving form is `c + a·vs[j]`, and it vanishes at that assignment. -/
+theorem dbAffRoots_sound [Fact p.Prime] [NeZero p] (vs : Array VarId) (hvs : vs.size ≤ 3)
+    (j : ℕ) (hj : j < vs.size) (e : DenseExpr p) (hsub : ∀ v ∈ e.vars, v ∈ vs)
+    (roots : List (ZMod p)) (h : dbAffRoots vs j e = some roots)
+    (denv : VarId → ZMod p) (he : e.eval denv = 0) : denv vs[j] ∈ roots := by
+  have hp : 1 < p := (Fact.out : p.Prime).one_lt
+  obtain ⟨hinv0, hzero⟩ := dbAffInit (p := p) hp vs denv
+  obtain ⟨hinv, hspec⟩ := dbAffAcc_spec vs hvs denv e 1 _ hinv0 hp hsub
+  set st := dbAffAcc vs e 1 (#[1, 0, 0, 0, 0, 0] : Array ℕ) with hst
+  rw [dbAffRoots] at h
+  by_cases hgate : st.getD 0 0 == 0 || dbOtherLive st j
+  · rw [if_pos hgate] at h; exact absurd h (by simp)
+  rw [if_neg hgate] at h
+  simp only [Bool.or_eq_true, beq_iff_eq, not_or] at hgate
+  obtain ⟨hflag, hoth⟩ := hgate
+  obtain ⟨_, hform⟩ := hspec hflag
+  rw [hzero, he] at hform
+  simp only [Nat.cast_one, mul_zero, zero_add] at hform
+  obtain ⟨hsz, hlt⟩ := hinv
+  have hdead : ∀ k, k < 3 → k ≠ j → st.getD (2 + k) 0 = 0 := by
+    intro k hk hkj
+    simp only [dbOtherLive, Bool.or_eq_true, Bool.and_eq_true, bne_iff_ne, ne_eq,
+      not_or] at hoth
+    obtain ⟨⟨⟨h0, h1⟩, h2⟩, _⟩ := hoth
+    rcases (show k = 0 ∨ k = 1 ∨ k = 2 from by omega) with h' | h' | h' <;> subst h'
+    · by_contra hc; exact h0 ⟨by omega, hc⟩
+    · by_contra hc; exact h1 ⟨by omega, hc⟩
+    · by_contra hc; exact h2 ⟨by omega, hc⟩
+  have hjv : vs.getD j default = vs[j] := dbGetD_lt vs j default hj
+  have hj3 : j < 3 := by omega
+  have hcol : dbAffOf vs st denv
+      = (st.getD 1 0 : ZMod p) + (st.getD (2 + j) 0 : ZMod p) * denv vs[j] := by
+    rw [← hjv]
+    rcases (show j = 0 ∨ j = 1 ∨ j = 2 from by omega) with h' | h' | h' <;> subst h'
+    · simp only [dbAffOf, dbAffTerm, hdead 1 (by omega) (by omega),
+        hdead 2 (by omega) (by omega)]; push_cast; ring
+    · simp only [dbAffOf, dbAffTerm, hdead 0 (by omega) (by omega),
+        hdead 2 (by omega) (by omega)]; push_cast; ring
+    · simp only [dbAffOf, dbAffTerm, hdead 0 (by omega) (by omega),
+        hdead 1 (by omega) (by omega)]; push_cast; ring
+  rw [hcol] at hform
+  exact dbAffRootsOf_sound _ _ (hlt _) (hlt 1) _ hform roots h
+
+/-- `denseRootsIn`'s union over the product spine, over the accumulator. -/
+theorem dbRootsAt_sound [Fact p.Prime] [NeZero p] (vs : Array VarId) (hvs : vs.size ≤ 3)
+    (j : ℕ) (hj : j < vs.size) :
+    ∀ (e : DenseExpr p), (∀ v ∈ e.vars, v ∈ vs) → ∀ (roots : List (ZMod p)),
+      dbRootsAt vs j e = some roots → ∀ (denv : VarId → ZMod p), e.eval denv = 0 →
+        denv vs[j] ∈ roots := by
+  intro e
+  induction e with
+  | const c => intro hsub roots h denv he; exact dbAffRoots_sound vs hvs j hj _ hsub _ h denv he
+  | var i => intro hsub roots h denv he; exact dbAffRoots_sound vs hvs j hj _ hsub _ h denv he
+  | add a b _ _ => intro hsub roots h denv he
+                   exact dbAffRoots_sound vs hvs j hj _ hsub _ h denv he
+  | mul a b iha ihb =>
+    intro hsub roots h denv he
+    have hsa : ∀ v ∈ a.vars, v ∈ vs := fun v hv => hsub v (by simp [DenseExpr.vars, hv])
+    have hsb : ∀ v ∈ b.vars, v ∈ vs := fun v hv => hsub v (by simp [DenseExpr.vars, hv])
+    rw [dbRootsAt] at h
+    split at h
+    · next r haff =>
+      rw [show roots = r from (Option.some.inj h).symm]
+      exact dbAffRoots_sound vs hvs j hj _ hsub r haff denv he
+    · split at h
+      · next ra rb hra hrb =>
+        rw [show roots = ra ++ rb from (Option.some.inj h).symm]
+        have he' : a.eval denv * b.eval denv = 0 := he
+        rcases mul_eq_zero.mp he' with hz | hz
+        · exact List.mem_append.2 (Or.inl (iha hsa ra hra denv hz))
+        · exact List.mem_append.2 (Or.inr (ihb hsb rb hrb denv hz))
+      all_goals exact absurd h (by simp)
 
 /-! ## 2b. Domain membership
 
@@ -214,9 +528,10 @@ theorem dbTabSound_insert (denv : VarId → ZMod p) (T : DbTab p) (i : ℕ) (dm 
 /-- Constraint roots: `dbAddConstraintVars` inserts the roots of each of the constraint's variables,
     and a satisfying assignment's value is one of them. -/
 theorem dbAddConstraintVars_sound [Fact p.Prime] [NeZero p] (denv : VarId → ZMod p)
-    (c : DenseExpr p) (hc : c.eval denv = 0) (vs : Array VarId) :
+    (c : DenseExpr p) (hc : c.eval denv = 0) (vs : Array VarId) (hvs : vs.size ≤ 3)
+    (hsub : ∀ v ∈ c.vars, v ∈ vs) :
     ∀ (k : ℕ) (T : DbTab p), DbTabSound p denv T →
-      DbTabSound p denv (dbAddConstraintVars (dbRootPlan c) vs k T) := by
+      DbTabSound p denv (dbAddConstraintVars c vs k T) := by
   intro k
   induction hk : vs.size - k generalizing k with
   | zero =>
@@ -227,18 +542,18 @@ theorem dbAddConstraintVars_sound [Fact p.Prime] [NeZero p] (denv : VarId → ZM
     intro T hT
     have hlt : k < vs.size := by omega
     rw [dbAddConstraintVars, dif_pos hlt]
-    dsimp only
     split
     · next rs hr =>
       refine ih (k + 1) (by omega) _ (dbTabSound_insert denv T _ _ hT ?_)
       refine dbDomMem_explicit _ _ ?_
-      have hmem : denv vs[k] ∈ rs := dbRootsIn_sound vs[k] c rs hr denv hc
+      have hmem : denv vs[k] ∈ rs := dbRootsAt_sound vs hvs k hlt c hsub rs hr denv hc
       simpa using List.mem_map.mpr ⟨denv vs[k], hmem, rfl⟩
     · exact ih (k + 1) (by omega) T hT
 
 theorem dbConstraintPhase_sound [Fact p.Prime] [NeZero p] (denv : VarId → ZMod p)
     (cs : Array (DenseExpr p)) (hcs : ∀ c ∈ cs, c.eval denv = 0)
-    (csVars : Array (Array VarId)) :
+    (csVars : Array (Array VarId))
+    (hvars : ∀ k, ∀ h : k < cs.size, ∀ v ∈ (cs[k]).vars, v ∈ csVars.getD k #[]) :
     ∀ (k : ℕ) (T : DbTab p), DbTabSound p denv T →
       DbTabSound p denv (dbConstraintPhase cs csVars k T) := by
   intro k
@@ -251,7 +566,9 @@ theorem dbConstraintPhase_sound [Fact p.Prime] [NeZero p] (denv : VarId → ZMod
     rw [dbConstraintPhase, dif_pos hlt]
     refine ih (k + 1) (by omega) _ ?_
     split
-    · exact dbAddConstraintVars_sound denv cs[k] (hcs cs[k] (Array.getElem_mem hlt)) _ 0 T hT
+    · next hsz =>
+      exact dbAddConstraintVars_sound denv cs[k] (hcs cs[k] (Array.getElem_mem hlt)) _ hsz
+        (hvars k hlt) 0 T hT
     · exact hT
 
 /-- Bus slot bounds: the fact's own soundness, specialised to the constant multiplicity and the
@@ -290,15 +607,16 @@ theorem dbSlotBound_sound {bs : BusSemantics p} (facts : BusFacts p bs)
 theorem dbBusSlots_sound [NeZero p] {bs : BusSemantics p} (facts : BusFacts p bs)
     (bi : BusInteraction (DenseExpr p)) (denv : VarId → ZMod p)
     (hob : (denseBIEval bi denv).multiplicity ≠ 0 → bs.accepts (denseBIEval bi denv)) :
-    ∀ (rest : List (DenseExpr p)) (slot : ℕ) (seen : Array VarId) (inf : Bool) (T : DbTab p),
+    ∀ (rest : List (DenseExpr p)) (ps : List (Option (ZMod p))) (slot : ℕ) (seen : Array VarId)
+      (inf : Bool) (T : DbTab p),
       (∀ k, rest[k]? = bi.payload[slot + k]?) → DbTabSound p denv T →
       DbTabSound p denv (dbBusSlots facts bi bi.multiplicity.constValue?
-        (bi.payload.map DenseExpr.constValue?) rest slot seen inf T).2 := by
+        (bi.payload.map DenseExpr.constValue?) rest ps slot seen inf T).2 := by
   intro rest
   induction rest with
-  | nil => intro slot seen inf T _ hT; exact hT
+  | nil => intro ps slot seen inf T _ hT; exact hT
   | cons e rest ih =>
-    intro slot seen inf T hsuf hT
+    intro ps slot seen inf T hsuf hT
     have hshift : ∀ k, rest[k]? = bi.payload[(slot + 1) + k]? := by
       intro k
       have := hsuf (k + 1)
@@ -308,27 +626,24 @@ theorem dbBusSlots_sound [NeZero p] {bs : BusSemantics p} (facts : BusFacts p bs
       rw [dbBusSlots]
       dsimp only
       by_cases hseen : seen.contains i
-      · rw [if_pos hseen]; exact ih (slot + 1) seen inf T hshift hT
+      · rw [if_pos hseen]; exact ih ps.tail (slot + 1) seen inf T hshift hT
       · rw [if_neg hseen]
         have hslot : bi.payload[slot]? = some (.var i) := by
           have := hsuf 0; simpa using this.symm
         rcases hsb : dbSlotBound facts bi bi.multiplicity.constValue?
           (bi.payload.map DenseExpr.constValue?) slot with _ | bound
-        · dsimp only; exact ih (slot + 1) (seen.push i) true T hshift hT
+        · dsimp only; exact ih ps.tail (slot + 1) (seen.push i) true T hshift hT
         · dsimp only
-          refine ih (slot + 1) (seen.push i) inf _ hshift ?_
+          refine ih ps.tail (slot + 1) (seen.push i) inf _ hshift ?_
           by_cases hb : bound ≤ maxDomainBound
           · rw [if_pos hb]
             refine dbTabSound_insert denv T i.index _ hT ?_
             exact dbDomMem_range bound _ (ZMod.val_lt _)
               (dbSlotBound_sound facts bi slot bound i hslot hsb denv hob)
           · rw [if_neg hb]; exact hT
-    | const c =>
-      simp only [dbBusSlots]; exact ih (slot + 1) seen _ T hshift hT
-    | add a b =>
-      simp only [dbBusSlots]; exact ih (slot + 1) seen _ T hshift hT
-    | mul a b =>
-      simp only [dbBusSlots]; exact ih (slot + 1) seen _ T hshift hT
+    | const c => exact ih ps.tail (slot + 1) seen _ T hshift hT
+    | add a b => exact ih ps.tail (slot + 1) seen _ T hshift hT
+    | mul a b => exact ih ps.tail (slot + 1) seen _ T hshift hT
 
 /-! ### Byte-operand domains
 
@@ -395,6 +710,28 @@ theorem dbByteOperand_sound [Fact p.Prime] [NeZero p] (denv : VarId → ZMod p)
       obtain ⟨rfl, rfl⟩ := h
       obtain ⟨k, hk, hveq⟩ := dbByteOperand_cosetIndex (.mul ea eb) bound x a b haff denv hbnd
       exact dbDomMem_coset bound b a⁻¹ (denv x) k hk hveq
+
+/-! ### The `busId`-keyed fact cache -/
+
+/-- The cache answers the bus-only facts it stands for, at one bus id. -/
+structure DbBusCacheOk {p : ℕ} {bs : BusSemantics p} (facts : BusFacts p bs) (bc : DbBusCache p)
+    (b : ℕ) : Prop where
+  usable : bc.usable.getD b false = !bs.isStateful b
+  varRange : bc.varRange.getD b false = facts.varRangeBus b
+  tuple : bc.tuple.getD b none = facts.tupleRangeBus b
+  byteSpec : bc.byteSpec.getD b none = facts.byteXorSpec b
+  alwaysOk0 : bc.alwaysOk0.getD b false = facts.neverViolates b
+  neverViol : bc.neverViol.getD b false = facts.neverViolates b
+
+theorem dbGetD_rangeMap {β : Type u} (nb : ℕ) (f : ℕ → β) (b : ℕ) (hb : b < nb) (dflt : β) :
+    ((Array.range nb).map f).getD b dflt = f b := by
+  rw [dbGetD_lt _ _ _ (by simpa using hb), Array.getElem_map, Array.getElem_range]
+
+theorem dbBusCacheOf_ok {bs : BusSemantics p} (facts : BusFacts p bs) (nb b : ℕ) (hb : b < nb) :
+    DbBusCacheOk facts (dbBusCacheOf facts nb) b :=
+  ⟨dbGetD_rangeMap nb _ b hb false, dbGetD_rangeMap nb _ b hb false,
+    dbGetD_rangeMap nb _ b hb none, dbGetD_rangeMap nb _ b hb none,
+    dbGetD_rangeMap nb _ b hb false, dbGetD_rangeMap nb _ b hb false⟩
 
 /-! ### Linking a precomputed view to its interaction
 
@@ -495,25 +832,15 @@ theorem dbBusPhase_sound [NeZero p] {bs : BusSemantics p} (facts : BusFacts p bs
     obtain ⟨⟨hmult, hpat, _, _, _, _⟩, hob⟩ := hpre k hlt
     refine ih (k + 1) (by omega) _ ?_
     dsimp only
-    rw [hmult, hpat]
-    exact dbBusSlots_sound facts bis[k] denv hob bis[k].payload 0 #[] false st.1
-      (fun m => by simp) hT
+    rw [hmult]
+    have := dbBusSlots_sound facts bis[k] denv hob bis[k].payload
+      (pre.getD k dbBiPreEmpty).pat 0 (Array.emptyWithCapacity 4) false st.1 (fun m => by simp) hT
+    rwa [← hpat] at this
 
 /-! ## 3. Items
 
 A gathered item's obligation holds at a satisfying assignment. Only this direction is needed: the
 mask is an intersection over *survivors*, so it suffices that the assignment's own point survives. -/
-
-theorem zmodOfNatP_eq [NeZero p] (n : ℕ) : zmodOfNatP p n = (n : ZMod p) := by
-  cases p with
-  | zero => exact absurd rfl (NeZero.ne 0)
-  | succ m =>
-    refine ZMod.val_injective (m + 1) ?_
-    rw [ZMod.val_natCast]
-    rfl
-
-theorem zmodOfNatP_val [NeZero p] (x : ZMod p) : zmodOfNatP p x.val = x := by
-  rw [zmodOfNatP_eq, ZMod.natCast_val, ZMod.cast_id]
 
 /-- Agreement on a bus interaction's variables restricts to each of its expressions. -/
 theorem dbRegsAgree_mult (denv : VarId → ZMod p) (regs : Array ℕ)
@@ -540,29 +867,27 @@ variable {bs : BusSemantics p}
 /-- The evaluated payload of the fallback message is the interaction's own evaluated payload. -/
 theorem dbFallback_payload [NeZero p] (denv : VarId → ZMod p) (regs : Array ℕ)
     (bi : BusInteraction (DenseExpr p)) (hagree : DbRegsAgree denv regs (denseBIVars bi)) :
-    (bi.payload.map dbCompile).map (fun t => zmodOfNatP p (dbEval p regs t))
+    bi.payload.map (fun t => zmodOfNatP p (dbEval p regs t))
       = bi.payload.map (fun ex => ex.eval denv) := by
-  rw [List.map_map]
   refine List.map_congr_left ?_
   intro x hx
-  simp only [Function.comp_apply]
-  rw [dbEval_dbCompile denv regs x (dbRegsAgree_payload denv regs bi hagree x hx),
+  rw [dbEval_eval denv regs x (dbRegsAgree_payload denv regs bi hagree x hx),
     zmodOfNatP_val]
 
 theorem dbFallback_ok [NeZero p] (facts : BusFacts p bs) (bi : BusInteraction (DenseExpr p))
     (denv : VarId → ZMod p) (regs : Array ℕ) (hagree : DbRegsAgree denv regs (denseBIVars bi))
     (hob : (denseBIEval bi denv).multiplicity ≠ 0 → bs.accepts (denseBIEval bi denv)) :
     dbItemOk facts regs
-      (.fallback bi.busId (dbCompile bi.multiplicity) (bi.payload.map dbCompile)) = true := by
-  have hmv : dbEval p regs (dbCompile bi.multiplicity) = (bi.multiplicity.eval denv).val :=
-    dbEval_dbCompile denv regs bi.multiplicity (dbRegsAgree_mult denv regs bi hagree)
+      (.fallback bi.busId bi.multiplicity bi.payload) = true := by
+  have hmv : dbEval p regs (bi.multiplicity) = (bi.multiplicity.eval denv).val :=
+    dbEval_eval denv regs bi.multiplicity (dbRegsAgree_mult denv regs bi hagree)
   simp only [dbItemOk]
-  by_cases hz : dbEval p regs (dbCompile bi.multiplicity) = 0
+  by_cases hz : dbEval p regs (bi.multiplicity) = 0
   · simp [hz]
   · have hne : bi.multiplicity.eval denv ≠ 0 := by
       intro h0; exact hz (by rw [hmv, h0, ZMod.val_zero])
-    have hmsg : (⟨bi.busId, zmodOfNatP p (dbEval p regs (dbCompile bi.multiplicity)),
-        (bi.payload.map dbCompile).map (fun t => zmodOfNatP p (dbEval p regs t))⟩ :
+    have hmsg : (⟨bi.busId, zmodOfNatP p (dbEval p regs (bi.multiplicity)),
+        bi.payload.map (fun t => zmodOfNatP p (dbEval p regs t))⟩ :
           BusInteraction (ZMod p)) = denseBIEval bi denv := by
       rw [denseBIEval_mk, hmv, zmodOfNatP_val, dbFallback_payload denv regs bi hagree]
     simp only [beq_iff_eq, hz, if_false]
@@ -573,7 +898,7 @@ theorem dbCompileRange_ok [Fact p.Prime] [NeZero p] (facts : BusFacts p bs)
     (bi : BusInteraction (DenseExpr p)) (e : DbBiPre p) (hpre : DbBiPreOf facts bi e)
     (denv : VarId → ZMod p) (regs : Array ℕ) (hagree : DbRegsAgree denv regs (denseBIVars bi))
     (hob : (denseBIEval bi denv).multiplicity ≠ 0 → bs.accepts (denseBIEval bi denv))
-    (item : DbItem) (h : dbCompileRange bi e (dbCompile bi.multiplicity) = some item) :
+    (item : DbItem p) (h : dbCompileRange bi e bi.multiplicity = some item) :
     dbItemOk facts regs item = true := by
   obtain ⟨hmult?, hpat, _, _, _, hra⟩ := hpre
   rw [dbCompileRange] at h
@@ -597,10 +922,10 @@ theorem dbCompileRange_ok [Fact p.Prime] [NeZero p] (facts : BusFacts p bs)
           have hmeval : bi.multiplicity.eval denv = 1 :=
             bi.multiplicity.constValue?_sound 1 hmc denv
           have hvmem : value ∈ bi.payload := List.mem_of_getElem? hv
-          have hvv : dbEval p regs (dbCompile value) = (value.eval denv).val :=
-            dbEval_dbCompile denv regs value (dbRegsAgree_payload denv regs bi hagree value hvmem)
-          have hmv : dbEval p regs (dbCompile bi.multiplicity) = (bi.multiplicity.eval denv).val :=
-            dbEval_dbCompile denv regs bi.multiplicity (dbRegsAgree_mult denv regs bi hagree)
+          have hvv : dbEval p regs (value) = (value.eval denv).val :=
+            dbEval_eval denv regs value (dbRegsAgree_payload denv regs bi hagree value hvmem)
+          have hmv : dbEval p regs (bi.multiplicity) = (bi.multiplicity.eval denv).val :=
+            dbEval_eval denv regs bi.multiplicity (dbRegsAgree_mult denv regs bi hagree)
           obtain ⟨_, hrc⟩ := facts.rangeCheckAt_sound bi.busId
             (bi.payload.map DenseExpr.constValue?) slot bound (by rw [← hpat]; exact hra _ hr)
           obtain ⟨_, hiff⟩ := hrc (denseBIEval bi denv) rfl (by rw [denseBIEval_mk]; exact hmeval)
@@ -627,16 +952,15 @@ theorem dbByteItem_ok [NeZero p] (facts : BusFacts p bs) (bi : BusInteraction (D
     (hrel : bs.accepts (denseBIEval bi denv) →
       (o1.eval denv).val < bound ∧ (o2.eval denv).val < bound ∧
         dbByteRel kind (o1.eval denv).val (o2.eval denv).val (r.eval denv).val = true) :
-    dbItemOk facts regs (.byte (dbCompile bi.multiplicity) (dbCompile o1) (dbCompile o2)
-      (dbCompile r) bound kind) = true := by
-  have hmv : dbEval p regs (dbCompile bi.multiplicity) = (bi.multiplicity.eval denv).val :=
-    dbEval_dbCompile denv regs bi.multiplicity (dbRegsAgree_mult denv regs bi hagree)
-  have e1 : dbEval p regs (dbCompile o1) = (o1.eval denv).val :=
-    dbEval_dbCompile denv regs o1 (dbRegsAgree_payload denv regs bi hagree o1 h1m)
-  have e2 : dbEval p regs (dbCompile o2) = (o2.eval denv).val :=
-    dbEval_dbCompile denv regs o2 (dbRegsAgree_payload denv regs bi hagree o2 h2m)
-  have er : dbEval p regs (dbCompile r) = (r.eval denv).val :=
-    dbEval_dbCompile denv regs r (dbRegsAgree_payload denv regs bi hagree r hrm)
+    dbItemOk facts regs (.byte bi.multiplicity o1 o2 r bound kind) = true := by
+  have hmv : dbEval p regs (bi.multiplicity) = (bi.multiplicity.eval denv).val :=
+    dbEval_eval denv regs bi.multiplicity (dbRegsAgree_mult denv regs bi hagree)
+  have e1 : dbEval p regs (o1) = (o1.eval denv).val :=
+    dbEval_eval denv regs o1 (dbRegsAgree_payload denv regs bi hagree o1 h1m)
+  have e2 : dbEval p regs (o2) = (o2.eval denv).val :=
+    dbEval_eval denv regs o2 (dbRegsAgree_payload denv regs bi hagree o2 h2m)
+  have er : dbEval p regs (r) = (r.eval denv).val :=
+    dbEval_eval denv regs r (dbRegsAgree_payload denv regs bi hagree r hrm)
   simp only [dbItemOk, hmv, e1, e2, er]
   by_cases hz : (bi.multiplicity.eval denv).val = 0
   · simp [hz]
@@ -648,7 +972,7 @@ theorem dbCompileByte_ok [NeZero p] (facts : BusFacts p bs) (bi : BusInteraction
     (e : DbBiPre p) (hpre : DbBiPreOf facts bi e) (denv : VarId → ZMod p) (regs : Array ℕ)
     (hagree : DbRegsAgree denv regs (denseBIVars bi))
     (hob : (denseBIEval bi denv).multiplicity ≠ 0 → bs.accepts (denseBIEval bi denv))
-    (item : DbItem) (h : dbCompileByte e (dbCompile bi.multiplicity) = some item) :
+    (item : DbItem p) (h : dbCompileByte e bi.multiplicity = some item) :
     dbItemOk facts regs item = true := by
   obtain ⟨_, _, hbyte, _, _, _⟩ := hpre
   rw [dbCompileByte] at h
@@ -671,8 +995,7 @@ theorem dbCompileByte_ok [NeZero p] (facts : BusFacts p bs) (bi : BusInteraction
           (b.o1.eval denv).val < b.spec.bound ∧ (b.o2.eval denv).val < b.spec.bound ∧
             dbByteRel kind (b.o1.eval denv).val (b.o2.eval denv).val
               (b.result.eval denv).val = true) →
-          dbItemOk facts regs (.byte (dbCompile bi.multiplicity) (dbCompile b.o1)
-            (dbCompile b.o2) (dbCompile b.result) b.spec.bound kind) = true :=
+          dbItemOk facts regs (.byte bi.multiplicity b.o1 b.o2 b.result b.spec.bound kind) = true :=
         fun kind hrel => dbByteItem_ok facts bi denv regs hagree hob b.o1 b.o2 b.result
           h1m h2m hrm b.spec.bound kind hrel
       by_cases hxo : opv = b.spec.xorOp
@@ -728,25 +1051,25 @@ theorem dbCompileOther_ok [Fact p.Prime] [NeZero p] (facts : BusFacts p bs)
     (bi : BusInteraction (DenseExpr p)) (e : DbBiPre p) (hpre : DbBiPreOf facts bi e)
     (denv : VarId → ZMod p) (regs : Array ℕ) (hagree : DbRegsAgree denv regs (denseBIVars bi))
     (hob : (denseBIEval bi denv).multiplicity ≠ 0 → bs.accepts (denseBIEval bi denv)) :
-    dbItemOk facts regs (dbCompileOther bi e (dbCompile bi.multiplicity)) = true := by
+    dbItemOk facts regs (dbCompileOther bi e bi.multiplicity) = true := by
   rw [dbCompileOther]
-  rcases hr : dbCompileRange bi e (dbCompile bi.multiplicity) with _ | item
+  rcases hr : dbCompileRange bi e bi.multiplicity with _ | item
   · dsimp only
-    rcases hb : dbCompileByte e (dbCompile bi.multiplicity) with _ | item2
+    rcases hb : dbCompileByte e bi.multiplicity with _ | item2
     · exact dbFallback_ok facts bi denv regs hagree hob
     · exact dbCompileByte_ok facts bi e hpre denv regs hagree hob item2 hb
   · exact dbCompileRange_ok facts bi e hpre denv regs hagree hob item hr
 
-theorem dbCompileBi_ok [Fact p.Prime] [NeZero p] (facts : BusFacts p bs)
+theorem dbCompileBi_ok [Fact p.Prime] [NeZero p] (facts : BusFacts p bs) (bc : DbBusCache p)
     (bi : BusInteraction (DenseExpr p)) (e : DbBiPre p) (hpre : DbBiPreOf facts bi e)
     (denv : VarId → ZMod p) (regs : Array ℕ) (hagree : DbRegsAgree denv regs (denseBIVars bi))
     (hob : (denseBIEval bi denv).multiplicity ≠ 0 → bs.accepts (denseBIEval bi denv)) :
-    dbItemOk facts regs (dbCompileBi facts bi e) = true := by
+    dbItemOk facts regs (dbCompileBi facts bc bi e) = true := by
   obtain ⟨_, _, _, hvrf, htuf, _⟩ := hpre
-  have hmv : dbEval p regs (dbCompile bi.multiplicity) = (bi.multiplicity.eval denv).val :=
-    dbEval_dbCompile denv regs bi.multiplicity (dbRegsAgree_mult denv regs bi hagree)
+  have hmv : dbEval p regs (bi.multiplicity) = (bi.multiplicity.eval denv).val :=
+    dbEval_eval denv regs bi.multiplicity (dbRegsAgree_mult denv regs bi hagree)
   rw [dbCompileBi]
-  by_cases hok : denseBiAlwaysOk facts bi
+  by_cases hok : dbBiAlwaysOk facts bc bi
   · rw [if_pos hok]; rfl
   · rw [if_neg hok]
     dsimp only
@@ -754,10 +1077,10 @@ theorem dbCompileBi_ok [Fact p.Prime] [NeZero p] (facts : BusFacts p bs)
     · next x width heq =>
       have hx : x ∈ bi.payload := by rw [heq]; simp
       have hw : width ∈ bi.payload := by rw [heq]; simp
-      have ex : dbEval p regs (dbCompile x) = (x.eval denv).val :=
-        dbEval_dbCompile denv regs x (dbRegsAgree_payload denv regs bi hagree x hx)
-      have ew : dbEval p regs (dbCompile width) = (width.eval denv).val :=
-        dbEval_dbCompile denv regs width (dbRegsAgree_payload denv regs bi hagree width hw)
+      have ex : dbEval p regs (x) = (x.eval denv).val :=
+        dbEval_eval denv regs x (dbRegsAgree_payload denv regs bi hagree x hx)
+      have ew : dbEval p regs (width) = (width.eval denv).val :=
+        dbEval_eval denv regs width (dbRegsAgree_payload denv regs bi hagree width hw)
       have hmsg : denseBIEval bi denv =
           ⟨bi.busId, bi.multiplicity.eval denv, [x.eval denv, width.eval denv]⟩ := by
         rw [denseBIEval_mk, heq]; rfl
@@ -950,38 +1273,34 @@ theorem dbAbsorbArgs_preserve (denv : VarId → ZMod p) (keys regs vals : Array 
   exact hag j hj (h2 j hal)
 
 /-- Once the mask is good, the rest of the sweep keeps it good. -/
-theorem dbScanLoop_preserve {bs : BusSemantics p} (facts : BusFacts p bs) (items : Array DbItem)
-    (keys : Array ℕ) (doms : Array DbDom) (denv : VarId → ZMod p) :
-    ∀ (d i n : ℕ) (regs vals : Array ℕ) (alive : Array Bool) (live : ℕ) (started : Bool),
+theorem dbScanLoop_preserve {bs : BusSemantics p} (facts : BusFacts p bs)
+    (items : Array (DbItem p)) (ilev : Array ℕ) (keys : Array ℕ) (doms : Array DbDom)
+    (denv : VarId → ZMod p) :
+    ∀ (d key : ℕ) (dom : DbDom) (i n : ℕ) (regs vals : Array ℕ) (alive : Array Bool) (live : ℕ)
+      (started : Bool),
       DbScanGood denv keys ⟨regs, vals, alive, live, started⟩ →
       DbScanGood denv keys
-        (dbScanLoop facts items keys doms d i n regs vals alive live started) := by
-  intro d i n regs vals alive live started
-  induction d, i, n, regs, vals, alive, live, started using
-    dbScanLoop.induct facts items keys doms with
-  | case1 d i n regs vals alive live started hge =>
+        (dbScanLoop facts items ilev keys doms d key dom i n regs vals alive live started) := by
+  intro d key dom i n regs vals alive live started
+  induction d, key, dom, i, n, regs, vals, alive, live, started using
+    dbScanLoop.induct facts items ilev keys doms with
+  | case1 d key dom i n regs vals alive live started hge =>
     intro hg; rw [dbScanLoop, if_pos hge]; exact hg
-  | case2 d i n regs vals alive live started hlt hdead =>
+  | case2 d key dom i n regs vals alive live started hlt hdead =>
     intro hg; rw [dbScanLoop, if_neg hlt, if_pos hdead]; exact hg
-  | case3 d i n regs vals alive live started hlt halive regs1 hinner hok vals1 alive1 live1
-      started1 habs ih =>
+  | case3 d key dom i n regs vals alive live started hlt halive regs1 hok hinner vals1 alive1
+      live1 started1 habs ih =>
     intro hg
     obtain ⟨hst, hlive⟩ := hg
     have hst' : started = true := hst
     subst hst'
     have hne : ¬ live = 0 := fun h0 => halive (by simp [h0])
     have hagree : DbMaskAgree denv keys ⟨regs, vals, alive, live, true⟩ := hlive.resolve_left hne
-    have hok' : dbAllOk facts items
-        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i)) 0 = true := hok
-    have habs' : dbAbsorbArgs keys
-        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i))
+    have habs' : dbAbsorbArgs keys (regs.set! key (DbDom.at p dom i))
         vals alive live true = (vals1, alive1, live1, started1) := habs
-    rw [dbScanLoop, if_neg hlt, if_neg halive]
-    simp only [if_pos hinner]
-    rw [if_pos hok', habs']
+    rw [dbScanLoop, if_neg hlt, if_neg halive, if_pos hok, if_pos hinner, habs']
     refine ih ⟨?_, Or.inr ?_⟩
-    · have hst4 : (dbAbsorbArgs keys
-          (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i))
+    · have hst4 : (dbAbsorbArgs keys (regs.set! key (DbDom.at p dom i))
           vals alive live true).2.2.2 = started1 := congrArg (fun r => r.2.2.2) habs'
       rw [dbAbsorbArgs_true] at hst4
       exact hst4.symm
@@ -992,28 +1311,24 @@ theorem dbScanLoop_preserve {bs : BusSemantics p} (facts : BusFacts p bs) (items
       rw [show (dbAbsorbArgs keys regs1 vals alive live true).2.1 = alive1 from
         congrArg (fun r => r.2.1) habs]
       exact hj2
-  | case4 d i n regs vals alive live started hlt halive regs1 hinner hok ih =>
+  | case4 d key dom i n regs vals alive live started hlt halive regs1 hok hinner dom' regs2 vals1
+      alive1 live1 started1 hrec ihinner ih =>
     intro hg
-    have hok' : ¬ dbAllOk facts items
-        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i)) 0 = true := hok
-    rw [dbScanLoop, if_neg hlt, if_neg halive]
-    simp only [if_pos hinner]
-    rw [if_neg hok']
-    exact ih hg
-  | case5 d i n regs vals alive live started hlt halive regs1 hinner regs2 vals1 alive1 live1
-      started1 hrec ihinner ih =>
-    intro hg
-    have hrec' : dbScanLoop facts items keys doms (d + 1) 0
-        (doms.getD (d + 1) (DbDom.range 0)).size
-        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i))
-        vals alive live started = ⟨regs2, vals1, alive1, live1, started1⟩ := hrec
-    rw [dbScanLoop, if_neg hlt, if_neg halive]
-    simp only [if_neg hinner]
+    have hrec' : dbScanLoop facts items ilev keys doms (d + 1) (keys.getD (d + 1) 0)
+        (doms.getD (d + 1) (DbDom.range 0)) 0 (doms.getD (d + 1) (DbDom.range 0)).size
+        (regs.set! key (DbDom.at p dom i)) vals alive live started
+        = ⟨regs2, vals1, alive1, live1, started1⟩ := hrec
+    rw [dbScanLoop, if_neg hlt, if_neg halive, if_pos hok, if_neg hinner]
+    simp only
     rw [hrec']
     refine ih ?_
     have := ihinner hg
-    rw [hrec] at this
+    rw [hrec'] at this
     exact this
+  | case5 d key dom i n regs vals alive live started hlt halive regs1 hok ih =>
+    intro hg
+    rw [dbScanLoop, if_neg hlt, if_neg halive, if_neg hok]
+    exact ih hg
 
 theorem dbSetD_self (regs : Array ℕ) (k v : ℕ) (hk : k < regs.size) :
     (regs.set! k v).getD k 0 = v := by
@@ -1029,124 +1344,117 @@ theorem dbSetD_ne {α : Type} (a : Array α) (k k' : ℕ) (v dflt : α) (h : k' 
     Array.getElem?_setIfInBounds_ne (Ne.symm h)]
 
 /-- The sweep at dimension `d` writes only the keys from `d` on. -/
-theorem dbScanLoop_regs {bs : BusSemantics p} (facts : BusFacts p bs) (items : Array DbItem)
-    (keys : Array ℕ) (doms : Array DbDom) (k : ℕ) :
-    ∀ (d i n : ℕ) (regs vals : Array ℕ) (alive : Array Bool) (live : ℕ) (started : Bool),
-      d < keys.size → (∀ d', d ≤ d' → d' < keys.size → keys.getD d' 0 ≠ k) →
-      (dbScanLoop facts items keys doms d i n regs vals alive live started).regs.getD k 0
-        = regs.getD k 0 := by
-  intro d i n regs vals alive live started
-  induction d, i, n, regs, vals, alive, live, started using
-    dbScanLoop.induct facts items keys doms with
-  | case1 d i n regs vals alive live started hge =>
-    intro _ _; rw [dbScanLoop, if_pos hge]
-  | case2 d i n regs vals alive live started hlt hdead =>
-    intro _ _; rw [dbScanLoop, if_neg hlt, if_pos hdead]
-  | case3 d i n regs vals alive live started hlt halive regs1 hinner hok vals1 alive1 live1
-      started1 habs ih =>
-    intro hd hfp
-    have hok' : dbAllOk facts items
-        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i)) 0 = true := hok
-    have habs' : dbAbsorbArgs keys
-        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i))
+theorem dbScanLoop_regs {bs : BusSemantics p} (facts : BusFacts p bs) (items : Array (DbItem p))
+    (ilev : Array ℕ) (keys : Array ℕ) (doms : Array DbDom) (k : ℕ) :
+    ∀ (d key : ℕ) (dom : DbDom) (i n : ℕ) (regs vals : Array ℕ) (alive : Array Bool) (live : ℕ)
+      (started : Bool),
+      key = keys.getD d 0 → d < keys.size →
+      (∀ d', d ≤ d' → d' < keys.size → keys.getD d' 0 ≠ k) →
+      (dbScanLoop facts items ilev keys doms d key dom i n regs vals alive live
+        started).regs.getD k 0 = regs.getD k 0 := by
+  intro d key dom i n regs vals alive live started
+  induction d, key, dom, i, n, regs, vals, alive, live, started using
+    dbScanLoop.induct facts items ilev keys doms with
+  | case1 d key dom i n regs vals alive live started hge =>
+    intro _ _ _; rw [dbScanLoop, if_pos hge]
+  | case2 d key dom i n regs vals alive live started hlt hdead =>
+    intro _ _ _; rw [dbScanLoop, if_neg hlt, if_pos hdead]
+  | case3 d key dom i n regs vals alive live started hlt halive regs1 hok hinner vals1 alive1
+      live1 started1 habs ih =>
+    intro hkey hd hfp
+    subst hkey
+    have habs' : dbAbsorbArgs keys (regs.set! (keys.getD d 0) (DbDom.at p dom i))
         vals alive live started = (vals1, alive1, live1, started1) := habs
-    rw [dbScanLoop, if_neg hlt, if_neg halive]
-    simp only [if_pos hinner]
-    rw [if_pos hok', habs', ih hd hfp]
+    rw [dbScanLoop, if_neg hlt, if_neg halive, if_pos hok, if_pos hinner, habs', ih rfl hd hfp]
     exact dbSetD_ne regs _ k _ 0 (fun he => hfp d (le_refl d) hd he.symm)
-  | case4 d i n regs vals alive live started hlt halive regs1 hinner hok ih =>
-    intro hd hfp
-    have hok' : ¬ dbAllOk facts items
-        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i)) 0 = true := hok
-    rw [dbScanLoop, if_neg hlt, if_neg halive]
-    simp only [if_pos hinner]
-    rw [if_neg hok', ih hd hfp]
-    exact dbSetD_ne regs _ k _ 0 (fun he => hfp d (le_refl d) hd he.symm)
-  | case5 d i n regs vals alive live started hlt halive regs1 hinner regs2 vals1 alive1 live1
-      started1 hrec ihinner ih =>
-    intro hd hfp
-    have hrec' : dbScanLoop facts items keys doms (d + 1) 0
-        (doms.getD (d + 1) (DbDom.range 0)).size
-        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i))
-        vals alive live started = ⟨regs2, vals1, alive1, live1, started1⟩ := hrec
-    rw [dbScanLoop, if_neg hlt, if_neg halive]
-    simp only [if_neg hinner]
-    rw [hrec', ih hd hfp]
-    have hin := ihinner (by omega) (fun d' hd' hlt' => hfp d' (by omega) hlt')
+  | case4 d key dom i n regs vals alive live started hlt halive regs1 hok hinner dom' regs2 vals1
+      alive1 live1 started1 hrec ihinner ih =>
+    intro hkey hd hfp
+    subst hkey
+    have hrec' : dbScanLoop facts items ilev keys doms (d + 1) (keys.getD (d + 1) 0)
+        (doms.getD (d + 1) (DbDom.range 0)) 0 (doms.getD (d + 1) (DbDom.range 0)).size
+        (regs.set! (keys.getD d 0) (DbDom.at p dom i)) vals alive live started
+        = ⟨regs2, vals1, alive1, live1, started1⟩ := hrec
+    rw [dbScanLoop, if_neg hlt, if_neg halive, if_pos hok, if_neg hinner]
+    simp only
+    rw [hrec', ih rfl hd hfp]
+    have hin := ihinner rfl (by omega) (fun d' hd' hlt' => hfp d' (by omega) hlt')
     rw [hrec'] at hin
     rw [hin]
     exact dbSetD_ne regs _ k _ 0 (fun he => hfp d (le_refl d) hd he.symm)
+  | case5 d key dom i n regs vals alive live started hlt halive regs1 hok ih =>
+    intro hkey hd hfp
+    subst hkey
+    rw [dbScanLoop, if_neg hlt, if_neg halive, if_neg hok, ih rfl hd hfp]
+    exact dbSetD_ne regs _ k _ 0 (fun he => hfp d (le_refl d) hd he.symm)
 
-theorem dbScanLoop_size {bs : BusSemantics p} (facts : BusFacts p bs) (items : Array DbItem)
-    (keys : Array ℕ) (doms : Array DbDom) :
-    ∀ (d i n : ℕ) (regs vals : Array ℕ) (alive : Array Bool) (live : ℕ) (started : Bool),
-      (dbScanLoop facts items keys doms d i n regs vals alive live started).regs.size
+theorem dbScanLoop_size {bs : BusSemantics p} (facts : BusFacts p bs) (items : Array (DbItem p))
+    (ilev : Array ℕ) (keys : Array ℕ) (doms : Array DbDom) :
+    ∀ (d key : ℕ) (dom : DbDom) (i n : ℕ) (regs vals : Array ℕ) (alive : Array Bool) (live : ℕ)
+      (started : Bool),
+      (dbScanLoop facts items ilev keys doms d key dom i n regs vals alive live started).regs.size
         = regs.size := by
-  intro d i n regs vals alive live started
-  induction d, i, n, regs, vals, alive, live, started using
-    dbScanLoop.induct facts items keys doms with
-  | case1 d i n regs vals alive live started hge => rw [dbScanLoop, if_pos hge]
-  | case2 d i n regs vals alive live started hlt hdead =>
+  intro d key dom i n regs vals alive live started
+  induction d, key, dom, i, n, regs, vals, alive, live, started using
+    dbScanLoop.induct facts items ilev keys doms with
+  | case1 d key dom i n regs vals alive live started hge => rw [dbScanLoop, if_pos hge]
+  | case2 d key dom i n regs vals alive live started hlt hdead =>
     rw [dbScanLoop, if_neg hlt, if_pos hdead]
-  | case3 d i n regs vals alive live started hlt halive regs1 hinner hok vals1 alive1 live1
-      started1 habs ih =>
-    have hok' : dbAllOk facts items
-        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i)) 0 = true := hok
-    have habs' : dbAbsorbArgs keys
-        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i))
+  | case3 d key dom i n regs vals alive live started hlt halive regs1 hok hinner vals1 alive1
+      live1 started1 habs ih =>
+    have habs' : dbAbsorbArgs keys (regs.set! key (DbDom.at p dom i))
         vals alive live started = (vals1, alive1, live1, started1) := habs
-    rw [dbScanLoop, if_neg hlt, if_neg halive]
-    simp only [if_pos hinner]
-    rw [if_pos hok', habs', ih, dbSet_size]
-  | case4 d i n regs vals alive live started hlt halive regs1 hinner hok ih =>
-    have hok' : ¬ dbAllOk facts items
-        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i)) 0 = true := hok
-    rw [dbScanLoop, if_neg hlt, if_neg halive]
-    simp only [if_pos hinner]
-    rw [if_neg hok', ih, dbSet_size]
-  | case5 d i n regs vals alive live started hlt halive regs1 hinner regs2 vals1 alive1 live1
-      started1 hrec ihinner ih =>
-    have hrec' : dbScanLoop facts items keys doms (d + 1) 0
-        (doms.getD (d + 1) (DbDom.range 0)).size
-        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i))
-        vals alive live started = ⟨regs2, vals1, alive1, live1, started1⟩ := hrec
-    rw [dbScanLoop, if_neg hlt, if_neg halive]
-    simp only [if_neg hinner]
+    rw [dbScanLoop, if_neg hlt, if_neg halive, if_pos hok, if_pos hinner, habs', ih, dbSet_size]
+  | case4 d key dom i n regs vals alive live started hlt halive regs1 hok hinner dom' regs2 vals1
+      alive1 live1 started1 hrec ihinner ih =>
+    have hrec' : dbScanLoop facts items ilev keys doms (d + 1) (keys.getD (d + 1) 0)
+        (doms.getD (d + 1) (DbDom.range 0)) 0 (doms.getD (d + 1) (DbDom.range 0)).size
+        (regs.set! key (DbDom.at p dom i)) vals alive live started
+        = ⟨regs2, vals1, alive1, live1, started1⟩ := hrec
+    rw [dbScanLoop, if_neg hlt, if_neg halive, if_pos hok, if_neg hinner]
+    simp only
     rw [hrec', ih]
-    have := ihinner
-    rw [hrec'] at this
-    rw [this, dbSet_size]
+    have hin := ihinner
+    rw [hrec'] at hin
+    rw [hin, dbSet_size]
+  | case5 d key dom i n regs vals alive live started hlt halive regs1 hok ih =>
+    rw [dbScanLoop, if_neg hlt, if_neg halive, if_neg hok, ih, dbSet_size]
 
-/-- The sweep reaches the assignment's own point, so the mask it ends with agrees with it (or is
-    empty, in which case the plan forces nothing). `idx` picks each key's index in its domain. -/
-theorem dbScanLoop_reach {bs : BusSemantics p} (facts : BusFacts p bs) (items : Array DbItem)
-    (keys : Array ℕ) (doms : Array DbDom) (denv : VarId → ZMod p) (idx : ℕ → ℕ)
+/-- The sweep reaches the assignment's own point, so the mask ends up agreeing with it. `hitems`
+    is level-aware: an item is tested at the depth of its innermost key, where the registers
+    already carry the assignment's values for every key up to that depth. -/
+theorem dbScanLoop_reach {bs : BusSemantics p} (facts : BusFacts p bs) (items : Array (DbItem p))
+    (ilev : Array ℕ) (keys : Array ℕ) (doms : Array DbDom) (denv : VarId → ZMod p) (idx : ℕ → ℕ)
     (hdist : ∀ a b, a < keys.size → b < keys.size → keys.getD a 0 = keys.getD b 0 → a = b)
     (hidx : ∀ d, d < keys.size → idx d < (doms.getD d (.range 0)).size ∧
       DbDom.at p (doms.getD d (.range 0)) (idx d) = (denv ⟨keys.getD d 0⟩).val)
-    (hitems : ∀ regs', DbRegsAt denv keys regs' → dbAllOk facts items regs' 0 = true) :
-    ∀ (d i n : ℕ) (regs vals : Array ℕ) (alive : Array Bool) (live : ℕ) (started : Bool),
+    (hitems : ∀ (dd : ℕ) (regs' : Array ℕ), dd < keys.size →
+      (∀ d', d' ≤ dd → regs'.getD (keys.getD d' 0) 0 = (denv ⟨keys.getD d' 0⟩).val) →
+      dbAllOkLev facts items ilev dd regs' 0 = true) :
+    ∀ (d key : ℕ) (dom : DbDom) (i n : ℕ) (regs vals : Array ℕ) (alive : Array Bool) (live : ℕ)
+      (started : Bool),
+      key = keys.getD d 0 → dom = doms.getD d (.range 0) →
       d < keys.size → n = (doms.getD d (.range 0)).size → i ≤ idx d →
       (∀ d', d' < keys.size → keys.getD d' 0 < regs.size) →
       (∀ d', d' < d → regs.getD (keys.getD d' 0) 0 = (denv ⟨keys.getD d' 0⟩).val) →
       DbScanGood denv keys
-        (dbScanLoop facts items keys doms d i n regs vals alive live started) := by
-  intro d i n regs vals alive live started
-  induction d, i, n, regs, vals, alive, live, started using
-    dbScanLoop.induct facts items keys doms with
-  | case1 d i n regs vals alive live started hge =>
-    intro hd hn hi _ _
+        (dbScanLoop facts items ilev keys doms d key dom i n regs vals alive live started) := by
+  intro d key dom i n regs vals alive live started
+  induction d, key, dom, i, n, regs, vals, alive, live, started using
+    dbScanLoop.induct facts items ilev keys doms with
+  | case1 d key dom i n regs vals alive live started hge =>
+    intro _ hdom hd hn hi _ _
+    subst hdom
     exact absurd hge (by rw [hn]; have := (hidx d hd).1; omega)
-  | case2 d i n regs vals alive live started hlt hdead =>
-    intro _ _ _ _ _
+  | case2 d key dom i n regs vals alive live started hlt hdead =>
+    intro _ _ _ _ _ _ _
     rw [dbScanLoop, if_neg hlt, if_pos hdead]
     simp only [Bool.and_eq_true, beq_iff_eq] at hdead
     exact ⟨hdead.1, Or.inl hdead.2⟩
-  | case3 d i n regs vals alive live started hlt halive regs1 hinner hok vals1 alive1 live1
-      started1 habs ih =>
-    intro hd hn hi hcov houter
-    have hok' : dbAllOk facts items
-        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i)) 0 = true := hok
+  | case3 d key dom i n regs vals alive live started hlt halive regs1 hok hinner vals1 alive1
+      live1 started1 habs ih =>
+    intro hkey hdom hd hn hi hcov houter
+    subst hkey; subst hdom
     have habs' : dbAbsorbArgs keys
         (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i))
         vals alive live started = (vals1, alive1, live1, started1) := habs
@@ -1157,14 +1465,11 @@ theorem dbScanLoop_reach {bs : BusSemantics p} (facts : BusFacts p bs) (items : 
       rw [dbSetD_ne regs _ _ _ 0 (fun he => by
         have := hdist d' d (by omega) hd he; omega)]
       exact houter d' hd'
-    rw [dbScanLoop, if_neg hlt, if_neg halive]
-    simp only [if_pos hinner]
-    rw [if_pos hok', habs']
+    rw [dbScanLoop, if_neg hlt, if_neg halive, if_pos hok, if_pos hinner, habs']
     rcases Nat.lt_or_ge i (idx d) with hlti | hgei
-    · exact ih hd hn (by omega) (fun d' hd' => by rw [dbSet_size]; exact hcov d' hd')
+    · exact ih rfl rfl hd hn (by omega) (fun d' hd' => by rw [dbSet_size]; exact hcov d' hd')
         (fun d' hd' => hset d' hd')
-    · -- this is the assignment's own point: the mask now agrees, and stays agreeing
-      have hieq : i = idx d := by omega
+    · have hieq : i = idx d := by omega
       have hregsAt : DbRegsAt denv keys
           (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i)) := by
         intro d0 hd0
@@ -1174,7 +1479,7 @@ theorem dbScanLoop_reach {bs : BusSemantics p} (facts : BusFacts p bs) (items : 
           rw [dbSetD_self regs _ _ (hcov d0 hd0), hieq]
           exact (hidx d0 hd0).2
         · omega
-      refine dbScanLoop_preserve facts items keys doms denv _ _ _ _ _ _ _ _ ⟨?_, Or.inr ?_⟩
+      refine dbScanLoop_preserve facts items ilev keys doms denv _ _ _ _ _ _ _ _ _ _ ⟨?_, Or.inr ?_⟩
       · have hst4 : (dbAbsorbArgs keys
             (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i))
             vals alive live started).2.2.2 = started1 := congrArg (fun r => r.2.2.2) habs'
@@ -1190,38 +1495,12 @@ theorem dbScanLoop_reach {bs : BusSemantics p} (facts : BusFacts p bs) (items : 
           (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i))
           vals alive live started).2.1 = alive1 from congrArg (fun r => r.2.1) habs']
         exact hj2
-  | case4 d i n regs vals alive live started hlt halive regs1 hinner hok ih =>
-    intro hd hn hi hcov houter
-    have hok' : ¬ dbAllOk facts items
-        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i)) 0 = true := hok
-    have hset : ∀ d', d' < d →
-        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i)).getD
-          (keys.getD d' 0) 0 = (denv ⟨keys.getD d' 0⟩).val := by
-      intro d' hd'
-      rw [dbSetD_ne regs _ _ _ 0 (fun he => by
-        have := hdist d' d (by omega) hd he; omega)]
-      exact houter d' hd'
-    rw [dbScanLoop, if_neg hlt, if_neg halive]
-    simp only [if_pos hinner]
-    rw [if_neg hok']
-    rcases Nat.lt_or_ge i (idx d) with hlti | hgei
-    · exact ih hd hn (by omega) (fun d' hd' => by rw [dbSet_size]; exact hcov d' hd')
-        (fun d' hd' => hset d' hd')
-    · -- the assignment's own point cannot fail
-      exfalso
-      refine hok' (hitems _ ?_)
-      intro d0 hd0
-      rcases Nat.lt_trichotomy d0 d with h | h | h
-      · exact hset d0 h
-      · subst h
-        rw [dbSetD_self regs _ _ (hcov d0 hd0), show i = idx d0 from by omega]
-        exact (hidx d0 hd0).2
-      · omega
-  | case5 d i n regs vals alive live started hlt halive regs1 hinner regs2 vals1 alive1 live1
-      started1 hrec ihinner ih =>
-    intro hd hn hi hcov houter
-    have hrec' : dbScanLoop facts items keys doms (d + 1) 0
-        (doms.getD (d + 1) (DbDom.range 0)).size
+  | case4 d key dom i n regs vals alive live started hlt halive regs1 hok hinner dom' regs2 vals1
+      alive1 live1 started1 hrec ihinner ih =>
+    intro hkey hdom hd hn hi hcov houter
+    subst hkey; subst hdom
+    have hrec' : dbScanLoop facts items ilev keys doms (d + 1) (keys.getD (d + 1) 0)
+        (doms.getD (d + 1) (DbDom.range 0)) 0 (doms.getD (d + 1) (DbDom.range 0)).size
         (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i))
         vals alive live started = ⟨regs2, vals1, alive1, live1, started1⟩ := hrec
     have hd1 : d + 1 < keys.size := by omega
@@ -1232,31 +1511,30 @@ theorem dbScanLoop_reach {bs : BusSemantics p} (facts : BusFacts p bs) (items : 
       rw [dbSetD_ne regs _ _ _ 0 (fun he => by
         have := hdist d' d (by omega) hd he; omega)]
       exact houter d' hd'
-    rw [dbScanLoop, if_neg hlt, if_neg halive]
-    simp only [if_neg hinner]
+    rw [dbScanLoop, if_neg hlt, if_neg halive, if_pos hok, if_neg hinner]
+    simp only
     rw [hrec']
     rcases Nat.lt_or_ge i (idx d) with hlti | hgei
-    · -- not yet the right index at this dimension: keep sweeping, restoring the outer agreement
-      refine ih hd hn (by omega) (fun d' hd' => by
-        have hsz := dbScanLoop_size facts items keys doms (d + 1) 0
-          (doms.getD (d + 1) (DbDom.range 0)).size
+    · refine ih rfl rfl hd hn (by omega) (fun d' hd' => by
+        have hsz := dbScanLoop_size facts items ilev keys doms (d + 1) (keys.getD (d + 1) 0)
+          (doms.getD (d + 1) (DbDom.range 0)) 0 (doms.getD (d + 1) (DbDom.range 0)).size
           (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i))
           vals alive live started
         rw [hrec'] at hsz
         rw [show regs2.size = regs.size from by rw [hsz, dbSet_size]]
         exact hcov d' hd') (fun d' hd' => ?_)
-      have hfoot := dbScanLoop_regs facts items keys doms (keys.getD d' 0) (d + 1) 0
+      have hfoot := dbScanLoop_regs facts items ilev keys doms (keys.getD d' 0) (d + 1)
+        (keys.getD (d + 1) 0) (doms.getD (d + 1) (DbDom.range 0)) 0
         (doms.getD (d + 1) (DbDom.range 0)).size
         (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i))
-        vals alive live started hd1
-        (fun e he hes hkey => by have := hdist d' e (by omega) hes hkey.symm; omega)
+        vals alive live started rfl hd1
+        (fun e he hes hkey' => by have := hdist d' e (by omega) hes hkey'.symm; omega)
       rw [hrec'] at hfoot
       rw [hfoot]
       exact hset d' hd'
-    · -- the right index here: the inner sweep reaches the point, then the rest preserves it
-      have hieq : i = idx d := by omega
-      refine dbScanLoop_preserve facts items keys doms denv _ _ _ _ _ _ _ _ ?_
-      have := ihinner hd1 rfl (Nat.zero_le _)
+    · have hieq : i = idx d := by omega
+      refine dbScanLoop_preserve facts items ilev keys doms denv _ _ _ _ _ _ _ _ _ _ ?_
+      have := ihinner rfl rfl hd1 rfl (Nat.zero_le _)
         (fun d' hd' => by rw [dbSet_size]; exact hcov d' hd') (fun d' hd' => by
         rcases Nat.lt_trichotomy d' d with h | h | h
         · exact hset d' h
@@ -1266,6 +1544,30 @@ theorem dbScanLoop_reach {bs : BusSemantics p} (facts : BusFacts p bs) (items : 
         · omega)
       rw [hrec'] at this
       exact this
+  | case5 d key dom i n regs vals alive live started hlt halive regs1 hok ih =>
+    intro hkey hdom hd hn hi hcov houter
+    subst hkey; subst hdom
+    have hset : ∀ d', d' < d →
+        (regs.set! (keys.getD d 0) (DbDom.at p (doms.getD d (DbDom.range 0)) i)).getD
+          (keys.getD d' 0) 0 = (denv ⟨keys.getD d' 0⟩).val := by
+      intro d' hd'
+      rw [dbSetD_ne regs _ _ _ 0 (fun he => by
+        have := hdist d' d (by omega) hd he; omega)]
+      exact houter d' hd'
+    rw [dbScanLoop, if_neg hlt, if_neg halive, if_neg hok]
+    rcases Nat.lt_or_ge i (idx d) with hlti | hgei
+    · exact ih rfl rfl hd hn (by omega) (fun d' hd' => by rw [dbSet_size]; exact hcov d' hd')
+        (fun d' hd' => hset d' hd')
+    · -- the assignment's own point cannot fail the level-`d` items
+      exfalso
+      refine hok (hitems d _ hd ?_)
+      intro d0 hd0
+      rcases Nat.lt_or_ge d0 d with h | h
+      · exact hset d0 h
+      · have hd0d : d0 = d := by omega
+        subst hd0d
+        rw [dbSetD_self regs _ _ (hcov d0 hd), show i = idx d0 from by omega]
+        exact (hidx d0 hd).2
 
 /-! ## 5. Assembling the invocation
 
@@ -1281,10 +1583,6 @@ def DbRegsAgreeA (denv : VarId → ZMod p) (regs : Array ℕ) (vs : Array VarId)
 /-- A target's keys are pairwise distinct, so the sweep's dimensions write disjoint registers. -/
 def DbNodupIdx (vs : Array VarId) : Prop :=
   ∀ a b, a < vs.size → b < vs.size → (vs.getD a ⟨0⟩).index = (vs.getD b ⟨0⟩).index → a = b
-
-theorem dbGetD_lt {α : Type u} (vs : Array α) (k : ℕ) (dflt : α) (h : k < vs.size) :
-    vs.getD k dflt = vs[k] := by
-  rw [Array.getD_eq_getD_getElem?, Array.getElem?_eq_getElem h]; rfl
 
 private theorem dbListFoldlInv {α : Type u} {β : Type v} (P : β → Prop) (f : β → α → β) :
     ∀ (l : List α), (∀ b a, a ∈ l → P b → P (f b a)) → ∀ b0, P b0 → P (l.foldl f b0) := by
@@ -1509,17 +1807,6 @@ theorem dbForcedOfMask_sound [NeZero p] (denv : VarId → ZMod p) (keys : Array 
     · rw [if_neg hal] at hf
       exact ih (i + 1) (by omega) f hf
 
-theorem dbAllOk_of_forall {bs : BusSemantics p} (facts : BusFacts p bs) (items : Array DbItem)
-    (regs : Array ℕ) (h : ∀ item ∈ items, dbItemOk facts regs item = true) :
-    ∀ i, dbAllOk facts items regs i = true := by
-  intro i
-  induction hn : items.size - i generalizing i with
-  | zero => rw [dbAllOk, dif_neg (by omega)]
-  | succ n ih =>
-    have hlt : i < items.size := by omega
-    rw [dbAllOk, dif_pos hlt, if_pos (h items[i] (Array.getElem_mem hlt))]
-    exact ih (i + 1) (by omega)
-
 /-! ### The per-item variable lists
 
 `dbVarsOf` collects a superset of `DenseExpr.vars` without duplicates: the first gives agreement on
@@ -1727,21 +2014,14 @@ theorem dbGetD_map {α : Type u} {β : Type v} (as : Array α) (f : α → β) (
       Array.getElem?_eq_none (by simpa using h)]
     rfl
 
-theorem dbGetD_map_zipIdx {α : Type u} {β : Type v} (as : Array α) (f : α × ℕ → β) (pos : ℕ) (dflt : β) :
-    ((as.zipIdx).map f).getD pos dflt = if h : pos < as.size then f (as[pos], pos) else dflt := by
-  rw [dbGetD_map]
-  simp only [Array.size_zipIdx]
-  split
-  · rw [Array.getElem_zipIdx, Nat.zero_add]
-  · rfl
-
 /-- The cache resolves each fact about the interaction it was built from. -/
-theorem dbPreOne_preOf {bs : BusSemantics p} (facts : BusFacts p bs)
-    (bi : BusInteraction (DenseExpr p)) (vars : Array VarId) :
-    DbBiPreOf facts bi (dbPreOne facts bi vars) := by
+theorem dbPreOne_preOf {bs : BusSemantics p} (facts : BusFacts p bs) (bc : DbBusCache p)
+    (bi : BusInteraction (DenseExpr p)) (hbc : DbBusCacheOk facts bc bi.busId)
+    (vars : Array VarId) :
+    DbBiPreOf facts bi (dbPreOne facts bc bi vars) := by
   refine ⟨rfl, rfl, ?_, ?_, ?_, ?_⟩
   · intro b hb
-    simp only [dbPreOne] at hb
+    simp only [dbPreOne, hbc.byteSpec] at hb
     split at hb
     · rcases hspec : facts.byteXorSpec bi.busId with _ | spec
       · rw [hspec] at hb; simp at hb
@@ -1755,52 +2035,173 @@ theorem dbPreOne_preOf {bs : BusSemantics p} (facts : BusFacts p bs)
           exact ⟨hspec, t.1, hdec, rfl⟩
     · simp at hb
   · intro h
-    simp only [dbPreOne, Bool.and_eq_true] at h
+    simp only [dbPreOne, hbc.varRange, Bool.and_eq_true] at h
     exact h.2
   · intro t ht
-    simp only [dbPreOne] at ht
+    simp only [dbPreOne, hbc.tuple] at ht
     split_ifs at ht
     exact ht
   · intro t ht
     simp only [dbPreOne] at ht
     split_ifs at ht <;> exact ht
 
-theorem dbCsItemsOf_ok [NeZero p] {bs : BusSemantics p} (facts : BusFacts p bs) (T : DbTab p)
-    (cs : Array (DenseExpr p)) (csVars : Array (Array VarId)) (denv : VarId → ZMod p)
-    (hcs : ∀ c ∈ cs, c.eval denv = 0)
-    (hvars : ∀ k, ∀ hk : k < cs.size, csVars.getD k #[] = dbVarsOf cs[k] #[]) :
-    ∀ (pos : ℕ) (regs : Array ℕ), DbRegsAgreeA denv regs (csVars.getD pos #[]) →
-      dbItemOk facts regs ((dbCsItemsOf T cs csVars).getD pos DbItem.always) = true := by
-  intro pos regs hagree
-  simp only [dbCsItemsOf, dbGetD_map_zipIdx]
-  split
-  · next hpos =>
-    split
-    · rw [hvars pos hpos] at hagree
-      show (dbEval p regs (dbCompile cs[pos]) == 0) = true
-      rw [dbEval_dbCompile_zero denv regs cs[pos] (dbVarsOf_agree denv regs cs[pos] hagree)]
-      exact decide_eq_true (hcs cs[pos] (Array.getElem_mem hpos))
-    · rfl
-  · rfl
+/-- The `k`-th entry of a phase that pushes one element per step. -/
+theorem dbPushGetD {α : Type u} (out : Array α) (x : α) (k : ℕ) (dflt : α) (h : k < out.size) :
+    (out.push x).getD k dflt = out.getD k dflt := by
+  rw [dbGetD_lt _ _ _ (by rw [Array.size_push]; omega), dbGetD_lt _ _ _ h,
+    Array.getElem_push_lt h]
 
-theorem dbBiItemsOf_ok [Fact p.Prime] [NeZero p] {bs : BusSemantics p} (facts : BusFacts p bs)
-    (T : DbTab p) (bis : Array (BusInteraction (DenseExpr p))) (pre : Array (DbBiPre p))
-    (biVars : Array (Array VarId)) (denv : VarId → ZMod p)
+theorem dbPushGetD_at {α : Type u} (out : Array α) (x : α) (k : ℕ) (dflt : α) (hk : k = out.size) :
+    (out.push x).getD k dflt = x := by
+  subst hk
+  rw [dbGetD_lt _ _ _ (by rw [Array.size_push]; omega), Array.getElem_push_eq]
+
+/-- Each phase pushes one element per step, so its output has one entry per input. -/
+theorem dbCsPhase_size {bs : BusSemantics p} (facts : BusFacts p bs) (T : DbTab p)
+    (cs : Array (DenseExpr p)) (csVars : Array (Array VarId)) :
+    ∀ (k : ℕ) (st : Array ℕ × Array (DbItem p) × Array Bool), st.2.1.size = k → k ≤ cs.size →
+      (dbCsPhase facts T cs csVars k st).2.1.size = cs.size := by
+  intro k
+  induction hn : cs.size - k generalizing k with
+  | zero => intro st hsz hk; rw [dbCsPhase, dif_neg (by omega)]; omega
+  | succ n ih =>
+    intro st hsz hk
+    have hlt : k < cs.size := by omega
+    rw [dbCsPhase, dif_pos hlt]
+    obtain ⟨regs, items, act⟩ := st
+    dsimp only at hsz
+    exact ih (k + 1) (by omega) _ (by simp [hsz]) (by omega)
+
+theorem dbBiItemPhase_size {bs : BusSemantics p} (facts : BusFacts p bs) (bc : DbBusCache p)
+    (T : DbTab p) (bis : Array (BusInteraction (DenseExpr p))) (pre : Array (DbBiPre p)) :
+    ∀ (k : ℕ) (st : Array (DbItem p) × Array Bool), st.1.size = k → k ≤ bis.size →
+      (dbBiItemPhase facts bc T bis pre k st).1.size = bis.size := by
+  intro k
+  induction hn : bis.size - k generalizing k with
+  | zero => intro st hsz hk; rw [dbBiItemPhase, dif_neg (by omega)]; omega
+  | succ n ih =>
+    intro st hsz hk
+    have hlt : k < bis.size := by omega
+    rw [dbBiItemPhase, dif_pos hlt]
+    obtain ⟨items, dred⟩ := st
+    dsimp only at hsz
+    exact ih (k + 1) (by omega) _ (by simp [hsz]) (by omega)
+
+theorem dbPrePhase_size {bs : BusSemantics p} (facts : BusFacts p bs) (bc : DbBusCache p)
+    (bis : Array (BusInteraction (DenseExpr p))) (biVars : Array (Array VarId)) :
+    ∀ (k : ℕ) (out : Array (DbBiPre p)), out.size = k → k ≤ bis.size →
+      (dbPrePhase facts bc bis biVars k out).size = bis.size := by
+  intro k
+  induction hn : bis.size - k generalizing k with
+  | zero => intro out hsz hk; rw [dbPrePhase, dif_neg (by omega)]; omega
+  | succ n ih =>
+    intro out hsz hk
+    have hlt : k < bis.size := by omega
+    rw [dbPrePhase, dif_pos hlt]
+    exact ih (k + 1) (by omega) _ (by simp [hsz]) (by omega)
+
+/-- Every entry of the pre-pass resolves its interaction's facts. -/
+theorem dbPrePhase_preOf {bs : BusSemantics p} (facts : BusFacts p bs) (bc : DbBusCache p)
+    (bis : Array (BusInteraction (DenseExpr p))) (biVars : Array (Array VarId))
+    (hbc : ∀ m, ∀ hm : m < bis.size, DbBusCacheOk facts bc bis[m].busId) :
+    ∀ (k : ℕ) (out : Array (DbBiPre p)), out.size = k → k ≤ bis.size →
+      (∀ pos, pos < k → ∀ h : pos < bis.size,
+        DbBiPreOf facts bis[pos] (out.getD pos dbBiPreEmpty)) →
+      ∀ pos, ∀ h : pos < bis.size,
+        DbBiPreOf facts bis[pos] ((dbPrePhase facts bc bis biVars k out).getD pos dbBiPreEmpty) := by
+  intro k
+  induction hn : bis.size - k generalizing k with
+  | zero =>
+    intro out hsz hk hinv pos hpos
+    rw [dbPrePhase, dif_neg (by omega)]
+    exact hinv pos (by omega) hpos
+  | succ n ih =>
+    intro out hsz hk hinv pos hpos
+    have hlt : k < bis.size := by omega
+    rw [dbPrePhase, dif_pos hlt]
+    refine ih (k + 1) (by omega) _ (by simp [hsz]) (by omega) (fun pos' hpos' h' => ?_) pos hpos
+    rcases Nat.lt_or_ge pos' k with hlt' | hge'
+    · rw [dbPushGetD _ _ _ _ (by omega)]
+      exact hinv pos' hlt' h'
+    · rw [dbPushGetD_at out _ pos' _ (by omega)]
+      have hpk : pos' = k := by omega
+      subst hpk
+      exact dbPreOne_preOf facts bc bis[pos'] (hbc pos' h') _
+
+/-- The constraint phase's programs are the constraints themselves, so a gathered one holds. -/
+theorem dbCsPhase_items [NeZero p] {bs : BusSemantics p} (facts : BusFacts p bs) (T : DbTab p)
+    (cs : Array (DenseExpr p)) (csVars : Array (Array VarId)) :
+    ∀ (k : ℕ) (st : Array ℕ × Array (DbItem p) × Array Bool),
+      st.2.1.size = k → k ≤ cs.size →
+      (∀ pos, pos < k → ∀ (h : pos < cs.size),
+        st.2.1.getD pos DbItem.always = DbItem.zero cs[pos] ∨
+          st.2.1.getD pos DbItem.always = DbItem.always) →
+      ∀ pos, ∀ h : pos < cs.size,
+        (dbCsPhase facts T cs csVars k st).2.1.getD pos DbItem.always = DbItem.zero cs[pos] ∨
+          (dbCsPhase facts T cs csVars k st).2.1.getD pos DbItem.always = DbItem.always := by
+  intro k
+  induction hn : cs.size - k generalizing k with
+  | zero =>
+    intro st hsz hk hinv pos hpos
+    rw [dbCsPhase, dif_neg (by omega)]
+    exact hinv pos (by omega) hpos
+  | succ n ih =>
+    intro st hsz hk hinv pos hpos
+    have hlt : k < cs.size := by omega
+    rw [dbCsPhase, dif_pos hlt]
+    obtain ⟨regs, items, act⟩ := st
+    dsimp only at hsz
+    refine ih (k + 1) (by omega) _ (by simp [hsz]) (by omega) (fun pos' hpos' h' => ?_) pos hpos
+    dsimp only
+    rcases Nat.lt_or_ge pos' k with hlt' | hge'
+    · rw [dbPushGetD _ _ _ _ (by omega)]
+      exact hinv pos' hlt' h'
+    · rw [dbPushGetD_at items _ pos' _ (by omega)]
+      have hpk : pos' = k := by omega
+      subst hpk
+      split
+      · exact Or.inl rfl
+      · exact Or.inr rfl
+
+/-- The interaction phase's programs are `dbCompileBi`'s, so a gathered one holds. -/
+theorem dbBiItemPhase_ok [Fact p.Prime] [NeZero p] {bs : BusSemantics p} (facts : BusFacts p bs)
+    (bc : DbBusCache p) (T : DbTab p) (bis : Array (BusInteraction (DenseExpr p)))
+    (pre : Array (DbBiPre p)) (denv : VarId → ZMod p)
     (hbis : ∀ bi ∈ bis, (denseBIEval bi denv).multiplicity ≠ 0 → bs.accepts (denseBIEval bi denv))
-    (hpre : ∀ k, ∀ hk : k < bis.size, DbBiPreOf facts bis[k] (pre.getD k dbBiPreEmpty))
-    (hvars : ∀ k, ∀ hk : k < bis.size, biVars.getD k #[] = dbBiVars bis[k]) :
-    ∀ (pos : ℕ) (regs : Array ℕ), DbRegsAgreeA denv regs (biVars.getD pos #[]) →
-      dbItemOk facts regs ((dbBiItemsOf facts T bis pre).getD pos DbItem.always) = true := by
-  intro pos regs hagree
-  simp only [dbBiItemsOf, dbGetD_map_zipIdx]
-  split
-  · next hpos =>
-    split
-    · rw [hvars pos hpos] at hagree
-      exact dbCompileBi_ok facts bis[pos] _ (hpre pos hpos) denv regs
-        (dbBiVars_agree denv regs bis[pos] hagree) (hbis bis[pos] (Array.getElem_mem hpos))
-    · rfl
-  · rfl
+    (hpre : ∀ k, ∀ hk : k < bis.size, DbBiPreOf facts bis[k] (pre.getD k dbBiPreEmpty)) :
+    ∀ (k : ℕ) (st : Array (DbItem p) × Array Bool), st.1.size = k → k ≤ bis.size →
+      (∀ pos, pos < k → ∀ (regs : Array ℕ) (hp : pos < bis.size),
+        DbRegsAgree denv regs (denseBIVars bis[pos]) →
+        dbItemOk facts regs (st.1.getD pos DbItem.always) = true) →
+      ∀ pos (regs : Array ℕ), ∀ hp : pos < bis.size,
+        DbRegsAgree denv regs (denseBIVars bis[pos]) →
+        dbItemOk facts regs
+          ((dbBiItemPhase facts bc T bis pre k st).1.getD pos DbItem.always) = true := by
+  intro k
+  induction hn : bis.size - k generalizing k with
+  | zero =>
+    intro st hsz hk hinv pos regs hp hagree
+    rw [dbBiItemPhase, dif_neg (by omega)]
+    exact hinv pos (by omega) regs hp hagree
+  | succ n ih =>
+    intro st hsz hk hinv pos regs hp hagree
+    have hlt : k < bis.size := by omega
+    rw [dbBiItemPhase, dif_pos hlt]
+    obtain ⟨items, dred⟩ := st
+    dsimp only at hsz
+    refine ih (k + 1) (by omega) _ (by simp [hsz]) (by omega)
+      (fun pos' hpos' regs' hp' hagree' => ?_) pos regs hp hagree
+    dsimp only
+    rcases Nat.lt_or_ge pos' k with hlt' | hge'
+    · rw [dbPushGetD _ _ _ _ (by omega)]
+      exact hinv pos' hlt' regs' hp' hagree'
+    · rw [dbPushGetD_at items _ pos' _ (by omega)]
+      have hpk : pos' = k := by omega
+      subst hpk
+      split
+      · exact dbCompileBi_ok facts bc bis[pos'] _ (hpre pos' hp') denv regs'
+          hagree' (hbis bis[pos'] (Array.getElem_mem hp'))
+      · rfl
 
 /-- A variable-free item's position lands in the varless bucket. -/
 theorem dbBucketsOf_varless (nv : ℕ) (vars : Array (Array VarId)) :
@@ -1890,26 +2291,107 @@ theorem dbBuildCtx_good [Fact p.Prime] [NeZero p] (bs : BusSemantics p) (facts :
   have hbis : ∀ bi ∈ d.busInteractions.toArray,
       (denseBIEval bi denv).multiplicity ≠ 0 → bs.accepts (denseBIEval bi denv) :=
     fun bi hbi => hsat.2 bi (by simpa using hbi)
-  have hprevars : ∀ k, ∀ hk : k < (d.busInteractions.toArray).size,
-      ((d.busInteractions.toArray).map dbBiVars).getD k #[] =
-        dbBiVars (d.busInteractions.toArray)[k] := fun k hk => by rw [dbGetD_map, dif_pos hk]
-  have hcsvars : ∀ k, ∀ hk : k < (d.algebraicConstraints.toArray).size,
-      ((d.algebraicConstraints.toArray).map (fun c => dbVarsOf c #[])).getD k #[] =
-        dbVarsOf (d.algebraicConstraints.toArray)[k] #[] := fun k hk => by
-    rw [dbGetD_map, dif_pos hk]
+  set cs := d.algebraicConstraints.toArray with hcsdef
+  set bis := d.busInteractions.toArray with hbisdef
+  set nb := bis.foldl (fun m b => max m (b.busId + 1)) 0 with hnb
+  have hfoldge : ∀ (l : List (BusInteraction (DenseExpr p))) (m : ℕ),
+      m ≤ l.foldl (fun m b => max m (b.busId + 1)) m := by
+    intro l
+    induction l with
+    | nil => intro m; exact le_refl _
+    | cons y r ihy => intro m; exact le_trans (le_max_left _ _) (ihy _)
+  have hfoldmem : ∀ (l : List (BusInteraction (DenseExpr p))) (m : ℕ)
+      (b : BusInteraction (DenseExpr p)), b ∈ l →
+      b.busId < l.foldl (fun m b => max m (b.busId + 1)) m := by
+    intro l
+    induction l with
+    | nil => intro m b hb; simp at hb
+    | cons x rest ih =>
+      intro m b hb
+      rcases List.mem_cons.mp hb with rfl | hrest
+      · exact lt_of_lt_of_le (by omega) (hfoldge rest (max m (b.busId + 1)))
+      · exact ih _ b hrest
+  have hnblt : ∀ k, ∀ hk : k < bis.size, bis[k].busId < nb := by
+    intro k hk
+    have hmem : bis[k] ∈ bis.toList := by simp
+    have hfold : nb = bis.toList.foldl (fun m b => max m (b.busId + 1)) 0 := by
+      rw [hnb, Array.foldl_toList]
+    rw [hfold]
+    exact hfoldmem _ 0 _ hmem
+  have hbc : ∀ k, ∀ hk : k < bis.size,
+      DbBusCacheOk facts (dbBusCacheOf facts nb) bis[k].busId :=
+    fun k hk => dbBusCacheOf_ok facts nb _ (hnblt k hk)
+  set pre := dbPrePhase facts (dbBusCacheOf facts nb) bis
+    (bis.map dbBiVars) 0 #[] with hpredef
+  have hpre : ∀ k, ∀ hk : k < bis.size, DbBiPreOf facts bis[k] (pre.getD k dbBiPreEmpty) := by
+    intro k hk
+    rw [hpredef]
+    exact dbPrePhase_preOf facts _ bis _ (fun m hm => hbc m hm) 0 #[] (by simp) (Nat.zero_le _)
+      (fun pos hpos h => absurd hpos (by omega)) k hk
+  have hcsvars : ∀ k, ∀ hk : k < cs.size,
+      (cs.map (fun c => dbVarsOf c (Array.emptyWithCapacity 4))).getD k #[]
+        = dbVarsOf cs[k] (Array.emptyWithCapacity 4) := fun k hk => by rw [dbGetD_map, dif_pos hk]
+  have hcsitem : ∀ (pos : ℕ) (regs : Array ℕ),
+      DbRegsAgreeA denv regs ((cs.map (fun c => dbVarsOf c (Array.emptyWithCapacity 4))).getD
+        pos #[]) →
+      dbItemOk facts regs ((dbBuildCtx bs facts d).csItems.getD pos DbItem.always) = true := by
+    intro pos regs hagree
+    rcases Nat.lt_or_ge pos cs.size with hpos | hpos
+    · have hshape := dbCsPhase_items facts (dbBuildCtx bs facts d).T cs
+        (cs.map (fun c => dbVarsOf c (Array.emptyWithCapacity 4))) 0
+        ⟨Array.replicate (dbBuildCtx bs facts d).nv 0, #[], #[]⟩ rfl (Nat.zero_le _)
+        (fun pos' hpos' _ => absurd hpos' (by omega)) pos hpos
+      have hitem : (dbBuildCtx bs facts d).csItems.getD pos DbItem.always
+          = DbItem.zero cs[pos] ∨
+            (dbBuildCtx bs facts d).csItems.getD pos DbItem.always = DbItem.always := by
+        simpa only [dbBuildCtx] using hshape
+      rcases hitem with h | h
+      · rw [h]
+        rw [hcsvars pos hpos] at hagree
+        show (dbEval p regs cs[pos] == 0) = true
+        rw [dbEval_zero denv regs cs[pos] (dbVarsOf_agree denv regs cs[pos] hagree)]
+        exact decide_eq_true (hcs cs[pos] (Array.getElem_mem hpos))
+      · rw [h]; rfl
+    · have hsz : (dbBuildCtx bs facts d).csItems.size = cs.size := by
+        simpa only [dbBuildCtx] using
+          dbCsPhase_size facts (dbBuildCtx bs facts d).T cs
+            (cs.map (fun c => dbVarsOf c (Array.emptyWithCapacity 4))) 0
+            ⟨Array.replicate (dbBuildCtx bs facts d).nv 0, #[], #[]⟩ rfl (Nat.zero_le _)
+      rw [Array.getD_eq_getD_getElem?, Array.getElem?_eq_none (by omega)]
+      rfl
+  have hbiitem : ∀ (pos : ℕ) (regs : Array ℕ),
+      DbRegsAgreeA denv regs ((bis.map dbBiVars).getD pos #[]) →
+      dbItemOk facts regs ((dbBuildCtx bs facts d).biItems.getD pos DbItem.always) = true := by
+    intro pos regs hagree
+    rcases Nat.lt_or_ge pos bis.size with hpos | hpos
+    · rw [dbGetD_map, dif_pos hpos] at hagree
+      have := dbBiItemPhase_ok facts (dbBusCacheOf facts nb) (dbBuildCtx bs facts d).T bis pre denv
+        hbis hpre 0 ⟨#[], #[]⟩ rfl (Nat.zero_le _)
+        (fun pos' hpos' _ _ _ => absurd hpos' (by omega)) pos regs hpos
+        (dbBiVars_agree denv regs bis[pos] hagree)
+      simpa only [dbBuildCtx] using this
+    · have hsz : (dbBuildCtx bs facts d).biItems.size = bis.size := by
+        simpa only [dbBuildCtx] using
+          dbBiItemPhase_size facts (dbBusCacheOf facts nb) (dbBuildCtx bs facts d).T bis pre 0
+            ⟨#[], #[]⟩ rfl (Nat.zero_le _)
+      rw [Array.getD_eq_getD_getElem?, Array.getElem?_eq_none (by omega)]
+      rfl
   refine ⟨?_, ?_, ?_, ?_, ?_⟩
   · -- the domain table: the three phases only insert sound domains
     simp only [dbBuildCtx]
     refine dbBytePhase_sound facts denv _ (fun k hk => ?_) 0 _ ?_
-    · have hk' : k < (d.busInteractions.toArray).size := by simpa using hk
-      refine ⟨(d.busInteractions.toArray)[k], ?_, hbis _ (Array.getElem_mem hk')⟩
-      rw [Array.getElem_map, Array.getElem_zipIdx]
-      simp only [Nat.zero_add]
-      exact dbPreOne_preOf facts _ _
-    · refine dbBusPhase_sound facts denv _ _ (fun k hk => ?_) 0 _ ?_
-      · simp only [dbGetD_map_zipIdx, dif_pos hk]
-        exact ⟨dbPreOne_preOf facts _ _, hbis _ (Array.getElem_mem hk)⟩
-      · exact dbConstraintPhase_sound denv _ hcs _ 0 _ (dbTabSound_empty denv _)
+    · have hk' : k < bis.size := by
+        rw [← dbPrePhase_size facts (dbBusCacheOf facts nb) bis (bis.map dbBiVars) 0 #[]
+          (by simp) (Nat.zero_le _)]
+        exact hk
+      refine ⟨bis[k], ?_, hbis _ (Array.getElem_mem hk')⟩
+      rw [← dbGetD_lt _ _ dbBiPreEmpty hk]
+      exact hpre k hk'
+    · refine dbBusPhase_sound facts denv _ _ (fun k hk => ⟨?_, hbis _ (Array.getElem_mem hk)⟩) 0 _ ?_
+      · exact hpre k hk
+      exact dbConstraintPhase_sound denv _ hcs _
+        (fun k hk v hv => by rw [hcsvars k hk]; exact (dbVarsOf_mem cs[k] _).2 v hv) 0 _
+        (dbTabSound_empty denv _)
   · -- `constOk`: a variable-free interaction's obligation holds at the assignment
     simp only [dbBuildCtx]
     refine dbFoldlInv (fun s : ℕ × Bool × Bool × Bool => s.2.2.2 = true) _ _
@@ -1918,91 +2400,209 @@ theorem dbBuildCtx_good [Fact p.Prime] [NeZero p] (bs : BusSemantics p) (facts :
     split
     · dsimp only
       rw [hsi, Bool.true_and]
-      refine dbBiItemsOf_ok facts _ _ _ _ denv hbis
-        (fun k hk => by simp only [dbGetD_map_zipIdx, dif_pos hk]; exact dbPreOne_preOf facts _ _)
-        hprevars i #[] ?_
+      refine hbiitem i #[] ?_
       rw [dbBucketsOf_varless _ _ i hi]
       intro x hx; simp at hx
     · exact hsi
-  · -- constraint items
-    intro pos regs hagree
-    simp only [dbBuildCtx] at hagree ⊢
-    exact dbCsItemsOf_ok facts _ _ _ denv hcs hcsvars pos regs hagree
+  · exact fun pos regs hagree => hcsitem pos regs (by simpa only [dbBuildCtx] using hagree)
   · -- variable-free constraint items: their programs read no register
     intro item hitem regs
-    simp only [dbBuildCtx] at hitem ⊢
+    simp only [dbBuildCtx] at hitem
     obtain ⟨i, hi, hfi⟩ := Array.mem_filterMap.mp hitem
     split at hfi
-    · rw [show item = (dbCsItemsOf _ _ _).getD i DbItem.always from (Option.some.inj hfi).symm]
-      refine dbCsItemsOf_ok facts _ _ _ denv hcs hcsvars i regs ?_
+    · rw [show item = (dbBuildCtx bs facts d).csItems.getD i DbItem.always from by
+        simpa only [dbBuildCtx] using (Option.some.inj hfi).symm]
+      refine hcsitem i regs ?_
       rw [dbBucketsOf_varless _ _ i hi]
       intro x hx; simp at hx
     · simp at hfi
-  · -- bus items
-    intro pos regs hagree
-    simp only [dbBuildCtx] at hagree ⊢
-    refine dbBiItemsOf_ok facts _ _ _ _ denv hbis
-      (fun k hk => by simp only [dbGetD_map_zipIdx, dif_pos hk]; exact dbPreOne_preOf facts _ _)
-      hprevars pos regs hagree
+  · exact fun pos regs hagree => hbiitem pos regs (by simpa only [dbBuildCtx] using hagree)
 
 /-! ### Gathering
 
-A gathered item's variables are all keys of the target, so agreement on the keys is agreement on the
-item. -/
+The gather records each item's variables alongside it, so the scan can place the item at the depth
+of its innermost key. -/
 
-theorem dbSubset_agree (denv : VarId → ZMod p) (regs : Array ℕ) (vs xs : Array VarId)
-    (hregs : DbRegsAgreeA denv regs xs) (hsub : dbSubset vs xs = true) :
-    DbRegsAgreeA denv regs vs := by
-  intro i hi
-  refine hregs i ?_
-  have hall : ∀ (j : ℕ) (h : j < vs.size), vs[j] ∈ xs := by simpa [dbSubset] using hsub
-  obtain ⟨j, hj, hvj⟩ := Array.getElem_of_mem hi
-  rw [← hvj]
-  exact hall j hj
+/-- Each gathered item holds whenever the registers carry the assignment on the variables recorded
+    for it. -/
+structure DbGatherOk {p : ℕ} {bs : BusSemantics p} (facts : BusFacts p bs)
+    (denv : VarId → ZMod p) (g : DbGather p) : Prop where
+  size : g.ivars.size = g.items.size
+  ok : ∀ i, i < g.items.size → ∀ regs : Array ℕ,
+    DbRegsAgreeA denv regs (g.ivars.getD i #[]) →
+    dbItemOk facts regs (g.items.getD i DbItem.always) = true
 
 private theorem dbGatherCsAt_ok [NeZero p] {bs : BusSemantics p} (facts : BusFacts p bs)
     (denv : VarId → ZMod p) (ctx : DbCtx p) (hgood : DbCtxGood facts denv ctx)
-    (xs : Array VarId) (regs : Array ℕ) (hregs : DbRegsAgreeA denv regs xs)
-    (g : DbGather p) (pos : ℕ) (hg : ∀ item ∈ g.items, dbItemOk facts regs item = true) :
-    ∀ item ∈ (dbGatherCsAt ctx xs g pos).items, dbItemOk facts regs item = true := by
+    (mark : Array ℕ) (gen : ℕ) (g : DbGather p) (pos : ℕ) (hg : DbGatherOk facts denv g) :
+    DbGatherOk facts denv (dbGatherCsAt ctx mark gen g pos) := by
+  obtain ⟨hsz, hok⟩ := hg
   rw [dbGatherCsAt]
   split
-  · next hsub =>
-    split
-    · intro item hitem
-      rcases Array.mem_push.mp hitem with hitem' | rfl
-      · exact hg item hitem'
-      · exact hgood.csItem pos regs (dbSubset_agree denv regs _ xs hregs hsub)
-    · exact hg
-  · exact hg
+  · split
+    · refine ⟨by simp [hsz], fun i hi regs hagree => ?_⟩
+      simp only [Array.size_push] at hi
+      rcases Nat.lt_or_ge i g.items.size with hlt | hge
+      · rw [dbPushGetD _ _ _ _ (show i < g.ivars.size by omega)] at hagree
+        rw [dbPushGetD _ _ _ _ (show i < g.items.size by omega)]
+        exact hok i hlt regs hagree
+      · rw [dbPushGetD_at _ _ i _ (show i = g.ivars.size by omega)] at hagree
+        rw [dbPushGetD_at _ _ i _ (show i = g.items.size by omega)]
+        exact hgood.csItem pos regs hagree
+    · exact ⟨hsz, hok⟩
+  · exact ⟨hsz, hok⟩
 
 private theorem dbGatherBiAt_ok [NeZero p] {bs : BusSemantics p} (facts : BusFacts p bs)
     (denv : VarId → ZMod p) (ctx : DbCtx p) (hgood : DbCtxGood facts denv ctx)
-    (xs : Array VarId) (regs : Array ℕ) (hregs : DbRegsAgreeA denv regs xs)
-    (g : DbGather p) (pos : ℕ) (hg : ∀ item ∈ g.items, dbItemOk facts regs item = true) :
-    ∀ item ∈ (dbGatherBiAt ctx xs g pos).items, dbItemOk facts regs item = true := by
+    (mark : Array ℕ) (gen : ℕ) (g : DbGather p) (pos : ℕ) (hg : DbGatherOk facts denv g) :
+    DbGatherOk facts denv (dbGatherBiAt ctx mark gen g pos) := by
+  obtain ⟨hsz, hok⟩ := hg
   rw [dbGatherBiAt]
   split
-  · next hsub =>
-    intro item hitem
-    rcases Array.mem_push.mp hitem with hitem' | rfl
-    · exact hg item hitem'
-    · refine hgood.biItem pos regs (dbSubset_agree denv regs _ xs hregs ?_)
-      exact (Bool.and_eq_true _ _ ▸ hsub : _ ∧ _).2
-  · exact hg
+  · refine ⟨by simp [hsz], fun i hi regs hagree => ?_⟩
+    simp only [Array.size_push] at hi
+    rcases Nat.lt_or_ge i g.items.size with hlt | hge
+    · rw [dbPushGetD _ _ _ _ (show i < g.ivars.size by omega)] at hagree
+      rw [dbPushGetD _ _ _ _ (show i < g.items.size by omega)]
+      exact hok i hlt regs hagree
+    · rw [dbPushGetD_at _ _ i _ (show i = g.ivars.size by omega)] at hagree
+      rw [dbPushGetD_at _ _ i _ (show i = g.items.size by omega)]
+      exact hgood.biItem pos regs hagree
+  · exact ⟨hsz, hok⟩
 
-theorem dbGather_items_ok [NeZero p] {bs : BusSemantics p} (facts : BusFacts p bs)
+theorem dbGather_ok [NeZero p] {bs : BusSemantics p} (facts : BusFacts p bs)
     (denv : VarId → ZMod p) (ctx : DbCtx p) (hgood : DbCtxGood facts denv ctx)
-    (xs : Array VarId) (regs : Array ℕ) (hregs : DbRegsAgreeA denv regs xs) :
-    ∀ item ∈ (dbGather ctx xs).items, dbItemOk facts regs item = true := by
+    (hvl : ctx.csVarlessVars.size = ctx.csVarlessItems.size)
+    (mark : Array ℕ) (gen : ℕ) (xs : Array VarId) :
+    DbGatherOk facts denv (dbGather ctx mark gen xs) := by
   rw [dbGather]
-  refine dbFoldlInv (fun g : DbGather p => ∀ item ∈ g.items, dbItemOk facts regs item = true)
-    _ _ (fun g v _ hg => ?_) _ (fun item hitem => hgood.csVarless item hitem regs)
-  dsimp only
-  refine dbFoldlInv (fun g : DbGather p => ∀ item ∈ g.items, dbItemOk facts regs item = true)
-    _ _ (fun g' pos _ hg' => dbGatherBiAt_ok facts denv ctx hgood xs regs hregs g' pos hg') _ ?_
-  exact dbFoldlInv (fun g : DbGather p => ∀ item ∈ g.items, dbItemOk facts regs item = true)
-    _ _ (fun g' pos _ hg' => dbGatherCsAt_ok facts denv ctx hgood xs regs hregs g' pos hg') _ hg
+  refine dbFoldlInv (fun g : DbGather p => DbGatherOk facts denv g)
+    _ _ (fun g v _ hg => ?_) _ ⟨hvl, fun i hi regs _ => ?_⟩
+  · dsimp only
+    refine dbFoldlInv (fun g : DbGather p => DbGatherOk facts denv g)
+      _ _ (fun g' pos _ hg' => dbGatherBiAt_ok facts denv ctx hgood mark gen g' pos hg') _ ?_
+    exact dbFoldlInv (fun g : DbGather p => DbGatherOk facts denv g)
+      _ _ (fun g' pos _ hg' => dbGatherCsAt_ok facts denv ctx hgood mark gen g' pos hg') _ hg
+  · exact hgood.csVarless _ (by rw [dbGetD_lt _ _ DbItem.always hi]; exact Array.getElem_mem hi)
+      regs
+
+/-! ### Item levels -/
+
+theorem dbKeyPos?_spec (keys : Array VarId) (v : VarId) :
+    ∀ (k j : ℕ), dbKeyPos? keys v k = some j → ∃ h : j < keys.size, keys[j] = v := by
+  intro k
+  induction hn : keys.size - k generalizing k with
+  | zero => intro j h; rw [dbKeyPos?, dif_neg (by omega)] at h; simp at h
+  | succ n ih =>
+    intro j h
+    have hk : k < keys.size := by omega
+    rw [dbKeyPos?, dif_pos hk] at h
+    split at h
+    · next heq =>
+      have hjk : j = k := (Option.some.inj h).symm
+      subst hjk
+      exact ⟨hk, eq_of_beq heq⟩
+    · exact ih (k + 1) (by omega) j h
+
+/-- Every variable of an item with a level is a key no deeper than that level. -/
+theorem dbItemLevel?_spec (keys : Array VarId) (vs : Array VarId) (l : ℕ)
+    (h : dbItemLevel? keys vs = some l) :
+    ∀ v ∈ vs, ∃ j, j ≤ l ∧ ∃ hj : j < keys.size, keys[j] = v := by
+  rw [dbItemLevel?] at h
+  have key : ∀ (li : List VarId) (acc : Option ℕ) (l' : ℕ),
+      li.foldl (fun m v => match m, dbKeyPos? keys v 0 with
+        | some a, some b => some (max a b) | _, _ => none) acc = some l' →
+      (∃ a, acc = some a ∧ a ≤ l') ∧
+        ∀ v ∈ li, ∃ j, j ≤ l' ∧ ∃ hj : j < keys.size, keys[j] = v := by
+    intro li
+    induction li with
+    | nil => intro acc l' hf; exact ⟨⟨l', hf, le_refl _⟩, fun v hv => by simp at hv⟩
+    | cons x rest ih =>
+      intro acc l' hf
+      simp only [List.foldl_cons] at hf
+      rcases hacc : acc with _ | a
+      · rw [hacc] at hf
+        have : ∀ (li' : List VarId) (l'' : ℕ),
+            li'.foldl (fun m v => match m, dbKeyPos? keys v 0 with
+              | some a, some b => some (max a b) | _, _ => none) none ≠ some l'' := by
+          intro li'
+          induction li' with
+          | nil => intro l'' h''; simp at h''
+          | cons y r ihy => intro l'' h''; exact ihy l'' (by simpa using h'')
+        exact absurd hf (this _ _)
+      · rw [hacc] at hf
+        rcases hkx : dbKeyPos? keys x 0 with _ | b
+        · rw [hkx] at hf
+          have : ∀ (li' : List VarId) (l'' : ℕ),
+              li'.foldl (fun m v => match m, dbKeyPos? keys v 0 with
+                | some a, some b => some (max a b) | _, _ => none) none ≠ some l'' := by
+            intro li'
+            induction li' with
+            | nil => intro l'' h''; simp at h''
+            | cons y r ihy => intro l'' h''; exact ihy l'' (by simpa using h'')
+          exact absurd hf (this _ _)
+        · rw [hkx] at hf
+          obtain ⟨⟨a', ha', hle⟩, hrest⟩ := ih (some (max a b)) l' hf
+          refine ⟨⟨a, rfl, le_trans (le_trans (le_max_left a b)
+            (le_of_eq (Option.some.inj ha'))) hle⟩, fun v hv => ?_⟩
+          rcases List.mem_cons.mp hv with rfl | hv'
+          · obtain ⟨hj, hkj⟩ := dbKeyPos?_spec keys v 0 b hkx
+            exact ⟨b, le_trans (le_trans (le_max_right a b)
+              (le_of_eq (Option.some.inj ha'))) hle, hj, hkj⟩
+          · exact hrest v hv'
+  intro v hv
+  rw [← Array.foldl_toList] at h
+  exact (key vs.toList (some 0) l h).2 v (by simpa using hv)
+
+/-- The level pass keeps each item's obligation and pins it to a depth where its variables are
+    already bound. -/
+theorem dbLevelItems_spec (keys : Array VarId) (items : Array (DbItem p))
+    (ivars : Array (Array VarId)) :
+    ∀ (k : ℕ) (out : Array (DbItem p)) (lev : Array ℕ), out.size = k → lev.size = k →
+      k ≤ items.size →
+      (∀ i, i < k → out.getD i DbItem.always = DbItem.always ∨
+        (out.getD i DbItem.always = items.getD i DbItem.always ∧
+          dbItemLevel? keys (ivars.getD i #[]) = some (lev.getD i 0))) →
+      (dbLevelItems keys items ivars k out lev).1.size = items.size ∧
+      (dbLevelItems keys items ivars k out lev).2.size = items.size ∧
+      ∀ i, i < items.size →
+        (dbLevelItems keys items ivars k out lev).1.getD i DbItem.always = DbItem.always ∨
+        ((dbLevelItems keys items ivars k out lev).1.getD i DbItem.always
+            = items.getD i DbItem.always ∧
+          dbItemLevel? keys (ivars.getD i #[])
+            = some ((dbLevelItems keys items ivars k out lev).2.getD i 0)) := by
+  intro k
+  induction hn : items.size - k generalizing k with
+  | zero =>
+    intro out lev ho hl hk hinv
+    rw [dbLevelItems, dif_neg (by omega)]
+    exact ⟨by simp only []; omega, by simp only []; omega, fun i hi => hinv i (by omega)⟩
+  | succ n ih =>
+    intro out lev ho hl hk hinv
+    have hlt : k < items.size := by omega
+    rw [dbLevelItems, dif_pos hlt]
+    have hstep : ∀ (x : DbItem p) (y : ℕ),
+        (x = items.getD k DbItem.always ∧ dbItemLevel? keys (ivars.getD k #[]) = some y) ∨
+          x = DbItem.always →
+        ∀ i, i < k + 1 → (out.push x).getD i DbItem.always = DbItem.always ∨
+          ((out.push x).getD i DbItem.always = items.getD i DbItem.always ∧
+            dbItemLevel? keys (ivars.getD i #[]) = some ((lev.push y).getD i 0)) := by
+      intro x y hx i hi
+      rcases Nat.lt_or_ge i k with hik | hik
+      · rw [dbPushGetD _ _ _ _ (by omega), dbPushGetD _ _ _ _ (by omega)]
+        exact hinv i hik
+      · have hik' : i = k := by omega
+        subst hik'
+        rw [dbPushGetD_at out _ i _ (by omega), dbPushGetD_at lev _ i _ (by omega)]
+        rcases hx with ⟨h1, h2⟩ | h1
+        · exact Or.inr ⟨h1, h2⟩
+        · exact Or.inl h1
+    split
+    · next l hlv =>
+      refine ih (k + 1) (by omega) _ _ (by simp [ho]) (by simp [hl]) (by omega)
+        (hstep _ l (Or.inl ⟨by rw [dbGetD_lt _ _ _ hlt], hlv⟩))
+    · exact ih (k + 1) (by omega) _ _ (by simp [ho]) (by simp [hl]) (by omega)
+        (hstep _ 0 (Or.inr rfl))
 
 /-! ### Plans
 
@@ -2014,11 +2614,11 @@ def dbRunPlanNew {bs : BusSemantics p} (facts : BusFacts p bs) (nv : ℕ) (regs0
     (plan : DbPlan p) : List (VarId × ZMod p) :=
   match plan with
   | .done forced => forced
-  | .scan keys doms items constOk =>
+  | .scan keys doms items ilev constOk =>
     let regs0 := if regs0.size == nv then regs0 else Array.replicate nv 0
     if !constOk then dbZeroAll keys
     else
-      let res := dbScanBox facts items (keys.map (fun v => v.index)) doms regs0
+      let res := dbScanBox facts items ilev (keys.map (fun v => v.index)) doms regs0
       if !res.started then dbZeroAll keys
       else if res.live == 0 then []
       else dbForcedOfMask p keys res.vals res.alive 0
@@ -2028,7 +2628,7 @@ theorem dbRunPlan_snd {bs : BusSemantics p} (facts : BusFacts p bs) (nv : ℕ)
     (dbRunPlan facts nv st plan).2 = dbRunPlanNew facts nv st.1 plan :: st.2 := by
   cases plan with
   | done forced => rfl
-  | scan keys doms items constOk =>
+  | scan keys doms items ilev constOk =>
     simp only [dbRunPlan, dbRunPlanNew]
     split_ifs <;> rfl
 
@@ -2043,16 +2643,18 @@ private theorem dbKeys_getD (xs : Array VarId) (j : ℕ) (hj : j < xs.size) :
     (xs.map (fun v => v.index)).getD j 0 = xs[j].index := by
   rw [dbGetD_map, dif_pos hj]
 
-/-- The sweep of a preflighted box ends with a good mask: it started, and either nothing survives or
-    every survivor carries the assignment's value. -/
+/-- The sweep of a preflighted box ends with a good mask. -/
 theorem dbScanBox_good [NeZero p] {bs : BusSemantics p} (facts : BusFacts p bs)
-    (denv : VarId → ZMod p) (items : Array DbItem) (xs : Array VarId) (doms : Array DbDom)
-    (regs : Array ℕ) (hnodup : DbNodupIdx xs) (hcov : ∀ i ∈ xs, i.index < regs.size)
+    (denv : VarId → ZMod p) (items : Array (DbItem p)) (ilev : Array ℕ) (xs : Array VarId)
+    (doms : Array DbDom) (regs : Array ℕ) (hnodup : DbNodupIdx xs)
+    (hcov : ∀ i ∈ xs, i.index < regs.size)
     (hmem : ∀ k, ∀ hk : k < xs.size, DbDomMem p (doms.getD k (.range 0)) (denv xs[k]).val)
-    (hitems : ∀ regs', DbRegsAt denv (xs.map (fun v => v.index)) regs' →
-      dbAllOk facts items regs' 0 = true) :
+    (hitems : ∀ (dd : ℕ) (regs' : Array ℕ), dd < xs.size →
+      (∀ d', d' ≤ dd → ∀ h : d' < xs.size, regs'.getD xs[d'].index 0 = (denv xs[d']).val) →
+      dbAllOkLev facts items ilev dd regs' 0 = true)
+    (hempty : xs.isEmpty = true → dbAllOkLev facts items ilev 0 regs 0 = true) :
     DbScanGood denv (xs.map (fun v => v.index))
-      (dbScanBox facts items (xs.map (fun v => v.index)) doms regs) := by
+      (dbScanBox facts items ilev (xs.map (fun v => v.index)) doms regs) := by
   have hcov' : ∀ d', d' < (xs.map (fun v => v.index)).size →
       (xs.map (fun v => v.index)).getD d' 0 < regs.size := by
     intro d' hd'
@@ -2061,17 +2663,17 @@ theorem dbScanBox_good [NeZero p] {bs : BusSemantics p} (facts : BusFacts p bs)
     exact hcov xs[d'] (Array.getElem_mem hd')
   rw [dbScanBox]
   split
-  · next hempty =>
-    have hxs : xs.size = 0 := by
-      have hz : (xs.map (fun v => v.index)).size = 0 := by simpa [Array.isEmpty] using hempty
-      rwa [Array.size_map] at hz
-    rw [if_pos (hitems regs (fun dd hdd => by
-      rw [Array.size_map] at hdd; exact absurd hdd (by omega)))]
+  · next hemp =>
+    have hxs : xs.isEmpty = true := by
+      have hz : (xs.map (fun v => v.index)).size = 0 := by simpa [Array.isEmpty] using hemp
+      rw [Array.size_map] at hz
+      simp [Array.isEmpty, hz]
+    rw [if_pos (hempty hxs)]
     exact ⟨rfl, Or.inl rfl⟩
-  · next hempty =>
+  · next hemp =>
     have hsz : 0 < (xs.map (fun v => v.index)).size := by
       rcases Nat.eq_zero_or_pos (xs.map (fun v => v.index)).size with h | h
-      · exact absurd (by simp [Array.isEmpty, h]) hempty
+      · exact absurd (by simp [Array.isEmpty, h]) hemp
       · exact h
     have hmem' : ∀ dd, dd < (xs.map (fun v => v.index)).size →
         DbDomMem p (doms.getD dd (.range 0))
@@ -2088,10 +2690,20 @@ theorem dbScanBox_good [NeZero p] {bs : BusSemantics p} (facts : BusFacts p bs)
       rw [dbKeys_getD xs a ha, dbKeys_getD xs b hb] at hab
       exact hnodup a b ha hb (by
         rw [dbGetD_lt xs a ⟨0⟩ ha, dbGetD_lt xs b ⟨0⟩ hb]; exact hab)
-    refine dbScanLoop_reach facts items _ doms denv
+    have hitems' : ∀ (dd : ℕ) (regs' : Array ℕ), dd < (xs.map (fun v => v.index)).size →
+        (∀ d', d' ≤ dd → regs'.getD ((xs.map (fun v => v.index)).getD d' 0) 0
+          = (denv ⟨(xs.map (fun v => v.index)).getD d' 0⟩).val) →
+        dbAllOkLev facts items ilev dd regs' 0 = true := by
+      intro dd regs' hdd hreg
+      rw [Array.size_map] at hdd
+      refine hitems dd regs' hdd (fun d' hd' h => ?_)
+      have := hreg d' hd'
+      rw [dbKeys_getD xs d' h] at this
+      exact this
+    refine dbScanLoop_reach facts items ilev _ doms denv
       (fun dd => if h : dd < (xs.map (fun v => v.index)).size then (hmem' dd h).choose else 0)
-      hdist (fun dd hdd => ?_) hitems 0 0 _ regs #[] #[] 0 false hsz rfl (Nat.zero_le _) hcov'
-      (fun d' hd' => absurd hd' (by omega))
+      hdist (fun dd hdd => ?_) hitems' 0 _ _ 0 _ regs #[] #[] 0 false rfl rfl hsz rfl
+      (Nat.zero_le _) hcov' (fun d' hd' => absurd hd' (by omega))
     dsimp only
     rw [dif_pos hdd]
     exact (hmem' dd hdd).choose_spec
@@ -2114,14 +2726,127 @@ theorem dbScanAnswer_sound [NeZero p] (denv : VarId → ZMod p) (xs : Array VarI
       have hj' := hag j (by rwa [Array.size_map]) hal
       rwa [dbKeys_getD xs j hj] at hj'
 
-/-- A preflighted target's plan is sound. The two "no answer" exits are vacuous: a variable-free
-    obligation cannot fail at a satisfying assignment (`DbCtxGood.constOk`), and the sweep visits
-    that assignment's own point, so it cannot come back empty. -/
+/-! ### The reordered keys
+
+The sort is untrusted: the plan keeps its output only when it is still a distinct sub-collection of
+the target's keys, and re-reads the domains from the table. -/
+
+theorem dbMemVar_spec (b : Array VarId) (v : VarId) :
+    ∀ k, dbMemVar b v k = true → v ∈ b := by
+  intro k
+  induction hn : b.size - k generalizing k with
+  | zero => intro h; rw [dbMemVar, dif_neg (by omega)] at h; simp at h
+  | succ n ih =>
+    intro h
+    have hk : k < b.size := by omega
+    rw [dbMemVar, dif_pos hk, Bool.or_eq_true] at h
+    rcases h with h | h
+    · rw [← eq_of_beq h]; exact Array.getElem_mem hk
+    · exact ih (k + 1) (by omega) h
+
+theorem dbSubsetVars_spec (a b : Array VarId) :
+    ∀ k, dbSubsetVars a b k = true → ∀ j, k ≤ j → ∀ hj : j < a.size, a[j] ∈ b := by
+  intro k
+  induction hn : a.size - k generalizing k with
+  | zero => intro _ j hkj hj; omega
+  | succ n ih =>
+    intro h j hkj hj
+    have hk : k < a.size := by omega
+    rw [dbSubsetVars, dif_pos hk, Bool.and_eq_true] at h
+    rcases Nat.eq_or_lt_of_le hkj with rfl | hlt
+    · exact dbMemVar_spec b a[k] 0 h.1
+    · exact ih (k + 1) (by omega) h.2 j (by omega) hj
+
+theorem dbNodupVars_spec (a : Array VarId) :
+    ∀ k, dbNodupVars a k = true → ∀ i j, k ≤ i → i < j → ∀ hj : j < a.size,
+      ∀ hi : i < a.size, a[i] ≠ a[j] := by
+  intro k
+  induction hn : a.size - k generalizing k with
+  | zero => intro _ i j hki hij hj hi; omega
+  | succ n ih =>
+    intro h i j hki hij hj hi
+    have hk : k < a.size := by omega
+    rw [dbNodupVars, dif_pos hk, Bool.and_eq_true, Bool.not_eq_true'] at h
+    rcases Nat.eq_or_lt_of_le hki with rfl | hlt
+    · intro heq
+      refine absurd ?_ (by simp [h.1] : ¬ (dbMemVar a a[k] (k + 1) = true))
+      have hmem : ∀ (m : ℕ), m ≤ j → a[k] = a[j] → dbMemVar a a[k] m = true := by
+        intro m
+        induction hnm : j - m generalizing m with
+        | zero =>
+          intro hmj heq'
+          have hmj' : m = j := by omega
+          subst hmj'
+          rw [dbMemVar, dif_pos hj, Bool.or_eq_true]
+          exact Or.inl (beq_iff_eq.mpr heq'.symm)
+        | succ n' ihm =>
+          intro hmj heq'
+          have hms : m < a.size := by omega
+          rw [dbMemVar, dif_pos hms, Bool.or_eq_true]
+          by_cases hb : a[m] == a[k]
+          · exact Or.inl hb
+          · refine Or.inr (ihm (m + 1) (by omega) ?_ heq')
+            rcases Nat.eq_or_lt_of_le hmj with rfl | hmlt
+            · exact absurd (beq_iff_eq.mpr heq'.symm) hb
+            · omega
+      exact hmem (k + 1) (by omega) heq
+    · exact ih (k + 1) (by omega) h.2 i j (by omega) hij hj hi
+
+/-- What the ordered keys give the scan: they are distinct, they are keys of the target, and their
+    domains are the table's. -/
+theorem dbOrderKeys_spec (T : DbTab p) (xs : Array VarId) (doms : Array DbDom) :
+    ∀ (ks : Array VarId) (ds : Array DbDom), dbOrderKeys T xs doms = (ks, ds) →
+      dbDomsOf T xs = some doms → DbNodupIdx xs →
+      DbNodupIdx ks ∧ (∀ v ∈ ks, v ∈ xs) ∧ ks.size = xs.size ∧
+        ∀ k, ∀ hk : k < ks.size, T.get ks[k].index = some (ds.getD k (.range 0)) := by
+  intro ks ds hord hdoms hnodup
+  have hid : ∀ (ks' : Array VarId) (ds' : Array DbDom), (ks', ds') = (xs, doms) →
+      DbNodupIdx ks' ∧ (∀ v ∈ ks', v ∈ xs) ∧ ks'.size = xs.size ∧
+        ∀ k, ∀ hk : k < ks'.size, T.get ks'[k].index = some (ds'.getD k (.range 0)) := by
+    intro ks' ds' h
+    have h1 : ks' = xs := congrArg Prod.fst h
+    have h2 : ds' = doms := congrArg Prod.snd h
+    subst h1; subst h2
+    exact ⟨hnodup, fun v hv => hv, rfl, fun k hk => dbDomsOf_get T ks' ds' hdoms k hk⟩
+  simp only [dbOrderKeys] at hord
+  split at hord
+  · exact hid ks ds hord.symm
+  · split at hord
+    · next hchk =>
+      simp only [Bool.and_eq_true, beq_iff_eq] at hchk
+      obtain ⟨⟨⟨hsz, hsub⟩, _⟩, hnd⟩ := hchk
+      split at hord
+      · next ds0 hds0 =>
+        have h1 : ks = _ := congrArg Prod.fst hord.symm
+        have h2 : ds = ds0 := congrArg Prod.snd hord.symm
+        subst h1; subst h2
+        refine ⟨fun a b ha hb hab => ?_, fun v hv => ?_, hsz, fun k hk =>
+          dbDomsOf_get T _ _ hds0 k hk⟩
+        · by_contra hne
+          rcases Nat.lt_or_ge a b with h | h
+          · exact dbNodupVars_spec _ 0 hnd a b (Nat.zero_le _) h hb ha
+              (by rw [← dbGetD_lt _ _ (⟨0⟩ : VarId) ha, ← dbGetD_lt _ _ (⟨0⟩ : VarId) hb]
+                  exact dbVarId_eq _ _ hab)
+          · have hlt : b < a := by omega
+            exact dbNodupVars_spec _ 0 hnd b a (Nat.zero_le _) hlt ha hb
+              (by rw [← dbGetD_lt _ _ (⟨0⟩ : VarId) hb, ← dbGetD_lt _ _ (⟨0⟩ : VarId) ha]
+                  exact dbVarId_eq _ _ hab.symm)
+        · obtain ⟨j, hj, hvj⟩ := Array.getElem_of_mem hv
+          rw [← hvj]
+          exact dbSubsetVars_spec _ xs 0 hsub j (Nat.zero_le _) hj
+      · exact hid ks ds hord.symm
+    · exact hid ks ds hord.symm
+
+/-! ### Preflight -/
+
+/-- A preflighted target's plan is sound. -/
 theorem dbPreflight_sound [Fact p.Prime] [NeZero p] (bs : BusSemantics p) (facts : BusFacts p bs)
     (d : DenseConstraintSystem p) (ctx : DbCtx p)
     (hgood : ∀ denv, d.satisfies bs denv → DbCtxGood facts denv ctx)
-    (xs : Array VarId) (hnodup : DbNodupIdx xs) (hnv : ∀ i ∈ xs, i.index < ctx.nv)
-    (plan : DbPlan p) (hpre : dbPreflight ctx xs = some plan) :
+    (hvl : ctx.csVarlessVars.size = ctx.csVarlessItems.size)
+    (mark : Array ℕ) (gen : ℕ) (xs : Array VarId) (hne : xs.isEmpty = false)
+    (hnodup : DbNodupIdx xs) (hnv : ∀ i ∈ xs, i.index < ctx.nv)
+    (plan : DbPlan p) (hpre : dbPreflight ctx mark gen xs = some plan) :
     DbPlanSound facts ctx.nv d plan := by
   intro regs0 f hf denv hsat
   have hg := hgood denv hsat
@@ -2139,36 +2864,85 @@ theorem dbPreflight_sound [Fact p.Prime] [NeZero p] (bs : BusSemantics p) (facts
         dbRunPlanNew] at hf
       exact dbConstantDomains_sound denv xs doms hmem f hf
     · -- the scan
-      rw [show plan = DbPlan.scan xs doms (dbGather ctx xs).items ctx.constOk
-          from (Option.some.inj hpre).symm, dbRunPlanNew, hg.constOk] at hf
+      set g := dbGather ctx mark gen xs with hgdef
+      set ks := (dbOrderKeys ctx.T xs doms).1 with hks
+      set ds := (dbOrderKeys ctx.T xs doms).2 with hds
+      set lv := dbLevelItems ks g.items g.ivars 0 #[] #[] with hlv
+      rw [show plan = DbPlan.scan ks ds lv.1 lv.2 ctx.constOk from (Option.some.inj hpre).symm,
+        dbRunPlanNew, hg.constOk] at hf
       simp only [Bool.not_true, Bool.false_eq_true, if_false] at hf
-      have hcovr : ∀ i ∈ xs,
+      obtain ⟨hknd, hksub, hkssz, hkdom⟩ := dbOrderKeys_spec ctx.T xs doms ks ds rfl hdoms hnodup
+      have hksne : 0 < ks.size := by
+        rw [hkssz]
+        rcases Nat.eq_zero_or_pos xs.size with h | h
+        · rw [show xs.isEmpty = true from by simp [Array.isEmpty, h]] at hne
+          exact absurd hne (by simp)
+        · exact h
+      have hcovr : ∀ i ∈ ks,
           i.index < (if regs0.size == ctx.nv then regs0 else Array.replicate ctx.nv 0).size := by
         intro i hi
+        have hix := hnv i (hksub i hi)
         split
-        · next hs => rw [show regs0.size = ctx.nv from by simpa using hs]; exact hnv i hi
-        · rw [Array.size_replicate]; exact hnv i hi
-      have hitems : ∀ regs', DbRegsAt denv (xs.map (fun v => v.index)) regs' →
-          dbAllOk facts (dbGather ctx xs).items regs' 0 = true := by
-        intro regs' hregs'
-        refine dbAllOk_of_forall facts _ regs' ?_ 0
-        refine dbGather_items_ok facts denv ctx hg xs regs' (fun i hi => ?_)
-        obtain ⟨j, hj, hij⟩ := Array.getElem_of_mem hi
-        have hj' := hregs' j (by rwa [Array.size_map])
-        rw [dbKeys_getD xs j hj, hij] at hj'
-        exact hj'
-      exact dbScanAnswer_sound denv xs _
-        (dbScanBox_good facts denv _ xs doms _ hnodup hcovr hmem hitems) f hf
+        · next hs => rw [show regs0.size = ctx.nv from by simpa using hs]; exact hix
+        · rw [Array.size_replicate]; exact hix
+      have hmemk : ∀ k, ∀ hk : k < ks.size,
+          DbDomMem p (ds.getD k (.range 0)) (denv ks[k]).val := fun k hk =>
+        hg.tab _ _ (hkdom k hk)
+      have hgok := dbGather_ok facts denv ctx hg hvl mark gen xs
+      obtain ⟨hlsz, hlsz2, hlspec⟩ := dbLevelItems_spec ks g.items g.ivars 0 #[] #[] rfl rfl
+        (Nat.zero_le _) (fun i hi => absurd hi (by omega))
+      rw [← hlv] at hlsz hlsz2 hlspec
+      have hitems : ∀ (dd : ℕ) (regs' : Array ℕ), dd < ks.size →
+          (∀ d', d' ≤ dd → ∀ h : d' < ks.size, regs'.getD ks[d'].index 0 = (denv ks[d']).val) →
+          dbAllOkLev facts lv.1 lv.2 dd regs' 0 = true := by
+        intro dd regs' hdd hreg
+        have hstep : ∀ i, i < lv.1.size →
+            dbItemOk facts regs' (lv.1.getD i DbItem.always) = true ∨
+            lv.2.getD i 0 ≠ dd := by
+          intro i hi
+          rcases hlspec i (by omega) with h | ⟨h1, h2⟩
+          · exact Or.inl (by rw [h]; rfl)
+          · by_cases hlev : lv.2.getD i 0 = dd
+            · refine Or.inl ?_
+              rw [h1]
+              refine hgok.ok i (by rw [← hlsz]; exact hi) regs' (fun v hv => ?_)
+              obtain ⟨j, hjle, hj, hkj⟩ := dbItemLevel?_spec ks (g.ivars.getD i #[])
+                (lv.2.getD i 0) h2 v hv
+              rw [← hkj]
+              exact hreg j (by omega) hj
+            · exact Or.inr hlev
+        -- walk the item array
+        have hall : ∀ (m : ℕ), dbAllOkLev facts lv.1 lv.2 dd regs' m = true := by
+          intro m
+          induction hnm : lv.1.size - m generalizing m with
+          | zero => rw [dbAllOkLev, dif_neg (by omega)]
+          | succ n ihm =>
+            have hm : m < lv.1.size := by omega
+            rw [dbAllOkLev, dif_pos hm]
+            by_cases hlev : lv.2.getD m 0 == dd
+            · rw [if_pos hlev]
+              rcases hstep m hm with h | h
+              · rw [dbGetD_lt _ _ DbItem.always hm] at h
+                rw [if_pos h]
+                exact ihm (m + 1) (by omega)
+              · exact absurd (by simpa using hlev) h
+            · rw [if_neg hlev]
+              exact ihm (m + 1) (by omega)
+        exact hall 0
+      exact dbScanAnswer_sound denv ks _
+        (dbScanBox_good facts denv lv.1 lv.2 ks ds _ hknd hcovr hmemk hitems (fun hemp => by
+          have : ks.size = 0 := by simpa [Array.isEmpty] using hemp
+          omega)) f hf
 
 /-! ### The target loop -/
 
 theorem dbTargetStep_sound [Fact p.Prime] [NeZero p] (bs : BusSemantics p) (facts : BusFacts p bs)
     (d : DenseConstraintSystem p) (ctx : DbCtx p)
     (hgood : ∀ denv, d.satisfies bs denv → DbCtxGood facts denv ctx)
+    (hvl : ctx.csVarlessVars.size = ctx.csVarlessItems.size)
     (xs : Array VarId) (hnodup : DbNodupIdx xs) (hnv : ∀ i ∈ xs, i.index < ctx.nv)
-    (st : DbSeen × List (DbPlan p))
-    (hst : ∀ plan ∈ st.2, DbPlanSound facts ctx.nv d plan) :
-    ∀ plan ∈ (dbTargetStep ctx xs st).2, DbPlanSound facts ctx.nv d plan := by
+    (st : DbTargetSt p) (hst : ∀ plan ∈ st.plans, DbPlanSound facts ctx.nv d plan) :
+    ∀ plan ∈ (dbTargetStep ctx xs st).plans, DbPlanSound facts ctx.nv d plan := by
   rw [dbTargetStep]
   split
   · exact hst
@@ -2184,15 +2958,17 @@ theorem dbTargetStep_sound [Fact p.Prime] [NeZero p] (bs : BusSemantics p) (fact
           · next plan heq =>
             intro plan' hplan'
             rcases List.mem_cons.mp hplan' with rfl | hrest
-            · exact dbPreflight_sound bs facts d ctx hgood xs hnodup hnv plan' heq
+            · exact dbPreflight_sound bs facts d ctx hgood hvl _ _ xs
+                (by simpa using ‹¬ xs.isEmpty = true›) hnodup hnv plan' heq
             · exact hst plan' hrest
 
 theorem dbTargetsCs_sound [Fact p.Prime] [NeZero p] (bs : BusSemantics p) (facts : BusFacts p bs)
     (d : DenseConstraintSystem p) (ctx : DbCtx p) (hshape : DbCtxShape ctx)
-    (hgood : ∀ denv, d.satisfies bs denv → DbCtxGood facts denv ctx) :
-    ∀ (k : ℕ) (st : DbSeen × List (DbPlan p)),
-      (∀ plan ∈ st.2, DbPlanSound facts ctx.nv d plan) →
-      ∀ plan ∈ (dbTargetsCs ctx k st).2, DbPlanSound facts ctx.nv d plan := by
+    (hgood : ∀ denv, d.satisfies bs denv → DbCtxGood facts denv ctx)
+    (hvl : ctx.csVarlessVars.size = ctx.csVarlessItems.size) :
+    ∀ (k : ℕ) (st : DbTargetSt p),
+      (∀ plan ∈ st.plans, DbPlanSound facts ctx.nv d plan) →
+      ∀ plan ∈ (dbTargetsCs ctx k st).plans, DbPlanSound facts ctx.nv d plan := by
   intro k
   induction hn : ctx.csVars.size - k generalizing k with
   | zero => intro st hst; rw [dbTargetsCs, dif_neg (by omega)]; exact hst
@@ -2200,17 +2976,18 @@ theorem dbTargetsCs_sound [Fact p.Prime] [NeZero p] (bs : BusSemantics p) (facts
     intro st hst
     have hlt : k < ctx.csVars.size := by omega
     rw [dbTargetsCs, dif_pos hlt]
-    refine ih (k + 1) (by omega) _ (dbTargetStep_sound bs facts d ctx hgood ctx.csVars[k] ?_ ?_ st
-      hst)
+    refine ih (k + 1) (by omega) _ (dbTargetStep_sound bs facts d ctx hgood hvl _ ?_ ?_ st hst)
     · have := hshape.csNodup k; rwa [dbGetD_lt _ _ _ hlt] at this
-    · have := hshape.csNv k; rwa [dbGetD_lt _ _ _ hlt] at this
+    · intro i hi
+      exact hshape.csNv k i (by rwa [dbGetD_lt _ _ _ hlt])
 
 theorem dbTargetsBis_sound [Fact p.Prime] [NeZero p] (bs : BusSemantics p) (facts : BusFacts p bs)
     (d : DenseConstraintSystem p) (ctx : DbCtx p) (hshape : DbCtxShape ctx)
-    (hgood : ∀ denv, d.satisfies bs denv → DbCtxGood facts denv ctx) :
-    ∀ (k : ℕ) (st : DbSeen × List (DbPlan p)),
-      (∀ plan ∈ st.2, DbPlanSound facts ctx.nv d plan) →
-      ∀ plan ∈ (dbTargetsBis ctx k st).2, DbPlanSound facts ctx.nv d plan := by
+    (hgood : ∀ denv, d.satisfies bs denv → DbCtxGood facts denv ctx)
+    (hvl : ctx.csVarlessVars.size = ctx.csVarlessItems.size) :
+    ∀ (k : ℕ) (st : DbTargetSt p),
+      (∀ plan ∈ st.plans, DbPlanSound facts ctx.nv d plan) →
+      ∀ plan ∈ (dbTargetsBis ctx k st).plans, DbPlanSound facts ctx.nv d plan := by
   intro k
   induction hn : ctx.biVars.size - k generalizing k with
   | zero => intro st hst; rw [dbTargetsBis, dif_neg (by omega)]; exact hst
@@ -2218,72 +2995,121 @@ theorem dbTargetsBis_sound [Fact p.Prime] [NeZero p] (bs : BusSemantics p) (fact
     intro st hst
     have hlt : k < ctx.biVars.size := by omega
     rw [dbTargetsBis, dif_pos hlt]
-    refine ih (k + 1) (by omega) _ (dbTargetStep_sound bs facts d ctx hgood ctx.biVars[k] ?_ ?_ st
-      hst)
+    refine ih (k + 1) (by omega) _ (dbTargetStep_sound bs facts d ctx hgood hvl _ ?_ ?_ st hst)
     · have := hshape.biNodup k; rwa [dbGetD_lt _ _ _ hlt] at this
-    · have := hshape.biNv k; rwa [dbGetD_lt _ _ _ hlt] at this
+    · intro i hi
+      exact hshape.biNv k i (by rwa [dbGetD_lt _ _ _ hlt])
 
 /-! ### The run and the solution map -/
 
 theorem dbRunPlans_sound {bs : BusSemantics p} (facts : BusFacts p bs) (nv : ℕ)
     (d : DenseConstraintSystem p) (plans : List (DbPlan p))
     (hplans : ∀ plan ∈ plans, DbPlanSound facts nv d plan) :
-    ∀ l ∈ dbRunPlans facts nv plans, ∀ f ∈ l,
+    ∀ forced ∈ dbRunPlans facts nv plans, ∀ f ∈ forced,
       ∀ denv, d.satisfies bs denv → denv f.1 = f.2 := by
-  have hfold : ∀ (plans : List (DbPlan p)) (st : Array ℕ × List (List (VarId × ZMod p))),
-      (∀ plan ∈ plans, DbPlanSound facts nv d plan) →
-      (∀ l ∈ st.2, ∀ f ∈ l, ∀ denv, d.satisfies bs denv → denv f.1 = f.2) →
-      ∀ l ∈ (plans.foldl (dbRunPlan facts nv) st).2, ∀ f ∈ l,
+  rw [dbRunPlans]
+  have key : ∀ (l : List (DbPlan p)) (st : Array ℕ × List (List (VarId × ZMod p))),
+      (∀ plan ∈ l, DbPlanSound facts nv d plan) →
+      (∀ forced ∈ st.2, ∀ f ∈ forced, ∀ denv, d.satisfies bs denv → denv f.1 = f.2) →
+      ∀ forced ∈ (l.foldl (dbRunPlan facts nv) st).2, ∀ f ∈ forced,
         ∀ denv, d.satisfies bs denv → denv f.1 = f.2 := by
-    intro plans
-    induction plans with
+    intro l
+    induction l with
     | nil => intro st _ hst; exact hst
-    | cons plan rest ih =>
-      intro st hp hst
-      rw [List.foldl_cons]
-      refine ih _ (fun q hq => hp q (List.mem_cons_of_mem _ hq)) ?_
+    | cons pl rest ih =>
+      intro st hpl hst
+      refine ih _ (fun plan hplan => hpl plan (List.mem_cons_of_mem _ hplan)) ?_
       rw [dbRunPlan_snd]
-      intro l hl
-      rcases List.mem_cons.mp hl with rfl | hl'
-      · exact hp plan (List.mem_cons_self ..) st.1
-      · exact hst l hl'
-  intro l hl
-  rw [dbRunPlans, List.mem_reverse] at hl
-  exact hfold plans _ hplans (fun l hl => by simp at hl) l hl
+      intro forced hforced f hf denv hsat
+      rcases List.mem_cons.mp hforced with rfl | hrest
+      · exact hpl pl List.mem_cons_self st.1 f hf denv hsat
+      · exact hst forced hrest f hf denv hsat
+  intro forced hforced
+  rw [List.mem_reverse] at hforced
+  exact key plans ⟨#[], []⟩ hplans (fun forced hf => by simp at hf) forced hforced
+
+theorem dbSetD_at {α : Type} (a : Array α) (k : ℕ) (v dflt : α) :
+    (a.set! k v).getD k dflt = if k < a.size then v else dflt := by
+  rw [Array.set!, Array.getD_eq_getD_getElem?, Array.getElem?_setIfInBounds_self]
+  split <;> rfl
+
+theorem dbGetD_replicate {α : Type} (n : ℕ) (x : α) (q : ℕ) (dflt : α) :
+    (Array.replicate n x).getD q dflt = if q < n then x else dflt := by
+  rw [Array.getD_eq_getD_getElem?]
+  split
+  · next h => rw [Array.getElem?_eq_getElem (by simpa using h), Array.getElem_replicate]; rfl
+  · next h => rw [Array.getElem?_eq_none (by simpa using h)]; rfl
+
+/-- Every constant the run collects into the array is forced by every satisfying assignment. -/
+theorem dbSolvedOf_sound {bs : BusSemantics p} (d : DenseConstraintSystem p) (nv : ℕ)
+    (results : List (List (VarId × ZMod p)))
+    (hres : ∀ forced ∈ results, ∀ f ∈ forced, ∀ denv, d.satisfies bs denv → denv f.1 = f.2) :
+    ∀ (q : ℕ) (c : ZMod p), (dbSolvedOf nv results).1.getD q none = some c →
+      ∀ denv, d.satisfies bs denv → denv ⟨q⟩ = c := by
+  have inner : ∀ (l : List (VarId × ZMod p)) (st : Array (Option (ZMod p)) × Bool),
+      (∀ f ∈ l, ∀ denv, d.satisfies bs denv → denv f.1 = f.2) →
+      (∀ q c, st.1.getD q none = some c → ∀ denv, d.satisfies bs denv → denv ⟨q⟩ = c) →
+      ∀ q c, (l.foldl (fun st f => (st.1.set! f.1.index (some f.2), true)) st).1.getD q none
+        = some c → ∀ denv, d.satisfies bs denv → denv ⟨q⟩ = c := by
+    intro l
+    induction l with
+    | nil => intro st _ hst; exact hst
+    | cons f rest ih =>
+      intro st hf hst
+      refine ih _ (fun g hg => hf g (List.mem_cons_of_mem _ hg)) (fun q c hq denv hsat => ?_)
+      by_cases hqi : q = f.1.index
+      · rw [hqi] at hq ⊢
+        rw [dbSetD_at st.1 f.1.index (some f.2) none] at hq
+        split at hq
+        · rw [show c = f.2 from (Option.some.inj hq).symm,
+            show (⟨f.1.index⟩ : VarId) = f.1 from rfl]
+          exact hf f List.mem_cons_self denv hsat
+        · simp at hq
+      · rw [dbSetD_ne st.1 f.1.index q (some f.2) none hqi] at hq
+        exact hst q c hq denv hsat
+  have outer : ∀ (l : List (List (VarId × ZMod p))) (st : Array (Option (ZMod p)) × Bool),
+      (∀ forced ∈ l, ∀ f ∈ forced, ∀ denv, d.satisfies bs denv → denv f.1 = f.2) →
+      (∀ q c, st.1.getD q none = some c → ∀ denv, d.satisfies bs denv → denv ⟨q⟩ = c) →
+      ∀ q c, (l.foldl (fun st forced =>
+        forced.foldl (fun st f => (st.1.set! f.1.index (some f.2), true)) st) st).1.getD q none
+        = some c → ∀ denv, d.satisfies bs denv → denv ⟨q⟩ = c := by
+    intro l
+    induction l with
+    | nil => intro st _ hst; exact hst
+    | cons forced rest ih =>
+      intro st hforced hst
+      exact ih _ (fun l' hl' => hforced l' (List.mem_cons_of_mem _ hl'))
+        (inner forced st (hforced forced List.mem_cons_self) hst)
+  rw [dbSolvedOf]
+  exact outer results _ hres (fun q c hq => by
+    rw [dbGetD_replicate] at hq
+    split at hq <;> simp at hq)
 
 theorem dbDomainBatchσ_entailed [Fact p.Prime] [NeZero p]
     (bs : BusSemantics p) (facts : BusFacts p bs) (d : DenseConstraintSystem p) :
-    EntailedMap d bs (dbDomainBatchσ bs facts d).map := by
-  have hfold : ∀ (results : List (List (VarId × ZMod p))) (dσ : DenseSolved p),
-      (∀ l ∈ results, ∀ f ∈ l, ∀ denv, d.satisfies bs denv → denv f.1 = f.2) →
-      EntailedMap d bs dσ.map →
-      EntailedMap d bs (results.foldl (fun dσ forced =>
-        dσ.insertAll (forced.map (fun f => (f.1, DenseExpr.const f.2)))) dσ).map := by
-    intro results
-    induction results with
-    | nil => intro dσ _ h; exact h
-    | cons l rest ih =>
-      intro dσ hres h
-      rw [List.foldl_cons]
-      refine ih _ (fun l' hl' => hres l' (List.mem_cons_of_mem _ hl')) ?_
-      rw [DenseSolved.insertAll_map]
-      refine EntailedMap_foldl_insert d bs _ dσ.map h (fun pr hpr => ?_)
-      obtain ⟨f, hfm, rfl⟩ := List.mem_map.1 hpr
-      refine ⟨fun z hz => by simp [DenseExpr.vars] at hz, fun denv hsat => ?_⟩
-      show denv f.1 = (DenseExpr.const f.2).eval denv
-      rw [DenseExpr.eval]
-      exact hres l (List.mem_cons_self ..) f hfm denv hsat
-  rw [dbDomainBatchσ]
-  refine hfold _ DenseSolved.empty ?_ (fun i t h => by
-    rw [DenseSolved.empty, Std.HashMap.getElem?_empty] at h
-    exact absurd h (by simp))
-  refine dbRunPlans_sound facts _ d _ (fun plan hplan => ?_)
-  rw [List.mem_reverse] at hplan
-  exact dbTargetsBis_sound bs facts d _ (dbBuildCtx_shape bs facts d)
-    (fun denv hsat => dbBuildCtx_good bs facts d denv hsat) 0 _
-    (dbTargetsCs_sound bs facts d _ (dbBuildCtx_shape bs facts d)
-      (fun denv hsat => dbBuildCtx_good bs facts d denv hsat) 0 ⟨⟨∅⟩, []⟩
-      (fun plan hplan => by simp at hplan)) plan hplan
+    ∀ (i : VarId) (t : DenseExpr p), dbSubstFn (dbDomainBatchσ bs facts d).1 i = some t →
+      (∀ z ∈ t.vars, z ∈ d.occ) ∧ ∀ denv, d.satisfies bs denv → denv i = t.eval denv := by
+  intro i t ht
+  set ctx := dbBuildCtx bs facts d with hctx
+  have hvl : ctx.csVarlessVars.size = ctx.csVarlessItems.size := by
+    simp [hctx, dbBuildCtx]
+  have hsound := dbRunPlans_sound facts ctx.nv d _ (fun plan hplan => by
+    rw [List.mem_reverse] at hplan
+    exact dbTargetsBis_sound bs facts d ctx (dbBuildCtx_shape bs facts d)
+      (fun denv hsat => dbBuildCtx_good bs facts d denv hsat) hvl 0 _
+      (dbTargetsCs_sound bs facts d ctx (dbBuildCtx_shape bs facts d)
+        (fun denv hsat => dbBuildCtx_good bs facts d denv hsat) hvl 0
+        ⟨⟨∅⟩, Array.replicate ctx.nv 0, 0, []⟩ (fun plan hplan => by simp at hplan))
+      plan hplan)
+  rw [dbSubstFn] at ht
+  rcases hq : (dbDomainBatchσ bs facts d).1.getD i.index none with _ | c
+  · rw [hq] at ht; simp at ht
+  · rw [hq, Option.map_some] at ht
+    rw [← Option.some.inj ht]
+    refine ⟨fun z hz => by simp [DenseExpr.vars] at hz, fun denv hsat => ?_⟩
+    rw [DenseExpr.eval]
+    rw [dbDomainBatchσ] at hq
+    exact dbSolvedOf_sound d ctx.nv _ hsound i.index c hq denv hsat
 
 theorem dbDomainBatchTransform_covered (pw : PrimeWitness p) (reg : VarRegistry)
     (bs : BusSemantics p) (facts : BusFacts p bs) (d : DenseConstraintSystem p)
@@ -2292,14 +3118,14 @@ theorem dbDomainBatchTransform_covered (pw : PrimeWitness p) (reg : VarRegistry)
   by_cases hpB : pw.isPrime = true
   · haveI : Fact p.Prime := ⟨pw.correct hpB⟩
     haveI : NeZero p := ⟨(pw.correct hpB).ne_zero⟩
-    rw [show dbDomainBatchTransform pw bs facts d = applyσ (dbDomainBatchσ bs facts d) d
-        from by simp only [dbDomainBatchTransform, if_pos hpB], applyσ]
-    by_cases he : (dbDomainBatchσ bs facts d).map.isEmpty = true
-    · rw [if_pos he]; exact hcov
-    · rw [if_neg he]
-      refine DenseConstraintSystem.substF_covered hcov (fun i _ t ht z hz => ?_)
+    rw [show dbDomainBatchTransform pw bs facts d
+        = (if (dbDomainBatchσ bs facts d).2 then d.substF (dbSubstFn (dbDomainBatchσ bs facts d).1)
+            else d) from by simp only [dbDomainBatchTransform, if_pos hpB]]
+    split
+    · refine DenseConstraintSystem.substF_covered hcov (fun i _ t ht z hz => ?_)
       exact DenseConstraintSystem.occ_valid hcov z
         ((dbDomainBatchσ_entailed bs facts d i t ht).1 z hz)
+    · exact hcov
   · rw [show dbDomainBatchTransform pw bs facts d = d
         from by simp only [dbDomainBatchTransform, if_neg hpB]]
     exact hcov
@@ -2310,15 +3136,15 @@ theorem dbDomainBatchTransform_correct (pw : PrimeWitness p) (reg : VarRegistry)
   by_cases hpB : pw.isPrime = true
   · haveI : Fact p.Prime := ⟨pw.correct hpB⟩
     haveI : NeZero p := ⟨(pw.correct hpB).ne_zero⟩
-    rw [show dbDomainBatchTransform pw bs facts d = applyσ (dbDomainBatchσ bs facts d) d
-        from by simp only [dbDomainBatchTransform, if_pos hpB], applyσ]
-    by_cases he : (dbDomainBatchσ bs facts d).map.isEmpty = true
-    · rw [if_pos he]; exact DensePassCorrect_refl reg.isInput d bs
-    · rw [if_neg he]
-      refine DenseConstraintSystem.substF_denseCorrect d (dbDomainBatchσ bs facts d).fn bs
-        reg.isInput (fun denv hsat j t hjt => ?_) (fun j t hjt z hz => ?_)
+    rw [show dbDomainBatchTransform pw bs facts d
+        = (if (dbDomainBatchσ bs facts d).2 then d.substF (dbSubstFn (dbDomainBatchσ bs facts d).1)
+            else d) from by simp only [dbDomainBatchTransform, if_pos hpB]]
+    split
+    · refine DenseConstraintSystem.substF_denseCorrect d (dbSubstFn (dbDomainBatchσ bs facts d).1)
+        bs reg.isInput (fun denv hsat j t hjt => ?_) (fun j t hjt z hz => ?_)
       · exact (dbDomainBatchσ_entailed bs facts d j t hjt).2 denv hsat
       · exact (dbDomainBatchσ_entailed bs facts d j t hjt).1 z hz
+    · exact DensePassCorrect_refl reg.isInput d bs
   · rw [show dbDomainBatchTransform pw bs facts d = d
         from by simp only [dbDomainBatchTransform, if_neg hpB]]
     exact DensePassCorrect_refl reg.isInput d bs
