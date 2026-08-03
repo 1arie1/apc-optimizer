@@ -20,7 +20,23 @@ variable {p : ℕ}
 
 /-! ## Dense `rootsIn` -/
 
+/-- `a⁻¹`, skipping `ZMod.inv`'s extended gcd for the overwhelmingly common monic coefficient
+    (`ZMod.inv_one`). -/
+def zmodInvFast (a : ZMod p) : ZMod p := if zmodIsOne a then a else a⁻¹
+
+/-- Dictionary-free twin of `denseRootsOfTerms`: the original mentions `⁻¹`, `*`, `+`, `-` and two
+    `≠`, so Lean builds the whole `CommRing (ZMod p)` chain at the head of *every* call — before it
+    even looks at the term list. -/
+def denseRootsOfTermsFast (i : VarId) (c : ZMod p) :
+    List (VarId × ZMod p) → Option (List (ZMod p))
+  | [] => if zmodIsZero c then none else some []
+  | [(j, a)] =>
+      let r := zmodNegP (zmodMulP (zmodInvFast a) c)
+      if j == i && !zmodIsZero a && zmodIsZero (zmodAddP (zmodMulP a r) c) then some [r] else none
+  | _ :: _ :: _ => none
+
 /-- Find the affine root of `c * v + i` if `[(j, a)]` is a single term `j = i` with `a ≠ 0`. -/
+@[implemented_by denseRootsOfTermsFast]
 def denseRootsOfTerms (i : VarId) (c : ZMod p) :
     List (VarId × ZMod p) → Option (List (ZMod p))
   | [] => if c = 0 then none else some []
