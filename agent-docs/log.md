@@ -6093,3 +6093,64 @@ everywhere but `apc_067` while needing its own soundness proof over a mutable lo
 byte-identical output.
 
 **Worked: yes.**
+
+### 166. Runtime: disconnected rebuilt as a union-find over the co-occurrence hypergraph (0.14–0.21x on the pass, sha256 total 0.93x)
+
+**Idea.** The pass built a `Std.HashMap VarId (List Nat)` co-occurrence graph and ran *two*
+breadth-first closures over it (variables reachable from a stateful bus; variables of any
+disconnected item the all-zero witness fails on), then re-checked the induced partition and filtered.
+An `IO` phase probe put the cost at graph 21 %, `conn` BFS 25 %, bad seeds 15 %, `bad` BFS 11 %,
+re-check + filter 26 % on sha256 `apc_001` — no villain, so a rewrite rather than a hoist.
+
+Two mechanical findings behind that spread: `DenseExpr.vars` was materialised **~12 times per
+constraint per invocation** (once for the graph, twice in the bad-seed fold, twice per
+`denseKeepConWith` across four `denseDropCheck` call sites, twice in the filter), and the C sweep
+flagged `List_foldl___at___00denseConnBad_spec__1/2` rebuilding `ZMod.commRing p → … → toZero`
+*inside* the bad-seed loop for `decide (c.eval (fun _ => 0) = 0)` — with `denseDropCheck` doing it
+again.
+
+**What it is now.** Each item is a hyperedge, so unioning its variables makes an item's whole
+"are all my variables disconnected" test one array read. Stateful interactions join one designated
+component, which *is* the old `conn` closure; a failing disconnected item marks its root, which
+replaces the whole `bad` closure with an O(1) mark. `dcUnion` links the larger root to the smaller,
+so `par[i] ≤ i` — that is what lets `dcFind` recurse on the strictly decreasing index (no fuel, no
+invariant carried) and what makes flattening a single increasing sweep, after which every root query
+is one array read. The parent array grows on demand, so there is no separate maximum-index pass.
+`denseDropCheck` and the filter are fused into `denseDropGuardedFast` behind a `@[csimp]`: two
+allocation-free scalar walks (`dcAnyVar`, `dcAllVar`) replace all five `vars` reads, and
+`dcAnyVar` alone settles the common case, because an item with no removable variable is kept *and*
+its kept-side obligation `vars.all (!remV)` is the same walk negated. Zero-evaluation is
+`denseEvalZero` over `Encoding.lean`'s primitives, so no `CommRing` chain is built anywhere.
+
+MEASURED (this box, serial, interleaved, 3 reps best-of; sha256 and SP1 keccak single-shot),
+pass / total, against `origin/main`'s binary:
+
+| case | pass | ratio | total | ratio |
+|---|---:|---:|---:|---:|
+| sha256 `apc_001` | 2 331 → **479** | **0.21x** | 37 240 → 34 781 | **0.93x** |
+| wasm-eth `apc_012` | 253 → **40** | 0.16x | 4 655 → 4 397 | 0.94x |
+| wasm-eth `apc_036` | 180 → **34** | 0.19x | 3 889 → 3 699 | 0.95x |
+| keccak `apc_001` | 175 → **37** | 0.21x | 3 413 → 3 258 | 0.96x |
+| SP1 keccak `apc_001` | 53 → **10** | 0.19x | 1 577 → 1 524 | 0.97x |
+| openvm-eth `apc_006` | 21 → **3** | 0.14x | 484 → 466 | 0.96x |
+
+No other pass regressed outside noise. `opt-export` is **byte-identical to `origin/main`** on five
+OpenVM cases and SP1 keccak.
+
+**The proof story is the reusable part: the search cost nothing to replace.** `denseDisconnectedF`
+is `denseDropGuarded_correct bs facts isInput d _`, universally quantified over `remV` — the pass
+*proposes* a removable set and `denseDropCheck` re-checks the partition it induces, so the entire
+connectivity rewrite (72 % of the win, on its own 0.30x) needed **zero** new proof, and deleted
+`denseBuildGraph`/`denseBfsClosure`/`denseConnBad` plus the three termination lemmas
+(`denseProcMem`, `denseFoldOutOfRange`, `denseBfsMeasureDecreasing`, ~85 lines) with them. The only
+new obligation is the `@[csimp]` for the fused re-check (~150 lines), which changes no theorem
+statement; the one gap it bridges is short-circuiting — a failed obligation stops `denseDropCheck`'s
+`&&` early where `dcCheckCs` keeps walking, and both yield `d`.
+
+**Measured dead end:** a first fused re-check used one walk returning a three-bit `UInt8` summary
+(has-a-variable / some-removable / some-not). Same speed (35 vs 37 ms on keccak, identical output),
+~3x the proof — bitmask reasoning against `vars` instead of two `List.any`/`List.all` inductions.
+Two walks win because `dcAnyVar` exits on the first variable of a removed item and is the *only*
+walk on a kept one.
+
+**Worked: yes.**
