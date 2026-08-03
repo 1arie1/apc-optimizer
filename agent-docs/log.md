@@ -6401,3 +6401,98 @@ would take roughly 40 % of the node visits out of the inner loop (est. −150 to
 irreducible without the cross-cutting change the dead end above rules out.
 
 **Worked: yes.**
+### 170. Runtime: rootPairUnify rebuilt — merge once per constraint, one inverse per coefficient (0.13–0.53x on the pass, sha256 total 0.97x)
+
+Full redesign of the two-root unification pass (`rootPairUnifyRedesign.md` has the design, the
+attribution and the rejected alternatives). Rank 4 by score in `ranked_passes.md` and the **top pass
+on wasm-eth `apc_012`** (697 ms of 3.9 s, 17.9 %); worst absolute sha256 `apc_001` 1825 ms.
+
+WHAT WAS WRONG. A candidate is a `(constraint, variable)` pair keyed by
+`(k, A.terms, A.const, δ)`, matched against earlier candidates. The old `denseRpCandidates`
+re-derived that key **per variable of the constraint**: `l1.coeff x`, `(l1.others x).norm`,
+`(l2.others x).norm` — the `norm` being an `O(T²)` like-term merge — and then compared the two
+offset forms as lists. Θ(V·T²) per constraint for data that is *the same merged list minus one
+entry* every time (R10b's "cubic build", fixed inside busUnify's copy in 2026-08-01, never here).
+LBR, pass-only, wasm-eth `apc_012`: the merge 30.6 % of the candidate phase, the list compare
+17.6 %, the `others` filter 8.8 %, `hashedEraseDups c.vars` 4.0 %, `l.coeff x` 2.6 % — and
+**48 % of the pass in allocator + refcount**, which is what a fresh term list per candidate
+variable costs.
+
+THE REBUILD (`RootPairUnify.lean`; soundness in `Proofs/RootPairUnify.lean`):
+1. **Merge each factor once, read the candidates off the merged pair.** `denseMergeTerms` keeps
+   first-occurrence order, so `(l.others x).norm.terms = (merge l.terms) \ x` — filtering before or
+   after the merge gives the same list. `denseRpDiffVars` then decides the candidate set with one
+   simultaneous walk: identical normal forms ⟹ every variable qualifies (the shape a real two-root
+   constraint has, its factors differing only in their constant); otherwise **at most the two
+   variables at the first difference**, since deleting a variable that occurs earlier deletes the
+   same position from both lists and leaves the difference in place. Each of those two is checked
+   by one allocation-free `denseRpSkipEq` walk.
+2. **No merge when the terms are already normal** (`denseRpTermsClean`: distinct variables, no zero
+   coefficient — index compares only): the normal form then *is* the linearized term list, shared.
+3. **The key is never materialized.** A candidate is its constraint's shared `DenseRpSrc` plus
+   `(x, k)`; `A.terms = terms \ x` stays implicit. The bucket hash is a multiset sum over the terms
+   (computed once per constraint) minus the candidate's own term — O(1) per candidate — and the
+   exact test is `denseRpSkipEq` on the two candidates' term lists, skipping each side's own entry.
+4. **One modular inverse per distinct coefficient.** `IO` phase timers on wasm-eth `apc_012`: of
+   19 ms per invocation preparing candidates, **11 ms was `ZMod`'s `Inv`** — an extended gcd, once
+   per candidate, for the root gap `g = k⁻¹·δ` behind the ≥ 256 filter, 13 500 times per
+   invocation. Preparation is now `denseRpPres` (candidate variables, no gap) → `denseRpInvTable`
+   (one inverse per distinct coefficient *value* — a coefficient recurs in every constraint of the
+   same instruction shape) → `denseRpGroupsOf` (the gap filter off the table).
+5. **A bound gate before the certificate** (`denseRpBoundGate`): the certificate's bound clause on
+   the candidate's own stored gap, a necessary condition of `denseRpCheckPair`, so a same-key
+   non-twin is rejected by two bound lookups instead of two `denseTwoRootOf?` re-derivations.
+6. **Groups whose `(A.const, δ)` signature no other group shares are dropped whole** — they can
+   match nothing (openvm-eth `apc_006`: 110 groups → 34).
+
+PROOF SURFACE: the scan-loop invariant re-run over `List (List DenseRPSeen)` instead of
+`List DenseExpr` (`denseRpScan_sound`, same argument), plus `denseRpLiveGroups_mem` — the one
+obligation preparation owes: every bucketed entry's constraint is one of `d`'s. Everything else
+about a candidate is untrusted: `denseRpCheckPair` re-derives the pair's two-root data from the two
+constraint expressions, so the merge walk, the multiset hash, the key test, the gap filter and the
+signature filter carry no obligation at all. `denseRpCheckPair_sound`/`_vars` and the certificate
+chain (`denseTwoRootOf?_sound` + `rootPair_eq`) are untouched; the certificate gained a
+`bnd`-parameterized twin (`denseRpCheckPairB`) so the indexed layer is one `funext` away
+(`denseRootPairUnifyF_eq_fast`).
+
+THE FUNNEL, and why the spread is what it is (`dbg_trace` probe, per invocation): wasm-eth
+`apc_012` prepares **13 500 candidates in 1 080 groups and adopts nothing, in every cycle** — its
+whole cost was preparation, which is what got 6× cheaper. keccak (11–187 adoptions per cycle) and
+sha256 (19–365) do adopt, so they keep paying bound queries and `substF`, which preparation had
+been hiding. sha256 has only **~900 bound queries in the whole run**.
+
+NUMBERS (this 20-core box, serial, interleaved, 2–3 reps; `profile` per-pass ms):
+wasm-eth `apc_012` **697 → 92 (0.13x)**, run total 3876 → 3347 (0.86x); wasm-eth `apc_036`
+455 → 70 (0.15x), 3216 → 2878 (0.90x); sha256 `apc_001` **1825 → 918 (0.50x)**, 29559 → 28791
+(0.97x); openvm-eth `apc_037` 50 → 10 (0.20x), 592 → 566 (0.96x); openvm-eth `apc_006` 17 → 5
+(0.30x); keccak `apc_001` 128 → 70 (0.53x), 2936 → 2829 (0.96x).
+VERIFIED: `opt-export` **byte-identical** on 18 cases — sha256 `apc_001`, OpenVM keccak `apc_001`,
+openvm-eth `apc_006` / `apc_032` / `apc_037` / `apc_058` / `apc_063` / `apc_071` / `apc_088` /
+`apc_100`, wasm-eth `apc_001` / `apc_002` / `apc_012` / `apc_036` / `apc_063`, SP1 keccak `apc_001`,
+SP1 rsp `apc_001` / `apc_002`; `lake build` clean, no warnings; `check-proof-integrity` passes.
+
+DEAD ENDS, measured (all three implemented and reverted):
+* **An eager raw-slot bound index over every variable** — `VarId → List (busId, mult, Thunk
+  pattern, slot)` built in one sweep, so a raw bound query is a `BusFacts` call with no payload walk
+  and no re-derived slot pattern. **Worse on every case**: sha256 1220 → 1324 ms, keccak 93 → 100,
+  wasm `apc_012` flat. The sweep inserts ~1 M (variable, interaction) entries per invocation to
+  serve ~900 queries in the whole run. *Eager indexing loses when the query set is three orders of
+  magnitude smaller than the index.*
+* **A memoizing bound table** (`Std.HashMap VarId (Thunk (Option Nat))` over the candidate
+  variables, forced on first use): **exactly 0** on sha256 (886 vs 887 ms), noise on keccak. The
+  queries are already almost all for distinct variables — the per-*pair* re-derivation it was built
+  to remove is already prevented by the bound gate.
+* **A constant-only pre-walk to skip linearizing** (`denseRpConstOf`: a factor's linearized constant
+  and term-emptiness without allocating, deciding `δ = 0` before the merge). On sha256 cycle 0 it
+  drops 104 264 products to 40 958 — and costs **59 ms against the 68 ms of linearizing all of
+  them**. The walk is the expensive half of `denseLinearize`; the allocation is not.
+
+RESIDUAL (sha256 918 ms, `IO` phase timers summed over 11 invocations): preparation 274 ms (of which
+`denseLinearize` 68 — near its floor), the `denseVarBucket` build 125, bound queries 122, `substF`
+259, rest ~40. The reducible item is the bound path: a **candidate-restricted raw bound sweep**
+behind a `Thunk` (record, for candidate variables only, the first fact-bounded literal `.var x`
+payload slot) replaces both the bucket build and the query walks with ~50–60 ms of sweeping in the
+three cycles that adopt — ~190 ms — and needs a first-yield sweep-equality lemma against
+`denseFindVarBound`. `substF` is the pass's own output and is ruled out by entry 169's dead end.
+
+**Worked: yes.**

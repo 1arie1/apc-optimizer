@@ -276,7 +276,7 @@ theorem denseRpCheckPair_sound [Fact p.Prime] (bs : BusSemantics p)
     (hbus : ∀ bi ∈ bis, (denseBIEval bi denv).multiplicity ≠ 0 →
       bs.accepts (denseBIEval bi denv)) :
     denv x = denv y := by
-  unfold denseRpCheckPair at h
+  unfold denseRpCheckPair denseRpCheckPairB at h
   cases hxt : denseTwoRootOf? cX x with
   | none => rw [hxt] at h; simp at h
   | some t =>
@@ -314,7 +314,7 @@ theorem denseRpCheckPair_vars (bs : BusSemantics p) (facts : BusFacts p bs)
     (bis : List (BusInteraction (DenseExpr p))) (domCs : List (DenseExpr p))
     (cX cY : DenseExpr p) (x y : VarId)
     (h : denseRpCheckPair bs facts bis domCs cX cY x y = true) : x ∈ cX.vars ∧ y ∈ cY.vars := by
-  unfold denseRpCheckPair at h
+  unfold denseRpCheckPair denseRpCheckPairB at h
   cases hxt : denseTwoRootOf? cX x with
   | none => rw [hxt] at h; simp at h
   | some t =>
@@ -354,96 +354,98 @@ theorem denseRpInsertAll_seen {S : List (DenseExpr p)} :
       have hacc : ∀ hsh' e', e' ∈ (denseRpInsertAll seen rest).getD hsh' [] → e'.c ∈ S :=
         ih seen hseen (fun e' he' => hes e' (List.mem_cons_of_mem _ he'))
       have hstep : denseRpInsertAll seen (e0 :: rest)
-          = (denseRpInsertAll seen rest).insert (denseRpKeyHash e0.key)
-              (e0 :: (denseRpInsertAll seen rest).getD (denseRpKeyHash e0.key) []) := by
+          = (denseRpInsertAll seen rest).insert e0.h
+              (e0 :: (denseRpInsertAll seen rest).getD e0.h []) := by
         simp only [denseRpInsertAll, List.foldr_cons]
       rw [hstep, Std.HashMap.getD_insert] at hmem
       split_ifs at hmem with hk
       · rcases List.mem_cons.1 hmem with rfl | hmem'
         · exact hes e (List.mem_cons_self ..)
-        · exact hacc (denseRpKeyHash e0.key) e hmem'
+        · exact hacc e0.h e hmem'
       · exact hacc hsh e hmem
 
-/-- **The scan loop is sound**: the final solution map is entailed (a) and occurrence-closed (b).
+/-- **The scan is sound**: the final solution map is entailed (a) and occurrence-closed (b).
     The certificate (`denseRpCheckPair_sound`) forces each adopted `x = y` on satisfying
-    assignments; the bucketed `seen` scan is proof-free, its membership recovered by
-    `denseRpInsertAll_seen`. -/
-theorem denseRpLoop_sound [Fact p.Prime] (bs : BusSemantics p)
+    assignments; candidate preparation, the bucket hash and the key match are proof-free, the
+    entries' constraint membership recovered by `denseRpInsertAll_seen`. -/
+theorem denseRpScan_sound [Fact p.Prime] (bs : BusSemantics p)
     (facts : BusFacts p bs) (d : DenseConstraintSystem p) :
-    ∀ (pending : List (DenseExpr p)) (seen : Std.HashMap UInt64 (List (DenseRPSeen p)))
-      (σ : DenseSolved p),
-      (∀ c ∈ pending, c ∈ d.algebraicConstraints) →
+    ∀ (groups : List (List (DenseRPSeen p)))
+      (seen : Std.HashMap UInt64 (List (DenseRPSeen p))) (σ : DenseSolved p),
+      (∀ g ∈ groups, ∀ e ∈ g, e.c ∈ d.algebraicConstraints) →
       (∀ hsh e, e ∈ seen.getD hsh [] → e.c ∈ d.algebraicConstraints) →
       (∀ denv, d.satisfies bs denv → ∀ i t, σ.fn i = some t → denv i = t.eval denv) →
       (∀ i t, σ.fn i = some t → ∀ z ∈ t.vars, z ∈ d.occ) →
       (∀ denv, d.satisfies bs denv → ∀ i t,
-          (denseRpLoop bs facts d.busInteractions d.algebraicConstraints pending seen σ).fn i
-            = some t → denv i = t.eval denv) ∧
-      (∀ i t, (denseRpLoop bs facts d.busInteractions d.algebraicConstraints pending seen σ).fn i
-          = some t → ∀ z ∈ t.vars, z ∈ d.occ) := by
-  intro pending
-  induction pending with
+          (denseRpScan (denseAnyVarBound bs facts d.busInteractions d.algebraicConstraints)
+              groups seen σ).fn i = some t → denv i = t.eval denv) ∧
+      (∀ i t, (denseRpScan (denseAnyVarBound bs facts d.busInteractions d.algebraicConstraints)
+          groups seen σ).fn i = some t → ∀ z ∈ t.vars, z ∈ d.occ) := by
+  intro groups
+  induction groups with
   | nil =>
       intro seen σ _ _ hσs hσv
       exact ⟨hσs, hσv⟩
-  | cons c rest ih =>
-      intro seen σ hpend hseen hσs hσv
-      have hcmem : c ∈ d.algebraicConstraints := hpend c (List.mem_cons_self ..)
-      have hrest : ∀ c' ∈ rest, c' ∈ d.algebraicConstraints :=
-        fun c' h' => hpend c' (List.mem_cons_of_mem _ h')
-      rw [denseRpLoop]
-      cases hf : (denseRpCandidates c).findSome? (fun xk =>
-          (seen.getD (denseRpKeyHash xk.2) []).findSome? (fun e =>
-            if e.key == xk.2 && e.x != xk.1 &&
-                denseRpCheckPair bs facts d.busInteractions d.algebraicConstraints e.c c e.x xk.1
-            then some (e, xk.1) else none)) with
+  | cons g rest ih =>
+      intro seen σ hgroups hseen hσs hσv
+      have hgmem : ∀ e ∈ g, e.c ∈ d.algebraicConstraints :=
+        hgroups g (List.mem_cons_self ..)
+      have hrest : ∀ g' ∈ rest, ∀ e ∈ g', e.c ∈ d.algebraicConstraints :=
+        fun g' h' => hgroups g' (List.mem_cons_of_mem _ h')
+      rw [denseRpScan]
+      cases hf : g.findSome? (fun cand =>
+          (seen.getD cand.h []).findSome? (fun e =>
+            if denseRpKeyEq e cand && !(e.x.index == cand.x.index) &&
+                denseRpBoundGate (denseAnyVarBound bs facts d.busInteractions
+                  d.algebraicConstraints) e cand &&
+                denseRpCheckPairB (denseAnyVarBound bs facts d.busInteractions
+                  d.algebraicConstraints) e.c cand.c e.x cand.x
+            then some (e, cand.x) else none)) with
       | none =>
           simp only []
           refine ih _ σ hrest ?_ hσs hσv
-          refine denseRpInsertAll_seen _ seen hseen ?_
-          intro e he
-          obtain ⟨xk, _hxk, rfl⟩ := List.mem_map.1 he
-          exact hcmem
+          exact denseRpInsertAll_seen _ seen hseen hgmem
       | some ex =>
           simp only []
-          obtain ⟨xk, _hxkmem, hinner⟩ := List.exists_of_findSome?_eq_some hf
+          obtain ⟨cand, hcandmem, hinner⟩ := List.exists_of_findSome?_eq_some hf
           obtain ⟨e, hemem, hif⟩ := List.exists_of_findSome?_eq_some hinner
-          by_cases hcnd : (e.key == xk.2 && e.x != xk.1 &&
-              denseRpCheckPair bs facts d.busInteractions d.algebraicConstraints e.c c e.x xk.1)
-              = true
+          by_cases hcnd : (denseRpKeyEq e cand && !(e.x.index == cand.x.index) &&
+              denseRpBoundGate (denseAnyVarBound bs facts d.busInteractions
+                d.algebraicConstraints) e cand &&
+              denseRpCheckPairB (denseAnyVarBound bs facts d.busInteractions
+                d.algebraicConstraints) e.c cand.c e.x cand.x) = true
           · rw [if_pos hcnd] at hif
             simp only [Option.some.injEq] at hif
             subst hif
-            rw [Bool.and_eq_true, Bool.and_eq_true] at hcnd
+            rw [Bool.and_eq_true] at hcnd
             have hcert : denseRpCheckPair bs facts d.busInteractions d.algebraicConstraints
-                e.c c e.x xk.1 = true := hcnd.2
-            have hecmem : e.c ∈ d.algebraicConstraints := hseen (denseRpKeyHash xk.2) e hemem
-            obtain ⟨hexv, _hxkv⟩ := denseRpCheckPair_vars bs facts d.busInteractions
-              d.algebraicConstraints e.c c e.x xk.1 hcert
+                e.c cand.c e.x cand.x = true := hcnd.2
+            have hecmem : e.c ∈ d.algebraicConstraints := hseen cand.h e hemem
+            have hcandmem' : cand.c ∈ d.algebraicConstraints := hgmem cand hcandmem
+            obtain ⟨hexv, _hcandv⟩ := denseRpCheckPair_vars bs facts d.busInteractions
+              d.algebraicConstraints e.c cand.c e.x cand.x hcert
             have hexocc : e.x ∈ d.occ := DenseConstraintSystem.mem_occ_of_constraint hecmem hexv
-            have hfn : ∀ i, (σ.insertAll [((e, xk.1).2, DenseExpr.var (e, xk.1).1.x)]).fn i
-                = (σ.map.insert xk.1 (DenseExpr.var e.x))[i]? := by
+            have hfn : ∀ i, (σ.insertAll [((e, cand.x).2, DenseExpr.var (e, cand.x).1.x)]).fn i
+                = (σ.map.insert cand.x (DenseExpr.var e.x))[i]? := by
               intro i
-              show (σ.insertAll [(xk.1, DenseExpr.var e.x)]).map[i]? = _
+              show (σ.insertAll [(cand.x, DenseExpr.var e.x)]).map[i]? = _
               rw [DenseSolved.insertAll_map]; rfl
             refine ih _ _ hrest ?_ ?_ ?_
-            · -- `seen` invariant preservation
-              refine denseRpInsertAll_seen _ seen hseen ?_
+            · refine denseRpInsertAll_seen _ seen hseen ?_
               intro e' he'
-              obtain ⟨xk', _hxk', rfl⟩ := List.mem_map.1 he'
-              exact hcmem
+              exact hgmem e' (List.mem_of_mem_filter he')
             · -- (a) entailment of the updated map
               intro denv hsat i t hti
               rw [hfn, Std.HashMap.getElem?_insert] at hti
               split_ifs at hti with hik
-              · have hi : xk.1 = i := by simpa using hik
+              · have hi : cand.x = i := by simpa using hik
                 simp only [Option.some.injEq] at hti
                 subst hti
                 subst hi
                 have heq := denseRpCheckPair_sound bs facts d.busInteractions
-                  d.algebraicConstraints e.c c e.x xk.1 hcert denv
-                  hsat.1 (hsat.1 e.c hecmem) (hsat.1 c hcmem) hsat.2
-                show denv xk.1 = denv e.x
+                  d.algebraicConstraints e.c cand.c e.x cand.x hcert denv
+                  hsat.1 (hsat.1 e.c hecmem) (hsat.1 cand.c hcandmem') hsat.2
+                show denv cand.x = denv e.x
                 exact heq.symm
               · exact hσs denv hsat i t hti
             · -- (b) occurrence closure of the updated map
@@ -459,31 +461,108 @@ theorem denseRpLoop_sound [Fact p.Prime] (bs : BusSemantics p)
           · rw [if_neg hcnd] at hif
             exact absurd hif (by simp)
 
+/-! ## Prepared candidates come from the system's constraints
+
+The only thing the scan's soundness needs from candidate preparation (`denseRpPres` and the
+root-gap filter): every bucketed entry's constraint is one of `d`'s. Everything else about a
+candidate — its key, its bucket hash, its gap — is re-derived by `denseRpCheckPair` for the pair it
+proposes, so it carries no obligation. -/
+
+/-- The root-gap filter keeps a candidate's constraint data. -/
+private theorem denseRpGroupOf_src (ops : DenseZModOps p) (inv : Std.HashMap Nat (ZMod p))
+    (src : DenseRpSrc p) :
+    ∀ (cands : List (VarId × ZMod p)) (e : DenseRPSeen p),
+      e ∈ denseRpGroupOf ops inv src cands → e.src = src := by
+  intro cands
+  induction cands with
+  | nil => intro e he; simp [denseRpGroupOf] at he
+  | cons t rest ih =>
+      intro e he
+      obtain ⟨v, k⟩ := t
+      rw [denseRpGroupOf] at he
+      cases hat : denseRpCandAt ops inv src v k with
+      | none => rw [hat] at he; exact ih e he
+      | some e0 =>
+          rw [hat] at he
+          have he0 : e0.src = src := by
+            simp only [denseRpCandAt, Option.ite_none_right_eq_some, Option.some.injEq] at hat
+            rw [← hat.2]
+          rcases List.mem_cons.1 he with rfl | he'
+          · exact he0
+          · exact ih e he'
+
+/-- Every group's entries come from one prepared constraint. -/
+private theorem denseRpGroupsOf_mem (ops : DenseZModOps p) (inv : Std.HashMap Nat (ZMod p)) :
+    ∀ (pres : List (DenseRpPre p)) (g : List (DenseRPSeen p)),
+      g ∈ denseRpGroupsOf ops inv pres →
+      ∃ pre ∈ pres, ∀ e ∈ g, e.src = pre.src := by
+  intro pres
+  induction pres with
+  | nil => intro g hg; simp [denseRpGroupsOf] at hg
+  | cons pre rest ih =>
+      intro g hg
+      rw [denseRpGroupsOf] at hg
+      cases hgo : denseRpGroupOf ops inv pre.src pre.cands with
+      | nil => rw [hgo] at hg
+               obtain ⟨pre', hpre', hall⟩ := ih g hg
+               exact ⟨pre', List.mem_cons_of_mem _ hpre', hall⟩
+      | cons e0 es =>
+          rw [hgo] at hg
+          rcases List.mem_cons.1 hg with rfl | hg'
+          · refine ⟨pre, List.mem_cons_self .., fun e he => ?_⟩
+            exact denseRpGroupOf_src ops inv pre.src pre.cands e (hgo ▸ he)
+          · obtain ⟨pre', hpre', hall⟩ := ih g hg'
+            exact ⟨pre', List.mem_cons_of_mem _ hpre', hall⟩
+
+/-- Every prepared constraint is one of the input constraints. -/
+private theorem denseRpPres_mem (ops : DenseZModOps p) :
+    ∀ (all : List (DenseExpr p)) (pre : DenseRpPre p),
+      pre ∈ denseRpPres ops all → pre.src.c ∈ all := by
+  intro all
+  induction all with
+  | nil => intro pre hpre; simp [denseRpPres] at hpre
+  | cons c rest ih =>
+      intro pre hpre
+      rw [denseRpPres] at hpre
+      cases hdata : denseRpDataOf ops c with
+      | none => rw [hdata] at hpre; exact List.mem_cons_of_mem _ (ih pre hpre)
+      | some data =>
+          obtain ⟨terms, cands, aconst, δ⟩ := data
+          rw [hdata] at hpre
+          rcases List.mem_cons.1 hpre with rfl | hpre'
+          · exact List.mem_cons_self ..
+          · exact List.mem_cons_of_mem _ (ih pre hpre')
+
+/-- Every prepared candidate's constraint is one of the system's. -/
+theorem denseRpLiveGroups_mem (all : List (DenseExpr p)) :
+    ∀ g ∈ denseRpLiveGroups (denseRpGroups denseZModOps all), ∀ e ∈ g, e.c ∈ all := by
+  intro g hg e he
+  have hgs : g ∈ denseRpGroups denseZModOps all := List.mem_of_mem_filter hg
+  obtain ⟨pre, hpre, hall⟩ := denseRpGroupsOf_mem denseZModOps _ _ g hgs
+  have : e.c = pre.src.c := by rw [DenseRPSeen.c, hall e he]
+  rw [this]
+  exact denseRpPres_mem denseZModOps all pre hpre
+
 /-! ## The dense `rootPairUnify` pass -/
 
-/-- The dense `rootPairUnify` transform re-expressed with the loop's solution map named, for the
+/-- The dense `rootPairUnify` transform re-expressed with the scan's solution map named, for the
     correctness/coverage proofs. -/
 theorem denseRootPairUnifyF_eq (pw : PrimeWitness p) (bs : BusSemantics p) (facts : BusFacts p bs)
     (d : DenseConstraintSystem p) :
     denseRootPairUnifyF pw bs facts d
       = (if pw.isPrime = true then
-          (if (denseRpLoop bs facts d.busInteractions d.algebraicConstraints
-                d.algebraicConstraints ∅ DenseSolved.empty).map.isEmpty then d
-           else d.substF (denseRpLoop bs facts d.busInteractions d.algebraicConstraints
-                d.algebraicConstraints ∅ DenseSolved.empty).fn)
+          (if (denseRpSigma bs facts d).map.isEmpty then d
+           else d.substF (denseRpSigma bs facts d).fn)
          else d) := rfl
 
-/-- The final loop solution map is entailed and occurrence-closed (specializing `denseRpLoop_sound`
-    to the pass's initial `∅`/`empty` accumulators). -/
+/-- The final scan solution map is entailed and occurrence-closed. -/
 theorem denseRootPairUnify_loop_invariant [Fact p.Prime] (bs : BusSemantics p)
     (facts : BusFacts p bs) (d : DenseConstraintSystem p) :
     (∀ denv, d.satisfies bs denv → ∀ i t,
-        (denseRpLoop bs facts d.busInteractions d.algebraicConstraints d.algebraicConstraints ∅
-          DenseSolved.empty).fn i = some t → denv i = t.eval denv) ∧
-    (∀ i t, (denseRpLoop bs facts d.busInteractions d.algebraicConstraints d.algebraicConstraints ∅
-        DenseSolved.empty).fn i = some t → ∀ z ∈ t.vars, z ∈ d.occ) := by
-  refine denseRpLoop_sound bs facts d d.algebraicConstraints ∅ DenseSolved.empty
-    (fun _ h => h) ?_ ?_ ?_
+        (denseRpSigma bs facts d).fn i = some t → denv i = t.eval denv) ∧
+    (∀ i t, (denseRpSigma bs facts d).fn i = some t → ∀ z ∈ t.vars, z ∈ d.occ) := by
+  refine denseRpScan_sound bs facts d _ ∅ DenseSolved.empty
+    (denseRpLiveGroups_mem d.algebraicConstraints) ?_ ?_ ?_
   · intro hsh e hmem
     rw [Std.HashMap.getD_empty] at hmem
     exact absurd hmem (by simp)
@@ -943,86 +1022,40 @@ private theorem denseAnyVarBoundIdx_eq (bs : BusSemantics p) (facts : BusFacts p
               (fun v => denseFindDomainAlg domCs v) bi x hp1 B ?_)
             rw [denseScaledSlotBoundD_eq bs facts domCs _ (fun _ => rfl) bi x, hb])
 
-/-- The indexed pair certificate answers exactly the scanning one. -/
-private theorem denseRpCheckPairIdx_eq (bs : BusSemantics p) (facts : BusFacts p bs)
-    (bis : List (BusInteraction (DenseExpr p))) (domCs : List (DenseExpr p))
-    (dom : VarId → Option (List (ZMod p)))
-    (hdom : ∀ v, dom v = denseFindDomainAlg domCs v)
-    (hp1 : (1 : ZMod p) ≠ 0) (cX cY : DenseExpr p) (x y : VarId) :
-    denseRpCheckPairIdx bs facts (denseVarBucketLookup (denseVarBucket denseBIVars bis)) dom
-        cX cY x y
-      = denseRpCheckPair bs facts bis domCs cX cY x y := by
-  unfold denseRpCheckPairIdx denseRpCheckPair
-  rw [denseAnyVarBoundIdx_eq bs facts bis domCs dom hdom hp1 x,
-    denseAnyVarBoundIdx_eq bs facts bis domCs dom hdom hp1 y]
-
-/-- The indexed scan loop computes the same solution map. -/
-private theorem denseRpLoopIdx_eq (bs : BusSemantics p) (facts : BusFacts p bs)
-    (bis : List (BusInteraction (DenseExpr p))) (domCs : List (DenseExpr p))
-    (dom : VarId → Option (List (ZMod p)))
-    (hdom : ∀ v, dom v = denseFindDomainAlg domCs v)
-    (hp1 : (1 : ZMod p) ≠ 0) :
-    ∀ (cs : List (DenseExpr p)) (seen : Std.HashMap UInt64 (List (DenseRPSeen p)))
-      (σ : DenseSolved p),
-      denseRpLoopIdx bs facts (denseVarBucketLookup (denseVarBucket denseBIVars bis)) dom
-          cs seen σ
-        = denseRpLoop bs facts bis domCs cs seen σ := by
-  intro cs
-  induction cs with
-  | nil => intro seen σ; rfl
-  | cons c rest ih =>
-      intro seen σ
-      have hfind : (denseRpCandidates c).findSome? (fun xk =>
-          (seen.getD (denseRpKeyHash xk.2) []).findSome? (fun e =>
-            if e.key == xk.2 && e.x != xk.1 &&
-                denseRpCheckPairIdx bs facts
-                  (denseVarBucketLookup (denseVarBucket denseBIVars bis)) dom e.c c e.x xk.1
-            then some (e, xk.1) else none))
-          = (denseRpCandidates c).findSome? (fun xk =>
-          (seen.getD (denseRpKeyHash xk.2) []).findSome? (fun e =>
-            if e.key == xk.2 && e.x != xk.1 &&
-                denseRpCheckPair bs facts bis domCs e.c c e.x xk.1
-            then some (e, xk.1) else none)) := by
-        refine findSome?_congr' _ (fun xk _ => findSome?_congr' _ (fun e _ => ?_))
-        rw [denseRpCheckPairIdx_eq bs facts bis domCs dom hdom hp1]
-      simp only [denseRpLoopIdx, denseRpLoop]
-      rw [hfind]
-      cases (denseRpCandidates c).findSome? (fun xk =>
-          (seen.getD (denseRpKeyHash xk.2) []).findSome? (fun e =>
-            if e.key == xk.2 && e.x != xk.1 &&
-                denseRpCheckPair bs facts bis domCs e.c c e.x xk.1
-            then some (e, xk.1) else none)) with
-      | some ex => exact ih _ _
-      | none => exact ih _ _
-
-/-- The pass with indexed lookups, installed as `denseRootPairUnifyF`'s compiled body. -/
+/-- The pass with indexed lookups, installed as `denseRootPairUnifyF`'s compiled body. The scan
+    takes its bound lookup as a function, so the indexed answers being pointwise equal
+    (`denseAnyVarBoundIdx_eq`) makes the two bodies the same term. -/
 @[csimp] theorem denseRootPairUnifyF_eq_fast :
     @denseRootPairUnifyF = @denseRootPairUnifyFFast := by
   funext p pw bs facts d
   by_cases hp : pw.isPrime = true
   · haveI : Fact p.Prime := ⟨pw.correct hp⟩
-    have hp1 : (1 : ZMod p) ≠ 0 := one_ne_zero
-    have hloop := denseRpLoopIdx_eq bs facts d.busInteractions d.algebraicConstraints
-      (fun v => (denseFindDomainMap d.algebraicConstraints)[v]?)
-      (fun v => denseFindDomainMap_getElem? d.algebraicConstraints v) hp1
-      d.algebraicConstraints ∅ DenseSolved.empty
+    have hbnd : (fun x => denseAnyVarBoundIdx bs facts
+          (fun v => denseVarBucketLookup (denseVarBucket denseBIVars d.busInteractions) v)
+          (fun v => (denseFindDomainMap d.algebraicConstraints)[v]?) x)
+        = denseAnyVarBound bs facts d.busInteractions d.algebraicConstraints := by
+      funext x
+      exact denseAnyVarBoundIdx_eq bs facts d.busInteractions d.algebraicConstraints
+        (fun v => (denseFindDomainMap d.algebraicConstraints)[v]?)
+        (fun v => denseFindDomainMap_getElem? d.algebraicConstraints v) one_ne_zero x
     show (if pw.isPrime = true then
-        if (denseRpLoop bs facts d.busInteractions d.algebraicConstraints
-            d.algebraicConstraints ∅ DenseSolved.empty).map.isEmpty then d
-        else d.substF (denseRpLoop bs facts d.busInteractions d.algebraicConstraints
-            d.algebraicConstraints ∅ DenseSolved.empty).fn
+        (if (denseRpSigma bs facts d).map.isEmpty then d
+         else d.substF (denseRpSigma bs facts d).fn)
       else d)
       = (if pw.isPrime = true then
-        if (denseRpLoopIdx bs facts
-            (denseVarBucketLookup (denseVarBucket denseBIVars d.busInteractions))
-            (fun v => (denseFindDomainMap d.algebraicConstraints)[v]?)
-            d.algebraicConstraints ∅ DenseSolved.empty).map.isEmpty then d
-        else d.substF (denseRpLoopIdx bs facts
-            (denseVarBucketLookup (denseVarBucket denseBIVars d.busInteractions))
-            (fun v => (denseFindDomainMap d.algebraicConstraints)[v]?)
-            d.algebraicConstraints ∅ DenseSolved.empty).fn
+        (if (denseRpScan (fun x => denseAnyVarBoundIdx bs facts
+              (fun v => denseVarBucketLookup (denseVarBucket denseBIVars d.busInteractions) v)
+              (fun v => (denseFindDomainMap d.algebraicConstraints)[v]?) x)
+            (denseRpLiveGroups (denseRpGroups denseZModOps d.algebraicConstraints)) ∅
+            DenseSolved.empty).map.isEmpty then d
+         else d.substF (denseRpScan (fun x => denseAnyVarBoundIdx bs facts
+              (fun v => denseVarBucketLookup (denseVarBucket denseBIVars d.busInteractions) v)
+              (fun v => (denseFindDomainMap d.algebraicConstraints)[v]?) x)
+            (denseRpLiveGroups (denseRpGroups denseZModOps d.algebraicConstraints)) ∅
+            DenseSolved.empty).fn)
       else d)
-    rw [hloop]
+    rw [hbnd]
+    rfl
   · show (if pw.isPrime = true then _ else d) = (if pw.isPrime = true then _ else d)
     rw [if_neg hp, if_neg hp]
 
