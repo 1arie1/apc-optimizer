@@ -6249,3 +6249,78 @@ filters early is worth at most ~2x (the last level is half the tree) and would t
 through the compile, the columns and the proof.
 
 **Worked: yes.**
+
+### 168. Runtime: bytePack rebuilt as an untrusted plan plus a re-checking sweep (0.12–0.15x on the pass, sha256 total 0.96x)
+
+`bytePack` packs two single-value byte checks on the same byte-XOR bus into one pair check. It was
+`DenseNativeStep.drain` over `denseBytePackStep`: **one pack per step**, each step re-splicing the
+whole interaction list — `take k` + `reverse` + `drop k`, `denseFindGo`'s `revPre.reverse`,
+`denseFindSecond`'s `revMid.reverse`, then `pre ++ pair :: mid ++ post` in the step's output. That
+is Θ(n) allocation per pack, i.e. **Θ(packs × interactions)**, and sha256 `apc_001` enters cycle 0
+with 71 402 of them. LBR inside the pass: **49.8 % list ops** (`reverseAux` 28.5, `takeTR_go` 9.2,
+`List.drop` 8.2), **24.6 % allocator**, 9.4 % refcount — and **3.7 % actual pass logic**. The
+recognizer was never the problem; the splice machinery was.
+
+**The semantics, restated.** The drain unrolled is exactly per-bus FIFO pairing left to right: a
+pack removes two single-value checks and inserts a pair check (which the recognizer rejects), so
+the set of single-value checks only shrinks and a position with no same-bus partner after it never
+gains one — which is why the entry-146 resume position is sound and why the drain's chosen opener
+is always the earliest unpaired check on its bus.
+
+**The rebuild, split so only half of it is trusted.**
+
+1. **Plan (`denseBpPlan`), untrusted** — one left-to-right walk emitting `keep`/`openPack`/
+   `closePack` per position: the `r`-th check on a bus opens a pack when `r` is even and closes it
+   when `r` is odd. `none` when nothing pairs, so the fixpoint's tail cycles cost one recognizer
+   sweep and no rebuild. It carries a `facts.byteXorSpec` memo — **not** a lookup cache: OpenVM
+   builds its `ByteXorSpec` record inline, so every call reconstructs `xorOp = 1`/`pairOp = 0`
+   through the `ZMod p` `CommRing` chain, which was 18 % of the pass once the quadratic was gone.
+   That needed the recognizer split into spec-parameterized `denseByteShapeWith?`/
+   `denseSvCheckWith?` with the old `denseByteShape?`/`denseSvCheck?` as "look the spec up, then
+   call those" — `tupleRange`, `redundantByteDrop`, `xorEqExtract` see no change.
+2. **Applier (`denseBpBack`), verified** — walks `bis.reverse` against the plan and builds the
+   result in source order, holding `dropped : (busId × value × interaction)`. Right-to-left is the
+   trick: the closer is seen *before* the opener, so the pair check's second value is already in
+   hand and the plan never has to carry it. The recognizer runs `n` times in phase 1 and twice per
+   pack in phase 2.
+
+**Why the plan needs no proof.** Entry-90 discipline. A pair check is emitted only where
+`denseBpSv?` confirms a single-value check *and* against a drop actually held, and a drop is
+recorded only where `denseBpSv?` confirmed one; a leftover drop at the end discards the whole
+result. Matching drops by bus and value rather than by position is sound because every recognized
+single-value check carries bound 256, so the obligation is the same wherever it came from. A wrong
+plan costs packing opportunities, never soundness. `denseBpBack_fires` is the statement that makes
+this an induction: *the output's obligations plus the held drops' equal the input's plus the
+incoming accumulator's and drops'* — an accounting identity that closes locally at every step,
+where the naive "output ⟺ input" invariant does not (an opener's second obligation is only
+discharged by a closer that is still in the future). Three more inductions give the stateful
+sublist (`_filter`), the variables (`_vars`) and the invariant sources (`_src`);
+`denseMergeStateless2_correct` generalizes to `denseBulkStateless_correct`, which turns those four
+facts about an arbitrary replacement interaction list into `DensePassCorrect` via `ofEnvEq`.
+Coverage falls out of `_vars` through `denseBICovered_iff`. The pass is one
+`DenseNativeStep.ofSame`; `denseFindGo`/`denseFindSecond`/the drain are gone.
+
+**Measured** (interleaved, 3 reps except sha256):
+
+| case | bytePack | bytePackLate | run total |
+|---|---|---|---|
+| sha256 `apc_001` | 1697 → **254 ms** (0.15x) | 389 → **13 ms** (0.03x) | 32.0 → 30.7 s (0.96x) |
+| wasm-eth `apc_012` | 156 → **19 ms** (0.12x) | 38 → **2 ms** | 4.27 → 4.16 s |
+| wasm-eth `apc_036` | 123 → **16 ms** (0.13x) | 11 → **1 ms** | 3.46 → 3.42 s |
+| keccak `apc_001` | 74 → **32 ms** (0.43x) | 5 → **2 ms** | 2.99 → 2.96 s |
+
+**Effectiveness: `opt-export` byte-identical to main on 35 cases** — 22 OpenVM (openvm-eth,
+wasm-eth, keccak) and 13 SP1 (rsp, keccak).
+
+**A measured intermediate, discarded:** the first version applied the packs positionally into an
+`Array (Option BusInteraction)` with `set!`. Same runtime to within noise (sha256 242 vs 254 ms),
+but its proof needs index distinctness and in-range obligations about the plan, i.e. the plan would
+have to be *trusted*. The re-checking applier buys the whole proof for ~1 % of runtime.
+
+**Residual** (254 ms, 0.8 % of the sha run, ~70 % allocator + refcount): `bitwiseDecode`'s 4-tuple
+per byte-bus interaction, the plan list, the output list. The plan and applier cannot be fused —
+the pairing parity is left-to-right information and the applier must run right-to-left — unless the
+pair check moves to the closer's position, which changes the output order and would have to be
+argued as an effectiveness change.
+
+**Worked: yes.**
