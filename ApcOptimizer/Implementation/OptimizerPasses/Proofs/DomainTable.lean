@@ -378,27 +378,6 @@ theorem denseCompileE_evalV (ops : DenseZModOps p) (keys : List VarId) (pt : Lis
           show denseIExprEvalWithV ops pt (.mul ia ib) = (a.mul b).eval (denseEnvOfKeysV keys pt)
           rw [denseIExprEvalWithV, DenseExpr.eval, ops.mul_eq, iha ia ha, ihb ib hb]
 
-/-- Compiled-list zero-check agrees with the source list's (value-only). -/
-theorem denseCompileEs_allV (ops : DenseZModOps p) (isZero : ZMod p → Bool)
-    (hz : ∀ v, isZero v = decide (v = 0)) (keys : List VarId) (pt : List (ZMod p)) :
-    ∀ (es : List (DenseExpr p)) (ces : List (IExpr p)), denseCompileEs keys es = some ces →
-      ces.all (fun ie => isZero (denseIExprEvalWithV ops pt ie))
-        = es.all (fun e => decide (e.eval (denseEnvOfKeysV keys pt) = 0)) := by
-  intro es
-  induction es with
-  | nil => intro ces h; rw [denseCompileEs] at h; simp only [Option.some.injEq] at h; subst h; rfl
-  | cons e rest ih =>
-    intro ces h
-    cases he : denseCompileE keys e with
-    | none => rw [denseCompileEs, he] at h; simp at h
-    | some ie =>
-      cases hr : denseCompileEs keys rest with
-      | none => rw [denseCompileEs, he, hr] at h; simp at h
-      | some irest =>
-        rw [denseCompileEs, he, hr] at h; simp only [Option.some.injEq] at h; subst h
-        rw [List.all_cons, List.all_cons, ih irest hr,
-          denseCompileE_evalV ops keys pt e ie he, hz]
-
 private theorem denseByteXorSpec_decode_iff (bs : BusSemantics p) (facts : BusFacts p bs)
     (spec : ByteXorSpec p) (bi : BusInteraction (DenseExpr p))
     (hspec : facts.byteXorSpec bi.busId = some spec)

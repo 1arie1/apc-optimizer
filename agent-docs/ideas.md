@@ -233,30 +233,19 @@ box-loop phase on the big cases), and hot-variable bucket capping (not byte-iden
 read `esFull`). **The pass's remaining cost is not here — see R13.**
 
 **R3. domainFold/reencode: fuse the duplicate whole-system scans; retire the 8192 raw-count
-index gate**  ·  mostly **done (entries 105/107/109/145)**:
-   - ~~domainFold's 8192 raw-count gate~~ **done (entry 145)**: replaced by a *candidate-group*
-     count gate (`domainFoldTargetIndexThreshold := 2`). The direct path costs `groups × system`,
-     so the raw constraint count was the wrong quantity to gate on — a small system with many
-     groups needs the index, a huge one with a single group does not. Replica ladder: exponent
-     **2.07 → 1.10**, `k=4` 29.0 → 0.74 s, total exponent 1.99 → 1.86. **Not byte-identical**, and
-     the CI matrix charges a real (tiny) price: SP1 `rsp` constraints 9.372× → 9.365×, two of 100
-     cases 175 → 177, variables and bus interactions identical on all six sets. It is a butterfly
-     (`reencode` mints `rnc…_49_0` instead of `rnc…_37_0` and its greedy accept order shifts), not a
-     systematic loss.
-   - **Open — the byte-identical version of the same fix.** The two `domainFold` paths differ in
-     *two* ways, so no gate tuning equates them: the direct path also constant-folds variable-free
-     subexpressions in group-disjoint items, **and** `denseFoldOutV` moves the covered constraints to
-     the end of the list while `denseFoldOutIdxV` rewrites in place. The fix that keeps the current
-     output exactly is to leave the direct path's *transform* alone and index only its **no-op gate**:
-     `denseSystemHasFoldableWV` is an `any`, so order and multiplicity are irrelevant, and
-     `hasFoldableV xs survsV e = true → e.anyVarIn xs = true ∨ e.hasConstFoldableNode = true` (one
-     induction — a `varsInF xs` node with no `xs` variable is variable-free, which is exactly
-     `hasConstFoldableNode`). Scan the `xs` buckets plus a per-invocation list of positions carrying a
-     variable-free node and the gate decides identically; take `es` from `denseCoveredIdx`
-     (`denseCoveredIdx_eq_filter_of_complete`), which also retires the per-target `partition`. Rebuild
-     both indexes per *accept* — free against the `O(system)` `denseFoldOutV` an accept already pays.
-     Result: `O(accepts × system + groups × (bucket + foldable))` with the output preserved exactly.
-     ~250–400 lines of proof; strictly better than the gate change above, which it would replace.
+index gate**  ·  domainFold **done (entry 167)**, reencode open:
+   - ~~domainFold's duplicated scans, its two paths, and the per-(target, variable) domain
+     re-linearization~~ **done (entry 167)**: the pass is one invocation-wide set of
+     `VarId.index`-keyed tables (per-item variable lists + candidate keys from one traversal, position
+     buckets restricted to target variables, one `denseRootsIn` per target variable) plus one fused
+     bottom-up traversal that carries each node's survivor value *and* its rewrite, so the no-op gate
+     and the rewrite are the same walk. The unindexed path and the per-item `anyVarIn` gate are gone;
+     effectiveness is identical on all 303 local corpus cases. Pass 0.23–0.36x, sha256 total 0.92x.
+     The superseded plan ("index only the direct path's no-op gate to keep the output byte-identical")
+     is retired: the two paths are now one, and the measured output is unchanged anyway.
+   - ~~`denseRootsOfTerms` built the whole `CommRing` chain per call~~ **done (entry 167)**: the
+     dictionary-free `@[csimp]` twin also skips `ZMod.inv`'s extended gcd for a monic coefficient.
+     Shared, so flagFold gains too (sha256 1286 → 1095 ms).
    - reencode: the pruned index (`CoveredIndex.buildPruned`, entry 105 — items with more than 8
      distinct variables can never be covered by a ≤8-variable target, so pruning keeps covered
      sets identical) stays, but **behind the 8192 gate again** (entry 107): CI measured
@@ -700,6 +689,20 @@ and in `run` alike. Consequences, all measured on busPairCancel:
      and `Thunk.mk` have the same `.get`, so the choice is invisible to every proof.
 
 ### Runtime dead ends (measured; do not re-propose without new evidence)
+
+- **Solving domainFold's last enumerated key instead of scanning its domain** (entry 167): an affine
+  filter with invertible leading coefficient determines its largest key, so the level could evaluate
+  once and test membership. Implemented and **reverted — it regressed**: keccak 134 → 149 ms (1.11x),
+  wasm-eth `apc_036` 90 → 93, openvm-eth `apc_009` 29 → 31. The covered constraints are *quadratic or
+  worse in their largest key* (83 % in the first cleanup invocation, **100 % in every later one** —
+  products, not sums), and where a filter is affine the last-level domain holds 2–3 values, so one
+  evaluation plus an inverse plus a membership test saves nothing while the coefficient extraction
+  costs a walk per filter per target. Needs a corpus with affine covered constraints to revisit.
+- **Prefix pruning in domainFold's box enumeration** (entry 167): 119 231 extensions against a
+  108 708-point box on keccak, i.e. *no* pruning — 66 % of the filters close at the last level
+  (widths 3–8 keys over 4–5-key targets). Keeping the level structure is free; reordering keys to
+  close filters early is worth at most ~2x (the last level is half the tree) and would thread a
+  permutation through the compile, the survivor columns and the proof.
 
 - **A three-bit `UInt8` summary walk for disconnected's fused re-check** (entry 166): one walk
   computing has-a-variable / some-removable / some-not measures the *same* as two separate

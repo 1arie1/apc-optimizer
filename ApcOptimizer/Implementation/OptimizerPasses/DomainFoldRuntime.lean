@@ -3,329 +3,22 @@ import ApcOptimizer.Implementation.OptimizerPasses.DomainTable
 
 set_option autoImplicit false
 
-/-! # Dense `domainFold`, with compiled value-only evaluation
+/-! # Dense `domainFold`
 
-The hot evaluators (`denseGroupSurvivorsEV`, `denseConstOnSurvsV`) compile the group's covered
-constraints once (via `DomainTable.lean`'s `IExpr`) and evaluate every enumerated point by index,
-value-only (`List (ZMod p)` points, no `VarId` per point). Runs with at least
-`domainFoldTargetIndexThreshold` candidate groups use the index-preserving indexed loop; fewer use
-the direct loop. Runtime only — correctness is in `Proofs/DomainFold.lean`. -/
+For a group of variables pinned to finite domains by "covered" constraints, enumerate the surviving
+joint assignments and replace every maximal wholly-in-group subexpression that is constant across all
+survivors by that constant: if the covered constraints force `x + y = 1` on every survivor, each
+`x + y` subterm folds to `1`.
+
+One invocation builds three index-keyed tables — the candidate groups and per-item variable lists
+(`dfScanGo`), the position buckets (`dfCsBuckets`/`dfBisBuckets`) and the per-variable domains
+(`dfDoms`) — and then folds each group in turn through one fused traversal (`dfGo`), which carries
+both the survivor value of every node and the rewrite. Runtime only — correctness is in
+`Proofs/DomainFold.lean`, `domainFoldRedesign.md` has the design. -/
 
 namespace ApcOptimizer.Dense
 
 variable {p : ℕ}
-
-/-! ## Value-only eager enumeration of a group's domain -/
-
-/-- Cartesian product of the group's per-variable domain values, value-only (each point a
-    `List (ZMod p)` in the input domain-list order). -/
-def denseAssignmentsV : List (List (ZMod p)) → List (List (ZMod p))
-  | [] => [[]]
-  | d :: rest => (denseAssignmentsV rest).flatMap (fun a => d.map (fun v => v :: a))
-
-/-! ## The group's survivor filter, compiled once per target -/
-
-/-- Whether every compiled covered constraint `ces` zeroes at point `pt`. -/
-def denseSurvZeroCWV (ops : DenseZModOps p) (isZero : ZMod p → Bool) (ces : List (IExpr p))
-    (pt : List (ZMod p)) : Bool :=
-  ces.all (fun ie => isZero (denseIExprEvalWithV ops pt ie))
-
-/-- The surviving group values, value-only: covered constraints `es` compiled once over key list
-    `xs`, every enumerated point checked by index. Falls back to the uncompiled filter only if
-    compilation fails (dead for a covered set, kept for totality). -/
-def denseGroupSurvivorsEV (es : List (DenseExpr p)) (xs : List VarId)
-    (domVals : List (List (ZMod p))) : List (List (ZMod p)) :=
-  match denseCompileEs xs es with
-  | some ces =>
-    let ops : DenseZModOps p := denseZModOps
-    let dec : DecidableEq (ZMod p) := inferInstance
-    let isZero : ZMod p → Bool := fun v => @decide (v = ops.zero) (dec v ops.zero)
-    let surv : DenseSurvV p := ⟨fun pt => denseSurvZeroCWV ops isZero ces pt⟩
-    (denseAssignmentsV domVals).filter surv.run
-  | none =>
-    (denseAssignmentsV domVals).filter
-      (fun a => es.all (fun c => decide (c.eval (denseEnvOfKeysV xs a) = 0)))
-
-/-! ## `constOnSurvs`, compiled per candidate node -/
-
-/-- `some c` if `e` evaluates to the same constant `c` on every survivor, else `none`. `e` is
-    compiled once over key list `xs` and every survivor checked by index (uncompiled fallback kept
-    for totality). -/
-def denseConstOnSurvsV (xs : List VarId) (survsV : List (List (ZMod p))) (e : DenseExpr p) :
-    Option (ZMod p) :=
-  match survsV with
-  | [] => none
-  | s₀ :: rest =>
-    match denseCompileE xs e with
-    | some ie =>
-      let ops : DenseZModOps p := denseZModOps
-      let v₀ := denseIExprEvalWithV ops s₀ ie
-      if (s₀ :: rest).all (fun s => decide (denseIExprEvalWithV ops s ie = v₀))
-      then some v₀ else none
-    | none =>
-      let v₀ := e.eval (denseEnvOfKeysV xs s₀)
-      if (s₀ :: rest).all (fun s => decide (e.eval (denseEnvOfKeysV xs s) = v₀))
-      then some v₀ else none
-
-/-! ## The dense fold rewrite, value-only -/
-
-/-- The recursive fold core, value-only survivors: replace every maximal wholly-in-group
-    subexpression that is constant on the survivors by that constant; recurse otherwise. -/
-def denseFoldRewriteGoV (xs : List VarId) (survsV : List (List (ZMod p))) :
-    DenseExpr p → DenseExpr p
-  | .const c => .const c
-  | .var y => .var y
-  | .add a b =>
-      if (DenseExpr.add a b).varsInF xs then
-        match denseConstOnSurvsV xs survsV (.add a b) with
-        | some c => .const c
-        | none => .add (denseFoldRewriteGoV xs survsV a) (denseFoldRewriteGoV xs survsV b)
-      else .add (denseFoldRewriteGoV xs survsV a) (denseFoldRewriteGoV xs survsV b)
-  | .mul a b =>
-      if (DenseExpr.mul a b).varsInF xs then
-        match denseConstOnSurvsV xs survsV (.mul a b) with
-        | some c => .const c
-        | none => .mul (denseFoldRewriteGoV xs survsV a) (denseFoldRewriteGoV xs survsV b)
-      else .mul (denseFoldRewriteGoV xs survsV a) (denseFoldRewriteGoV xs survsV b)
-
-/-- The fold rewrite, gated. -/
-def denseFoldRewriteV (xs : List VarId) (survsV : List (List (ZMod p)))
-    (e : DenseExpr p) : DenseExpr p :=
-  if e.anyVarIn xs || e.hasConstFoldableNode then denseFoldRewriteGoV xs survsV e else e
-
-/-! ## The folded output -/
-
-/-- Fold every non-covered constraint and every bus interaction; keep the covered (domain-pinning)
-    constraints verbatim. -/
-def denseFoldOutV (d : DenseConstraintSystem p) (xs : List VarId)
-    (survsV : List (List (ZMod p))) : DenseConstraintSystem p :=
-  { algebraicConstraints :=
-      (d.algebraicConstraints.filter (fun c => !denseCoveredBy xs c)).map (denseFoldRewriteV xs survsV)
-        ++ denseCoveredCsOf d xs,
-    busInteractions := d.busInteractions.map
-      (fun bi => { bi with
-        multiplicity := denseFoldRewriteV xs survsV bi.multiplicity,
-        payload := bi.payload.map (denseFoldRewriteV xs survsV) }) }
-
-/-! ## The no-op gates, value-only -/
-
-/-- Does this expression have a maximal wholly-in-group subexpression that folds to a constant
-    (value-only survivors)? Purely an efficiency gate. -/
-def DenseExpr.hasFoldableV (xs : List VarId) (survsV : List (List (ZMod p))) : DenseExpr p → Bool
-  | .const _ => false
-  | .var _ => false
-  | .add a b =>
-      ((DenseExpr.add a b).varsInF xs && (denseConstOnSurvsV xs survsV (.add a b)).isSome) ||
-        a.hasFoldableV xs survsV || b.hasFoldableV xs survsV
-  | .mul a b =>
-      ((DenseExpr.mul a b).varsInF xs && (denseConstOnSurvsV xs survsV (.mul a b)).isSome) ||
-        a.hasFoldableV xs survsV || b.hasFoldableV xs survsV
-
-/-- Does the fold change anything? The direct path's no-op efficiency gate; `csRest` is the
-    caller's precomputed non-covered constraint list. -/
-def denseSystemHasFoldableWV (d : DenseConstraintSystem p) (xs : List VarId)
-    (survsV : List (List (ZMod p))) (csRest : List (DenseExpr p)) : Bool :=
-  csRest.any (fun c => c.hasFoldableV xs survsV) ||
-    d.busInteractions.any (fun bi =>
-      bi.multiplicity.hasFoldableV xs survsV || bi.payload.any (fun e => e.hasFoldableV xs survsV))
-
-/-- The indexed path's no-op gate: scans only the items sharing a variable with `xs` through the
-    prebuilt inverted indexes. -/
-def denseSystemHasFoldableIdxV (fidx : DenseFoldIdx p) (xs : List VarId)
-    (survsV : List (List (ZMod p))) : Bool :=
-  (((xs.flatMap (fun v => fidx.idx.buckets.getD v [])).foldl (·.insert ·)
-      (∅ : Std.HashSet Nat)).toList.any (fun i =>
-    if h : i < fidx.arr.size then
-      let c := fidx.arr[i]
-      !denseCoveredBy xs c && c.hasFoldableV xs survsV
-    else false)) ||
-  (((xs.flatMap (fun v => fidx.bisIdx.buckets.getD v [])).foldl (·.insert ·)
-      (∅ : Std.HashSet Nat)).toList.any (fun i =>
-    if h : i < fidx.arrBis.size then
-      let bi := fidx.arrBis[i]
-      bi.multiplicity.hasFoldableV xs survsV || bi.payload.any (fun e => e.hasFoldableV xs survsV)
-    else false))
-
-/-! ## The direct (unindexed) fold loop
-
-For runs with fewer than `domainFoldTargetIndexThreshold` candidate groups. -/
-
-/-- One checked fold for a candidate group, given the covered set `es` and its complement `csRest`
-    (the non-covered constraints, feeding the no-op gate). -/
-def denseFoldStepWithV (d : DenseConstraintSystem p) (xs : List VarId)
-    (es : List (DenseExpr p)) (csRest : List (DenseExpr p)) :
-    DenseConstraintSystem p :=
-  match denseGroupDoms es xs with
-  | none => d
-  | some doms =>
-    if (doms.map (fun yd => yd.2.length)).prod ≤ 256 then
-      let survsV := denseGroupSurvivorsEV es xs (doms.map Prod.snd)
-      if 1 ≤ survsV.length && denseSystemHasFoldableWV d xs survsV csRest then
-        denseFoldOutV d xs survsV
-      else d
-    else d
-
-/-- The direct fold loop: one `partition` per target splits the covered set `es` and complement
-    `csRest`, no index. -/
-def denseFoldLoopDirectV : List (List VarId) → DenseConstraintSystem p → DenseConstraintSystem p
-  | [], d => d
-  | xs :: rest, d =>
-    match d.algebraicConstraints.partition (denseCoveredBy xs) with
-    | (es, csRest) => denseFoldLoopDirectV rest (denseFoldStepWithV d xs es csRest)
-
-/-! ## The index-preserving indexed-path rewrite
-
-The indexed path uses an `anyVarIn`-only gate feeding an order- and length-preserving in-place fold,
-so `DenseFoldIdx.refresh` keeps both inverted indexes without rebuilding across an accepted fold
-(positions never move); `denseFoldOutIdxV` computes that fold sparsely, touching only bucketed
-candidate positions. -/
-
-/-- The indexed-path fold rewrite, gated by `anyVarIn` alone: an expression sharing no variable with
-    the group is returned untouched, letting `denseFoldOutIdxV` skip it. -/
-def denseFoldRewriteIdxV (xs : List VarId) (survsV : List (List (ZMod p)))
-    (e : DenseExpr p) : DenseExpr p :=
-  if e.anyVarIn xs then denseFoldRewriteGoV xs survsV e else e
-
-/-- The in-place fold, order- and length-preserving: fold every non-covered constraint and bus
-    interaction in place, keep the covered (domain-pinning) constraints verbatim in place. Positions
-    never move and rewrites only shrink variable sets, so an accepted fold can refresh the index
-    without rebuild. -/
-def denseFoldOutInPlaceV (d : DenseConstraintSystem p) (xs : List VarId)
-    (survsV : List (List (ZMod p))) : DenseConstraintSystem p :=
-  { algebraicConstraints := d.algebraicConstraints.map
-      (fun c => if denseCoveredBy xs c then c else denseFoldRewriteIdxV xs survsV c),
-    busInteractions := d.busInteractions.map (fun bi => { bi with
-      multiplicity := denseFoldRewriteIdxV xs survsV bi.multiplicity,
-      payload := bi.payload.map (denseFoldRewriteIdxV xs survsV) }) }
-
-/-- The deduplicated set of bucket positions for the variables of `xs` — the positions an accepted
-    fold can possibly touch. -/
-def denseTouchedSet (idx : DenseCovIndex) (xs : List VarId) : Std.HashSet Nat :=
-  (xs.flatMap (fun v => idx.buckets.getD v [])).foldl (·.insert ·) ∅
-
-/-- `denseFoldOutInPlaceV` computed sparsely: only candidate positions (bucketed under a variable of
-    `xs`) are rewritten; all others pass through unchanged by position. -/
-def denseFoldOutIdxV (d : DenseConstraintSystem p) (fidx : DenseFoldIdx p) (xs : List VarId)
-    (survsV : List (List (ZMod p))) : DenseConstraintSystem p :=
-  let touchedCs : Std.HashSet Nat := denseTouchedSet fidx.idx xs
-  let touchedBis : Std.HashSet Nat := denseTouchedSet fidx.bisIdx xs
-  { algebraicConstraints := d.algebraicConstraints.zipIdx.map (fun ci =>
-      if touchedCs.contains ci.2 then
-        (if denseCoveredBy xs ci.1 then ci.1 else denseFoldRewriteIdxV xs survsV ci.1)
-      else ci.1),
-    busInteractions := d.busInteractions.zipIdx.map (fun bii =>
-      if touchedBis.contains bii.2 then
-        { bii.1 with
-          multiplicity := denseFoldRewriteIdxV xs survsV bii.1.multiplicity,
-          payload := bii.1.payload.map (denseFoldRewriteIdxV xs survsV) }
-      else bii.1) }
-
-/-! ## The indexed fold loop
-
-For runs with at least `domainFoldTargetIndexThreshold` candidate groups; the covered set is served
-from the prebuilt `DenseFoldIdx`, refreshed (no rebuild) only on an accepted fold. -/
-
-/-- One checked fold served from the prebuilt covered-constraint index; an accepted fold is computed
-    sparsely (`denseFoldOutIdxV`) and the index refreshed without rebuild (`fidx.refresh`). -/
-def denseFoldStepV (d : DenseConstraintSystem p) (fidx : DenseFoldIdx p) (xs : List VarId) :
-    DenseConstraintSystem p × DenseFoldIdx p :=
-  let es := denseCoveredIdx fidx.idx fidx.arr (denseCoveredBy xs) xs
-  match denseGroupDoms es xs with
-  | none => (d, fidx)
-  | some doms =>
-    if (doms.map (fun yd => yd.2.length)).prod ≤ 256 then
-      let survsV := denseGroupSurvivorsEV es xs (doms.map Prod.snd)
-      if 1 ≤ survsV.length && denseSystemHasFoldableIdxV fidx xs survsV then
-        let ro := denseFoldOutIdxV d fidx xs survsV
-        (ro, fidx.refresh ro)
-      else (d, fidx)
-    else (d, fidx)
-
-/-- Process the candidate groups sequentially, threading and refreshing the index. -/
-def denseFoldLoopV : List (List VarId) → DenseConstraintSystem p → DenseFoldIdx p →
-    DenseConstraintSystem p
-  | [], d, _ => d
-  | xs :: rest, d, fidx =>
-    let r := denseFoldStepV d fidx xs
-    denseFoldLoopV rest r.1 r.2
-
-/-! ## The array-native indexed fold loop (runtime twin)
-
-`denseFoldLoopV` threads the *list* system `d` and re-materializes it per accepted fold:
-`denseFoldOutIdxV` maps over `d.algebraicConstraints.zipIdx` / `d.busInteractions.zipIdx` (each an
-O(system) `toArray` + rebuild) and `DenseFoldIdx.refresh` converts the folded lists back to arrays.
-The twin below threads only the `DenseFoldIdx` (already array-backed) and applies an accepted fold
-with `Array.modify` at the touched positions — O(touched) per accept — materializing lists once at
-the pass exit. `denseDomainFoldFV_eq_fast` (`Proofs/DomainFold.lean`) proves it equal to
-`denseDomainFoldFV` and installs it with `@[csimp]`. -/
-
-/-- `denseFoldOutIdxV` + `refresh`, array-native: modify only the touched positions, in place. -/
-def denseFoldOutArrV (fidx : DenseFoldIdx p) (xs : List VarId)
-    (survsV : List (List (ZMod p))) : DenseFoldIdx p :=
-  match fidx with
-  | ⟨idx, arr, bisIdx, arrBis⟩ =>
-    ⟨idx,
-     (denseTouchedSet idx xs).toList.foldl
-       (fun a i => a.modify i
-         (fun c => if denseCoveredBy xs c then c else denseFoldRewriteIdxV xs survsV c)) arr,
-     bisIdx,
-     (denseTouchedSet bisIdx xs).toList.foldl
-       (fun a i => a.modify i
-         (fun bi => { bi with
-           multiplicity := denseFoldRewriteIdxV xs survsV bi.multiplicity,
-           payload := bi.payload.map (denseFoldRewriteIdxV xs survsV) })) arrBis⟩
-
-/-- `denseFoldStepV`, array-native: the identical probe/gate served from the shared index, with an
-    accepted fold applied sparsely by `denseFoldOutArrV`. -/
-def denseFoldStepArrV (fidx : DenseFoldIdx p) (xs : List VarId) : DenseFoldIdx p :=
-  let es := denseCoveredIdx fidx.idx fidx.arr (denseCoveredBy xs) xs
-  match denseGroupDoms es xs with
-  | none => fidx
-  | some doms =>
-    if (doms.map (fun yd => yd.2.length)).prod ≤ 256 then
-      let survsV := denseGroupSurvivorsEV es xs (doms.map Prod.snd)
-      if 1 ≤ survsV.length && denseSystemHasFoldableIdxV fidx xs survsV then
-        denseFoldOutArrV fidx xs survsV
-      else fidx
-    else fidx
-
-/-- Process the candidate groups sequentially, array-native. -/
-def denseFoldLoopArrV : List (List VarId) → DenseFoldIdx p → DenseFoldIdx p
-  | [], fidx => fidx
-  | xs :: rest, fidx => denseFoldLoopArrV rest (denseFoldStepArrV fidx xs)
-
-/-! ## The candidate group list -/
-
-/-- The candidate fold targets: every constraint's 2–8-distinct-variable group all of whose
-    variables occur in some single-variable constraint (`denseSvSet`), sorted by `VarId.index` and
-    deduplicated. -/
-def denseTargetsV (d : DenseConstraintSystem p) : List (List VarId) :=
-  let svSet := denseSvSet d
-  dedupHash (d.algebraicConstraints.filterMap (fun c =>
-    let vs := HashedDedup.hashedDedup (hash ·) c.vars
-    if 2 ≤ vs.length && vs.length ≤ 8 && vs.all (svSet.contains ·) then
-      some (vs.mergeSort (fun a b => compare a.index b.index != .gt))
-    else none))
-
-/-! ## The pass -/
-
-/-- Domain-constant subexpression folding: for a group of variables pinned to finite domains by
-    "covered" constraints, enumerates the surviving joint assignments and replaces every
-    wholly-in-group subexpression that is constant across all survivors by that constant. E.g. if
-    the covered constraints force `x + y = 1` on every survivor, each `x + y` subterm folds to `1`. -/
-def denseDomainFoldFV (pw : PrimeWitness p) (d : DenseConstraintSystem p) : DenseConstraintSystem p :=
-  if pw.isPrime = true then
-    let targets := denseTargetsV d
-    if domainFoldTargetIndexThreshold ≤ targets.length then
-      denseFoldLoopV targets d (DenseFoldIdx.mk' d)
-    else denseFoldLoopDirectV targets d
-  else d
-
-/-! ## The redesigned engine
-
-One invocation builds three index-keyed tables (`dfScanGo`, `dfCsBuckets`, `dfDoms`) and then walks
-the targets, folding each item at most once per target through the fused gate-and-rewrite traversal
-`dfGo`. See `domainFoldRedesign.md`. -/
 
 /-- Insert into a `VarId.index`-ascending, duplicate-free list; `none` if `v` is already there, so a
     repeated occurrence costs a walk and no allocation. -/
@@ -446,21 +139,31 @@ def dfBisBuckets (isTgt : Array Bool) : Nat → List (BusInteraction (DenseExpr 
       dfBisBuckets isTgt (q + 1) rest
         (dfBiBucketGo isTgt q bi.payload (dfBucketGo isTgt q bi.multiplicity bs))
 
+/-- A key's finite domain: the values, plus the position and the expression of the single-variable
+    constraint that entails them. The pass never trusts the table — `dfKeyDoms` re-checks that the
+    constraint is still there, which is what makes the domain entailed by the *current* system. -/
+structure DfDom (p : ℕ) where
+  vals : List (ZMod p)
+  pos : Nat
+  src : DenseExpr p
+
 /-- The domain table and the 1-based source positions, from the single-variable constraints in
     position order: one `denseRootsIn` per target variable (first roots win), none for a variable no
     target needs. -/
 def dfDoms (cs : Array (DenseExpr p)) (isTgt : Array Bool) (sv : List (Nat × VarId))
-    (doms : Array (Option (List (ZMod p)))) (src : Array Nat) :
-    Array (Option (List (ZMod p))) × Array Nat :=
+    (doms : Array (Option (DfDom p))) (src : Array Nat) :
+    Array (Option (DfDom p)) × Array Nat :=
   match sv with
   | [] => (doms, src)
   | (q, x) :: rest =>
     if isTgt.getD x.index false && (doms.getD x.index none).isNone then
-      match (if h : q < cs.size then denseRootsIn x cs[q] else none) with
-      | some ds =>
-          dfDoms cs isTgt rest (doms.setIfInBounds x.index (some ds))
-            (src.setIfInBounds x.index (q + 1))
-      | none => dfDoms cs isTgt rest doms src
+      if h : q < cs.size then
+        match denseRootsIn x cs[q] with
+        | some ds =>
+            dfDoms cs isTgt rest (doms.setIfInBounds x.index (some ⟨ds, q, cs[q]⟩))
+              (src.setIfInBounds x.index (q + 1))
+        | none => dfDoms cs isTgt rest doms src
+      else dfDoms cs isTgt rest doms src
     else dfDoms cs isTgt rest doms src
 
 /-! ### Per-target key lookup and the covered test -/
@@ -468,8 +171,9 @@ def dfDoms (cs : Array (DenseExpr p)) (isTgt : Array Bool) (sv : List (Nat × Va
 /-- The position of `y` in the ascending key array, or `none`. -/
 def dfSlotGo (keys : Array VarId) (y : Nat) (j : Nat) : Option Nat :=
   if h : j < keys.size then
-    let k := keys[j].index
-    if k == y then some j else if y < k then none else dfSlotGo keys y (j + 1)
+    if keys[j].index == y then some j
+    else if y < keys[j].index then none
+    else dfSlotGo keys y (j + 1)
   else none
 termination_by keys.size - j
 decreasing_by all_goals omega
@@ -489,38 +193,22 @@ def dfCoveredBy (keys : Array VarId) (c : DenseExpr p) : Bool := dfCovGo keys c 
 
 /-! ### The survivor enumeration -/
 
-/-- Compile `e` positionally against the key array. -/
-def dfCompile (keys : Array VarId) : DenseExpr p → Option (IExpr p)
-  | .const n => some (.const n)
-  | .var y => (dfSlotGo keys y.index 0).map .ix
-  | .add a b =>
-      match dfCompile keys a, dfCompile keys b with
-      | some ia, some ib => some (.add ia ib)
-      | _, _ => none
-  | .mul a b =>
-      match dfCompile keys a, dfCompile keys b with
-      | some ia, some ib => some (.mul ia ib)
-      | _, _ => none
-
-/-- The largest key position a compiled expression reads — the level at which it becomes fully
-    assigned, keys being assigned in increasing order. `none` if it reads none. -/
-def dfMaxIx : IExpr p → Option Nat
+/-- The largest key slot `e` reads — the level at which it becomes fully assigned, keys being
+    assigned in increasing order. `none` if it reads no key. -/
+def dfMaxSlot (keys : Array VarId) : DenseExpr p → Option Nat
   | .const _ => none
-  | .ix i => some i
+  | .var y => dfSlotGo keys y.index 0
   | .add a b | .mul a b =>
-      match dfMaxIx a, dfMaxIx b with
+      match dfMaxSlot keys a, dfMaxSlot keys b with
       | some x, some y => some (max x y)
       | some x, none => some x
       | none, r => r
 
-/-- Re-index a compiled filter for evaluation at its own level `m`: a partial point is the assigned
-    prefix in *reverse* order (newest first), so key `i` sits at offset `m - i` and `.ix 0` is the
-    value being assigned. -/
-def dfShift (m : Nat) : IExpr p → IExpr p
-  | .const n => .const n
-  | .ix i => .ix (m - i)
-  | .add a b => .add (dfShift m a) (dfShift m b)
-  | .mul a b => .mul (dfShift m a) (dfShift m b)
+/-- The keys assigned up to level `m`, newest first — the key list a level-`m` partial point is the
+    values of, so compiling a filter against it *is* the level-relative re-indexing. -/
+def dfRKeys (keys : Array VarId) : Nat → List VarId
+  | 0 => [keys.getD 0 ⟨0⟩]
+  | m + 1 => keys.getD (m + 1) ⟨0⟩ :: dfRKeys keys m
 
 /-- Evaluate a level-shifted filter on `v :: pt` without building the cons cell. Calls the field
     primitives directly: a `DenseZModOps` field is a closure, and this is the hottest loop of the
@@ -595,8 +283,7 @@ def dfEqZ (a b : ZMod p) : Bool := if p = 0 then dfEqSlow a b else a.val == b.va
 /-- The constant value of a survivor vector, if it has one. -/
 def dfUni (a : Array (ZMod p)) : Option (ZMod p) :=
   if h : 0 < a.size then
-    let c := a[0]
-    if a.all (fun v => dfEqZ v c) then some c else none
+    if a.all (fun v => dfEqZ v a[0]) then some a[0] else none
   else none
 
 /-- Rebuild a node only if a child changed. -/
@@ -675,7 +362,7 @@ def dfRewriteBi (ctx : DfCtx p) (bi : BusInteraction (DenseExpr p)) :
 structure DfIdx (p : ℕ) where
   csB : Array (Array Nat)
   bisB : Array (Array Nat)
-  doms : Array (Option (List (ZMod p)))
+  doms : Array (Option (DfDom p))
   src : Array Nat
 
 /-- The nonempty buckets of the target's keys. -/
@@ -726,44 +413,57 @@ def dfTouched (buckets : Array (Array Nat)) (keys : Array VarId) : Array Nat :=
   let bs := dfSlices buckets keys
   dfMergeGo bs (Array.replicate bs.size 0) #[] (bs.foldl (fun n b => n + b.size) 0)
 
-/-- The keys' domains, all-or-nothing. -/
-def dfKeyDoms (doms : Array (Option (List (ZMod p)))) (keys : Array VarId) :
+/-- The keys' domains, all-or-nothing, each re-checked against the current system: the entailing
+    single-variable constraint must still sit at its position and be covered by the keys (so the fold
+    keeps it verbatim, and the domain is entailed by the system the fold is applied to). -/
+def dfKeyDomsGo (tbl : Array (Option (DfDom p))) (keys : Array VarId) (cs : Array (DenseExpr p)) :
+    List VarId → Option (List (List (ZMod p)))
+  | [] => some []
+  | v :: rest =>
+    match tbl.getD v.index none with
+    | some dm =>
+        if dm.pos < cs.size && cs.getD dm.pos (.const (zmodZeroP p)) == dm.src &&
+            dfCoveredBy keys dm.src then
+          (dfKeyDomsGo tbl keys cs rest).map (fun ds => dm.vals :: ds)
+        else none
+    | none => none
+
+def dfKeyDoms (tbl : Array (Option (DfDom p))) (keys : Array VarId) (cs : Array (DenseExpr p)) :
     Option (Array (List (ZMod p))) :=
-  keys.foldl (init := some #[]) fun acc v =>
-    match acc, doms.getD v.index none with
-    | some a, some d => some (a.push d)
-    | _, _ => none
+  (dfKeyDomsGo tbl keys cs keys.toList).map List.toArray
 
 /-- Is position `q` the domain source of one of the keys? Such a constraint is zero at every box
     point by construction, so it never rejects one. -/
 def dfIsSrc (src : Array Nat) (keys : Array VarId) (q : Nat) : Bool :=
   keys.any (fun v => src.getD v.index 0 == q + 1)
 
-/-- Walk the touched constraints once: which are covered (parallel to `touched`), and the compiled
-    filters the enumeration needs (the covered ones that are not domain sources). -/
+/-- Walk the touched constraints once: the positions the fold has to rewrite (the non-covered ones),
+    and the compiled filters the enumeration needs (the covered ones that are not domain sources,
+    each compiled against its own level's reversed key prefix). -/
 def dfCovScan (keys : Array VarId) (src : Array Nat) (cs : Array (DenseExpr p))
-    (touched : Array Nat) (i : Nat) (mask : Array Bool) (filters : Array (Nat × IExpr p)) :
-    Array Bool × Array (Nat × IExpr p) :=
+    (touched : Array Nat) (i : Nat) (fold : List Nat) (filters : List (Nat × IExpr p)) :
+    List Nat × List (Nat × IExpr p) :=
   if h : i < touched.size then
     let q := touched[i]
     let c := cs.getD q (.const (zmodZeroP p))
     if dfCoveredBy keys c then
-      if dfIsSrc src keys q then dfCovScan keys src cs touched (i + 1) (mask.push true) filters
+      if dfIsSrc src keys q then dfCovScan keys src cs touched (i + 1) fold filters
       else
-        match dfCompile keys c with
-        | some ie =>
-            let m := (dfMaxIx ie).getD 0
-            dfCovScan keys src cs touched (i + 1) (mask.push true) (filters.push (m, dfShift m ie))
-        | none => dfCovScan keys src cs touched (i + 1) (mask.push true) filters
-    else dfCovScan keys src cs touched (i + 1) (mask.push false) filters
-  else (mask, filters)
+        match dfMaxSlot keys c with
+        | some m =>
+            match denseCompileE (dfRKeys keys m) c with
+            | some ie => dfCovScan keys src cs touched (i + 1) fold ((m, ie) :: filters)
+            | none => dfCovScan keys src cs touched (i + 1) fold filters
+        | none => dfCovScan keys src cs touched (i + 1) fold filters
+    else dfCovScan keys src cs touched (i + 1) (q :: fold) filters
+  else (fold, filters)
 termination_by touched.size - i
 decreasing_by all_goals omega
 
 /-- Bucket the filters by the level at which they become fully assigned. -/
-def dfLevels (k : Nat) (filters : Array (Nat × IExpr p)) : Array (List (IExpr p)) :=
-  filters.foldl (init := Array.replicate k ([] : List (IExpr p)))
-    fun a mie => a.modify (min mie.1 (k - 1)) (mie.2 :: ·)
+def dfLevels (k : Nat) : List (Nat × IExpr p) → Array (List (IExpr p)) → Array (List (IExpr p))
+  | [], a => a
+  | mie :: rest, a => dfLevels k rest (a.modify (min mie.1 (k - 1)) (mie.2 :: ·))
 
 /-- Each key's survivor column, classified once per target; a survivor is the reversed assignment,
     so key `j` sits at offset `k - 1 - j`. -/
@@ -774,52 +474,46 @@ def dfColRes (survs : Array (List (ZMod p))) (k : Nat) : Array (DfRes p) :=
     | some c => .uni c false
     | none => .vec col none
 
-def dfCollectCs (ctx : DfCtx p) (cs : Array (DenseExpr p)) (touched : Array Nat)
-    (mask : Array Bool) (i : Nat) (acc : Array (Nat × DenseExpr p)) : Array (Nat × DenseExpr p) :=
-  if h : i < touched.size then
-    let q := touched[i]
-    if mask.getD i false then dfCollectCs ctx cs touched mask (i + 1) acc
-    else
-      match dfRewrite ctx (cs.getD q (.const (zmodZeroP p))) with
-      | some e => dfCollectCs ctx cs touched mask (i + 1) (acc.push (q, e))
-      | none => dfCollectCs ctx cs touched mask (i + 1) acc
-  else acc
-termination_by touched.size - i
-decreasing_by all_goals omega
+def dfCollectCs (ctx : DfCtx p) (cs : Array (DenseExpr p)) :
+    List Nat → List (Nat × DenseExpr p) → List (Nat × DenseExpr p)
+  | [], acc => acc
+  | q :: rest, acc =>
+    match dfRewrite ctx (cs.getD q (.const (zmodZeroP p))) with
+    | some e => dfCollectCs ctx cs rest ((q, e) :: acc)
+    | none => dfCollectCs ctx cs rest acc
 
-def dfCollectBis (ctx : DfCtx p) (bis : Array (BusInteraction (DenseExpr p))) (touched : Array Nat)
-    (i : Nat) (acc : Array (Nat × BusInteraction (DenseExpr p))) :
-    Array (Nat × BusInteraction (DenseExpr p)) :=
-  if h : i < touched.size then
-    let q := touched[i]
-    if hq : q < bis.size then
-      match dfRewriteBi ctx bis[q] with
-      | some bi => dfCollectBis ctx bis touched (i + 1) (acc.push (q, bi))
-      | none => dfCollectBis ctx bis touched (i + 1) acc
-    else dfCollectBis ctx bis touched (i + 1) acc
-  else acc
-termination_by touched.size - i
+def dfCollectBis (ctx : DfCtx p) (bis : Array (BusInteraction (DenseExpr p))) :
+    Nat → Array Nat → List (Nat × BusInteraction (DenseExpr p)) →
+    List (Nat × BusInteraction (DenseExpr p))
+  | i, touched, acc =>
+    if h : i < touched.size then
+      let q := touched[i]
+      if hq : q < bis.size then
+        match dfRewriteBi ctx bis[q] with
+        | some bi => dfCollectBis ctx bis (i + 1) touched ((q, bi) :: acc)
+        | none => dfCollectBis ctx bis (i + 1) touched acc
+      else dfCollectBis ctx bis (i + 1) touched acc
+    else acc
+termination_by i touched => touched.size - i
 decreasing_by all_goals omega
 
 /-- One target: domains, box gate, survivors, and the items it rewrites. Reads the system arrays
     only — the caller applies the changes, so a rejected target costs no copy. -/
 def dfPlan (ix : DfIdx p) (keys : Array VarId) (cs : Array (DenseExpr p))
     (bis : Array (BusInteraction (DenseExpr p))) :
-    Array (Nat × DenseExpr p) × Array (Nat × BusInteraction (DenseExpr p)) :=
-  match dfKeyDoms ix.doms keys with
-  | none => (#[], #[])
+    List (Nat × DenseExpr p) × List (Nat × BusInteraction (DenseExpr p)) :=
+  match dfKeyDoms ix.doms keys cs with
+  | none => ([], [])
   | some doms =>
-    if doms.foldl (fun n d => n * d.length) 1 > 256 then (#[], #[])
+    if doms.foldl (fun n d => n * d.length) 1 > 256 then ([], [])
     else
-      let touchedCs := dfTouched ix.csB keys
-      match dfCovScan keys ix.src cs touchedCs 0 #[] #[] with
-      | (mask, filters) =>
-        let survs := dfEnumGo (zmodZeroP p) (dfLevels keys.size filters) doms keys.size 0 #[[]]
-        if survs.isEmpty then (#[], #[])
-        else
-          let ctx : DfCtx p := ⟨keys, dfColRes survs keys.size⟩
-          (dfCollectCs ctx cs touchedCs mask 0 #[],
-           dfCollectBis ctx bis (dfTouched ix.bisB keys) 0 #[])
+      let fs := dfCovScan keys ix.src cs (dfTouched ix.csB keys) 0 [] []
+      let survs := dfEnumGo (zmodZeroP p)
+        (dfLevels keys.size fs.2 (Array.replicate keys.size [])) doms keys.size 0 #[[]]
+      if survs.isEmpty then ([], [])
+      else
+        let ctx : DfCtx p := ⟨keys, dfColRes survs keys.size⟩
+        (dfCollectCs ctx cs fs.1 [], dfCollectBis ctx bis 0 (dfTouched ix.bisB keys) [])
 
 def dfApplyCs (cs : Array (DenseExpr p)) (ch : List (Nat × DenseExpr p)) : Array (DenseExpr p) :=
   match ch with
@@ -839,47 +533,32 @@ def dfLoop (ix : DfIdx p) (targets : List (Array VarId)) (cs : Array (DenseExpr 
   match targets with
   | [] => (cs, bis, ch)
   | keys :: rest =>
-    match dfPlan ix keys cs bis with
-    | (chCs, chBis) =>
-      if chCs.isEmpty && chBis.isEmpty then dfLoop ix rest cs bis ch
-      else dfLoop ix rest (dfApplyCs cs chCs.toList) (dfApplyBis bis chBis.toList) true
+    let pl := dfPlan ix keys cs bis
+    if pl.1.isEmpty && pl.2.isEmpty then dfLoop ix rest cs bis ch
+    else dfLoop ix rest (dfApplyCs cs pl.1) (dfApplyBis bis pl.2) true
+
+/-- The pass body once the targets are known: build the per-invocation index and fold every target,
+    keeping the input unless something changed. -/
+def dfRunWith (d : DenseConstraintSystem p) (n : Nat) (svRev : List (Nat × VarId))
+    (dvs : Array (Option (List VarId))) (targets : List (Array VarId)) : DenseConstraintSystem p :=
+  let cs := d.algebraicConstraints.toArray
+  let isTgt := dfMarkKeys targets (Array.replicate n false)
+  let tbl := dfDoms cs isTgt svRev (Array.replicate n none) (Array.replicate n 0)
+  let ix : DfIdx p :=
+    ⟨dfCsBuckets isTgt dvs 0 d.algebraicConstraints (Array.replicate n #[]),
+     dfBisBuckets isTgt 0 d.busInteractions (Array.replicate n #[]), tbl.1, tbl.2⟩
+  let r := dfLoop ix targets cs d.busInteractions.toArray false
+  if r.2.2 then { algebraicConstraints := r.1.toList, busInteractions := r.2.1.toList } else d
 
 /-- Domain-constant subexpression folding; see `denseDomainFoldFV` for what the pass does and
     `domainFoldRedesign.md` for the engine. -/
 def dfRun (pw : PrimeWitness p) (d : DenseConstraintSystem p) : DenseConstraintSystem p :=
   if pw.isPrime = true then
-    match dfScanGo d.algebraicConstraints 0 0 [] [] #[] with
-    | (mx, svRev, candRev, dvs) =>
-      let n := mx + 1
-      let targets := dfDedupKeys (dfMarkVars (svRev.map Prod.snd) (Array.replicate n false))
-        candRev (Array.replicate n []) []
-      match targets with
-      | [] => d
-      | _ =>
-        let isTgt := dfMarkKeys targets (Array.replicate n false)
-        let cs := d.algebraicConstraints.toArray
-        match dfDoms cs isTgt svRev.reverse (Array.replicate n none) (Array.replicate n 0) with
-        | (doms, src) =>
-          let ix : DfIdx p :=
-            ⟨dfCsBuckets isTgt dvs 0 d.algebraicConstraints (Array.replicate n #[]),
-             dfBisBuckets isTgt 0 d.busInteractions (Array.replicate n #[]), doms, src⟩
-          match dfLoop ix targets cs d.busInteractions.toArray false with
-          | (cs', bis', true) =>
-              { algebraicConstraints := cs'.toList, busInteractions := bis'.toList }
-          | (_, _, false) => d
-  else d
-
-/-- `denseDomainFoldFV` with the array-native loop on the indexed path. Proven equal and installed
-    by `denseDomainFoldFV_eq_fast` (`Proofs/DomainFold.lean`). -/
-@[implemented_by dfRun]
-def denseDomainFoldFVFast (pw : PrimeWitness p) (d : DenseConstraintSystem p) :
-    DenseConstraintSystem p :=
-  if pw.isPrime = true then
-    let targets := denseTargetsV d
-    if domainFoldTargetIndexThreshold ≤ targets.length then
-      let fidx := denseFoldLoopArrV targets (DenseFoldIdx.mk' d)
-      { algebraicConstraints := fidx.arr.toList, busInteractions := fidx.arrBis.toList }
-    else denseFoldLoopDirectV targets d
+    let sc := dfScanGo d.algebraicConstraints 0 0 [] [] #[]
+    let n := sc.1 + 1
+    let targets := dfDedupKeys (dfMarkVars (sc.2.1.map Prod.snd) (Array.replicate n false))
+      sc.2.2.1 (Array.replicate n []) []
+    if targets.isEmpty then d else dfRunWith d n sc.2.1.reverse sc.2.2.2 targets
   else d
 
 end ApcOptimizer.Dense

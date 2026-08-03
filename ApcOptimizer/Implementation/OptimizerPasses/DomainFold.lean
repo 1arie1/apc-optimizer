@@ -119,64 +119,6 @@ def denseCoveredIdx (idx : DenseCovIndex) (arr : Array α) (Q : α → Bool) (xs
   (uniq.mergeSort (· ≤ ·)).filterMap (fun i =>
     if h : i < arr.size then (if Q arr[i] then some arr[i] else none) else none)
 
-/-- Inserting a position into dense buckets never removes an existing membership. -/
-theorem denseInner_getD_mono (i : Nat) (vs : List VarId) (w : VarId) (j : Nat) :
-    ∀ (m : Std.HashMap VarId (List Nat)), j ∈ m.getD w [] →
-    j ∈ (vs.foldl (fun m v => m.insert v (i :: m.getD v [])) m).getD w [] := by
-  induction vs with
-  | nil => intro m hj; simpa using hj
-  | cons v0 rest ih =>
-    intro m hj
-    simp only [List.foldl_cons]
-    apply ih
-    rw [Std.HashMap.getD_insert]
-    by_cases h : (v0 == w) = true
-    · rw [if_pos h]
-      have hvw : v0 = w := eq_of_beq h
-      subst hvw
-      exact List.mem_cons_of_mem _ hj
-    · rw [if_neg h]; exact hj
-
-/-- After inserting `i` into every dense bucket of `vs`, `i` is in the bucket of each `v ∈ vs`. -/
-theorem denseInner_getD_self (i : Nat) (vs : List VarId) (v : VarId) :
-    ∀ (m : Std.HashMap VarId (List Nat)), v ∈ vs →
-    i ∈ (vs.foldl (fun m v => m.insert v (i :: m.getD v [])) m).getD v [] := by
-  induction vs with
-  | nil => intro m hv; simp at hv
-  | cons v0 rest ih =>
-    intro m hv
-    simp only [List.foldl_cons]
-    rcases List.mem_cons.1 hv with rfl | hv
-    · apply denseInner_getD_mono
-      rw [Std.HashMap.getD_insert, if_pos (by simp)]
-      exact List.mem_cons_self
-    · exact ih _ hv
-
-/-- **Index completeness (buckets).** Every item at position `i` with variable `v` is bucketed
-    under `v`. -/
-theorem denseBuildStep_bucket_complete (varsOf : α → List VarId) :
-    ∀ (l : List (α × Nat)) (a : α) (i : Nat), (a, i) ∈ l → ∀ (v : VarId), v ∈ varsOf a →
-      i ∈ (l.foldr (denseBuildStep varsOf) ⟨∅, []⟩).buckets.getD v [] := by
-  intro l
-  induction l with
-  | nil => intro a i hai; simp at hai
-  | cons ai0 rest ih =>
-    intro a i hai v hv
-    rw [List.foldr_cons]
-    rcases List.mem_cons.1 hai with heq | hmem
-    · rw [← heq]
-      cases hvs : varsOf a with
-      | nil => rw [hvs] at hv; simp at hv
-      | cons w0 ws =>
-        rw [denseBuildStep_buckets_cons varsOf (a, i) _ w0 ws hvs]
-        exact denseInner_getD_self i (w0 :: ws) v _ (by rw [← hvs]; exact hv)
-    · have hrec : i ∈ (rest.foldr (denseBuildStep varsOf) ⟨∅, []⟩).buckets.getD v [] := ih a i hmem v hv
-      cases hvs : varsOf ai0.1 with
-      | nil => rw [denseBuildStep_buckets_nil varsOf ai0 _ hvs]; exact hrec
-      | cons w0 ws =>
-        rw [denseBuildStep_buckets_cons varsOf ai0 _ w0 ws hvs]
-        exact denseInner_getD_mono ai0.2 (w0 :: ws) v i _ hrec
-
 /-- A position bucketed under a variable of `xs` is a dense candidate. -/
 theorem denseMem_candidates (idx : DenseCovIndex) (xs : List VarId) (v : VarId) (i : Nat)
     (hv : v ∈ xs) (hi : i ∈ idx.buckets.getD v []) : i ∈ denseCandidates idx xs :=
@@ -271,15 +213,6 @@ theorem denseCoveredIdx_eq_filter_of_complete (idx : DenseCovIndex) (items : Lis
     _ = (List.range items.length).filterMap gI := (L1 _).symm
     _ = items.filter Q := claim1
 
-/-- Completeness of a fresh dense build: every item position is bucketed under each variable
-    `varsOf` yields for it. -/
-theorem denseBuild_complete (varsOf : α → List VarId) (items : List α)
-    (i : Nat) (hi : i < items.length) (v : VarId) (hv : v ∈ varsOf items[i]) :
-    i ∈ (denseCovBuild varsOf items).buckets.getD v [] := by
-  have hz : (items.zipIdx)[i]? = some (items[i], i) := by
-    rw [List.getElem?_zipIdx, List.getElem?_eq_getElem hi]; simp
-  exact denseBuildStep_bucket_complete varsOf items.zipIdx items[i] i (List.mem_of_getElem? hz) v hv
-
 /-! ## The dense fold index -/
 
 /-- The dense fold index (plain data — no proof fields; completeness is threaded externally
@@ -318,26 +251,6 @@ def DenseFoldIdx.refresh (old : DenseFoldIdx p) (ro : DenseConstraintSystem p) :
 
 /-! ## Foundational soundness lemmas -/
 
-/-- A dense expression with a variable has a nonempty `vars` list. -/
-theorem denseExpr_hasVar_vars_ne_nil (c : DenseExpr p) (h : c.hasVar = true) : c.vars ≠ [] := by
-  induction c with
-  | const n => simp [DenseExpr.hasVar] at h
-  | var y => simp [DenseExpr.vars]
-  | add a b iha ihb =>
-    intro hnil
-    rw [DenseExpr.vars, List.append_eq_nil_iff] at hnil
-    simp only [DenseExpr.hasVar, Bool.or_eq_true] at h
-    rcases h with h | h
-    · exact iha h hnil.1
-    · exact ihb h hnil.2
-  | mul a b iha ihb =>
-    intro hnil
-    rw [DenseExpr.vars, List.append_eq_nil_iff] at hnil
-    simp only [DenseExpr.hasVar, Bool.or_eq_true] at h
-    rcases h with h | h
-    · exact iha h hnil.1
-    · exact ihb h hnil.2
-
 /-- `denseContainsFast` soundness. -/
 theorem denseContainsFast_sound (xs : List VarId) (v : VarId) (h : denseContainsFast xs v = true) :
     v ∈ xs := by
@@ -373,14 +286,6 @@ theorem denseVarsInF_sound (xs : List VarId) :
       rcases hv with hv | hv
       · exact iha h.1 v hv
       · exact ihb h.2 v hv
-
-/-- A `denseCoveredBy`-item shares a variable with the target `xs`. -/
-theorem denseCoveredBy_shares_var (xs : List VarId) (c : DenseExpr p) (h : denseCoveredBy xs c = true) :
-    ∃ v ∈ c.vars, v ∈ xs := by
-  rw [denseCoveredBy, Bool.and_eq_true] at h
-  obtain ⟨hhv, hvin⟩ := h
-  obtain ⟨v, hmem⟩ := List.exists_mem_of_ne_nil c.vars (denseExpr_hasVar_vars_ne_nil c hhv)
-  exact ⟨v, hmem, denseVarsInF_sound xs c hvin v hmem⟩
 
 /-! ## Dense `svSet` -/
 

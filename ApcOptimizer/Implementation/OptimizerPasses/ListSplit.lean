@@ -80,25 +80,6 @@ def foldlStop {α β : Type} (f : β → α → β) (stop : β → Bool) : List 
 
 /-! ### Sparse positional map and self-zip membership -/
 
-/-- The positional pass-through map equals the plain map when the function fixes the item at
-    every position outside `mem`. -/
-theorem zipIdx_map_sparse {α : Type _} (l : List α) (f : α → α) (mem : Nat → Bool)
-    (hfix : ∀ (i : Nat) (hi : i < l.length), mem i = false → f l[i] = l[i]) :
-    l.zipIdx.map (fun ai => if mem ai.2 then f ai.1 else ai.1) = l.map f := by
-  rw [show l.map f = l.zipIdx.map (f ∘ Prod.fst) by rw [← List.map_map, List.zipIdx_map_fst]]
-  refine List.map_congr_left ?_
-  rintro ⟨a, i⟩ hp
-  obtain ⟨_, hlt, heq⟩ := List.mem_zipIdx (k := 0) hp
-  have hlt' : i < l.length := by simpa using hlt
-  have heq' : l[i]'hlt' = a := by simpa using heq.symm
-  dsimp only [Function.comp_apply]
-  by_cases hm : mem i = true
-  · rw [if_pos hm]
-  · rw [if_neg hm]
-    have := hfix i hlt' (by simpa using hm)
-    rw [heq'] at this
-    exact this.symm
-
 /-- Membership of the graph pairs in the zip of a list with its image. -/
 theorem zip_map_self_mem {α β : Type} (f : α → β) (l : List α) (a : α) (ha : a ∈ l) :
     (a, f a) ∈ l.zip (l.map f) := by
