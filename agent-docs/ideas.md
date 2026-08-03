@@ -210,8 +210,11 @@ these need no new proof.
    - ~~`dedup` constraint-side `List.dedup` O(C²·E)~~ **done (entry 104)**: bucketed
      proven-identical twin (`HashedDedup.hashedDedup`), keccak 6.6 s → noise.
    - ~~`intervalForce` seed filters / `eraseDups` / per-slot pattern re-maps~~ **done (entry
-     104)**: keccak 20.7 s → 1.1 s. (`walk`'s O(t²) with `maxTerms = 32` cap remains — bounded,
-     low value.)
+     104)**: keccak 20.7 s → 1.1 s. ~~`walk`'s O(t²)~~ **done (entry 172)**, with the rest of the
+     pass: the `occ` `HashSet` (vacuous — every seed variable comes from a term of an item of `d`),
+     the `bHash` bucket build over every constraint, the duplicated interaction sweep, and the
+     per-slot list pipeline are all gone. 0.32–0.34x on the pass; its residual is
+     `BusFacts.slotBound` dispatch (see R13(b)).
    - ~~`rootPairUnify` re-linearization per candidate var~~ **done (entry 104)** — factors
      linearized once per constraint. `anyVarBound` memoization across pairs still open (only
      matters if key-matched pairs are common; measure first).
@@ -723,6 +726,20 @@ instead of 256 (~30× on those scans). It needs a per-item degree analysis and a
 are non-survivors" argument (`a·y + b = 0` has at most one root when `a ≠ 0`).
 
 ### Runtime dead ends (measured; do not re-propose without new evidence)
+
+- **A per-`(busId, multiplicity, pattern)` memo of the whole slot-bound vector** (entry 172,
+  intervalForce): rejected on the *keys*, not on a timing. `slotBoundImpl` reads one pattern
+  position per bus type (memory slot 0, bitwise slot 3, range-checker slot 1), but memory payloads
+  also carry constant pointers and timestamps that differ per interaction — so a memo keyed on the
+  whole pattern misses on nearly every hit that would matter, and keying on the relevant positions
+  is `BusFacts`-specific knowledge a pass does not have. The fix belongs at the interface (R13(b)).
+- **An `Array`-backed raw-term buffer for intervalForce's linearization** (entry 172), with an
+  in-place region scale for `mul` instead of the list accumulator. Built and measured first: keccak
+  63 vs 68 ms, wasm-eth `apc_012` 74 vs 81, identical output — real, but ~5 ms on a 2.4 s run
+  against the whole `Array.modify`/`toList`/index-arithmetic layer in the proof *plus* a
+  from-scratch `denseMergeTerms` equality. The list form is `denseLinearizeAcc` plus one changed
+  arm, so it inherits `Affine`/`Normalize`'s lemmas wholesale. Revisit only for a corpus with large
+  affine slots (present maximum 24 merged terms).
 
 - **An in-place `Array` like-term merge in normalize's materializer** (entry 171): a linear scan +
   `Array.set` buffer folded straight into the `toExpr` spine, instead of the shipped
