@@ -3,11 +3,13 @@ import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DomainTable
 
 set_option autoImplicit false
 
-/-! # Correctness for the value-only dense `domainFold`
+/-! # Correctness for the dense `domainFold`
 
 Proves `DensePassCorrect` for the fold of `DomainFoldRuntime.lean`. The fold is a pure rewrite: any
 assignment satisfying either system pins the group to a survivor, under which the rewrite agrees
-with the identity — so `env' = env` is the completeness witness and no derivations are produced. -/
+with the identity — so `env' = env` is the completeness witness and no derivations are produced.
+
+`denseFindDomainAlg_sound` / `denseGroupDoms_sound` are the shared domain lemmas other passes use. -/
 
 namespace ApcOptimizer.Dense
 
@@ -59,1082 +61,1827 @@ theorem denseGroupDoms_sound [Fact p.Prime] (denv : VarId → ZMod p) (es : List
               · exact denseFindDomainAlg_sound denv es i dm hd hsat
               · exact ih ds hr yd hmem
 
-/-! ## Value-only survivor certificate -/
+/-! # Correctness for the index-keyed `domainFold` engine
 
-theorem mem_denseAssignmentsV_of_sound (denv : VarId → ZMod p) :
-    ∀ (doms : List (VarId × List (ZMod p))), (∀ yd ∈ doms, denv yd.1 ∈ yd.2) →
-      (doms.map (fun yd => denv yd.1)) ∈ denseAssignmentsV (doms.map Prod.snd) := by
-  intro doms
-  induction doms with
-  | nil => intro _; simp [denseAssignmentsV]
-  | cons yd rest ih =>
-      intro hsound
-      obtain ⟨i, dm⟩ := yd
-      have hhead : denv i ∈ dm := hsound (i, dm) (List.mem_cons_self ..)
-      have htail : (rest.map (fun yd => denv yd.1)) ∈ denseAssignmentsV (rest.map Prod.snd) :=
-        ih (fun yd hyd => hsound yd (List.mem_cons_of_mem _ hyd))
-      show (denv i :: rest.map (fun yd => denv yd.1)) ∈ denseAssignmentsV (dm :: rest.map Prod.snd)
-      rw [denseAssignmentsV, List.mem_flatMap]
-      exact ⟨rest.map (fun yd => denv yd.1), htail, List.mem_map.2 ⟨denv i, hhead, rfl⟩⟩
+The engine (`DomainFoldRuntime.lean`, `dfRun`) folds one target at a time: it re-checks each key's
+domain against the current system, enumerates the surviving joint assignments, and rewrites the
+touched items through one fused traversal. Correctness rests on two facts, both proven below for an
+arbitrary assignment `denv` of the *current* system:
 
-theorem denseGroupSurvivorsEV_eq (es : List (DenseExpr p)) (xs : List VarId)
-    (domVals : List (List (ZMod p))) :
-    denseGroupSurvivorsEV es xs domVals
-      = (denseAssignmentsV domVals).filter
-          (fun a => es.all (fun c => decide (c.eval (denseEnvOfKeysV xs a) = 0))) := by
-  unfold denseGroupSurvivorsEV
-  cases hce : denseCompileEs xs es with
-  | none => rfl
-  | some ces =>
-      apply List.filter_congr
-      intro a _
-      show denseSurvZeroCWV denseZModOps (fun v => decide (v = denseZModOps.zero)) ces a
-        = es.all (fun c => decide (c.eval (denseEnvOfKeysV xs a) = 0))
-      unfold denseSurvZeroCWV
-      exact denseCompileEs_allV denseZModOps (fun v => decide (v = denseZModOps.zero))
-        (fun _ => by simp [denseZModOps]) xs a es ces hce
+* the key values of `denv` are one of the enumerated survivors (`dfEnumGo_mem`), because every key's
+  domain is entailed by a covered constraint and every filter is a covered constraint;
+* a `uni` node of the traversal is constant on every survivor, hence equal at `denv`
+  (`dfGo_ok`), so the rewrite preserves every evaluation.
 
-theorem mem_denseGroupSurvivorsEV (es : List (DenseExpr p)) (xs : List VarId)
-    (domVals : List (List (ZMod p))) (pt : List (ZMod p)) (hmem : pt ∈ denseAssignmentsV domVals)
-    (hzero : ∀ c ∈ es, c.eval (denseEnvOfKeysV xs pt) = 0) :
-    pt ∈ denseGroupSurvivorsEV es xs domVals := by
-  rw [denseGroupSurvivorsEV_eq, List.mem_filter]
-  refine ⟨hmem, ?_⟩
-  rw [List.all_eq_true]
-  intro c hc
-  rw [decide_eq_true_eq]
-  exact hzero c hc
+Both are established from `DfCovered` — "every covered constraint vanishes" — which holds on either
+side of the step, since the fold leaves covered constraints where they are. -/
 
-theorem denseConstOnSurvsV_sound (xs : List VarId) (survsV : List (List (ZMod p)))
-    (e : DenseExpr p) (c : ZMod p) (h : denseConstOnSurvsV xs survsV e = some c) :
-    ∀ s ∈ survsV, e.eval (denseEnvOfKeysV xs s) = c := by
-  rcases survsV with _ | ⟨s₀, rest⟩ <;> grind [denseConstOnSurvsV, denseCompileE_evalV]
+/-! ## Dictionary-free primitives -/
 
-/-! ## The fold rewrite: agreement and variable containment (value-only) -/
+theorem dfEqZ_eq (a b : ZMod p) : dfEqZ a b = decide (a = b) := by
+  unfold dfEqZ
+  cases p with
+  | zero => simp [dfEqSlow]
+  | succ n =>
+      simp only [Nat.succ_ne_zero, if_false]
+      by_cases h : a = b
+      · simp [h]
+      · simpa [h] using fun hv => h (ZMod.val_injective (n + 1) hv)
 
-theorem denseFoldRewriteGoV_agree (xs : List VarId) (survsV : List (List (ZMod p)))
-    (denv : VarId → ZMod p) (pt : List (ZMod p)) (hpt : pt ∈ survsV)
-    (hcongr : ∀ e : DenseExpr p, e.varsInF xs = true →
-      e.eval denv = e.eval (denseEnvOfKeysV xs pt)) :
-    ∀ e : DenseExpr p, (denseFoldRewriteGoV xs survsV e).eval denv = e.eval denv := by
+/-- A `uni` vector's entries all equal its constant. -/
+theorem dfUni_sound (a : Array (ZMod p)) (c : ZMod p) (h : dfUni a = some c) :
+    ∀ x ∈ a, x = c := by
+  unfold dfUni at h
+  split at h
+  · split at h
+    · rename_i hall
+      obtain rfl : a[0] = c := Option.some.inj h
+      intro x hx
+      simpa [dfEqZ_eq] using (Array.all_eq_true_iff_forall_mem.1 hall) x hx
+    · exact absurd h (by simp)
+  · exact absurd h (by simp)
+
+/-- The closure-free evaluator is `denseIExprEvalWithV` on the extended point. -/
+theorem dfEvalCons_eq (v : ZMod p) (pt : List (ZMod p)) :
+    ∀ ie : IExpr p, dfEvalCons (zmodZeroP p) v pt ie
+      = denseIExprEvalWithV denseZModOps (v :: pt) ie := by
+  intro ie
+  induction ie with
+  | const n => rfl
+  | ix i => cases i <;> rfl
+  | add a b iha ihb => show zmodAddP _ _ = denseZModOps.add _ _; rw [iha, ihb]; rfl
+  | mul a b iha ihb => show zmodMulP _ _ = denseZModOps.mul _ _; rw [iha, ihb]; rfl
+
+/-! ## Key slots -/
+
+/-- A found slot names its key. -/
+theorem dfSlotGo_spec (keys : Array VarId) (y : Nat) :
+    ∀ (n j i : Nat), keys.size - j ≤ n → dfSlotGo keys y j = some i →
+      ∃ h : i < keys.size, (keys[i]'h).index = y := by
+  intro n
+  induction n with
+  | zero =>
+      intro j i hn h
+      rw [dfSlotGo, dif_neg (by omega)] at h
+      exact absurd h (by simp)
+  | succ n ih =>
+      intro j i hn h
+      rw [dfSlotGo] at h
+      by_cases hj : j < keys.size
+      · rw [dif_pos hj] at h
+        by_cases hkey : (keys[j].index == y) = true
+        · rw [if_pos hkey] at h
+          obtain rfl : j = i := Option.some.inj h
+          exact ⟨hj, eq_of_beq hkey⟩
+        · rw [if_neg hkey] at h
+          by_cases hlt : y < keys[j].index
+          · rw [if_pos hlt] at h; exact absurd h (by simp)
+          · rw [if_neg hlt] at h; exact ih (j + 1) i (by omega) h
+      · rw [dif_neg hj] at h; exact absurd h (by simp)
+
+/-- A found slot names its key (the form the proofs use). -/
+theorem dfSlot_key (keys : Array VarId) (y : Nat) (i : Nat) (h : dfSlotGo keys y 0 = some i) :
+    ∃ hi : i < keys.size, (keys[i]'hi).index = y :=
+  dfSlotGo_spec keys y keys.size 0 i (by omega) h
+
+/-- A found `denseVarIx` names a member. -/
+theorem denseVarIx_mem (ks : List VarId) (y : VarId) :
+    ∀ k : Nat, denseVarIx ks y = some k → y ∈ ks := by
+  induction ks with
+  | nil => intro k h; simp [denseVarIx] at h
+  | cons x rest ih =>
+      intro k h
+      rw [denseVarIx] at h
+      by_cases hx : (y == x) = true
+      · exact List.mem_cons.2 (Or.inl (eq_of_beq hx))
+      · rw [if_neg hx] at h
+        cases hr : denseVarIx rest y with
+        | none => rw [hr] at h; exact absurd h (by simp)
+        | some k' => exact List.mem_cons_of_mem _ (ih k' hr)
+
+/-- Compiling against a key list needs every variable to be in it. -/
+theorem denseCompileE_vars (ks : List VarId) :
+    ∀ (e : DenseExpr p) (ie : IExpr p), denseCompileE ks e = some ie → ∀ v ∈ e.vars, v ∈ ks := by
   intro e
   induction e with
-  | const c => rfl
-  | var y => rfl
-  | add a b iha ihb =>
-      unfold denseFoldRewriteGoV
-      by_cases hin : (DenseExpr.add a b).varsInF xs = true
-      · rw [if_pos hin]
-        cases hc : denseConstOnSurvsV xs survsV (DenseExpr.add a b) with
-        | none =>
-            show (denseFoldRewriteGoV xs survsV a).eval denv + (denseFoldRewriteGoV xs survsV b).eval denv
-              = a.eval denv + b.eval denv
-            rw [iha, ihb]
-        | some c =>
-            have h2 := denseConstOnSurvsV_sound xs survsV (DenseExpr.add a b) c hc pt hpt
-            have h1 := hcongr (DenseExpr.add a b) hin
-            show c = (DenseExpr.add a b).eval denv
-            rw [h1, h2]
-      · rw [if_neg (by simpa using hin)]
-        show (denseFoldRewriteGoV xs survsV a).eval denv + (denseFoldRewriteGoV xs survsV b).eval denv
-          = a.eval denv + b.eval denv
-        rw [iha, ihb]
-  | mul a b iha ihb =>
-      unfold denseFoldRewriteGoV
-      by_cases hin : (DenseExpr.mul a b).varsInF xs = true
-      · rw [if_pos hin]
-        cases hc : denseConstOnSurvsV xs survsV (DenseExpr.mul a b) with
-        | none =>
-            show (denseFoldRewriteGoV xs survsV a).eval denv * (denseFoldRewriteGoV xs survsV b).eval denv
-              = a.eval denv * b.eval denv
-            rw [iha, ihb]
-        | some c =>
-            have h2 := denseConstOnSurvsV_sound xs survsV (DenseExpr.mul a b) c hc pt hpt
-            have h1 := hcongr (DenseExpr.mul a b) hin
-            show c = (DenseExpr.mul a b).eval denv
-            rw [h1, h2]
-      · rw [if_neg (by simpa using hin)]
-        show (denseFoldRewriteGoV xs survsV a).eval denv * (denseFoldRewriteGoV xs survsV b).eval denv
-          = a.eval denv * b.eval denv
-        rw [iha, ihb]
-
-theorem denseFoldRewriteV_agree_covered [Fact p.Prime] (d : DenseConstraintSystem p)
-    (xs : List VarId) (doms : List (VarId × List (ZMod p)))
-    (hdoms : denseGroupDoms (denseCoveredCsOf d xs) xs = some doms) (denv : VarId → ZMod p)
-    (hcov : ∀ c ∈ denseCoveredCsOf d xs, c.eval denv = 0) :
-    ∀ e : DenseExpr p,
-      (denseFoldRewriteV xs (denseGroupSurvivorsEV (denseCoveredCsOf d xs) xs (doms.map Prod.snd)) e).eval denv
-        = e.eval denv := by
-  have hkeys : doms.map Prod.fst = xs := denseGroupDoms_fst (denseCoveredCsOf d xs) xs doms hdoms
-  have hsound_doms : ∀ yd ∈ doms, denv yd.1 ∈ yd.2 :=
-    denseGroupDoms_sound denv (denseCoveredCsOf d xs) hcov xs doms hdoms
-  have hpteq : xs.map denv = doms.map (fun yd => denv yd.1) := by
-    rw [← hkeys, List.map_map]; rfl
-  have hmemA : (xs.map denv) ∈ denseAssignmentsV (doms.map Prod.snd) := by
-    rw [hpteq]; exact mem_denseAssignmentsV_of_sound denv doms hsound_doms
-  have hcovVars : ∀ c ∈ denseCoveredCsOf d xs, c.varsInF xs = true := by
-    intro c hc
-    have hcf : c ∈ d.algebraicConstraints.filter (denseCoveredBy xs) := hc
-    have hcb : denseCoveredBy xs c = true := (List.mem_filter.1 hcf).2
-    rw [denseCoveredBy, Bool.and_eq_true] at hcb
-    exact hcb.2
-  have hzero : ∀ c ∈ denseCoveredCsOf d xs, c.eval (denseEnvOfKeysV xs (xs.map denv)) = 0 := by
-    intro c hc
-    have hvin := denseVarsInF_sound xs c (hcovVars c hc)
-    have hce : c.eval (denseEnvOfKeysV xs (xs.map denv)) = c.eval denv :=
-      DenseExpr.eval_congr c _ _ (fun v hv => denseEnvOfKeysV_map denv xs v (hvin v hv))
-    rw [hce]; exact hcov c hc
-  have hptSurv : (xs.map denv) ∈ denseGroupSurvivorsEV (denseCoveredCsOf d xs) xs (doms.map Prod.snd) :=
-    mem_denseGroupSurvivorsEV (denseCoveredCsOf d xs) xs (doms.map Prod.snd) (xs.map denv) hmemA hzero
-  have hcongr : ∀ e : DenseExpr p, e.varsInF xs = true →
-      e.eval denv = e.eval (denseEnvOfKeysV xs (xs.map denv)) := by
-    intro e he
-    refine DenseExpr.eval_congr e _ _ (fun v hv => ?_)
-    exact (denseEnvOfKeysV_map denv xs v (denseVarsInF_sound xs e he v hv)).symm
-  intro e
-  unfold denseFoldRewriteV
-  split
-  · exact denseFoldRewriteGoV_agree xs
-      (denseGroupSurvivorsEV (denseCoveredCsOf d xs) xs (doms.map Prod.snd)) denv (xs.map denv)
-      hptSurv hcongr e
-  · rfl
-
-/-- Folding introduces no `VarId` (value-only core). -/
-theorem denseFoldRewriteGoV_vars (xs : List VarId) (survsV : List (List (ZMod p))) (e : DenseExpr p) :
-    ∀ i ∈ (denseFoldRewriteGoV xs survsV e).vars, i ∈ e.vars := by
-  induction e with
-  | const c => intro i hi; simp [denseFoldRewriteGoV, DenseExpr.vars] at hi
-  | var y => intro i hi; exact hi
-  | add a b iha ihb =>
-      unfold denseFoldRewriteGoV
-      by_cases hin : (DenseExpr.add a b).varsInF xs = true
-      · rw [if_pos hin]
-        cases denseConstOnSurvsV xs survsV (DenseExpr.add a b) with
-        | none =>
-            intro i hi; simp only [DenseExpr.vars, List.mem_append] at hi ⊢
-            rcases hi with hi | hi
-            · exact Or.inl (iha i hi)
-            · exact Or.inr (ihb i hi)
-        | some c => intro i hi; simp [DenseExpr.vars] at hi
-      · rw [if_neg (by simpa using hin)]
-        intro i hi; simp only [DenseExpr.vars, List.mem_append] at hi ⊢
-        rcases hi with hi | hi
-        · exact Or.inl (iha i hi)
-        · exact Or.inr (ihb i hi)
-  | mul a b iha ihb =>
-      unfold denseFoldRewriteGoV
-      by_cases hin : (DenseExpr.mul a b).varsInF xs = true
-      · rw [if_pos hin]
-        cases denseConstOnSurvsV xs survsV (DenseExpr.mul a b) with
-        | none =>
-            intro i hi; simp only [DenseExpr.vars, List.mem_append] at hi ⊢
-            rcases hi with hi | hi
-            · exact Or.inl (iha i hi)
-            · exact Or.inr (ihb i hi)
-        | some c => intro i hi; simp [DenseExpr.vars] at hi
-      · rw [if_neg (by simpa using hin)]
-        intro i hi; simp only [DenseExpr.vars, List.mem_append] at hi ⊢
-        rcases hi with hi | hi
-        · exact Or.inl (iha i hi)
-        · exact Or.inr (ihb i hi)
-
-theorem denseFoldRewriteV_vars (xs : List VarId) (survsV : List (List (ZMod p))) (e : DenseExpr p) :
-    ∀ i ∈ (denseFoldRewriteV xs survsV e).vars, i ∈ e.vars := by
-  intro i hi
-  unfold denseFoldRewriteV at hi
-  split at hi
-  · exact denseFoldRewriteGoV_vars xs survsV e i hi
-  · exact hi
-
-theorem denseFoldRewriteV_covered (reg : VarRegistry) (xs : List VarId)
-    (survsV : List (List (ZMod p))) {e : DenseExpr p} (hc : e.CoveredBy reg) :
-    (denseFoldRewriteV xs survsV e).CoveredBy reg :=
-  fun i hi => hc i (denseFoldRewriteV_vars xs survsV e i hi)
-
-/-! ## Single-fold correctness -/
-
-theorem denseFoldOutV_correct [Fact p.Prime] (bs : BusSemantics p) (d : DenseConstraintSystem p)
-    (xs : List VarId) (doms : List (VarId × List (ZMod p)))
-    (hdoms : denseGroupDoms (denseCoveredCsOf d xs) xs = some doms) (isInput : VarId → Bool) :
-    DensePassCorrect isInput d
-      (denseFoldOutV d xs (denseGroupSurvivorsEV (denseCoveredCsOf d xs) xs (doms.map Prod.snd))) [] bs := by
-  set survsV := denseGroupSurvivorsEV (denseCoveredCsOf d xs) xs (doms.map Prod.snd) with hsurv_def
-  have hagCov : ∀ denv : VarId → ZMod p, (∀ c ∈ denseCoveredCsOf d xs, c.eval denv = 0) →
-      ∀ e : DenseExpr p, (denseFoldRewriteV xs survsV e).eval denv = e.eval denv := by
-    intro denv hcov
-    rw [hsurv_def]
-    exact denseFoldRewriteV_agree_covered d xs doms hdoms denv hcov
-  refine DensePassCorrect.ofEvalAgree
-    (fun denv => ∀ c ∈ denseCoveredCsOf d xs, c.eval denv = 0)
-    (denseFoldRewriteV xs survsV) rfl ?_ ?_ hagCov ?_ ?_ ?_
-    (fun e i hi => denseFoldRewriteV_vars xs survsV e i hi)
-  · -- a covered constraint sits verbatim in the output
-    intro denv hsatout c hc
-    exact hsatout.1 c (show c ∈ (denseFoldOutV d xs survsV).algebraicConstraints from
-      List.mem_append_right _ hc)
-  · exact fun denv hsat c hc => hsat.1 c (List.mem_of_mem_filter hc)
-  · -- input constraints vanish when the output's do
-    intro denv hA hout c hc
-    by_cases hccov : denseCoveredBy xs c = true
-    · exact hA c (List.mem_filter.2 ⟨hc, hccov⟩)
-    · have hz := hout _ (show denseFoldRewriteV xs survsV c
-          ∈ (denseFoldOutV d xs survsV).algebraicConstraints from
-        List.mem_append_left _
-          (List.mem_map.2 ⟨c, List.mem_filter.2 ⟨hc, by simpa using hccov⟩, rfl⟩))
-      rwa [hagCov denv hA c] at hz
-  · -- output constraints vanish when the input's do
-    intro denv hA hd c' hc'
-    have hc'2 : c' ∈ (d.algebraicConstraints.filter (fun c => !denseCoveredBy xs c)).map
-        (denseFoldRewriteV xs survsV) ++ denseCoveredCsOf d xs := hc'
-    rcases List.mem_append.1 hc'2 with h | h
-    · obtain ⟨c0, hc0, rfl⟩ := List.mem_map.1 h
-      rw [hagCov denv hA c0]
-      exact hd c0 (List.mem_of_mem_filter hc0)
-    · exact hd c' (List.mem_of_mem_filter h)
-  · -- output constraints read only occurring variables
-    intro c' hc' i hi
-    have hc'2 : c' ∈ (d.algebraicConstraints.filter (fun c => !denseCoveredBy xs c)).map
-        (denseFoldRewriteV xs survsV) ++ denseCoveredCsOf d xs := hc'
-    rcases List.mem_append.1 hc'2 with h | h
-    · obtain ⟨c0, hc0, rfl⟩ := List.mem_map.1 h
-      exact DenseConstraintSystem.mem_occ_of_constraint (List.mem_of_mem_filter hc0)
-        (denseFoldRewriteV_vars xs survsV c0 i hi)
-    · exact DenseConstraintSystem.mem_occ_of_constraint (List.mem_of_mem_filter h) hi
-
-/-! ## Coverage preservation (value-only fold) -/
-
-theorem denseFoldOutV_covered (reg : VarRegistry) (d : DenseConstraintSystem p)
-    (hcov : d.CoveredBy reg) (xs : List VarId) (survsV : List (List (ZMod p))) :
-    (denseFoldOutV d xs survsV).CoveredBy reg := by
-  refine ⟨fun e he => ?_, fun bi hbi => ?_⟩
-  · have he' : e ∈ (d.algebraicConstraints.filter (fun c => !denseCoveredBy xs c)).map
-        (denseFoldRewriteV xs survsV) ++ denseCoveredCsOf d xs := he
-    rcases List.mem_append.1 he' with h | h
-    · obtain ⟨c, hc, rfl⟩ := List.mem_map.1 h
-      exact denseFoldRewriteV_covered reg xs survsV (hcov.1 c (List.mem_of_mem_filter hc))
-    · exact hcov.1 e (List.mem_of_mem_filter h)
-  · have hbi' : bi ∈ d.busInteractions.map
-        (fun bi => { bi with
-          multiplicity := denseFoldRewriteV xs survsV bi.multiplicity,
-          payload := bi.payload.map (denseFoldRewriteV xs survsV) }) := hbi
-    obtain ⟨bi0, hbi0, rfl⟩ := List.mem_map.1 hbi'
-    obtain ⟨hm, hp⟩ := hcov.2 bi0 hbi0
-    refine ⟨denseFoldRewriteV_covered reg xs survsV hm, fun e he => ?_⟩
-    have he' : e ∈ bi0.payload.map (denseFoldRewriteV xs survsV) := he
-    obtain ⟨e0, he0, rfl⟩ := List.mem_map.1 he'
-    exact denseFoldRewriteV_covered reg xs survsV (hp e0 he0)
-
-/-! ## The direct fold loop -/
-
-theorem denseFoldStepWithV_correct [Fact p.Prime] (bs : BusSemantics p) (isInput : VarId → Bool)
-    (d : DenseConstraintSystem p) (xs : List VarId) (es csRest : List (DenseExpr p))
-    (hes : es = denseCoveredCsOf d xs) :
-    DensePassCorrect isInput d (denseFoldStepWithV d xs es csRest) [] bs := by
-  subst hes
-  unfold denseFoldStepWithV
-  split
-  · exact DensePassCorrect_refl isInput d bs
-  · rename_i doms hgd
-    by_cases hp : (doms.map (fun yd => yd.2.length)).prod ≤ 256
-    · rw [if_pos hp]
-      by_cases hgate : (1 ≤ (denseGroupSurvivorsEV (denseCoveredCsOf d xs) xs (doms.map Prod.snd)).length
-          && denseSystemHasFoldableWV d xs (denseGroupSurvivorsEV (denseCoveredCsOf d xs) xs (doms.map Prod.snd)) csRest) = true
-      · rw [if_pos hgate]
-        exact denseFoldOutV_correct bs d xs doms hgd isInput
-      · rw [if_neg (by simpa using hgate)]; exact DensePassCorrect_refl isInput d bs
-    · rw [if_neg hp]; exact DensePassCorrect_refl isInput d bs
-
-theorem denseFoldStepWithV_covered (reg : VarRegistry) (d : DenseConstraintSystem p)
-    (hcov : d.CoveredBy reg) (xs : List VarId) (es csRest : List (DenseExpr p)) :
-    (denseFoldStepWithV d xs es csRest).CoveredBy reg := by
-  unfold denseFoldStepWithV
-  split
-  · exact hcov
-  · rename_i doms _
-    by_cases hp : (doms.map (fun yd => yd.2.length)).prod ≤ 256
-    · rw [if_pos hp]
-      by_cases hgate : (1 ≤ (denseGroupSurvivorsEV es xs (doms.map Prod.snd)).length
-          && denseSystemHasFoldableWV d xs (denseGroupSurvivorsEV es xs (doms.map Prod.snd)) csRest) = true
-      · rw [if_pos hgate]; exact denseFoldOutV_covered reg d hcov xs _
-      · rw [if_neg (by simpa using hgate)]; exact hcov
-    · rw [if_neg hp]; exact hcov
-
-theorem denseFoldLoopDirectV_correct [Fact p.Prime] (bs : BusSemantics p) (isInput : VarId → Bool) :
-    ∀ (targets : List (List VarId)) (d : DenseConstraintSystem p),
-      DensePassCorrect isInput d (denseFoldLoopDirectV targets d) [] bs := by
-  intro targets
-  induction targets with
-  | nil => intro d; exact DensePassCorrect_refl isInput d bs
-  | cons xs rest ih =>
-      intro d
-      simp only [denseFoldLoopDirectV, List.partition_eq_filter_filter]
-      exact DensePassCorrect.trans
-        (denseFoldStepWithV_correct bs isInput d xs _ _ rfl) (ih _)
-
-theorem denseFoldLoopDirectV_covered (reg : VarRegistry) :
-    ∀ (targets : List (List VarId)) (d : DenseConstraintSystem p),
-      d.CoveredBy reg → (denseFoldLoopDirectV targets d).CoveredBy reg := by
-  intro targets
-  induction targets with
-  | nil => intro d hcov; exact hcov
-  | cons xs rest ih =>
-      intro d hcov
-      simp only [denseFoldLoopDirectV, List.partition_eq_filter_filter]
-      exact ih _ (denseFoldStepWithV_covered reg d hcov xs _ _)
-
-/-! ## The indexed fold loop -/
-
-/-- `.1` of one indexed step as a plain match/if. -/
-theorem denseFoldStepV_fst (d : DenseConstraintSystem p) (fidx : DenseFoldIdx p) (xs : List VarId) :
-    (denseFoldStepV d fidx xs).1 =
-      (match denseGroupDoms (denseCoveredIdx fidx.idx fidx.arr (denseCoveredBy xs) xs) xs with
-       | none => d
-       | some doms =>
-         if (doms.map (fun yd => yd.2.length)).prod ≤ 256 then
-           (if 1 ≤ (denseGroupSurvivorsEV (denseCoveredIdx fidx.idx fidx.arr (denseCoveredBy xs) xs) xs
-                    (doms.map Prod.snd)).length
-                && denseSystemHasFoldableIdxV fidx xs
-                    (denseGroupSurvivorsEV (denseCoveredIdx fidx.idx fidx.arr (denseCoveredBy xs) xs) xs
-                      (doms.map Prod.snd))
-            then denseFoldOutIdxV d fidx xs
-                (denseGroupSurvivorsEV (denseCoveredIdx fidx.idx fidx.arr (denseCoveredBy xs) xs) xs
-                  (doms.map Prod.snd))
-            else d)
-           else d) := by
-  simp only [denseFoldStepV]
-  cases hgd : denseGroupDoms (denseCoveredIdx fidx.idx fidx.arr (denseCoveredBy xs) xs) xs with
-  | none => rfl
-  | some doms => simp only [apply_ite Prod.fst]
-
-/-- The step's refreshed index keeps the input's constraint bucket map (`refresh` sets
-    `idx := old.idx`). -/
-theorem denseFoldStepV_snd_idx_eq (d : DenseConstraintSystem p) (fidx : DenseFoldIdx p) (xs : List VarId) :
-    (denseFoldStepV d fidx xs).2.idx = fidx.idx := by
-  simp only [denseFoldStepV]; split
-  · rfl
-  · split_ifs <;> rfl
-
-/-- The step's refreshed index keeps the input's interaction bucket map (no-rebuild refresh). -/
-theorem denseFoldStepV_snd_bisIdx_eq (d : DenseConstraintSystem p) (fidx : DenseFoldIdx p) (xs : List VarId) :
-    (denseFoldStepV d fidx xs).2.bisIdx = fidx.bisIdx := by
-  simp only [denseFoldStepV]; split
-  · rfl
-  · split_ifs <;> rfl
-
-theorem denseFoldStepV_snd_arr (d : DenseConstraintSystem p) (fidx : DenseFoldIdx p) (xs : List VarId)
-    (harr : fidx.arr = d.algebraicConstraints.toArray) :
-    (denseFoldStepV d fidx xs).2.arr = (denseFoldStepV d fidx xs).1.algebraicConstraints.toArray := by
-  simp only [denseFoldStepV]; split
-  · exact harr
-  · split_ifs <;> first | rfl | exact harr
-
-/-- The step's output is either the input verbatim or the sparse fold (`denseFoldOutIdxV`) — the
-    case split shared by the completeness/array invariants. -/
-theorem denseFoldStepV_fst_alg (d : DenseConstraintSystem p) (fidx : DenseFoldIdx p) (xs : List VarId) :
-    (denseFoldStepV d fidx xs).1 = d ∨
-      ∃ survsV, (denseFoldStepV d fidx xs).1 = denseFoldOutIdxV d fidx xs survsV := by
-  rw [denseFoldStepV_fst]
-  split
-  · exact Or.inl rfl
-  · split_ifs
-    · exact Or.inr ⟨_, rfl⟩
-    · exact Or.inl rfl
-    · exact Or.inl rfl
-
-/-- Under bucket-completeness (and array-sync), the covered set the index serves equals the direct
-    covered set — a stale superset index is fine, bucket completeness is all that is needed. -/
-theorem denseFoldStepV_es_eq (d : DenseConstraintSystem p) (fidx : DenseFoldIdx p) (xs : List VarId)
-    (hidx : ∀ (i : Nat) (_ : i < d.algebraicConstraints.length),
-      ∀ v ∈ d.algebraicConstraints[i].vars, i ∈ fidx.idx.buckets.getD v [])
-    (harr : fidx.arr = d.algebraicConstraints.toArray) :
-    denseCoveredIdx fidx.idx fidx.arr (denseCoveredBy xs) xs = denseCoveredCsOf d xs := by
-  rw [harr, denseCoveredCsOf]
-  exact denseCoveredIdx_eq_filter_of_complete fidx.idx d.algebraicConstraints (denseCoveredBy xs) xs
-    (fun i hi hQ => by
-      obtain ⟨v, hv, hvxs⟩ := denseCoveredBy_shares_var xs d.algebraicConstraints[i] hQ
-      exact denseMem_candidates fidx.idx xs v i hvxs (hidx i hi v hv))
-
-/-! ## The index-preserving indexed path
-
-Correctness for the `anyVarIn`-only-gated rewrite, the in-place fold, and the sparse fold's equality
-to it. -/
-
-/-- `DenseExpr.anyVarIn` finds a genuinely shared variable. -/
-theorem denseAnyVarIn_exists {xs : List VarId} {e : DenseExpr p}
-    (h : e.anyVarIn xs = true) : ∃ i ∈ e.vars, i ∈ xs := by
-  induction e with
-  | const c => simp [DenseExpr.anyVarIn] at h
+  | const n => intro ie _ v hv; simp [DenseExpr.vars] at hv
   | var y =>
-    rw [DenseExpr.anyVarIn] at h
-    exact ⟨y, by simp [DenseExpr.vars], denseContainsFast_sound xs y h⟩
+      intro ie h v hv
+      simp only [DenseExpr.vars, List.mem_singleton] at hv
+      subst hv
+      rw [denseCompileE] at h
+      cases hix : denseVarIx ks v with
+      | none => rw [hix] at h; exact absurd h (by simp)
+      | some k => exact denseVarIx_mem ks v k hix
   | add a b iha ihb =>
-    rw [DenseExpr.anyVarIn, Bool.or_eq_true] at h
-    rcases h with h | h
-    · obtain ⟨i, hi, hx⟩ := iha h
-      exact ⟨i, by rw [DenseExpr.vars]; exact List.mem_append_left _ hi, hx⟩
-    · obtain ⟨i, hi, hx⟩ := ihb h
-      exact ⟨i, by rw [DenseExpr.vars]; exact List.mem_append_right _ hi, hx⟩
+      intro ie h v hv
+      rw [denseCompileE] at h
+      cases hca : denseCompileE ks a with
+      | none => rw [hca] at h; exact absurd h (by simp)
+      | some ia =>
+        cases hcb : denseCompileE ks b with
+        | none => rw [hca, hcb] at h; exact absurd h (by simp)
+        | some ib =>
+            simp only [DenseExpr.vars, List.mem_append] at hv
+            rcases hv with hv | hv
+            · exact iha ia hca v hv
+            · exact ihb ib hcb v hv
   | mul a b iha ihb =>
-    rw [DenseExpr.anyVarIn, Bool.or_eq_true] at h
-    rcases h with h | h
-    · obtain ⟨i, hi, hx⟩ := iha h
-      exact ⟨i, by rw [DenseExpr.vars]; exact List.mem_append_left _ hi, hx⟩
-    · obtain ⟨i, hi, hx⟩ := ihb h
-      exact ⟨i, by rw [DenseExpr.vars]; exact List.mem_append_right _ hi, hx⟩
+      intro ie h v hv
+      rw [denseCompileE] at h
+      cases hca : denseCompileE ks a with
+      | none => rw [hca] at h; exact absurd h (by simp)
+      | some ia =>
+        cases hcb : denseCompileE ks b with
+        | none => rw [hca, hcb] at h; exact absurd h (by simp)
+        | some ib =>
+            simp only [DenseExpr.vars, List.mem_append] at hv
+            rcases hv with hv | hv
+            · exact iha ia hca v hv
+            · exact ihb ib hcb v hv
 
-/-- `denseFoldRewriteIdxV` is the identity on an expression sharing no variable with the group — what
-    lets the sparse `denseFoldOutIdxV` pass untouched items through by position. -/
-theorem denseFoldRewriteIdxV_eq_self {xs : List VarId} {survsV : List (List (ZMod p))}
-    {e : DenseExpr p} (h : e.anyVarIn xs = false) : denseFoldRewriteIdxV xs survsV e = e := by
-  rw [denseFoldRewriteIdxV, h]; rfl
 
-/-- Folding never introduces a `VarId` (gated indexed form). -/
-theorem denseFoldRewriteIdxV_vars (xs : List VarId) (survsV : List (List (ZMod p)))
-    (e : DenseExpr p) : ∀ i ∈ (denseFoldRewriteIdxV xs survsV e).vars, i ∈ e.vars := by
-  intro i hi
-  unfold denseFoldRewriteIdxV at hi
-  split at hi
-  · exact denseFoldRewriteGoV_vars xs survsV e i hi
-  · exact hi
+/-! ## The reversed key prefix
 
-theorem denseFoldRewriteIdxV_covered (reg : VarRegistry) (xs : List VarId)
-    (survsV : List (List (ZMod p))) {e : DenseExpr p} (hc : e.CoveredBy reg) :
-    (denseFoldRewriteIdxV xs survsV e).CoveredBy reg :=
-  fun i hi => hc i (denseFoldRewriteIdxV_vars xs survsV e i hi)
+A partial point at level `j` is the values of the first `j` keys, newest first; the point a level-`j`
+filter is checked on is therefore the values of `dfRKeys keys j`, which is the list that filter was
+compiled against. -/
 
-/-- On an env agreeing with a survivor `pt` on `xs`, `denseFoldRewriteIdxV` is
-    evaluation-preserving. -/
-theorem denseFoldRewriteIdxV_agree (xs : List VarId) (survsV : List (List (ZMod p)))
-    (denv : VarId → ZMod p) (pt : List (ZMod p)) (hpt : pt ∈ survsV)
-    (hcongr : ∀ e : DenseExpr p, e.varsInF xs = true →
-      e.eval denv = e.eval (denseEnvOfKeysV xs pt)) :
-    ∀ e : DenseExpr p, (denseFoldRewriteIdxV xs survsV e).eval denv = e.eval denv := by
-  intro e
-  unfold denseFoldRewriteIdxV
-  split
-  · exact denseFoldRewriteGoV_agree xs survsV denv pt hpt hcongr e
-  · rfl
+/-- The values of the keys below level `j`, newest first. -/
+def dfPref (keys : Array VarId) (denv : VarId → ZMod p) : Nat → List (ZMod p)
+  | 0 => []
+  | j + 1 => denv (keys.getD j ⟨0⟩) :: dfPref keys denv j
 
-/-- If `denv` zeroes every covered constraint, the group is pinned to a survivor `pt` (the witness
-    `xs.map denv`) that `denv` agrees with on `xs`. -/
-theorem denseGroupSurvivorsEV_mem_agree [Fact p.Prime] (d : DenseConstraintSystem p)
-    (xs : List VarId) (doms : List (VarId × List (ZMod p)))
-    (hdoms : denseGroupDoms (denseCoveredCsOf d xs) xs = some doms) (denv : VarId → ZMod p)
-    (hcov : ∀ c ∈ denseCoveredCsOf d xs, c.eval denv = 0) :
-    ∃ pt ∈ denseGroupSurvivorsEV (denseCoveredCsOf d xs) xs (doms.map Prod.snd),
-      ∀ e : DenseExpr p, e.varsInF xs = true → e.eval denv = e.eval (denseEnvOfKeysV xs pt) := by
-  have hkeys : doms.map Prod.fst = xs := denseGroupDoms_fst (denseCoveredCsOf d xs) xs doms hdoms
-  have hsound_doms : ∀ yd ∈ doms, denv yd.1 ∈ yd.2 :=
-    denseGroupDoms_sound denv (denseCoveredCsOf d xs) hcov xs doms hdoms
-  have hpteq : xs.map denv = doms.map (fun yd => denv yd.1) := by
-    rw [← hkeys, List.map_map]; rfl
-  have hmemA : (xs.map denv) ∈ denseAssignmentsV (doms.map Prod.snd) := by
-    rw [hpteq]; exact mem_denseAssignmentsV_of_sound denv doms hsound_doms
-  have hcovVars : ∀ c ∈ denseCoveredCsOf d xs, c.varsInF xs = true := by
-    intro c hc
-    have hcf : c ∈ d.algebraicConstraints.filter (denseCoveredBy xs) := hc
-    have hcb : denseCoveredBy xs c = true := (List.mem_filter.1 hcf).2
-    rw [denseCoveredBy, Bool.and_eq_true] at hcb
-    exact hcb.2
-  have hzero : ∀ c ∈ denseCoveredCsOf d xs, c.eval (denseEnvOfKeysV xs (xs.map denv)) = 0 := by
-    intro c hc
-    have hvin := denseVarsInF_sound xs c (hcovVars c hc)
-    have hce : c.eval (denseEnvOfKeysV xs (xs.map denv)) = c.eval denv :=
-      DenseExpr.eval_congr c _ _ (fun v hv => denseEnvOfKeysV_map denv xs v (hvin v hv))
-    rw [hce]; exact hcov c hc
-  have hptSurv : (xs.map denv) ∈ denseGroupSurvivorsEV (denseCoveredCsOf d xs) xs (doms.map Prod.snd) :=
-    mem_denseGroupSurvivorsEV (denseCoveredCsOf d xs) xs (doms.map Prod.snd) (xs.map denv) hmemA hzero
-  have hcongr : ∀ e : DenseExpr p, e.varsInF xs = true →
-      e.eval denv = e.eval (denseEnvOfKeysV xs (xs.map denv)) := by
-    intro e he
-    refine DenseExpr.eval_congr e _ _ (fun v hv => ?_)
-    exact (denseEnvOfKeysV_map denv xs v (denseVarsInF_sound xs e he v hv)).symm
-  exact ⟨xs.map denv, hptSurv, hcongr⟩
+theorem dfPref_eq_map (keys : Array VarId) (denv : VarId → ZMod p) :
+    ∀ m : Nat, dfPref keys denv (m + 1) = (dfRKeys keys m).map denv := by
+  intro m
+  induction m with
+  | zero => rfl
+  | succ m ih => rw [dfPref, dfRKeys, List.map_cons, ← ih]
 
-theorem denseFoldRewriteIdxV_agree_covered [Fact p.Prime] (d : DenseConstraintSystem p)
-    (xs : List VarId) (doms : List (VarId × List (ZMod p)))
-    (hdoms : denseGroupDoms (denseCoveredCsOf d xs) xs = some doms) (denv : VarId → ZMod p)
-    (hcov : ∀ c ∈ denseCoveredCsOf d xs, c.eval denv = 0) :
-    ∀ e : DenseExpr p,
-      (denseFoldRewriteIdxV xs (denseGroupSurvivorsEV (denseCoveredCsOf d xs) xs (doms.map Prod.snd)) e).eval denv
-        = e.eval denv := by
-  obtain ⟨pt, hpt, hcongr⟩ := denseGroupSurvivorsEV_mem_agree d xs doms hdoms denv hcov
-  intro e
-  exact denseFoldRewriteIdxV_agree xs _ denv pt hpt hcongr e
-
-/-! ### The in-place fold `denseFoldOutInPlaceV` -/
-
-/-- Correctness of one in-place fold: the covered constraints pin the group so the rewrite agrees
-    with the identity. -/
-theorem denseFoldOutInPlaceV_correct [Fact p.Prime] (bs : BusSemantics p) (d : DenseConstraintSystem p)
-    (xs : List VarId) (doms : List (VarId × List (ZMod p)))
-    (hdoms : denseGroupDoms (denseCoveredCsOf d xs) xs = some doms) (isInput : VarId → Bool) :
-    DensePassCorrect isInput d
-      (denseFoldOutInPlaceV d xs (denseGroupSurvivorsEV (denseCoveredCsOf d xs) xs (doms.map Prod.snd))) [] bs := by
-  set survsV := denseGroupSurvivorsEV (denseCoveredCsOf d xs) xs (doms.map Prod.snd) with hsurv_def
-  have hagCov : ∀ denv : VarId → ZMod p, (∀ c ∈ denseCoveredCsOf d xs, c.eval denv = 0) →
-      ∀ e : DenseExpr p, (denseFoldRewriteIdxV xs survsV e).eval denv = e.eval denv := by
-    intro denv hcov
-    rw [hsurv_def]
-    exact denseFoldRewriteIdxV_agree_covered d xs doms hdoms denv hcov
-  have hceval : ∀ (denv : VarId → ZMod p), (∀ c ∈ denseCoveredCsOf d xs, c.eval denv = 0) →
-      ∀ c : DenseExpr p,
-      (if denseCoveredBy xs c then c else denseFoldRewriteIdxV xs survsV c).eval denv
-        = c.eval denv := by
-    intro denv hA c
-    by_cases hcov : denseCoveredBy xs c = true
-    · rw [if_pos hcov]
-    · rw [if_neg hcov]; exact hagCov denv hA c
-  refine DensePassCorrect.ofEvalAgree
-    (fun denv => ∀ c ∈ denseCoveredCsOf d xs, c.eval denv = 0)
-    (denseFoldRewriteIdxV xs survsV) rfl ?_ ?_ hagCov ?_ ?_ ?_
-    (fun e i hi => denseFoldRewriteIdxV_vars xs survsV e i hi)
-  · -- a covered constraint sits verbatim in the output (its `if` keeps it)
-    intro denv hsatout c hc
-    have hcb : denseCoveredBy xs c = true := (List.mem_filter.mp hc).2
-    have hmem : (if denseCoveredBy xs c then c else denseFoldRewriteIdxV xs survsV c)
-        ∈ (denseFoldOutInPlaceV d xs survsV).algebraicConstraints :=
-      List.mem_map.2 ⟨c, List.mem_of_mem_filter hc, rfl⟩
-    rw [if_pos hcb] at hmem
-    exact hsatout.1 c hmem
-  · exact fun denv hsat c hc => hsat.1 c (List.mem_of_mem_filter hc)
-  · -- input constraints vanish when the output's do
-    intro denv hA hout c hc
-    have hz := hout _ (show (if denseCoveredBy xs c then c else denseFoldRewriteIdxV xs survsV c)
-        ∈ (denseFoldOutInPlaceV d xs survsV).algebraicConstraints from
-      List.mem_map.2 ⟨c, hc, rfl⟩)
-    rwa [hceval denv hA c] at hz
-  · -- output constraints vanish when the input's do
-    intro denv hA hd c' hc'
-    have hc'2 : c' ∈ d.algebraicConstraints.map
-        (fun c => if denseCoveredBy xs c then c else denseFoldRewriteIdxV xs survsV c) := hc'
-    obtain ⟨c0, hc0, rfl⟩ := List.mem_map.1 hc'2
-    rw [hceval denv hA c0]
-    exact hd c0 hc0
-  · -- output constraints read only occurring variables
-    intro c' hc' i hi
-    have hc'2 : c' ∈ d.algebraicConstraints.map
-        (fun c => if denseCoveredBy xs c then c else denseFoldRewriteIdxV xs survsV c) := hc'
-    obtain ⟨c0, hc0, rfl⟩ := List.mem_map.1 hc'2
-    by_cases hcc : denseCoveredBy xs c0 = true
-    · rw [if_pos hcc] at hi
-      exact DenseConstraintSystem.mem_occ_of_constraint hc0 hi
-    · rw [if_neg hcc] at hi
-      exact DenseConstraintSystem.mem_occ_of_constraint hc0
-        (denseFoldRewriteIdxV_vars xs survsV c0 i hi)
-
-/-! ### The sparse indexed fold `denseFoldOutIdxV` -/
-
-/-- Membership in the touched set is membership in some bucket of `xs`. -/
-theorem denseTouchedSet_contains_iff (idx : DenseCovIndex) (xs : List VarId) (i : Nat) :
-    (denseTouchedSet idx xs).contains i = true ↔ ∃ v ∈ xs, i ∈ idx.buckets.getD v [] := by
-  rw [← Std.HashSet.mem_iff_contains, denseTouchedSet, mem_foldl_insert,
-    List.mem_flatMap]
-  simp [Std.HashSet.not_mem_empty]
-
-/-- An untouched interaction maps to itself under an inline rewrite that fixes each of its
-    expressions. -/
-theorem denseMapExpr_eq_self {bi : BusInteraction (DenseExpr p)} {g : DenseExpr p → DenseExpr p}
-    (hm : g bi.multiplicity = bi.multiplicity) (hp : ∀ e ∈ bi.payload, g e = e) :
-    { bi with multiplicity := g bi.multiplicity, payload := bi.payload.map g } = bi := by
-  have hpl : bi.payload.map g = bi.payload :=
-    (List.map_congr_left (g := id) hp).trans (List.map_id _)
-  rw [hm, hpl]
-
-/-- A rewrite that introduces no variables per expression keeps an interaction's variables. -/
-theorem denseMapExpr_vars_subset (g : DenseExpr p → DenseExpr p)
-    (hg : ∀ (e : DenseExpr p) (i : VarId), i ∈ (g e).vars → i ∈ e.vars)
-    (bi : BusInteraction (DenseExpr p)) :
-    ∀ i ∈ denseBIVars { bi with multiplicity := g bi.multiplicity, payload := bi.payload.map g },
-      i ∈ denseBIVars bi := by
-  grind [denseBIVars]
-
-/-- The sparse fold is the in-place fold: every non-candidate position holds an item sharing no
-    variable with `xs` (bucket completeness, contraposed), on which `denseFoldRewriteIdxV` is the
-    identity, so skipping it is exact. `hidx`/`hbis` are the bucket-completeness hypotheses. -/
-theorem denseFoldOutIdxV_eq (d : DenseConstraintSystem p) (fidx : DenseFoldIdx p) (xs : List VarId)
-    (survsV : List (List (ZMod p)))
-    (hidx : ∀ (i : Nat) (_ : i < d.algebraicConstraints.length),
-      ∀ v ∈ d.algebraicConstraints[i].vars, i ∈ fidx.idx.buckets.getD v [])
-    (hbis : ∀ (i : Nat) (_ : i < d.busInteractions.length),
-      ∀ v ∈ denseBIVars d.busInteractions[i], i ∈ fidx.bisIdx.buckets.getD v []) :
-    denseFoldOutIdxV d fidx xs survsV = denseFoldOutInPlaceV d xs survsV := by
-  show DenseConstraintSystem.mk
-      (d.algebraicConstraints.zipIdx.map (fun ci =>
-        if (denseTouchedSet fidx.idx xs).contains ci.2 then
-          (if denseCoveredBy xs ci.1 then ci.1 else denseFoldRewriteIdxV xs survsV ci.1)
-        else ci.1))
-      (d.busInteractions.zipIdx.map (fun bii =>
-        if (denseTouchedSet fidx.bisIdx xs).contains bii.2 then
-          { bii.1 with
-            multiplicity := denseFoldRewriteIdxV xs survsV bii.1.multiplicity,
-            payload := bii.1.payload.map (denseFoldRewriteIdxV xs survsV) }
-        else bii.1)) = denseFoldOutInPlaceV d xs survsV
-  unfold denseFoldOutInPlaceV
-  congr 1
-  · -- constraint side
-    refine zipIdx_map_sparse d.algebraicConstraints
-      (fun c => if denseCoveredBy xs c then c else denseFoldRewriteIdxV xs survsV c)
-      (fun i => (denseTouchedSet fidx.idx xs).contains i) ?_
-    intro i hi hm
-    have hm' : (denseTouchedSet fidx.idx xs).contains i = false := hm
-    have hnb : ¬ ∃ v ∈ xs, i ∈ fidx.idx.buckets.getD v [] := by
-      rw [← denseTouchedSet_contains_iff fidx.idx xs i, hm']
-      simp
-    have hnav : d.algebraicConstraints[i].anyVarIn xs = false := by
-      by_contra hav
-      obtain ⟨v, hvc, hvxs⟩ := denseAnyVarIn_exists (Bool.ne_false_iff.mp hav)
-      exact hnb ⟨v, hvxs, hidx i hi v hvc⟩
-    show (if denseCoveredBy xs d.algebraicConstraints[i] then d.algebraicConstraints[i]
-        else denseFoldRewriteIdxV xs survsV d.algebraicConstraints[i]) = d.algebraicConstraints[i]
-    rw [denseFoldRewriteIdxV_eq_self hnav, ite_self]
-  · -- interaction side
-    refine zipIdx_map_sparse d.busInteractions
-      (fun bi => { bi with
-        multiplicity := denseFoldRewriteIdxV xs survsV bi.multiplicity,
-        payload := bi.payload.map (denseFoldRewriteIdxV xs survsV) })
-      (fun i => (denseTouchedSet fidx.bisIdx xs).contains i) ?_
-    intro i hi hm
-    have hm' : (denseTouchedSet fidx.bisIdx xs).contains i = false := hm
-    have hnb : ¬ ∃ v ∈ xs, i ∈ fidx.bisIdx.buckets.getD v [] := by
-      rw [← denseTouchedSet_contains_iff fidx.bisIdx xs i, hm']
-      simp
-    have hnoshare : ∀ v ∈ denseBIVars (d.busInteractions[i]), v ∉ xs := by
-      intro v hvbi hvxs
-      exact hnb ⟨v, hvxs, hbis i hi v hvbi⟩
-    have hfix : ∀ e : DenseExpr p, (∀ v ∈ e.vars, v ∈ denseBIVars (d.busInteractions[i])) →
-        denseFoldRewriteIdxV xs survsV e = e := by
-      intro e hsub
-      refine denseFoldRewriteIdxV_eq_self ?_
-      by_contra hav
-      obtain ⟨v, hvc, hvxs⟩ := denseAnyVarIn_exists (Bool.ne_false_iff.mp hav)
-      exact hnoshare v (hsub v hvc) hvxs
-    show { d.busInteractions[i] with
-        multiplicity := denseFoldRewriteIdxV xs survsV (d.busInteractions[i]).multiplicity,
-        payload := (d.busInteractions[i]).payload.map (denseFoldRewriteIdxV xs survsV) }
-        = d.busInteractions[i]
-    exact denseMapExpr_eq_self
-      (hfix (d.busInteractions[i]).multiplicity (fun v hv => by
-        rw [denseBIVars]; exact List.mem_append_left _ hv))
-      (fun e he => hfix e (fun v hv => by
-        rw [denseBIVars]
-        exact List.mem_append_right _ (List.mem_flatMap.2 ⟨e, he, hv⟩)))
-
-/-! ### Completeness preservation across an in-place fold
-
-The in-place fold is order- and length-preserving and only shrinks variable sets, so a bucket map
-complete for the input stays complete for the output. -/
-
-/-- Constraint-side bucket completeness survives an in-place fold. -/
-theorem denseFoldOutInPlaceV_hidx (bkts : Std.HashMap VarId (List Nat)) (d : DenseConstraintSystem p)
-    (xs : List VarId) (survsV : List (List (ZMod p)))
-    (hidx : ∀ (i : Nat) (_ : i < d.algebraicConstraints.length),
-      ∀ v ∈ d.algebraicConstraints[i].vars, i ∈ bkts.getD v []) :
-    ∀ (i : Nat) (_ : i < (denseFoldOutInPlaceV d xs survsV).algebraicConstraints.length),
-      ∀ v ∈ (denseFoldOutInPlaceV d xs survsV).algebraicConstraints[i].vars,
-        i ∈ bkts.getD v [] := by
-  intro i hi v hv
-  have hlen : i < d.algebraicConstraints.length := by
-    simpa only [denseFoldOutInPlaceV, List.length_map] using hi
-  have hv' : v ∈ d.algebraicConstraints[i].vars := by
-    have hgm : (denseFoldOutInPlaceV d xs survsV).algebraicConstraints[i]'hi
-        = (if denseCoveredBy xs (d.algebraicConstraints[i]'hlen) then
-            d.algebraicConstraints[i]'hlen
-           else denseFoldRewriteIdxV xs survsV (d.algebraicConstraints[i]'hlen)) := by
-      simp only [denseFoldOutInPlaceV, List.getElem_map]
-    rw [hgm] at hv
-    by_cases hcov : denseCoveredBy xs (d.algebraicConstraints[i]'hlen) = true
-    · rwa [if_pos hcov] at hv
-    · rw [if_neg hcov] at hv
-      exact denseFoldRewriteIdxV_vars xs survsV _ v hv
-  exact hidx i hlen v hv'
-
-/-- Interaction-side bucket completeness survives an in-place fold. -/
-theorem denseFoldOutInPlaceV_hbis (bkts : Std.HashMap VarId (List Nat)) (d : DenseConstraintSystem p)
-    (xs : List VarId) (survsV : List (List (ZMod p)))
-    (hbis : ∀ (i : Nat) (_ : i < d.busInteractions.length),
-      ∀ v ∈ denseBIVars d.busInteractions[i], i ∈ bkts.getD v []) :
-    ∀ (i : Nat) (_ : i < (denseFoldOutInPlaceV d xs survsV).busInteractions.length),
-      ∀ v ∈ denseBIVars (denseFoldOutInPlaceV d xs survsV).busInteractions[i],
-        i ∈ bkts.getD v [] := by
-  intro i hi v hv
-  have hlen : i < d.busInteractions.length := by
-    simpa only [denseFoldOutInPlaceV, List.length_map] using hi
-  have hv' : v ∈ denseBIVars (d.busInteractions[i]'hlen) := by
-    have hgm : (denseFoldOutInPlaceV d xs survsV).busInteractions[i]'hi
-        = { d.busInteractions[i]'hlen with
-            multiplicity := denseFoldRewriteIdxV xs survsV (d.busInteractions[i]'hlen).multiplicity,
-            payload := (d.busInteractions[i]'hlen).payload.map (denseFoldRewriteIdxV xs survsV) } := by
-      simp only [denseFoldOutInPlaceV, List.getElem_map]
-    rw [hgm] at hv
-    exact denseMapExpr_vars_subset (denseFoldRewriteIdxV xs survsV)
-      (denseFoldRewriteIdxV_vars xs survsV) (d.busInteractions[i]'hlen) v hv
-  exact hbis i hlen v hv'
-
-/-- Coverage survives the sparse indexed fold: it only rewrites, never introduces, variables. Proved
-    without the completeness hypotheses, so the coverage loop needs none. -/
-theorem denseFoldOutIdxV_covered (reg : VarRegistry) (d : DenseConstraintSystem p)
-    (fidx : DenseFoldIdx p) (hcov : d.CoveredBy reg) (xs : List VarId)
-    (survsV : List (List (ZMod p))) :
-    (denseFoldOutIdxV d fidx xs survsV).CoveredBy reg := by
-  refine ⟨fun e he => ?_, fun bi hbi => ?_⟩
-  · have he' : e ∈ d.algebraicConstraints.zipIdx.map (fun ci =>
-        if (denseTouchedSet fidx.idx xs).contains ci.2 then
-          (if denseCoveredBy xs ci.1 then ci.1 else denseFoldRewriteIdxV xs survsV ci.1)
-        else ci.1) := he
-    obtain ⟨⟨c0, j⟩, hp, rfl⟩ := List.mem_map.1 he'
-    have hc0mem : c0 ∈ d.algebraicConstraints := by
-      have h2 : c0 ∈ d.algebraicConstraints.zipIdx.map Prod.fst :=
-        List.mem_map.2 ⟨(c0, j), hp, rfl⟩
-      rwa [List.zipIdx_map_fst] at h2
-    have hc0cov : c0.CoveredBy reg := hcov.1 c0 hc0mem
-    dsimp only
-    by_cases ht : (denseTouchedSet fidx.idx xs).contains j = true
-    · rw [if_pos ht]
-      by_cases hcc : denseCoveredBy xs c0 = true
-      · rw [if_pos hcc]; exact hc0cov
-      · rw [if_neg hcc]; exact denseFoldRewriteIdxV_covered reg xs survsV hc0cov
-    · rw [if_neg ht]; exact hc0cov
-  · have hbi' : bi ∈ d.busInteractions.zipIdx.map (fun bii =>
-        if (denseTouchedSet fidx.bisIdx xs).contains bii.2 then
-          { bii.1 with
-            multiplicity := denseFoldRewriteIdxV xs survsV bii.1.multiplicity,
-            payload := bii.1.payload.map (denseFoldRewriteIdxV xs survsV) }
-        else bii.1) := hbi
-    obtain ⟨⟨bi0, j⟩, hp, rfl⟩ := List.mem_map.1 hbi'
-    have hbi0mem : bi0 ∈ d.busInteractions := by
-      have h2 : bi0 ∈ d.busInteractions.zipIdx.map Prod.fst :=
-        List.mem_map.2 ⟨(bi0, j), hp, rfl⟩
-      rwa [List.zipIdx_map_fst] at h2
-    obtain ⟨hm, hpl⟩ := hcov.2 bi0 hbi0mem
-    dsimp only
-    by_cases ht : (denseTouchedSet fidx.bisIdx xs).contains j = true
-    · rw [if_pos ht]
-      refine ⟨denseFoldRewriteIdxV_covered reg xs survsV hm, fun e he => ?_⟩
-      have he'' : e ∈ bi0.payload.map (denseFoldRewriteIdxV xs survsV) := he
-      obtain ⟨e0, he0, rfl⟩ := List.mem_map.1 he''
-      exact denseFoldRewriteIdxV_covered reg xs survsV (hpl e0 he0)
-    · rw [if_neg ht]; exact ⟨hm, hpl⟩
-
-/-! ## The indexed fold loop (index-preserving path) -/
-
-/-- Constraint-side index completeness survives one step: the refreshed index keeps the old bucket
-    map, which stays complete for the step's output. -/
-theorem denseFoldStepV_snd_idx (d : DenseConstraintSystem p) (fidx : DenseFoldIdx p) (xs : List VarId)
-    (hidx : ∀ (i : Nat) (_ : i < d.algebraicConstraints.length),
-      ∀ v ∈ d.algebraicConstraints[i].vars, i ∈ fidx.idx.buckets.getD v [])
-    (hbis : ∀ (i : Nat) (_ : i < d.busInteractions.length),
-      ∀ v ∈ denseBIVars d.busInteractions[i], i ∈ fidx.bisIdx.buckets.getD v []) :
-    ∀ (i : Nat) (_ : i < (denseFoldStepV d fidx xs).1.algebraicConstraints.length),
-      ∀ v ∈ (denseFoldStepV d fidx xs).1.algebraicConstraints[i].vars,
-        i ∈ (denseFoldStepV d fidx xs).2.idx.buckets.getD v [] := by
-  rw [denseFoldStepV_snd_idx_eq]
-  rcases denseFoldStepV_fst_alg d fidx xs with h | ⟨survsV, h⟩
-  · rw [h]; exact hidx
-  · rw [h, denseFoldOutIdxV_eq d fidx xs survsV hidx hbis]
-    exact denseFoldOutInPlaceV_hidx fidx.idx.buckets d xs survsV hidx
-
-/-- Interaction-side completeness survives one step (dual of `denseFoldStepV_snd_idx`). -/
-theorem denseFoldStepV_snd_bis (d : DenseConstraintSystem p) (fidx : DenseFoldIdx p) (xs : List VarId)
-    (hidx : ∀ (i : Nat) (_ : i < d.algebraicConstraints.length),
-      ∀ v ∈ d.algebraicConstraints[i].vars, i ∈ fidx.idx.buckets.getD v [])
-    (hbis : ∀ (i : Nat) (_ : i < d.busInteractions.length),
-      ∀ v ∈ denseBIVars d.busInteractions[i], i ∈ fidx.bisIdx.buckets.getD v []) :
-    ∀ (i : Nat) (_ : i < (denseFoldStepV d fidx xs).1.busInteractions.length),
-      ∀ v ∈ denseBIVars (denseFoldStepV d fidx xs).1.busInteractions[i],
-        i ∈ (denseFoldStepV d fidx xs).2.bisIdx.buckets.getD v [] := by
-  rw [denseFoldStepV_snd_bisIdx_eq]
-  rcases denseFoldStepV_fst_alg d fidx xs with h | ⟨survsV, h⟩
-  · rw [h]; exact hbis
-  · rw [h, denseFoldOutIdxV_eq d fidx xs survsV hidx hbis]
-    exact denseFoldOutInPlaceV_hbis fidx.bisIdx.buckets d xs survsV hbis
-
-theorem denseFoldStepV_correct [Fact p.Prime] (bs : BusSemantics p) (isInput : VarId → Bool)
-    (d : DenseConstraintSystem p) (fidx : DenseFoldIdx p) (xs : List VarId)
-    (hidx : ∀ (i : Nat) (_ : i < d.algebraicConstraints.length),
-      ∀ v ∈ d.algebraicConstraints[i].vars, i ∈ fidx.idx.buckets.getD v [])
-    (hbis : ∀ (i : Nat) (_ : i < d.busInteractions.length),
-      ∀ v ∈ denseBIVars d.busInteractions[i], i ∈ fidx.bisIdx.buckets.getD v [])
-    (harr : fidx.arr = d.algebraicConstraints.toArray) :
-    DensePassCorrect isInput d (denseFoldStepV d fidx xs).1 [] bs := by
-  have hes := denseFoldStepV_es_eq d fidx xs hidx harr
-  rw [denseFoldStepV_fst, hes]
-  split
-  · exact DensePassCorrect_refl isInput d bs
-  · rename_i doms hgd
-    by_cases hp : (doms.map (fun yd => yd.2.length)).prod ≤ 256
-    · rw [if_pos hp]
-      by_cases hgate : (1 ≤ (denseGroupSurvivorsEV (denseCoveredCsOf d xs) xs (doms.map Prod.snd)).length
-          && denseSystemHasFoldableIdxV fidx xs (denseGroupSurvivorsEV (denseCoveredCsOf d xs) xs (doms.map Prod.snd))) = true
-      · rw [if_pos hgate, denseFoldOutIdxV_eq d fidx xs _ hidx hbis]
-        exact denseFoldOutInPlaceV_correct bs d xs doms hgd isInput
-      · rw [if_neg (by simpa using hgate)]; exact DensePassCorrect_refl isInput d bs
-    · rw [if_neg hp]; exact DensePassCorrect_refl isInput d bs
-
-theorem denseFoldStepV_covered (reg : VarRegistry) (d : DenseConstraintSystem p)
-    (hcov : d.CoveredBy reg) (fidx : DenseFoldIdx p) (xs : List VarId) :
-    (denseFoldStepV d fidx xs).1.CoveredBy reg := by
-  rw [denseFoldStepV_fst]
-  split
-  · exact hcov
-  · rename_i doms _
-    by_cases hp : (doms.map (fun yd => yd.2.length)).prod ≤ 256
-    · rw [if_pos hp]
-      by_cases hgate : (1 ≤ (denseGroupSurvivorsEV (denseCoveredIdx fidx.idx fidx.arr (denseCoveredBy xs) xs) xs
-              (doms.map Prod.snd)).length
-          && denseSystemHasFoldableIdxV fidx xs (denseGroupSurvivorsEV (denseCoveredIdx fidx.idx fidx.arr (denseCoveredBy xs) xs) xs
-              (doms.map Prod.snd))) = true
-      · rw [if_pos hgate]; exact denseFoldOutIdxV_covered reg d fidx hcov xs _
-      · rw [if_neg (by simpa using hgate)]; exact hcov
-    · rw [if_neg hp]; exact hcov
-
-theorem denseFoldLoopV_correct [Fact p.Prime] (bs : BusSemantics p) (isInput : VarId → Bool) :
-    ∀ (targets : List (List VarId)) (d : DenseConstraintSystem p) (fidx : DenseFoldIdx p),
-      (∀ (i : Nat) (_ : i < d.algebraicConstraints.length),
-        ∀ v ∈ d.algebraicConstraints[i].vars, i ∈ fidx.idx.buckets.getD v []) →
-      (∀ (i : Nat) (_ : i < d.busInteractions.length),
-        ∀ v ∈ denseBIVars d.busInteractions[i], i ∈ fidx.bisIdx.buckets.getD v []) →
-      fidx.arr = d.algebraicConstraints.toArray →
-      DensePassCorrect isInput d (denseFoldLoopV targets d fidx) [] bs := by
-  intro targets
-  induction targets with
-  | nil => intro d fidx _ _ _; exact DensePassCorrect_refl isInput d bs
-  | cons xs rest ih =>
-      intro d fidx hidx hbis harr
-      show DensePassCorrect isInput d
-        (denseFoldLoopV rest (denseFoldStepV d fidx xs).1 (denseFoldStepV d fidx xs).2) [] bs
-      refine DensePassCorrect.trans (denseFoldStepV_correct bs isInput d fidx xs hidx hbis harr)
-        (ih _ _ ?_ ?_ ?_)
-      · exact denseFoldStepV_snd_idx d fidx xs hidx hbis
-      · exact denseFoldStepV_snd_bis d fidx xs hidx hbis
-      · exact denseFoldStepV_snd_arr d fidx xs harr
-
-theorem denseFoldLoopV_covered (reg : VarRegistry) :
-    ∀ (targets : List (List VarId)) (d : DenseConstraintSystem p) (fidx : DenseFoldIdx p),
-      d.CoveredBy reg → (denseFoldLoopV targets d fidx).CoveredBy reg := by
-  intro targets
-  induction targets with
-  | nil => intro d fidx hcov; exact hcov
-  | cons xs rest ih =>
-      intro d fidx hcov
-      exact ih _ _ (denseFoldStepV_covered reg d hcov fidx xs)
-
-/-! ## The whole pass -/
-
-theorem denseDomainFoldFV_correct (pw : PrimeWitness p) (bs : BusSemantics p) (isInput : VarId → Bool)
-    (d : DenseConstraintSystem p) :
-    DensePassCorrect isInput d (denseDomainFoldFV pw d) [] bs := by
-  unfold denseDomainFoldFV
-  by_cases hpB : pw.isPrime = true
-  · rw [if_pos hpB]
-    haveI : Fact p.Prime := ⟨pw.correct hpB⟩
-    by_cases hthr : domainFoldTargetIndexThreshold ≤ (denseTargetsV d).length
-    · rw [if_pos hthr]
-      exact denseFoldLoopV_correct bs isInput (denseTargetsV d) d (DenseFoldIdx.mk' d)
-        (fun i hi v hv => denseBuild_complete denseDedupVarsOf d.algebraicConstraints i hi v (by
-          rw [denseDedupVarsOf, HashedDedup.hashedEraseDups_eq]
-          exact List.mem_eraseDups.2 hv))
-        (fun i hi v hv => denseBuild_complete denseDedupBiVarsOf d.busInteractions i hi v (by
-          rw [denseDedupBiVarsOf, HashedDedup.hashedEraseDups_eq]
-          exact List.mem_eraseDups.2 hv))
+/-- Position `k - 1 - j` of a level-`k` point is key `j`'s value. -/
+theorem dfPref_lookup (keys : Array VarId) (denv : VarId → ZMod p) :
+    ∀ (k j : Nat), j < k →
+      denseLookupIxV (zmodZeroP p) (dfPref keys denv k) (k - 1 - j) = denv (keys.getD j ⟨0⟩) := by
+  intro k
+  induction k with
+  | zero => intro j hj; omega
+  | succ k ih =>
+      intro j hj
+      rw [dfPref]
+      by_cases hjk : j = k
+      · rw [show k + 1 - 1 - j = 0 by omega, hjk]
         rfl
-    · rw [if_neg hthr]
-      exact denseFoldLoopDirectV_correct bs isInput (denseTargetsV d) d
-  · rw [if_neg hpB]
-    exact DensePassCorrect_refl isInput d bs
+      · have hlt : j < k := by omega
+        rw [show k + 1 - 1 - j = (k - 1 - j) + 1 by omega, denseLookupIxV]
+        exact ih j hlt
 
-theorem denseDomainFoldFV_covered (pw : PrimeWitness p) (reg : VarRegistry)
-    (d : DenseConstraintSystem p) (hcov : d.CoveredBy reg) :
-    (denseDomainFoldFV pw d).CoveredBy reg := by
-  unfold denseDomainFoldFV
-  by_cases hpB : pw.isPrime = true
-  · rw [if_pos hpB]
-    by_cases hthr : domainFoldTargetIndexThreshold ≤ (denseTargetsV d).length
-    · rw [if_pos hthr]
-      exact denseFoldLoopV_covered reg (denseTargetsV d) d (DenseFoldIdx.mk' d) hcov
-    · rw [if_neg hthr]
-      exact denseFoldLoopDirectV_covered reg (denseTargetsV d) d hcov
-  · rw [if_neg hpB]; exact hcov
+/-! ## The survivor enumeration contains the real point -/
 
-/-! ## The array-native loop equals the list loop (`@[csimp]` runtime replacement)
+theorem dfExtOne_mono (zero : ZMod p) (ies : List (IExpr p)) (pt : List (ZMod p)) :
+    ∀ (dom : List (ZMod p)) (out : Array (List (ZMod p))) (x : List (ZMod p)),
+      x ∈ out → x ∈ dfExtOne zero ies pt dom out := by
+  intro dom
+  induction dom with
+  | nil => intro out x hx; exact hx
+  | cons v vs ih =>
+      intro out x hx
+      rw [dfExtOne]
+      refine ih _ x ?_
+      split
+      · exact Array.mem_push.2 (Or.inl hx)
+      · exact hx
 
-`denseFoldLoopArrV` (`DomainFoldRuntime.lean`) threads only the array-backed `DenseFoldIdx`,
-applying an accepted fold with `Array.modify` at the touched positions instead of re-materializing
-the whole list system per accept. The lemmas below relate it to `denseFoldLoopV` under the loop's
-array-sync invariant; `denseDomainFoldFV_eq_fast` installs the fast body via `@[csimp]`, so the
-correctness proofs above keep talking about the list-loop specification. -/
+theorem dfExtOne_mem (zero : ZMod p) (ies : List (IExpr p)) (pt : List (ZMod p)) (v : ZMod p)
+    (hz : dfAllZero zero v pt ies = true) :
+    ∀ (dom : List (ZMod p)) (out : Array (List (ZMod p))), v ∈ dom →
+      (v :: pt) ∈ dfExtOne zero ies pt dom out := by
+  intro dom
+  induction dom with
+  | nil => intro out hv; simp at hv
+  | cons w ws ih =>
+      intro out hv
+      rw [dfExtOne]
+      rcases List.mem_cons.1 hv with rfl | hmem
+      · exact dfExtOne_mono zero ies pt ws _ _ (by rw [if_pos hz]; exact Array.mem_push_self)
+      · exact ih _ hmem
 
-/-- Folding `Array.modify` over distinct positions applies `f` exactly at the listed in-range
-    positions. -/
-theorem foldl_modify_getElem? {α : Type} (f : α → α) :
-    ∀ (l : List Nat), l.Nodup → ∀ (arr : Array α) (i : Nat),
-      (l.foldl (fun a j => a.modify j f) arr)[i]?
-        = if i ∈ l then arr[i]?.map f else arr[i]? := by
+theorem dfExtLevel_mono (zero : ZMod p) (ies : List (IExpr p)) (dom : List (ZMod p))
+    (pts : Array (List (ZMod p))) :
+    ∀ (n i : Nat) (out : Array (List (ZMod p))) (x : List (ZMod p)), pts.size - i ≤ n → x ∈ out →
+      x ∈ dfExtLevel zero ies dom i pts out := by
+  intro n
+  induction n with
+  | zero =>
+      intro i out x hn hx
+      rw [dfExtLevel, dif_neg (by omega)]
+      exact hx
+  | succ n ih =>
+      intro i out x hn hx
+      rw [dfExtLevel]
+      by_cases hi : i < pts.size
+      · rw [dif_pos hi]
+        exact ih (i + 1) _ x (by omega) (dfExtOne_mono zero ies pts[i] dom out x hx)
+      · rw [dif_neg hi]; exact hx
+
+theorem dfExtLevel_mem (zero : ZMod p) (ies : List (IExpr p)) (dom : List (ZMod p))
+    (pts : Array (List (ZMod p))) (i0 : Nat) (hi0 : i0 < pts.size) (v : ZMod p) (hv : v ∈ dom)
+    (hz : dfAllZero zero v pts[i0] ies = true) :
+    ∀ (n i : Nat) (out : Array (List (ZMod p))), pts.size - i ≤ n → i ≤ i0 →
+      (v :: pts[i0]) ∈ dfExtLevel zero ies dom i pts out := by
+  intro n
+  induction n with
+  | zero => intro i out hn hle; omega
+  | succ n ih =>
+      intro i out hn hle
+      rw [dfExtLevel, dif_pos (by omega)]
+      by_cases heq : i = i0
+      · subst heq
+        exact dfExtLevel_mono zero ies dom pts (n + 1) (i + 1) _ _ (by omega)
+          (dfExtOne_mem zero ies pts[i] v hz dom out hv)
+      · exact ih (i + 1) _ (by omega) (by omega)
+
+/-- The real assignment's key values survive: each key's value is in its domain and every filter
+    vanishes on it, so the level-by-level enumeration keeps its prefix at every level. -/
+theorem dfEnumGo_mem (byLevel : Array (List (IExpr p))) (doms : Array (List (ZMod p))) (k : Nat)
+    (keys : Array VarId) (denv : VarId → ZMod p)
+    (hdom : ∀ j, j < k → denv (keys.getD j ⟨0⟩) ∈ doms.getD j [])
+    (hfil : ∀ j, j < k →
+      dfAllZero (zmodZeroP p) (denv (keys.getD j ⟨0⟩)) (dfPref keys denv j)
+        (byLevel.getD j []) = true) :
+    ∀ (n j : Nat) (pts : Array (List (ZMod p))), k - j ≤ n → j ≤ k → dfPref keys denv j ∈ pts →
+      dfPref keys denv k ∈ dfEnumGo (zmodZeroP p) byLevel doms k j pts := by
+  intro n
+  induction n with
+  | zero =>
+      intro j pts hn hjk hmem
+      obtain rfl : j = k := by omega
+      rw [dfEnumGo]
+      rw [if_neg (by
+        intro he
+        rw [Array.isEmpty_iff] at he
+        rw [he] at hmem
+        simp at hmem)]
+      rw [dif_neg (by omega)]
+      exact hmem
+  | succ n ih =>
+      intro j pts hn hjk hmem
+      rw [dfEnumGo]
+      rw [if_neg (by
+        intro he
+        rw [Array.isEmpty_iff] at he
+        rw [he] at hmem
+        simp at hmem)]
+      by_cases hj : j < k
+      · rw [dif_pos hj]
+        obtain ⟨i0, hi0, hval⟩ := Array.mem_iff_getElem.1 hmem
+        refine ih (j + 1) _ (by omega) (by omega) ?_
+        show dfPref keys denv (j + 1) ∈ _
+        rw [dfPref, ← hval]
+        exact dfExtLevel_mem (zmodZeroP p) (byLevel.getD j []) (doms.getD j []) pts i0 hi0 _
+          (hdom j hj) (by rw [hval]; exact hfil j hj) (pts.size) 0 #[] (by omega) (by omega)
+      · rw [dif_neg hj]
+        obtain rfl : j = k := by omega
+        exact hmem
+
+
+/-! ## The fused gate-and-rewrite traversal
+
+`DfOk` is the invariant carried at one survivor index `t`: the node's value class describes its value
+under `denv`, and its rewrite — when it has one — evaluates identically and introduces no variable.
+A `uni` class is therefore "constant on every survivor", which is exactly what licenses the fold. -/
+
+/-- One-field `VarId`s are equal when their indexes are. -/
+theorem dfVarId_eq : ∀ (a b : VarId), a.index = b.index → a = b := by
+  intro a b h
+  cases a; cases b; simpa using h
+
+/-- The traversal invariant at survivor index `t`. -/
+def DfOk (denv : VarId → ZMod p) (t : Nat) (e : DenseExpr p) (r : DfRes p) : Prop :=
+  (match r with
+   | .uni c _ => e.eval denv = c
+   | .vec a _ => a[t]? = some (e.eval denv)
+   | _ => True) ∧
+  ∀ e' : DenseExpr p, r.e? = some e' →
+    e'.eval denv = e.eval denv ∧ ∀ i ∈ e'.vars, i ∈ e.vars
+
+/-- A rebuilt node agrees with the original and introduces no variable. -/
+theorem dfRebuild_ok (denv : VarId → ZMod p) (isAdd : Bool)
+    (mk : DenseExpr p → DenseExpr p → DenseExpr p)
+    (hev : ∀ x y : DenseExpr p, (mk x y).eval denv = dfOp isAdd (x.eval denv) (y.eval denv))
+    (hvars : ∀ x y : DenseExpr p, (mk x y).vars = x.vars ++ y.vars)
+    (hmk : ∀ x y : DenseExpr p, (if isAdd then DenseExpr.add x y else DenseExpr.mul x y) = mk x y)
+    (a b : DenseExpr p) (ea eb : Option (DenseExpr p))
+    (hA : ∀ e' : DenseExpr p, ea = some e' → e'.eval denv = a.eval denv ∧ ∀ i ∈ e'.vars, i ∈ a.vars)
+    (hB : ∀ e' : DenseExpr p, eb = some e' → e'.eval denv = b.eval denv ∧ ∀ i ∈ e'.vars, i ∈ b.vars) :
+    ∀ e' : DenseExpr p, dfRebuild isAdd a b ea eb = some e' →
+      e'.eval denv = (mk a b).eval denv ∧ ∀ i ∈ e'.vars, i ∈ (mk a b).vars := by
+  intro e' he'
+  have hagA : (ea.getD a).eval denv = a.eval denv ∧ ∀ i ∈ (ea.getD a).vars, i ∈ a.vars := by
+    cases ea with
+    | none => exact ⟨rfl, fun i hi => hi⟩
+    | some x => exact hA x rfl
+  have hagB : (eb.getD b).eval denv = b.eval denv ∧ ∀ i ∈ (eb.getD b).vars, i ∈ b.vars := by
+    cases eb with
+    | none => exact ⟨rfl, fun i hi => hi⟩
+    | some x => exact hB x rfl
+  have hval : e' = mk (ea.getD a) (eb.getD b) := by
+    unfold dfRebuild at he'
+    cases ea with
+    | none =>
+        cases eb with
+        | none => exact absurd he' (by simp)
+        | some y => rw [← hmk]; exact (Option.some.inj he').symm
+    | some x => rw [← hmk]; exact (Option.some.inj he').symm
+  subst hval
+  refine ⟨?_, ?_⟩
+  · rw [hev, hev, hagA.1, hagB.1]
+  · intro i hi
+    rw [hvars] at hi ⊢
+    rcases List.mem_append.1 hi with hi | hi
+    · exact List.mem_append_left _ (hagA.2 i hi)
+    · exact List.mem_append_right _ (hagB.2 i hi)
+
+/-- Combining an operation node's children preserves the invariant; a `uni` result folds the node. -/
+theorem dfComb_ok (denv : VarId → ZMod p) (t : Nat) (isAdd : Bool)
+    (mk : DenseExpr p → DenseExpr p → DenseExpr p)
+    (hev : ∀ x y : DenseExpr p, (mk x y).eval denv = dfOp isAdd (x.eval denv) (y.eval denv))
+    (hvars : ∀ x y : DenseExpr p, (mk x y).vars = x.vars ++ y.vars)
+    (hmk : ∀ x y : DenseExpr p, (if isAdd then DenseExpr.add x y else DenseExpr.mul x y) = mk x y)
+    (a b : DenseExpr p) (ra rb : DfRes p) (hA : DfOk denv t a ra) (hB : DfOk denv t b rb) :
+    DfOk denv t (mk a b) (dfComb isAdd a b ra rb) := by
+  -- the folded-constant result, shared by the four in-group shapes
+  have huni : ∀ c : ZMod p, (mk a b).eval denv = c → DfOk denv t (mk a b) (.uni c true) := by
+    intro c hc
+    refine ⟨hc, ?_⟩
+    intro e' he'
+    have hde : (DfRes.uni c true).e? = some (DenseExpr.const c) := by simp [DfRes.e?]
+    rw [hde] at he'
+    obtain rfl : DenseExpr.const c = e' := Option.some.inj he'
+    exact ⟨hc.symm, fun i hi => by simp [DenseExpr.vars] at hi⟩
+  -- the out result, shared by every shape with a non-key variable
+  have hout : ∀ ea eb : Option (DenseExpr p),
+      (∀ e' : DenseExpr p, ea = some e' →
+        e'.eval denv = a.eval denv ∧ ∀ i ∈ e'.vars, i ∈ a.vars) →
+      (∀ e' : DenseExpr p, eb = some e' →
+        e'.eval denv = b.eval denv ∧ ∀ i ∈ e'.vars, i ∈ b.vars) →
+      DfOk denv t (mk a b)
+        (match dfRebuild isAdd a b ea eb with | none => .out | some e => .outCh e) := by
+    intro ea eb hA' hB'
+    have hrb := dfRebuild_ok denv isAdd mk hev hvars hmk a b ea eb hA' hB'
+    cases hd : dfRebuild isAdd a b ea eb with
+    | none => exact ⟨trivial, fun e' he' => by simp [DfRes.e?] at he'⟩
+    | some e0 =>
+        refine ⟨trivial, ?_⟩
+        intro e' he'
+        have hde : (DfRes.outCh e0).e? = some e0 := rfl
+        rw [hde] at he'
+        obtain rfl : e0 = e' := Option.some.inj he'
+        exact hrb _ hd
+  -- the vector shapes: the combined vector's `t`-th entry is the node's value
+  have hvec : ∀ (s : Array (ZMod p)) (ea eb : Option (DenseExpr p)),
+      s[t]? = some ((mk a b).eval denv) →
+      (∀ e' : DenseExpr p, ea = some e' →
+        e'.eval denv = a.eval denv ∧ ∀ i ∈ e'.vars, i ∈ a.vars) →
+      (∀ e' : DenseExpr p, eb = some e' →
+        e'.eval denv = b.eval denv ∧ ∀ i ∈ e'.vars, i ∈ b.vars) →
+      DfOk denv t (mk a b)
+        (match dfUni s with
+         | some c => .uni c true
+         | none => .vec s (dfRebuild isAdd a b ea eb)) := by
+    intro s ea eb hs hA' hB'
+    have hrb := dfRebuild_ok denv isAdd mk hev hvars hmk a b ea eb hA' hB'
+    cases hu : dfUni s with
+    | some c =>
+        exact huni c (dfUni_sound s c hu _ (Array.mem_iff_getElem?.2 ⟨t, hs⟩))
+    | none => exact ⟨hs, hrb⟩
+  unfold dfComb
+  cases ra with
+  | out => cases rb <;> exact hout _ _ hA.2 hB.2
+  | outCh ea => cases rb <;> exact hout _ _ hA.2 hB.2
+  | uni x fa =>
+      cases rb with
+      | out => exact hout _ _ hA.2 hB.2
+      | outCh eb => exact hout _ _ hA.2 hB.2
+      | uni y fb =>
+          have hx : a.eval denv = x := hA.1
+          have hy : b.eval denv = y := hB.1
+          exact huni _ (by rw [hev, hx, hy])
+      | vec vb eb =>
+          have hx : a.eval denv = x := hA.1
+          have hy : vb[t]? = some (b.eval denv) := hB.1
+          exact hvec _ _ _ (by rw [Array.getElem?_map, hy, hev, hx]; try rfl) hA.2 hB.2
+  | vec va ea =>
+      cases rb with
+      | out => exact hout _ _ hA.2 hB.2
+      | outCh eb => exact hout _ _ hA.2 hB.2
+      | uni y fb =>
+          have hx : va[t]? = some (a.eval denv) := hA.1
+          have hy : b.eval denv = y := hB.1
+          exact hvec _ _ _ (by rw [Array.getElem?_map, hx, hev, hy]; try rfl) hA.2 hB.2
+      | vec vb eb =>
+          have hx : va[t]? = some (a.eval denv) := hA.1
+          have hy : vb[t]? = some (b.eval denv) := hB.1
+          exact hvec _ _ _ (by rw [Array.getElem?_zipWith, hx, hy, hev]; try rfl) hA.2 hB.2
+
+/-- The traversal is sound at every survivor index, given the key columns are. -/
+theorem dfGo_ok (ctx : DfCtx p) (denv : VarId → ZMod p) (t : Nat)
+    (hcol : ∀ (j : Nat) (hj : j < ctx.keys.size),
+      DfOk denv t (.var (ctx.keys[j]'hj)) (ctx.colRes.getD j .out)) :
+    ∀ e : DenseExpr p, DfOk denv t e (dfGo ctx e) := by
+  intro e
+  induction e with
+  | const c => exact ⟨rfl, fun e' he' => by simp [dfGo, DfRes.e?] at he'⟩
+  | var y =>
+      rw [dfGo]
+      cases hslot : dfSlotGo ctx.keys y.index 0 with
+      | none => exact ⟨trivial, fun e' he' => by simp [DfRes.e?] at he'⟩
+      | some j =>
+          obtain ⟨hj, hkey⟩ := dfSlot_key ctx.keys y.index j hslot
+          have : (ctx.keys[j]'hj) = y := dfVarId_eq _ _ hkey
+          rw [← this]
+          exact hcol j hj
+  | add a b iha ihb =>
+      exact dfComb_ok denv t true DenseExpr.add
+        (fun x y => by show x.eval denv + y.eval denv = zmodAddP _ _; rw [zmodAddP_eq])
+        (fun _ _ => rfl) (fun _ _ => rfl) a b _ _ iha ihb
+  | mul a b iha ihb =>
+      exact dfComb_ok denv t false DenseExpr.mul
+        (fun x y => by show x.eval denv * y.eval denv = zmodMulP _ _; rw [zmodMulP_eq])
+        (fun _ _ => rfl) (fun _ _ => rfl) a b _ _ iha ihb
+
+/-! ## Item-level agreement -/
+
+theorem dfRewrite_ok (ctx : DfCtx p) (denv : VarId → ZMod p) (t : Nat)
+    (hcol : ∀ (j : Nat) (hj : j < ctx.keys.size),
+      DfOk denv t (.var (ctx.keys[j]'hj)) (ctx.colRes.getD j .out))
+    (e e' : DenseExpr p) (h : dfRewrite ctx e = some e') :
+    e'.eval denv = e.eval denv ∧ ∀ i ∈ e'.vars, i ∈ e.vars :=
+  (dfGo_ok ctx denv t hcol e).2 e' h
+
+theorem dfRewriteList_ok (ctx : DfCtx p) (denv : VarId → ZMod p) (t : Nat)
+    (hcol : ∀ (j : Nat) (hj : j < ctx.keys.size),
+      DfOk denv t (.var (ctx.keys[j]'hj)) (ctx.colRes.getD j .out)) :
+    ∀ (es es' : List (DenseExpr p)), dfRewriteList ctx es = some es' →
+      es'.map (fun e => e.eval denv) = es.map (fun e => e.eval denv) ∧
+      ∀ (i : VarId), (∃ e' ∈ es', i ∈ e'.vars) → ∃ e ∈ es, i ∈ e.vars := by
+  intro es
+  induction es with
+  | nil => intro es' h; simp [dfRewriteList] at h
+  | cons e rest ih =>
+      intro es' h
+      rw [dfRewriteList] at h
+      cases hr : dfRewrite ctx e with
+      | none =>
+          cases hrs : dfRewriteList ctx rest with
+          | none => rw [hr, hrs] at h; exact absurd h (by simp)
+          | some rest' =>
+              rw [hr, hrs] at h
+              simp only [Option.some.injEq] at h
+              subst h
+              obtain ⟨hmap, hvars⟩ := ih rest' hrs
+              refine ⟨by simp only [List.map_cons, Option.getD_none, Option.getD_some, hmap], ?_⟩
+              intro i hi
+              obtain ⟨e', he', hie⟩ := hi
+              rcases List.mem_cons.1 he' with rfl | hmem
+              · exact ⟨e', List.mem_cons_self .., hie⟩
+              · obtain ⟨e0, he0, hie0⟩ := hvars i ⟨e', hmem, hie⟩
+                exact ⟨e0, List.mem_cons_of_mem _ he0, hie0⟩
+      | some e' =>
+          obtain ⟨hev, hvr⟩ := dfRewrite_ok ctx denv t hcol e e' hr
+          cases hrs : dfRewriteList ctx rest with
+          | none =>
+              rw [hr, hrs] at h
+              simp only [Option.some.injEq] at h
+              subst h
+              refine ⟨by simp only [List.map_cons, Option.getD_none, Option.getD_some, hev], ?_⟩
+              intro i hi
+              obtain ⟨e0, he0, hie⟩ := hi
+              rcases List.mem_cons.1 he0 with rfl | hmem
+              · exact ⟨e, List.mem_cons_self .., hvr i hie⟩
+              · exact ⟨e0, List.mem_cons_of_mem _ hmem, hie⟩
+          | some rest' =>
+              rw [hr, hrs] at h
+              simp only [Option.some.injEq] at h
+              subst h
+              obtain ⟨hmap, hvars⟩ := ih rest' hrs
+              refine ⟨by simp only [List.map_cons, Option.getD_some, hev, hmap], ?_⟩
+              intro i hi
+              obtain ⟨e0, he0, hie⟩ := hi
+              rcases List.mem_cons.1 he0 with rfl | hmem
+              · exact ⟨e, List.mem_cons_self .., hvr i hie⟩
+              · obtain ⟨e1, he1, hie1⟩ := hvars i ⟨e0, hmem, hie⟩
+                exact ⟨e1, List.mem_cons_of_mem _ he1, hie1⟩
+
+theorem dfRewriteBi_ok (ctx : DfCtx p) (denv : VarId → ZMod p) (t : Nat)
+    (hcol : ∀ (j : Nat) (hj : j < ctx.keys.size),
+      DfOk denv t (.var (ctx.keys[j]'hj)) (ctx.colRes.getD j .out))
+    (bi bi' : BusInteraction (DenseExpr p)) (h : dfRewriteBi ctx bi = some bi') :
+    denseBIEval bi' denv = denseBIEval bi denv ∧
+      ∀ i ∈ denseBIVars bi', i ∈ denseBIVars bi := by
+  rw [dfRewriteBi] at h
+  have hmul : ∀ m', dfRewrite ctx bi.multiplicity = some m' →
+      m'.eval denv = bi.multiplicity.eval denv ∧ ∀ i ∈ m'.vars, i ∈ bi.multiplicity.vars :=
+    fun m' hm => dfRewrite_ok ctx denv t hcol _ m' hm
+  have hpl : ∀ pl', dfRewriteList ctx bi.payload = some pl' →
+      pl'.map (fun e => e.eval denv) = bi.payload.map (fun e => e.eval denv) ∧
+      ∀ (i : VarId), (∃ e' ∈ pl', i ∈ e'.vars) → ∃ e ∈ bi.payload, i ∈ e.vars :=
+    fun pl' hp => dfRewriteList_ok ctx denv t hcol bi.payload pl' hp
+  have hshape : bi' = { bi with
+      multiplicity := (dfRewrite ctx bi.multiplicity).getD bi.multiplicity,
+      payload := (dfRewriteList ctx bi.payload).getD bi.payload } := by
+    cases hm : dfRewrite ctx bi.multiplicity with
+    | none =>
+        cases hp : dfRewriteList ctx bi.payload with
+        | none => rw [hm, hp] at h; exact absurd h (by simp)
+        | some pl' => rw [hm, hp] at h; exact (Option.some.inj h).symm
+    | some m' => rw [hm] at h; exact (Option.some.inj h).symm
+  have hmulEq : ((dfRewrite ctx bi.multiplicity).getD bi.multiplicity).eval denv
+      = bi.multiplicity.eval denv := by
+    cases hm : dfRewrite ctx bi.multiplicity with
+    | none => rfl
+    | some m' => exact (hmul m' hm).1
+  have hplEq : ((dfRewriteList ctx bi.payload).getD bi.payload).map (fun e => e.eval denv)
+      = bi.payload.map (fun e => e.eval denv) := by
+    cases hp : dfRewriteList ctx bi.payload with
+    | none => rfl
+    | some pl' => exact (hpl pl' hp).1
+  subst hshape
+  refine ⟨?_, ?_⟩
+  · unfold denseBIEval
+    simp only [hmulEq, hplEq]
+  · intro i hi
+    rw [denseBIVars, List.mem_append] at hi ⊢
+    rcases hi with hi | hi
+    · refine Or.inl ?_
+      cases hm : dfRewrite ctx bi.multiplicity with
+      | none => rw [hm] at hi; exact hi
+      | some m' => rw [hm] at hi; exact (hmul m' hm).2 i hi
+    · rw [List.mem_flatMap] at hi
+      obtain ⟨e', he', hie⟩ := hi
+      cases hp : dfRewriteList ctx bi.payload with
+      | none =>
+          rw [hp] at he'
+          exact Or.inr (List.mem_flatMap.2 ⟨e', he', hie⟩)
+      | some pl' =>
+          rw [hp] at he'
+          obtain ⟨e0, he0, hie0⟩ := (hpl pl' hp).2 i ⟨e', he', hie⟩
+          exact Or.inr (List.mem_flatMap.2 ⟨e0, he0, hie0⟩)
+
+
+/-! ## Applying a step's changes, position by position -/
+
+theorem dfApplyCs_size : ∀ (ch : List (Nat × DenseExpr p)) (cs : Array (DenseExpr p)),
+    (dfApplyCs cs ch).size = cs.size := by
+  intro ch
+  induction ch with
+  | nil => intro cs; rfl
+  | cons qe rest ih => intro cs; rw [dfApplyCs, ih]; simp
+
+/-- Each position of the folded array is either untouched or one of the listed changes. -/
+theorem dfApplyCs_getElem? : ∀ (ch : List (Nat × DenseExpr p)) (cs : Array (DenseExpr p)) (q : Nat),
+    (dfApplyCs cs ch)[q]? = cs[q]? ∨
+      ∃ e : DenseExpr p, (q, e) ∈ ch ∧ (dfApplyCs cs ch)[q]? = some e := by
+  intro ch
+  induction ch with
+  | nil => intro cs q; exact Or.inl rfl
+  | cons qe rest ih =>
+      intro cs q
+      obtain ⟨q0, e0⟩ := qe
+      rw [dfApplyCs]
+      rcases ih (cs.setIfInBounds q0 e0) q with h | ⟨e, hmem, he⟩
+      · by_cases hq : q0 = q
+        · subst hq
+          by_cases hlt : q0 < cs.size
+          · exact Or.inr ⟨e0, List.mem_cons_self .., by
+              rw [h, Array.getElem?_setIfInBounds, if_pos rfl, if_pos hlt]⟩
+          · refine Or.inl ?_
+            rw [h, Array.getElem?_setIfInBounds, if_pos rfl, if_neg hlt]
+            exact (Array.getElem?_eq_none_iff.2 (by omega)).symm
+        · refine Or.inl ?_
+          rw [h, Array.getElem?_setIfInBounds, if_neg hq]
+      · exact Or.inr ⟨e, List.mem_cons_of_mem _ hmem, he⟩
+
+/-- Setting positions to values with the same `f`-image leaves the mapped list alone. Stated against
+    the *original* array, so a position listed twice is no obstacle. -/
+theorem dfApplyBis_map {β : Type} (f : BusInteraction (DenseExpr p) → β)
+    (bis0 : Array (BusInteraction (DenseExpr p))) :
+    ∀ (ch : List (Nat × BusInteraction (DenseExpr p))) (bis : Array (BusInteraction (DenseExpr p))),
+      bis.size = bis0.size →
+      (∀ (q : Nat) (bi bi0 : BusInteraction (DenseExpr p)),
+        bis[q]? = some bi → bis0[q]? = some bi0 → f bi = f bi0) →
+      (∀ qb ∈ ch, ∀ bi0, bis0[qb.1]? = some bi0 → f qb.2 = f bi0) →
+      (dfApplyBis bis ch).toList.map f = bis0.toList.map f := by
+  intro ch
+  induction ch with
+  | nil =>
+      intro bis hsize hinv _
+      rw [dfApplyBis]
+      refine List.ext_getElem? (fun i => ?_)
+      rw [List.getElem?_map, List.getElem?_map, Array.getElem?_toList, Array.getElem?_toList]
+      cases hb : bis[i]? with
+      | none =>
+          have hn : bis0[i]? = none := by
+            rw [Array.getElem?_eq_none_iff]
+            rw [Array.getElem?_eq_none_iff] at hb
+            omega
+          rw [hn]
+      | some bi =>
+          have hlt : i < bis0.size := by
+            obtain ⟨h1, _⟩ := Array.getElem?_eq_some_iff.1 hb
+            omega
+          rw [Array.getElem?_eq_getElem hlt, Option.map_some, Option.map_some,
+            hinv i bi _ hb (Array.getElem?_eq_getElem hlt)]
+  | cons qb rest ih =>
+      intro bis hsize hinv hall
+      obtain ⟨q0, b0⟩ := qb
+      have hq0 : ∀ bi0, bis0[q0]? = some bi0 → f b0 = f bi0 := hall (q0, b0) (List.mem_cons_self ..)
+      rw [dfApplyBis]
+      refine ih (bis.setIfInBounds q0 b0) (by simp [hsize]) ?_
+        (fun qb' hqb' => hall qb' (List.mem_cons_of_mem _ hqb'))
+      intro q bi bi0 hbi hbi0
+      rw [Array.getElem?_setIfInBounds] at hbi
+      by_cases hq : q0 = q
+      · rw [if_pos hq] at hbi
+        by_cases hlt : q0 < bis.size
+        · rw [if_pos hlt] at hbi
+          obtain hb : b0 = bi := Option.some.inj hbi
+          rw [← hb, hq0 bi0 (by rw [hq]; exact hbi0)]
+        · rw [if_neg hlt] at hbi; exact absurd hbi (by simp)
+      · rw [if_neg hq] at hbi
+        exact hinv q bi bi0 hbi hbi0
+
+/-- Same, for the variable sets: a rewritten interaction introduces no variable. -/
+theorem dfApplyBis_vars (bis0 : Array (BusInteraction (DenseExpr p))) :
+    ∀ (ch : List (Nat × BusInteraction (DenseExpr p))) (bis : Array (BusInteraction (DenseExpr p))),
+      bis.size = bis0.size →
+      (∀ (q : Nat) (bi bi0 : BusInteraction (DenseExpr p)),
+        bis[q]? = some bi → bis0[q]? = some bi0 → ∀ i ∈ denseBIVars bi, i ∈ denseBIVars bi0) →
+      (∀ qb ∈ ch, ∀ bi0, bis0[qb.1]? = some bi0 →
+        ∀ i ∈ denseBIVars qb.2, i ∈ denseBIVars bi0) →
+      ∀ (q : Nat) (bi' : BusInteraction (DenseExpr p)), (dfApplyBis bis ch)[q]? = some bi' →
+        ∃ bi0, bis0[q]? = some bi0 ∧ ∀ i ∈ denseBIVars bi', i ∈ denseBIVars bi0 := by
+  intro ch
+  induction ch with
+  | nil =>
+      intro bis hsize hinv _ q bi' hbi'
+      rw [dfApplyBis] at hbi'
+      have hlt : q < bis0.size := by
+        obtain ⟨h1, _⟩ := Array.getElem?_eq_some_iff.1 hbi'
+        omega
+      exact ⟨bis0[q], Array.getElem?_eq_getElem hlt,
+        hinv q bi' _ hbi' (Array.getElem?_eq_getElem hlt)⟩
+  | cons qb rest ih =>
+      intro bis hsize hinv hall
+      obtain ⟨q0, b0⟩ := qb
+      have hq0 : ∀ bi0, bis0[q0]? = some bi0 → ∀ i ∈ denseBIVars b0, i ∈ denseBIVars bi0 :=
+        hall (q0, b0) (List.mem_cons_self ..)
+      rw [dfApplyBis]
+      refine ih (bis.setIfInBounds q0 b0) (by simp [hsize]) ?_
+        (fun qb' hqb' => hall qb' (List.mem_cons_of_mem _ hqb'))
+      intro q bi bi0 hbi hbi0
+      rw [Array.getElem?_setIfInBounds] at hbi
+      by_cases hq : q0 = q
+      · rw [if_pos hq] at hbi
+        by_cases hlt : q0 < bis.size
+        · rw [if_pos hlt] at hbi
+          obtain hb : b0 = bi := Option.some.inj hbi
+          rw [← hb]
+          exact hq0 bi0 (by rw [hq]; exact hbi0)
+        · rw [if_neg hlt] at hbi; exact absurd hbi (by simp)
+      · rw [if_neg hq] at hbi
+        exact hinv q bi bi0 hbi hbi0
+
+
+/-! ## A positional rewrite is a `DensePassCorrect` step
+
+The step rewrites items *by position*, so the output is not a `map` of the input and
+`DensePassCorrect.ofEvalAgree` does not apply. What does hold — and is all four obligations need — is
+that the two lists have the same length and agree position by position: on the constraint side up to
+evaluation under an anchor `A`, on the bus side up to the evaluated message. -/
+
+/-- Side effects read the interactions only through their evaluated messages. -/
+theorem dfSideEffects_map (bs : BusSemantics p) (denv : VarId → ZMod p) :
+    ∀ l : List (BusInteraction (DenseExpr p)),
+      (l.filter (fun bi => bs.isStateful bi.busId)).map
+          (fun bi => let m := denseBIEval bi denv; ((m.busId, m.payload), m.multiplicity))
+        = ((l.map (fun bi => denseBIEval bi denv)).filter (fun m => bs.isStateful m.busId)).map
+          (fun m => ((m.busId, m.payload), m.multiplicity)) := by
   intro l
   induction l with
-  | nil => intro _ arr i; simp
-  | cons j rest ih =>
-      intro hnd arr i
-      rw [List.foldl_cons, ih (List.Nodup.of_cons hnd) (arr.modify j f) i]
-      by_cases hij : j = i
-      · subst hij
-        have hnotin : j ∉ rest := (List.nodup_cons.mp hnd).1
-        rw [if_neg hnotin, if_pos (List.mem_cons_self ..), Array.getElem?_modify, if_pos rfl]
-      · rw [Array.getElem?_modify, if_neg hij]
-        by_cases hmem : i ∈ rest
-        · rw [if_pos hmem, if_pos (List.mem_cons_of_mem _ hmem)]
-        · rw [if_neg hmem, if_neg (by
-            rw [List.mem_cons]
-            rintro (rfl | h)
-            · exact hij rfl
-            · exact hmem h)]
+  | nil => rfl
+  | cons bi rest ih =>
+      rw [List.filter_cons, List.map_cons, List.filter_cons]
+      have hid : (denseBIEval bi denv).busId = bi.busId := rfl
+      by_cases hb : bs.isStateful bi.busId = true
+      · rw [if_pos hb, if_pos (by rw [hid]; exact hb), List.map_cons, List.map_cons, ih]
+      · rw [if_neg hb, if_neg (by rw [hid]; exact hb), ih]
 
-/-- The touched-position `Array.modify` fold computes the sparse positional map, list-level. -/
-theorem foldl_modify_toList {α : Type} (f : α → α) (s : Std.HashSet Nat) (l : List α) :
-    (s.toList.foldl (fun a j => a.modify j f) l.toArray).toList
-      = l.zipIdx.map (fun ai => if s.contains ai.2 then f ai.1 else ai.1) := by
-  have hnd : s.toList.Nodup := Std.HashSet.distinct_toList.imp (fun {a b} h => by simpa using h)
-  refine List.ext_getElem? (fun i => ?_)
-  rw [Array.getElem?_toList, foldl_modify_getElem? f s.toList hnd l.toArray i,
-    List.getElem?_map, List.getElem?_zipIdx]
-  have htoa : l.toArray[i]? = l[i]? := List.getElem?_toArray
-  have hmem : (i ∈ s.toList) ↔ s.contains i = true := by
-    rw [Std.HashSet.mem_toList, Std.HashSet.mem_iff_contains]
-  cases hl : l[i]? with
-  | none =>
-      rw [htoa, hl]
+/-- Constraint lists of equal length whose entries evaluate alike vanish together. -/
+theorem dfCsZero_iff (cs cs' : Array (DenseExpr p)) (denv : VarId → ZMod p)
+    (hsize : cs'.size = cs.size)
+    (hev : ∀ (q : Nat) (c c' : DenseExpr p), cs[q]? = some c → cs'[q]? = some c' →
+      c'.eval denv = c.eval denv) :
+    (∀ c ∈ cs.toList, c.eval denv = 0) ↔ (∀ c' ∈ cs'.toList, c'.eval denv = 0) := by
+  constructor
+  · intro hall c' hc'
+    obtain ⟨q, hq⟩ := List.mem_iff_getElem?.1 hc'
+    rw [Array.getElem?_toList] at hq
+    have hlt : q < cs.size := by
+      obtain ⟨h1, _⟩ := Array.getElem?_eq_some_iff.1 hq
+      omega
+    rw [hev q cs[q] c' (Array.getElem?_eq_getElem hlt) hq]
+    exact hall cs[q] (List.mem_iff_getElem?.2 ⟨q, by
+      rw [Array.getElem?_toList]; exact Array.getElem?_eq_getElem hlt⟩)
+  · intro hall c hc
+    obtain ⟨q, hq⟩ := List.mem_iff_getElem?.1 hc
+    rw [Array.getElem?_toList] at hq
+    have hlt : q < cs'.size := by
+      obtain ⟨h1, _⟩ := Array.getElem?_eq_some_iff.1 hq
+      omega
+    rw [← hev q c cs'[q] hq (Array.getElem?_eq_getElem hlt)]
+    exact hall cs'[q] (List.mem_iff_getElem?.2 ⟨q, by
+      rw [Array.getElem?_toList]; exact Array.getElem?_eq_getElem hlt⟩)
+
+/-- The step's `DensePassCorrect`, from position-wise agreement. -/
+theorem dfStep_general (bs : BusSemantics p) (isInput : VarId → Bool)
+    (cs : Array (DenseExpr p)) (bis : Array (BusInteraction (DenseExpr p)))
+    (chCs : List (Nat × DenseExpr p)) (chBis : List (Nat × BusInteraction (DenseExpr p)))
+    (A : (VarId → ZMod p) → Prop)
+    (hAout : ∀ denv, (∀ c ∈ (dfApplyCs cs chCs).toList, c.eval denv = 0) → A denv)
+    (hAin : ∀ denv, (∀ c ∈ cs.toList, c.eval denv = 0) → A denv)
+    (hcs : ∀ denv, A denv → ∀ (q : Nat) (e : DenseExpr p), (q, e) ∈ chCs →
+      ∀ c : DenseExpr p, cs[q]? = some c → e.eval denv = c.eval denv)
+    (hcsV : ∀ (q : Nat) (e : DenseExpr p), (q, e) ∈ chCs →
+      ∀ c : DenseExpr p, cs[q]? = some c → ∀ i ∈ e.vars, i ∈ c.vars)
+    (hbis : ∀ denv, A denv → ∀ (q : Nat) (b : BusInteraction (DenseExpr p)), (q, b) ∈ chBis →
+      ∀ bi, bis[q]? = some bi → denseBIEval b denv = denseBIEval bi denv)
+    (hbisV : ∀ (q : Nat) (b : BusInteraction (DenseExpr p)), (q, b) ∈ chBis →
+      ∀ bi, bis[q]? = some bi → ∀ i ∈ denseBIVars b, i ∈ denseBIVars bi) :
+    DensePassCorrect isInput ⟨cs.toList, bis.toList⟩
+      ⟨(dfApplyCs cs chCs).toList, (dfApplyBis bis chBis).toList⟩ [] bs := by
+  set out : DenseConstraintSystem p :=
+    ⟨(dfApplyCs cs chCs).toList, (dfApplyBis bis chBis).toList⟩ with hout
+  set inp : DenseConstraintSystem p := ⟨cs.toList, bis.toList⟩ with hinp
+  -- constraint side: positions agree under `A`
+  have hcsEv : ∀ denv, A denv → ∀ (q : Nat) (c c' : DenseExpr p), cs[q]? = some c →
+      (dfApplyCs cs chCs)[q]? = some c' → c'.eval denv = c.eval denv := by
+    intro denv hA q c c' hc hc'
+    rcases dfApplyCs_getElem? chCs cs q with h | ⟨e, hmem, he⟩
+    · rw [h, hc] at hc'
+      rw [Option.some.inj hc']
+    · rw [he] at hc'
+      obtain he2 : e = c' := Option.some.inj hc'
+      rw [← he2]
+      exact hcs denv hA q e hmem c hc
+  have hcsVars : ∀ (q : Nat) (c c' : DenseExpr p), cs[q]? = some c →
+      (dfApplyCs cs chCs)[q]? = some c' → ∀ i ∈ c'.vars, i ∈ c.vars := by
+    intro q c c' hc hc'
+    rcases dfApplyCs_getElem? chCs cs q with h | ⟨e, hmem, he⟩
+    · rw [h, hc] at hc'
+      rw [Option.some.inj hc']
+      exact fun i hi => hi
+    · rw [he] at hc'
+      obtain he2 : e = c' := Option.some.inj hc'
+      rw [← he2]
+      exact hcsV q e hmem c hc
+  have hsatCs : ∀ denv, A denv →
+      ((∀ c ∈ cs.toList, c.eval denv = 0) ↔ (∀ c' ∈ (dfApplyCs cs chCs).toList, c'.eval denv = 0)) :=
+    fun denv hA => dfCsZero_iff cs (dfApplyCs cs chCs) denv (dfApplyCs_size chCs cs)
+      (hcsEv denv hA)
+  -- bus side: the evaluated messages agree under `A`, and no variable is introduced
+  have hbisMap : ∀ denv, A denv →
+      (dfApplyBis bis chBis).toList.map (fun bi => denseBIEval bi denv)
+        = bis.toList.map (fun bi => denseBIEval bi denv) := by
+    intro denv hA
+    refine dfApplyBis_map (fun bi => denseBIEval bi denv) bis chBis bis rfl ?_ ?_
+    · intro q bi bi0 h1 h2
+      rw [h1] at h2
+      rw [Option.some.inj h2]
+    · intro qb hqb bi0 hbi0
+      exact hbis denv hA qb.1 qb.2 hqb bi0 hbi0
+  have hbisVars : ∀ (q : Nat) (bi' : BusInteraction (DenseExpr p)),
+      (dfApplyBis bis chBis)[q]? = some bi' →
+      ∃ bi, bis[q]? = some bi ∧ ∀ i ∈ denseBIVars bi', i ∈ denseBIVars bi := by
+    refine dfApplyBis_vars bis chBis bis rfl ?_ ?_
+    · intro q bi bi0 h1 h2
+      rw [h1] at h2
+      rw [Option.some.inj h2]
+      exact fun i hi => hi
+    · intro qb hqb bi0 hbi0
+      exact hbisV qb.1 qb.2 hqb bi0 hbi0
+  have hsatBis : ∀ denv, A denv → ((∀ bi ∈ bis.toList, (denseBIEval bi denv).multiplicity ≠ 0 →
+        bs.accepts (denseBIEval bi denv)) ↔
+      (∀ bi' ∈ (dfApplyBis bis chBis).toList, (denseBIEval bi' denv).multiplicity ≠ 0 →
+        bs.accepts (denseBIEval bi' denv))) := by
+    intro denv hA
+    have hmap := hbisMap denv hA
+    constructor
+    · intro hall bi' hbi'
+      have : denseBIEval bi' denv ∈ bis.toList.map (fun bi => denseBIEval bi denv) := by
+        rw [← hmap]; exact List.mem_map.2 ⟨bi', hbi', rfl⟩
+      obtain ⟨bi, hbi, heq⟩ := List.mem_map.1 this
+      rw [← heq]; exact hall bi hbi
+    · intro hall bi hbi
+      have : denseBIEval bi denv
+          ∈ (dfApplyBis bis chBis).toList.map (fun bi => denseBIEval bi denv) := by
+        rw [hmap]; exact List.mem_map.2 ⟨bi, hbi, rfl⟩
+      obtain ⟨bi', hbi', heq⟩ := List.mem_map.1 this
+      rw [← heq]; exact hall bi' hbi'
+  have hsatIff : ∀ denv, A denv → (out.satisfies bs denv ↔ inp.satisfies bs denv) := by
+    intro denv hA
+    constructor
+    · rintro ⟨hc, hb⟩
+      exact ⟨(hsatCs denv hA).2 hc, fun bi hbi => (hsatBis denv hA).2 hb bi hbi⟩
+    · rintro ⟨hc, hb⟩
+      exact ⟨(hsatCs denv hA).1 hc, fun bi' hbi' => (hsatBis denv hA).1 hb bi' hbi'⟩
+  have hside : ∀ denv, A denv → out.sideEffects bs denv = inp.sideEffects bs denv := by
+    intro denv hA
+    unfold DenseConstraintSystem.sideEffects
+    refine funext (fun message => congrArg (multiplicitySum message) ?_)
+    show (((dfApplyBis bis chBis).toList.filter (fun bi => bs.isStateful bi.busId)).map _) = _
+    rw [dfSideEffects_map bs denv, dfSideEffects_map bs denv, hbisMap denv hA]
+  have hadm : ∀ denv, A denv → (out.admissible bs denv ↔ inp.admissible bs denv) := by
+    intro denv hA
+    unfold DenseConstraintSystem.admissible
+    show bs.admissible (((dfApplyBis bis chBis).toList.map _).filter _) ↔ _
+    rw [hbisMap denv hA]
+  have hsub : ∀ i ∈ out.occ, i ∈ inp.occ := by
+    intro i hi
+    simp only [hout, DenseConstraintSystem.occ, List.mem_append, List.mem_flatMap] at hi
+    rcases hi with ⟨c', hc', hic⟩ | ⟨bi', hbi', hib⟩
+    · obtain ⟨q, hq⟩ := List.mem_iff_getElem?.1 hc'
+      rw [Array.getElem?_toList] at hq
+      have hlt : q < cs.size := by
+        obtain ⟨h1, _⟩ := Array.getElem?_eq_some_iff.1 hq
+        rw [dfApplyCs_size] at h1; omega
+      refine DenseConstraintSystem.mem_occ_of_constraint (d := inp)
+        (List.mem_iff_getElem?.2 ⟨q, by
+          rw [Array.getElem?_toList]; exact Array.getElem?_eq_getElem hlt⟩) ?_
+      exact hcsVars q cs[q] c' (Array.getElem?_eq_getElem hlt) hq i hic
+    · obtain ⟨q, hq⟩ := List.mem_iff_getElem?.1 hbi'
+      rw [Array.getElem?_toList] at hq
+      obtain ⟨bi, hbi, hvars⟩ := hbisVars q bi' hq
+      refine DenseConstraintSystem.mem_occ_of_bi (d := inp)
+        (List.mem_iff_getElem?.2 ⟨q, by rw [Array.getElem?_toList]; exact hbi⟩) (hvars i hib)
+  refine DensePassCorrect.ofEnvEq ?_ ?_ hsub ?_
+  · intro denv hsatout
+    have hA := hAout denv hsatout.1
+    exact ⟨denv, (hsatIff denv hA).1 hsatout, hside denv hA⟩
+  · intro hgi denv hsatout bi' hbi'
+    have hA := hAout denv hsatout.1
+    have hsatd := (hsatIff denv hA).1 hsatout
+    have hmap := hbisMap denv hA
+    have : denseBIEval bi' denv ∈ bis.toList.map (fun bi => denseBIEval bi denv) := by
+      rw [← hmap]; exact List.mem_map.2 ⟨bi', hbi', rfl⟩
+    obtain ⟨bi, hbi, heq⟩ := List.mem_map.1 this
+    rw [show denseBIEval bi' denv = denseBIEval bi denv from heq.symm ▸ rfl]
+    exact hgi denv hsatd bi hbi
+  · intro denv hadmd hsatd
+    have hA := hAin denv hsatd.1
+    exact ⟨(hsatIff denv hA).2 hsatd, (hadm denv hA).2 hadmd, (hside denv hA).symm⟩
+
+
+/-! ## The domain table is entailed by the system it was built from -/
+
+theorem dfDoms_sound (cs : Array (DenseExpr p)) (isTgt : Array Bool) :
+    ∀ (sv : List (Nat × VarId)) (doms : Array (Option (DfDom p))) (src : Array Nat),
+      (∀ (v : VarId) (dm : DfDom p), doms[v.index]? = some (some dm) →
+        denseRootsIn v dm.src = some dm.vals ∧ ∃ q : Nat, cs[q]? = some dm.src) →
+      ∀ (v : VarId) (dm : DfDom p), (dfDoms cs isTgt sv doms src).1[v.index]? = some (some dm) →
+        denseRootsIn v dm.src = some dm.vals ∧ ∃ q : Nat, cs[q]? = some dm.src := by
+  intro sv
+  induction sv with
+  | nil => intro doms src h v dm hv; exact h v dm hv
+  | cons qx rest ih =>
+      intro doms src h v dm hv
+      obtain ⟨q, x⟩ := qx
+      rw [dfDoms] at hv
+      split at hv
+      · split at hv
+        · rename_i hlt
+          split at hv
+          · rename_i ds hds
+            refine ih _ _ ?_ v dm hv
+            intro w dm' hw
+            rw [Array.getElem?_setIfInBounds] at hw
+            by_cases hwx : x.index = w.index
+            · rw [if_pos hwx] at hw
+              split at hw
+              · obtain hdm : (⟨ds, q, cs[q]⟩ : DfDom p) = dm' :=
+                  Option.some.inj (Option.some.inj hw)
+                obtain rfl : x = w := dfVarId_eq x w hwx
+                rw [← hdm]
+                exact ⟨hds, ⟨q, Array.getElem?_eq_getElem hlt⟩⟩
+              · exact absurd hw (by simp)
+            · rw [if_neg hwx] at hw
+              exact h w dm' hw
+          · exact ih _ _ h v dm hv
+        · exact ih _ _ h v dm hv
+      · exact ih _ _ h v dm hv
+
+/-! ## The per-key domains, re-checked against the current system -/
+
+theorem dfKeyDomsGo_spec (tbl : Array (Option (DfDom p))) (keys : Array VarId)
+    (cs : Array (DenseExpr p)) :
+    ∀ (l : List VarId) (ds : List (List (ZMod p))), dfKeyDomsGo tbl keys cs l = some ds →
+      ∀ (t : Nat) (v : VarId), l[t]? = some v → ∃ dm : DfDom p,
+        tbl[v.index]? = some (some dm) ∧ ds[t]? = some dm.vals ∧
+        cs[dm.pos]? = some dm.src ∧ dfCoveredBy keys dm.src = true := by
+  intro l
+  induction l with
+  | nil => intro ds _ t v hv; simp at hv
+  | cons w rest ih =>
+      intro ds h t v hv
+      rw [dfKeyDomsGo] at h
+      cases htbl : tbl.getD w.index none with
+      | none => rw [htbl] at h; exact absurd h (by simp)
+      | some dm =>
+          simp only [htbl] at h
+          split at h
+          · rename_i hchk
+            cases hrest : dfKeyDomsGo tbl keys cs rest with
+            | none => rw [hrest] at h; exact absurd h (by simp)
+            | some ds' =>
+                rw [hrest, Option.map_some] at h
+                obtain rfl : dm.vals :: ds' = ds := Option.some.inj h
+                simp only [Bool.and_eq_true, decide_eq_true_eq] at hchk
+                obtain ⟨⟨hpos, hbeq⟩, hcov⟩ := hchk
+                cases t with
+                | zero =>
+                    obtain hwv : w = v := by simpa using hv
+                    refine ⟨dm, ?_, rfl, ?_, hcov⟩
+                    · rw [← hwv]
+                      have hgd : (tbl[w.index]?).getD none = some dm := by
+                        rw [← Array.getD_eq_getD_getElem?]; exact htbl
+                      cases hg : tbl[w.index]? with
+                      | none => rw [hg] at hgd; exact absurd hgd (by simp)
+                      | some o =>
+                          rw [hg] at hgd
+                          exact congrArg some hgd
+                    · rw [Array.getElem?_eq_getElem hpos]
+                      refine congrArg some (eq_of_beq ?_)
+                      rw [Array.getD_eq_getD_getElem?, Array.getElem?_eq_getElem hpos] at hbeq
+                      exact hbeq
+                | succ t =>
+                    simp only [List.getElem?_cons_succ] at hv ⊢
+                    exact ih ds' hrest t v hv
+          · exact absurd h (by simp)
+
+theorem dfKeyDoms_spec (tbl : Array (Option (DfDom p))) (keys : Array VarId)
+    (cs : Array (DenseExpr p)) (doms : Array (List (ZMod p)))
+    (h : dfKeyDoms tbl keys cs = some doms) :
+    ∀ (j : Nat) (hj : j < keys.size), ∃ dm : DfDom p,
+      tbl[(keys[j]'hj).index]? = some (some dm) ∧ doms.getD j [] = dm.vals ∧
+      cs[dm.pos]? = some dm.src ∧ dfCoveredBy keys dm.src = true := by
+  intro j hj
+  rw [dfKeyDoms] at h
+  cases hgo : dfKeyDomsGo tbl keys cs keys.toList with
+  | none => rw [hgo] at h; exact absurd h (by simp)
+  | some ds =>
+      rw [hgo, Option.map_some] at h
+      obtain rfl : ds.toArray = doms := Option.some.inj h
+      obtain ⟨dm, htbl, hds, hsrc, hcov⟩ :=
+        dfKeyDomsGo_spec tbl keys cs keys.toList ds hgo j (keys[j]'hj) (by
+          rw [List.getElem?_eq_getElem (by simpa using hj)]
+          simp)
+      refine ⟨dm, htbl, ?_, hsrc, hcov⟩
+      rw [Array.getD_eq_getD_getElem?, List.getElem?_toArray, hds]
+      rfl
+
+/-- A key slot is in range. -/
+theorem dfMaxSlot_lt (keys : Array VarId) :
+    ∀ (e : DenseExpr p) (m : Nat), dfMaxSlot keys e = some m → m < keys.size := by
+  intro e
+  induction e with
+  | const n => intro m h; simp [dfMaxSlot] at h
+  | var y =>
+      intro m h
+      rw [dfMaxSlot] at h
+      obtain ⟨hj, _⟩ := dfSlot_key keys y.index m h
+      exact hj
+  | add a b iha ihb =>
+      intro m h
+      rw [dfMaxSlot] at h
+      cases hma : dfMaxSlot keys a with
+      | none => rw [hma] at h; exact ihb m (by simpa using h)
+      | some x =>
+        cases hmb : dfMaxSlot keys b with
+        | none =>
+            rw [hma, hmb] at h
+            obtain hxm : x = m := Option.some.inj h
+            rw [← hxm]
+            exact iha x hma
+        | some y =>
+            rw [hma, hmb] at h
+            obtain hxy : max x y = m := Option.some.inj h
+            rw [← hxy]
+            exact Nat.max_lt.2 ⟨iha x hma, ihb y hmb⟩
+  | mul a b iha ihb =>
+      intro m h
+      rw [dfMaxSlot] at h
+      cases hma : dfMaxSlot keys a with
+      | none => rw [hma] at h; exact ihb m (by simpa using h)
+      | some x =>
+        cases hmb : dfMaxSlot keys b with
+        | none =>
+            rw [hma, hmb] at h
+            obtain hxm : x = m := Option.some.inj h
+            rw [← hxm]
+            exact iha x hma
+        | some y =>
+            rw [hma, hmb] at h
+            obtain hxy : max x y = m := Option.some.inj h
+            rw [← hxy]
+            exact Nat.max_lt.2 ⟨iha x hma, ihb y hmb⟩
+
+/-! ## The covered scan -/
+
+theorem dfCovScan_fold (keys : Array VarId) (src : Array Nat) (cs : Array (DenseExpr p))
+    (touched : Array Nat) :
+    ∀ (n i : Nat) (fold : List Nat) (filters : List (Nat × IExpr p)), touched.size - i ≤ n →
+      (∀ q ∈ fold, dfCoveredBy keys (cs.getD q (.const (zmodZeroP p))) = false) →
+      ∀ q ∈ (dfCovScan keys src cs touched i fold filters).1,
+        dfCoveredBy keys (cs.getD q (.const (zmodZeroP p))) = false := by
+  intro n
+  induction n with
+  | zero =>
+      intro i fold filters hn hfold q hq
+      rw [dfCovScan, dif_neg (by omega)] at hq
+      exact hfold q hq
+  | succ n ih =>
+      intro i fold filters hn hfold q hq
+      rw [dfCovScan] at hq
+      by_cases hi : i < touched.size
+      · rw [dif_pos hi] at hq
+        by_cases hcov : dfCoveredBy keys (cs.getD touched[i] (.const (zmodZeroP p))) = true
+        · rw [if_pos hcov] at hq
+          split at hq
+          · exact ih (i + 1) fold filters (by omega) hfold q hq
+          · split at hq
+            · split at hq
+              · exact ih (i + 1) fold _ (by omega) hfold q hq
+              · exact ih (i + 1) fold filters (by omega) hfold q hq
+            · exact ih (i + 1) fold filters (by omega) hfold q hq
+        · rw [if_neg hcov] at hq
+          refine ih (i + 1) _ filters (by omega) ?_ q hq
+          intro q' hq'
+          rcases List.mem_cons.1 hq' with rfl | hmem
+          · simpa using hcov
+          · exact hfold q' hmem
+      · rw [dif_neg hi] at hq; exact hfold q hq
+
+theorem dfCovScan_filters (keys : Array VarId) (src : Array Nat) (cs : Array (DenseExpr p))
+    (touched : Array Nat) :
+    ∀ (n i : Nat) (fold : List Nat) (filters : List (Nat × IExpr p)), touched.size - i ≤ n →
+      (∀ mie ∈ filters, mie.1 < keys.size ∧ ∃ c : DenseExpr p, (∃ q : Nat, cs[q]? = some c) ∧
+        dfCoveredBy keys c = true ∧ denseCompileE (dfRKeys keys mie.1) c = some mie.2) →
+      ∀ mie ∈ (dfCovScan keys src cs touched i fold filters).2,
+        mie.1 < keys.size ∧ ∃ c : DenseExpr p,
+        (∃ q : Nat, cs[q]? = some c) ∧ dfCoveredBy keys c = true ∧
+        denseCompileE (dfRKeys keys mie.1) c = some mie.2 := by
+  intro n
+  induction n with
+  | zero =>
+      intro i fold filters hn hfil mie hmie
+      rw [dfCovScan, dif_neg (by omega)] at hmie
+      exact hfil mie hmie
+  | succ n ih =>
+      intro i fold filters hn hfil mie hmie
+      rw [dfCovScan] at hmie
+      by_cases hi : i < touched.size
+      · rw [dif_pos hi] at hmie
+        by_cases hcov : dfCoveredBy keys (cs.getD touched[i] (.const (zmodZeroP p))) = true
+        · rw [if_pos hcov] at hmie
+          split at hmie
+          · exact ih (i + 1) fold filters (by omega) hfil mie hmie
+          · split at hmie
+            · rename_i m hm
+              split at hmie
+              · rename_i ie hie
+                refine ih (i + 1) fold _ (by omega) ?_ mie hmie
+                intro mie' hmie'
+                rcases List.mem_cons.1 hmie' with rfl | hmem
+                · refine ⟨dfMaxSlot_lt keys _ _ hm, cs.getD touched[i] (.const (zmodZeroP p)), ?_, hcov, hie⟩
+                  -- a covered constraint is in range, so it is an element of `cs`
+                  by_cases hq : touched[i] < cs.size
+                  · exact ⟨touched[i], by
+                      rw [Array.getD_eq_getD_getElem?, Array.getElem?_eq_getElem hq]; rfl⟩
+                  · rw [Array.getD_eq_getD_getElem?, Array.getElem?_eq_none_iff.2 (by omega)] at hcov
+                    simp [dfCoveredBy, dfCovGo] at hcov
+                · exact hfil mie' hmem
+              · exact ih (i + 1) fold filters (by omega) hfil mie hmie
+            · exact ih (i + 1) fold filters (by omega) hfil mie hmie
+        · rw [if_neg hcov] at hmie
+          exact ih (i + 1) _ filters (by omega) hfil mie hmie
+      · rw [dif_neg hi] at hmie; exact hfil mie hmie
+
+
+/-! ## Levels, columns and the collected changes -/
+
+/-- Every filter parked at a level was compiled against that level's reversed key prefix. -/
+theorem dfLevels_spec (k : Nat) (P : Nat → IExpr p → Prop) :
+    ∀ (l : List (Nat × IExpr p)) (a : Array (List (IExpr p))),
+      (∀ mie ∈ l, mie.1 < k ∧ P mie.1 mie.2) →
+      (∀ (j : Nat) (ie : IExpr p), ie ∈ a.getD j [] → P j ie) →
+      ∀ (j : Nat) (ie : IExpr p), ie ∈ (dfLevels k l a).getD j [] → P j ie := by
+  intro l
+  induction l with
+  | nil => intro a _ ha j ie hie; exact ha j ie hie
+  | cons mie rest ih =>
+      intro a hall ha j ie hie
+      refine ih _ (fun mie' hmie' => hall mie' (List.mem_cons_of_mem _ hmie')) ?_ j ie hie
+      intro j' ie' hie'
+      obtain ⟨hlt, hP⟩ := hall mie (List.mem_cons_self ..)
+      have hmin : min mie.1 (k - 1) = mie.1 := by omega
+      rw [Array.getD_eq_getD_getElem?, Array.getElem?_modify, hmin] at hie'
+      by_cases hj : mie.1 = j'
+      · rw [if_pos hj] at hie'
+        cases hg : a[j']? with
+        | none => rw [hg] at hie'; simp at hie'
+        | some l0 =>
+            rw [hg, Option.map_some] at hie'
+            rcases List.mem_cons.1 hie' with rfl | hmem
+            · rw [← hj]; exact hP
+            · exact ha j' ie' (by rw [Array.getD_eq_getD_getElem?, hg]; exact hmem)
+      · rw [if_neg hj] at hie'
+        exact ha j' ie' (by rw [Array.getD_eq_getD_getElem?]; exact hie')
+
+/-- The filter check passes when every filter of the level vanishes on the point. -/
+theorem dfAllZero_of (v : ZMod p) (pt : List (ZMod p)) :
+    ∀ ies : List (IExpr p),
+      (∀ ie ∈ ies, denseIExprEvalWithV denseZModOps (v :: pt) ie = 0) →
+      dfAllZero (zmodZeroP p) v pt ies = true := by
+  intro ies
+  induction ies with
+  | nil => intro _; rfl
+  | cons ie rest ih =>
+      intro hall
+      rw [dfAllZero, Bool.and_eq_true]
+      refine ⟨?_, ih (fun ie' hie' => hall ie' (List.mem_cons_of_mem _ hie'))⟩
+      rw [dfEvalCons_eq, hall ie (List.mem_cons_self ..), zmodIsZero_eq]
       simp
-  | some a =>
-      rw [htoa, hl]
-      by_cases hc : s.contains i = true
-      · rw [if_pos (hmem.mpr hc)]
-        simp only [Option.map_some, Nat.zero_add]
-        rw [if_pos hc]
-      · rw [if_neg (fun h => hc (hmem.mp h))]
-        simp only [Option.map_some, Nat.zero_add]
-        rw [if_neg hc]
 
-/-- `denseFoldOutArrV` is `denseFoldOutIdxV` followed by the (no-rebuild) `refresh`, under array
-    sync. -/
-theorem denseFoldOutArrV_eq (d : DenseConstraintSystem p) (fidx : DenseFoldIdx p)
-    (xs : List VarId) (survsV : List (List (ZMod p)))
-    (harr : fidx.arr = d.algebraicConstraints.toArray)
-    (hbis : fidx.arrBis = d.busInteractions.toArray) :
-    denseFoldOutArrV fidx xs survsV = fidx.refresh (denseFoldOutIdxV d fidx xs survsV) := by
-  obtain ⟨idx, arr, bisIdx, arrBis⟩ := fidx
-  dsimp only at harr hbis
-  subst harr hbis
-  show DenseFoldIdx.mk idx _ bisIdx _ = DenseFoldIdx.mk idx _ bisIdx _
-  congr 1
-  · -- constraint side
-    have h := foldl_modify_toList
-      (fun c => if denseCoveredBy xs c then c else denseFoldRewriteIdxV xs survsV c)
-      (denseTouchedSet idx xs) d.algebraicConstraints
-    calc (denseTouchedSet idx xs).toList.foldl
-          (fun a i => a.modify i
-            (fun c => if denseCoveredBy xs c then c else denseFoldRewriteIdxV xs survsV c))
-          d.algebraicConstraints.toArray
-        = ((denseTouchedSet idx xs).toList.foldl
-            (fun a i => a.modify i
-              (fun c => if denseCoveredBy xs c then c else denseFoldRewriteIdxV xs survsV c))
-            d.algebraicConstraints.toArray).toList.toArray := by rw [Array.toArray_toList]
-      _ = _ := by rw [h]; simp only [denseFoldOutIdxV]
-  · -- interaction side
-    have h := foldl_modify_toList
-      (fun bi => { bi with
-        multiplicity := denseFoldRewriteIdxV xs survsV bi.multiplicity,
-        payload := bi.payload.map (denseFoldRewriteIdxV xs survsV) })
-      (denseTouchedSet bisIdx xs) d.busInteractions
-    calc (denseTouchedSet bisIdx xs).toList.foldl
-          (fun a i => a.modify i
-            (fun bi => { bi with
-              multiplicity := denseFoldRewriteIdxV xs survsV bi.multiplicity,
-              payload := bi.payload.map (denseFoldRewriteIdxV xs survsV) }))
-          d.busInteractions.toArray
-        = ((denseTouchedSet bisIdx xs).toList.foldl
-            (fun a i => a.modify i
-              (fun bi => { bi with
-                multiplicity := denseFoldRewriteIdxV xs survsV bi.multiplicity,
-                payload := bi.payload.map (denseFoldRewriteIdxV xs survsV) }))
-            d.busInteractions.toArray).toList.toArray := by rw [Array.toArray_toList]
-      _ = _ := by rw [h]; simp only [denseFoldOutIdxV]
+/-- The key columns describe the real point at its survivor index. -/
+theorem dfColRes_ok (survs : Array (List (ZMod p))) (keys : Array VarId) (denv : VarId → ZMod p)
+    (t : Nat) (hsurv : survs[t]? = some (dfPref keys denv keys.size)) :
+    ∀ (j : Nat) (hj : j < keys.size),
+      DfOk denv t (.var (keys[j]'hj)) ((dfColRes survs keys.size).getD j .out) := by
+  intro j hj
+  have hcol : (dfColRes survs keys.size).getD j (.out) =
+      (match dfUni (survs.map (fun s => denseLookupIxV (zmodZeroP p) s (keys.size - 1 - j))) with
+       | some c => .uni c false
+       | none => .vec (survs.map (fun s => denseLookupIxV (zmodZeroP p) s (keys.size - 1 - j))) none) := by
+    rw [dfColRes, Array.getD_eq_getD_getElem?, Array.getElem?_map,
+      Array.getElem?_range]
+    rw [if_pos hj]
+    rfl
+  have hval : (survs.map (fun s => denseLookupIxV (zmodZeroP p) s (keys.size - 1 - j)))[t]?
+      = some (denv (keys[j]'hj)) := by
+    rw [Array.getElem?_map, hsurv, Option.map_some,
+      dfPref_lookup keys denv keys.size j hj, Array.getD_eq_getD_getElem?,
+      Array.getElem?_eq_getElem hj]
+    rfl
+  rw [hcol]
+  cases hu : dfUni (survs.map (fun s => denseLookupIxV (zmodZeroP p) s (keys.size - 1 - j))) with
+  | some c =>
+      refine ⟨?_, fun e' he' => by simp [DfRes.e?] at he'⟩
+      show denv (keys[j]'hj) = c
+      exact dfUni_sound _ c hu _ (Array.mem_iff_getElem?.2 ⟨t, hval⟩)
+  | none => exact ⟨hval, fun e' he' => by simp [DfRes.e?] at he'⟩
 
-/-- Interaction-side analog of `denseFoldStepV_snd_arr`. -/
-theorem denseFoldStepV_snd_arrBis (d : DenseConstraintSystem p) (fidx : DenseFoldIdx p)
-    (xs : List VarId) (hbis : fidx.arrBis = d.busInteractions.toArray) :
-    (denseFoldStepV d fidx xs).2.arrBis
-      = (denseFoldStepV d fidx xs).1.busInteractions.toArray := by
-  simp only [denseFoldStepV]; split
-  · exact hbis
-  · split_ifs <;> first | rfl | exact hbis
+theorem dfCollectCs_spec (ctx : DfCtx p) (cs : Array (DenseExpr p)) (all : List Nat) :
+    ∀ (fold : List Nat) (acc : List (Nat × DenseExpr p)), (∀ q ∈ fold, q ∈ all) →
+      (∀ qe ∈ acc, qe.1 ∈ all ∧
+        dfRewrite ctx (cs.getD qe.1 (.const (zmodZeroP p))) = some qe.2) →
+      ∀ qe ∈ dfCollectCs ctx cs fold acc, qe.1 ∈ all ∧
+        dfRewrite ctx (cs.getD qe.1 (.const (zmodZeroP p))) = some qe.2 := by
+  intro fold
+  induction fold with
+  | nil => intro acc _ hacc qe hqe; exact hacc qe hqe
+  | cons q rest ih =>
+      intro acc hsub hacc qe hqe
+      rw [dfCollectCs] at hqe
+      cases hr : dfRewrite ctx (cs.getD q (.const (zmodZeroP p))) with
+      | none =>
+          rw [hr] at hqe
+          exact ih acc (fun q' h => hsub q' (List.mem_cons_of_mem _ h)) hacc qe hqe
+      | some e =>
+          rw [hr] at hqe
+          refine ih ((q, e) :: acc) (fun q' h => hsub q' (List.mem_cons_of_mem _ h)) ?_ qe hqe
+          intro qe' hqe'
+          rcases List.mem_cons.1 hqe' with rfl | hmem
+          · exact ⟨hsub q (List.mem_cons_self ..), hr⟩
+          · exact hacc qe' hmem
 
-/-- One array-native step is exactly the list step's refreshed index, under array sync. -/
-theorem denseFoldStepArrV_eq (d : DenseConstraintSystem p) (fidx : DenseFoldIdx p)
-    (xs : List VarId)
-    (harr : fidx.arr = d.algebraicConstraints.toArray)
-    (hbis : fidx.arrBis = d.busInteractions.toArray) :
-    denseFoldStepArrV fidx xs = (denseFoldStepV d fidx xs).2 := by
-  simp only [denseFoldStepArrV, denseFoldStepV]
-  cases denseGroupDoms (denseCoveredIdx fidx.idx fidx.arr (denseCoveredBy xs) xs) xs with
-  | none => rfl
-  | some doms =>
-      dsimp only
+theorem dfCollectCs_mem_fold (ctx : DfCtx p) (cs : Array (DenseExpr p)) (fold : List Nat)
+    (qe : Nat × DenseExpr p) (hqe : qe ∈ dfCollectCs ctx cs fold []) :
+    qe.1 ∈ fold ∧ dfRewrite ctx (cs.getD qe.1 (.const (zmodZeroP p))) = some qe.2 :=
+  dfCollectCs_spec ctx cs fold fold [] (fun _ h => h) (fun _ h => by simp at h) qe hqe
+
+theorem dfCollectBis_spec (ctx : DfCtx p) (bis : Array (BusInteraction (DenseExpr p)))
+    (touched : Array Nat) :
+    ∀ (n i : Nat) (acc : List (Nat × BusInteraction (DenseExpr p))), touched.size - i ≤ n →
+      (∀ qb ∈ acc, ∃ bi, bis[qb.1]? = some bi ∧ dfRewriteBi ctx bi = some qb.2) →
+      ∀ qb ∈ dfCollectBis ctx bis i touched acc,
+        ∃ bi, bis[qb.1]? = some bi ∧ dfRewriteBi ctx bi = some qb.2 := by
+  intro n
+  induction n with
+  | zero =>
+      intro i acc hn hacc qb hqb
+      rw [dfCollectBis, dif_neg (by omega)] at hqb
+      exact hacc qb hqb
+  | succ n ih =>
+      intro i acc hn hacc qb hqb
+      rw [dfCollectBis] at hqb
+      by_cases hi : i < touched.size
+      · rw [dif_pos hi] at hqb
+        by_cases hq : touched[i] < bis.size
+        · rw [dif_pos hq] at hqb
+          cases hr : dfRewriteBi ctx bis[touched[i]] with
+          | none => rw [hr] at hqb; exact ih (i + 1) acc (by omega) hacc qb hqb
+          | some b =>
+              rw [hr] at hqb
+              refine ih (i + 1) _ (by omega) ?_ qb hqb
+              intro qb' hqb'
+              rcases List.mem_cons.1 hqb' with rfl | hmem
+              · exact ⟨bis[touched[i]], Array.getElem?_eq_getElem hq, hr⟩
+              · exact hacc qb' hmem
+        · rw [dif_neg hq] at hqb; exact ih (i + 1) acc (by omega) hacc qb hqb
+      · rw [dif_neg hi] at hqb; exact hacc qb hqb
+
+
+/-! ## Variable containment, independent of any assignment -/
+
+theorem dfRebuild_vars (isAdd : Bool) (mk : DenseExpr p → DenseExpr p → DenseExpr p)
+    (hvars : ∀ x y : DenseExpr p, (mk x y).vars = x.vars ++ y.vars)
+    (hmk : ∀ x y : DenseExpr p, (if isAdd then DenseExpr.add x y else DenseExpr.mul x y) = mk x y)
+    (a b : DenseExpr p) (ea eb : Option (DenseExpr p))
+    (hA : ∀ e' : DenseExpr p, ea = some e' → ∀ i ∈ e'.vars, i ∈ a.vars)
+    (hB : ∀ e' : DenseExpr p, eb = some e' → ∀ i ∈ e'.vars, i ∈ b.vars) :
+    ∀ e' : DenseExpr p, dfRebuild isAdd a b ea eb = some e' →
+      ∀ i ∈ e'.vars, i ∈ (mk a b).vars := by
+  intro e' he' i hi
+  have hagA : ∀ i ∈ (ea.getD a).vars, i ∈ a.vars := by
+    cases ea with
+    | none => exact fun i hi => hi
+    | some x => exact hA x rfl
+  have hagB : ∀ i ∈ (eb.getD b).vars, i ∈ b.vars := by
+    cases eb with
+    | none => exact fun i hi => hi
+    | some x => exact hB x rfl
+  have hval : e' = mk (ea.getD a) (eb.getD b) := by
+    unfold dfRebuild at he'
+    cases ea with
+    | none =>
+        cases eb with
+        | none => exact absurd he' (by simp)
+        | some y => rw [← hmk]; exact (Option.some.inj he').symm
+    | some x => rw [← hmk]; exact (Option.some.inj he').symm
+  subst hval
+  rw [hvars] at hi ⊢
+  rcases List.mem_append.1 hi with hi | hi
+  · exact List.mem_append_left _ (hagA i hi)
+  · exact List.mem_append_right _ (hagB i hi)
+
+theorem dfComb_vars (isAdd : Bool) (mk : DenseExpr p → DenseExpr p → DenseExpr p)
+    (hvars : ∀ x y : DenseExpr p, (mk x y).vars = x.vars ++ y.vars)
+    (hmk : ∀ x y : DenseExpr p, (if isAdd then DenseExpr.add x y else DenseExpr.mul x y) = mk x y)
+    (a b : DenseExpr p) (ra rb : DfRes p)
+    (hA : ∀ e' : DenseExpr p, ra.e? = some e' → ∀ i ∈ e'.vars, i ∈ a.vars)
+    (hB : ∀ e' : DenseExpr p, rb.e? = some e' → ∀ i ∈ e'.vars, i ∈ b.vars) :
+    ∀ e' : DenseExpr p, (dfComb isAdd a b ra rb).e? = some e' →
+      ∀ i ∈ e'.vars, i ∈ (mk a b).vars := by
+  have hconst : ∀ (c : ZMod p) (e' : DenseExpr p), (DfRes.uni c true).e? = some e' →
+      ∀ i ∈ e'.vars, i ∈ (mk a b).vars := by
+    intro c e' he' i hi
+    have hde : (DfRes.uni c true).e? = some (DenseExpr.const c) := by simp [DfRes.e?]
+    rw [hde] at he'
+    obtain rfl : DenseExpr.const c = e' := Option.some.inj he'
+    simp [DenseExpr.vars] at hi
+  have hout : ∀ ea eb : Option (DenseExpr p),
+      (∀ e' : DenseExpr p, ea = some e' → ∀ i ∈ e'.vars, i ∈ a.vars) →
+      (∀ e' : DenseExpr p, eb = some e' → ∀ i ∈ e'.vars, i ∈ b.vars) →
+      ∀ e' : DenseExpr p,
+        (match dfRebuild isAdd a b ea eb with | none => DfRes.out | some e => DfRes.outCh e).e?
+          = some e' → ∀ i ∈ e'.vars, i ∈ (mk a b).vars := by
+    intro ea eb hA' hB' e' he'
+    have hreb := dfRebuild_vars isAdd mk hvars hmk a b ea eb hA' hB'
+    cases hd : dfRebuild isAdd a b ea eb with
+    | none => rw [hd] at he'; simp [DfRes.e?] at he'
+    | some e0 =>
+        rw [hd] at he'
+        have hde : (DfRes.outCh e0).e? = some e0 := rfl
+        rw [hde] at he'
+        obtain rfl : e0 = e' := Option.some.inj he'
+        exact hreb _ hd
+  have hvec : ∀ (s : Array (ZMod p)) (ea eb : Option (DenseExpr p)),
+      (∀ e' : DenseExpr p, ea = some e' → ∀ i ∈ e'.vars, i ∈ a.vars) →
+      (∀ e' : DenseExpr p, eb = some e' → ∀ i ∈ e'.vars, i ∈ b.vars) →
+      ∀ e' : DenseExpr p,
+        (match dfUni s with
+         | some c => DfRes.uni c true
+         | none => DfRes.vec s (dfRebuild isAdd a b ea eb)).e? = some e' →
+        ∀ i ∈ e'.vars, i ∈ (mk a b).vars := by
+    intro s ea eb hA' hB' e' he'
+    have hreb := dfRebuild_vars isAdd mk hvars hmk a b ea eb hA' hB'
+    cases hu : dfUni s with
+    | some c => rw [hu] at he'; exact hconst c e' he'
+    | none =>
+        rw [hu] at he'
+        have hde : (DfRes.vec s (dfRebuild isAdd a b ea eb)).e? = dfRebuild isAdd a b ea eb := rfl
+        rw [hde] at he'
+        exact hreb e' he'
+  unfold dfComb
+  cases ra with
+  | out => cases rb <;> exact hout _ _ hA hB
+  | outCh ea => cases rb <;> exact hout _ _ hA hB
+  | uni x fa =>
+      cases rb with
+      | out => exact hout _ _ hA hB
+      | outCh eb => exact hout _ _ hA hB
+      | uni y fb => exact hconst _
+      | vec vb eb => exact hvec _ _ _ hA hB
+  | vec va ea =>
+      cases rb with
+      | out => exact hout _ _ hA hB
+      | outCh eb => exact hout _ _ hA hB
+      | uni y fb => exact hvec _ _ _ hA hB
+      | vec vb eb => exact hvec _ _ _ hA hB
+
+/-- The classified columns carry no rewrite. -/
+theorem dfColRes_e? (survs : Array (List (ZMod p))) (k : Nat) (j : Nat) :
+    ((dfColRes survs k).getD j (.out : DfRes p)).e? = none := by
+  rw [dfColRes, Array.getD_eq_getD_getElem?, Array.getElem?_map, Array.getElem?_range]
+  by_cases hj : j < k
+  · rw [if_pos hj]
+    show ((match dfUni (survs.map (fun s => denseLookupIxV (zmodZeroP p) s (k - 1 - j))) with
+      | some c => DfRes.uni c false
+      | none => DfRes.vec _ none) : DfRes p).e? = none
+    cases hu : dfUni (survs.map (fun s => denseLookupIxV (zmodZeroP p) s (k - 1 - j))) <;> rfl
+  · rw [if_neg hj]; rfl
+
+/-- The traversal introduces no variable. -/
+theorem dfGo_vars (ctx : DfCtx p) (hcol : ∀ j : Nat, ((ctx.colRes.getD j .out).e?) = none) :
+    ∀ (e e' : DenseExpr p), (dfGo ctx e).e? = some e' → ∀ i ∈ e'.vars, i ∈ e.vars := by
+  intro e
+  induction e with
+  | const c => intro e' he'; simp [dfGo, DfRes.e?] at he'
+  | var y =>
+      intro e' he'
+      rw [dfGo] at he'
+      cases hslot : dfSlotGo ctx.keys y.index 0 with
+      | none => rw [hslot] at he'; simp [DfRes.e?] at he'
+      | some j => rw [hslot, hcol j] at he'; exact absurd he' (by simp)
+  | add a b iha ihb =>
+      intro e' he'
+      rw [dfGo] at he'
+      exact dfComb_vars true DenseExpr.add (fun _ _ => rfl) (fun _ _ => rfl) a b _ _ iha ihb e' he'
+  | mul a b iha ihb =>
+      intro e' he'
+      rw [dfGo] at he'
+      exact dfComb_vars false DenseExpr.mul (fun _ _ => rfl) (fun _ _ => rfl) a b _ _ iha ihb e' he'
+
+theorem dfRewrite_vars (ctx : DfCtx p) (hcol : ∀ j : Nat, ((ctx.colRes.getD j .out).e?) = none)
+    (e e' : DenseExpr p) (h : dfRewrite ctx e = some e') : ∀ i ∈ e'.vars, i ∈ e.vars :=
+  dfGo_vars ctx hcol e e' h
+
+theorem dfRewriteList_vars (ctx : DfCtx p)
+    (hcol : ∀ j : Nat, ((ctx.colRes.getD j .out).e?) = none) :
+    ∀ (es es' : List (DenseExpr p)), dfRewriteList ctx es = some es' →
+      ∀ (i : VarId), (∃ e' ∈ es', i ∈ e'.vars) → ∃ e ∈ es, i ∈ e.vars := by
+  intro es
+  induction es with
+  | nil => intro es' h; simp [dfRewriteList] at h
+  | cons e rest ih =>
+      intro es' h
+      rw [dfRewriteList] at h
+      cases hr : dfRewrite ctx e with
+      | none =>
+          cases hrs : dfRewriteList ctx rest with
+          | none => rw [hr, hrs] at h; exact absurd h (by simp)
+          | some rest' =>
+              rw [hr, hrs] at h
+              simp only [Option.some.injEq] at h
+              subst h
+              intro i hi
+              obtain ⟨e0, he0, hie⟩ := hi
+              rcases List.mem_cons.1 he0 with rfl | hmem
+              · exact ⟨e0, List.mem_cons_self .., hie⟩
+              · obtain ⟨e1, he1, hie1⟩ := ih rest' hrs i ⟨e0, hmem, hie⟩
+                exact ⟨e1, List.mem_cons_of_mem _ he1, hie1⟩
+      | some e' =>
+          cases hrs : dfRewriteList ctx rest with
+          | none =>
+              rw [hr, hrs] at h
+              simp only [Option.some.injEq] at h
+              subst h
+              intro i hi
+              obtain ⟨e0, he0, hie⟩ := hi
+              rcases List.mem_cons.1 he0 with rfl | hmem
+              · exact ⟨e, List.mem_cons_self .., dfRewrite_vars ctx hcol e _ hr i hie⟩
+              · exact ⟨e0, List.mem_cons_of_mem _ hmem, hie⟩
+          | some rest' =>
+              rw [hr, hrs] at h
+              simp only [Option.some.injEq] at h
+              subst h
+              intro i hi
+              obtain ⟨e0, he0, hie⟩ := hi
+              rcases List.mem_cons.1 he0 with rfl | hmem
+              · exact ⟨e, List.mem_cons_self .., dfRewrite_vars ctx hcol e _ hr i hie⟩
+              · obtain ⟨e1, he1, hie1⟩ := ih rest' hrs i ⟨e0, hmem, hie⟩
+                exact ⟨e1, List.mem_cons_of_mem _ he1, hie1⟩
+
+theorem dfRewriteBi_vars (ctx : DfCtx p)
+    (hcol : ∀ j : Nat, ((ctx.colRes.getD j .out).e?) = none)
+    (bi bi' : BusInteraction (DenseExpr p)) (h : dfRewriteBi ctx bi = some bi') :
+    ∀ i ∈ denseBIVars bi', i ∈ denseBIVars bi := by
+  rw [dfRewriteBi] at h
+  have hshape : bi' = { bi with
+      multiplicity := (dfRewrite ctx bi.multiplicity).getD bi.multiplicity,
+      payload := (dfRewriteList ctx bi.payload).getD bi.payload } := by
+    cases hm : dfRewrite ctx bi.multiplicity with
+    | none =>
+        cases hp : dfRewriteList ctx bi.payload with
+        | none => rw [hm, hp] at h; exact absurd h (by simp)
+        | some pl' => rw [hm, hp] at h; exact (Option.some.inj h).symm
+    | some m' => rw [hm] at h; exact (Option.some.inj h).symm
+  subst hshape
+  intro i hi
+  rw [denseBIVars, List.mem_append] at hi ⊢
+  rcases hi with hi | hi
+  · refine Or.inl ?_
+    cases hm : dfRewrite ctx bi.multiplicity with
+    | none => rw [hm] at hi; exact hi
+    | some m' => rw [hm] at hi; exact dfRewrite_vars ctx hcol _ m' hm i hi
+  · rw [List.mem_flatMap] at hi
+    obtain ⟨e', he', hie⟩ := hi
+    cases hp : dfRewriteList ctx bi.payload with
+    | none =>
+        rw [hp] at he'
+        exact Or.inr (List.mem_flatMap.2 ⟨e', he', hie⟩)
+    | some pl' =>
+        rw [hp] at he'
+        obtain ⟨e0, he0, hie0⟩ := dfRewriteList_vars ctx hcol bi.payload pl' hp i ⟨e', he', hie⟩
+        exact Or.inr (List.mem_flatMap.2 ⟨e0, he0, hie0⟩)
+
+/-! ## One target's fold -/
+
+/-- Every covered constraint vanishes — the anchor both sides of a step supply, since the fold
+    leaves covered constraints exactly where they are. -/
+def DfCovered (keys : Array VarId) (cs : Array (DenseExpr p)) (denv : VarId → ZMod p) : Prop :=
+  ∀ c ∈ cs, dfCoveredBy keys c = true → c.eval denv = 0
+
+/-- Under the anchor, the real assignment's key values are one of the enumerated survivors, so the
+    traversal's columns describe it. -/
+theorem dfPlan_colRes [Fact p.Prime] (ix : DfIdx p) (keys : Array VarId)
+    (cs : Array (DenseExpr p)) (doms : Array (List (ZMod p))) (denv : VarId → ZMod p)
+    (htbl : ∀ (v : VarId) (dm : DfDom p), ix.doms[v.index]? = some (some dm) →
+      denseRootsIn v dm.src = some dm.vals)
+    (hkd : dfKeyDoms ix.doms keys cs = some doms)
+    (hA : DfCovered keys cs denv)
+    (filters : List (Nat × IExpr p))
+    (hfilters : ∀ mie ∈ filters, mie.1 < keys.size ∧ ∃ c : DenseExpr p,
+      (∃ q : Nat, cs[q]? = some c) ∧ dfCoveredBy keys c = true ∧
+      denseCompileE (dfRKeys keys mie.1) c = some mie.2) :
+    ∃ t : Nat, ∀ (j : Nat) (hj : j < keys.size),
+      DfOk denv t (.var (keys[j]'hj))
+        ((dfColRes (dfEnumGo (zmodZeroP p) (dfLevels keys.size filters
+          (Array.replicate keys.size [])) doms keys.size 0 #[[]]) keys.size).getD j .out) := by
+  -- each key's value lies in its domain, because the entailing constraint is covered and present
+  have hdom : ∀ j, j < keys.size → denv (keys.getD j ⟨0⟩) ∈ doms.getD j [] := by
+    intro j hj
+    obtain ⟨dm, htblj, hvals, hsrc, hcov⟩ := dfKeyDoms_spec ix.doms keys cs doms hkd j hj
+    have hroots : denseRootsIn (keys[j]'hj) dm.src = some dm.vals := htbl _ dm htblj
+    have hzero : dm.src.eval denv = 0 :=
+      hA dm.src (Array.mem_iff_getElem?.2 ⟨dm.pos, hsrc⟩) hcov
+    rw [hvals, Array.getD_eq_getD_getElem?, Array.getElem?_eq_getElem hj]
+    exact denseRootsIn_sound _ dm.src dm.vals hroots denv hzero
+  -- every filter of a level vanishes on the real prefix of that level
+  have hfil : ∀ j, j < keys.size →
+      dfAllZero (zmodZeroP p) (denv (keys.getD j ⟨0⟩)) (dfPref keys denv j)
+        ((dfLevels keys.size filters (Array.replicate keys.size [])).getD j []) = true := by
+    intro j hj
+    refine dfAllZero_of _ _ _ ?_
+    intro ie hie
+    have hP : ∀ (j' : Nat) (ie' : IExpr p), ie' ∈ (dfLevels keys.size filters
+        (Array.replicate keys.size [])).getD j' [] →
+        ∃ c : DenseExpr p, dfCoveredBy keys c = true ∧ c.eval denv = 0 ∧
+          denseCompileE (dfRKeys keys j') c = some ie' := by
+      refine dfLevels_spec keys.size
+        (fun j' ie' => ∃ c : DenseExpr p, dfCoveredBy keys c = true ∧ c.eval denv = 0 ∧
+          denseCompileE (dfRKeys keys j') c = some ie') filters _ ?_ ?_
+      · intro mie hmie
+        obtain ⟨hlt, c, ⟨q, hq⟩, hcov, hce⟩ := hfilters mie hmie
+        exact ⟨hlt, c, hcov, hA c (Array.mem_iff_getElem?.2 ⟨q, hq⟩) hcov, hce⟩
+      · intro j' ie' hie'
+        rw [Array.getD_eq_getD_getElem?, Array.getElem?_replicate] at hie'
+        split at hie' <;> simp at hie'
+    obtain ⟨c, hcov, hzero, hce⟩ := hP j ie hie
+    -- the level-`j` point is the values of `dfRKeys keys j`, the list `ie` was compiled against
+    have hpt : denv (keys.getD j ⟨0⟩) :: dfPref keys denv j = (dfRKeys keys j).map denv := by
+      rw [← dfPref_eq_map keys denv j]; rfl
+    rw [hpt, denseCompileE_evalV denseZModOps (dfRKeys keys j) _ c ie hce]
+    rw [DenseExpr.eval_congr c _ denv (fun v hv =>
+      denseEnvOfKeysV_map denv (dfRKeys keys j) v (denseCompileE_vars (dfRKeys keys j) c ie hce v hv))]
+    exact hzero
+  -- so the real point survives the enumeration
+  have hmem : dfPref keys denv keys.size ∈ dfEnumGo (zmodZeroP p)
+      (dfLevels keys.size filters (Array.replicate keys.size [])) doms keys.size 0 #[[]] :=
+    dfEnumGo_mem _ doms keys.size keys denv hdom hfil keys.size 0 #[[]] (by omega) (by omega)
+      (by show dfPref keys denv 0 ∈ (#[[]] : Array (List (ZMod p))); simp [dfPref])
+  obtain ⟨t, ht⟩ := Array.mem_iff_getElem?.1 hmem
+  exact ⟨t, dfColRes_ok _ keys denv t ht⟩
+
+/-- One target is a correct step. -/
+theorem dfPlan_correct [Fact p.Prime] (bs : BusSemantics p) (isInput : VarId → Bool)
+    (ix : DfIdx p) (keys : Array VarId) (cs : Array (DenseExpr p))
+    (bis : Array (BusInteraction (DenseExpr p)))
+    (htbl : ∀ (v : VarId) (dm : DfDom p), ix.doms[v.index]? = some (some dm) →
+      denseRootsIn v dm.src = some dm.vals) :
+    DensePassCorrect isInput ⟨cs.toList, bis.toList⟩
+      ⟨(dfApplyCs cs (dfPlan ix keys cs bis).1).toList,
+       (dfApplyBis bis (dfPlan ix keys cs bis).2).toList⟩ [] bs := by
+  rw [dfPlan]
+  split
+  · exact DensePassCorrect_refl isInput _ bs
+  · rename_i doms hkd
+    split
+    · exact DensePassCorrect_refl isInput _ bs
+    · dsimp only
       split
-      · split
-        · exact denseFoldOutArrV_eq d fidx xs _ harr hbis
-        · rfl
-      · rfl
+      · exact DensePassCorrect_refl isInput _ bs
+      · rename_i hbox _
+        set touched := dfTouched ix.csB keys with htouched
+        set fs := dfCovScan keys ix.src cs touched 0 [] [] with hfs
+        set survs := dfEnumGo (zmodZeroP p)
+          (dfLevels keys.size fs.2 (Array.replicate keys.size [])) doms keys.size 0 #[[]]
+          with hsurvs
+        set ctx : DfCtx p := ⟨keys, dfColRes survs keys.size⟩ with hctx
+        -- the filters are covered constraints of the current system
+        have hfilters : ∀ mie ∈ fs.2, mie.1 < keys.size ∧ ∃ c : DenseExpr p,
+            (∃ q : Nat, cs[q]? = some c) ∧ dfCoveredBy keys c = true ∧
+            denseCompileE (dfRKeys keys mie.1) c = some mie.2 :=
+          dfCovScan_filters keys ix.src cs touched touched.size 0 [] [] (by omega)
+            (fun _ h => by simp at h)
+        -- the anchor: every covered constraint vanishes, on either side of the step
+        have hcovNotFold : ∀ q ∈ fs.1,
+            dfCoveredBy keys (cs.getD q (.const (zmodZeroP p))) = false :=
+          dfCovScan_fold keys ix.src cs touched touched.size 0 [] [] (by omega)
+            (fun _ h => by simp at h)
+        have hAin : ∀ denv : VarId → ZMod p, (∀ c ∈ cs.toList, c.eval denv = 0) →
+            DfCovered keys cs denv := by
+          intro denv hall c hc _
+          exact hall c (by simpa using hc)
+        have hAout : ∀ denv : VarId → ZMod p,
+            (∀ c ∈ (dfApplyCs cs (dfCollectCs ctx cs fs.1 [])).toList, c.eval denv = 0) →
+            DfCovered keys cs denv := by
+          intro denv hall c hc hcov
+          obtain ⟨q, hq⟩ := Array.mem_iff_getElem?.1 hc
+          have hqnot : ∀ e : DenseExpr p, (q, e) ∉ dfCollectCs ctx cs fs.1 [] := by
+            intro e hmem
+            obtain ⟨hin, _⟩ := dfCollectCs_mem_fold ctx cs fs.1 (q, e) hmem
+            have hf := hcovNotFold q hin
+            rw [Array.getD_eq_getD_getElem?, hq] at hf
+            simp only [Option.getD_some] at hf
+            rw [hf] at hcov
+            exact absurd hcov (by simp)
+          rcases dfApplyCs_getElem? (dfCollectCs ctx cs fs.1 []) cs q with h | ⟨e, hmem, he⟩
+          · refine hall c (List.mem_iff_getElem?.2 ⟨q, ?_⟩)
+            rw [Array.getElem?_toList, h, hq]
+          · exact absurd hmem (hqnot e)
+        refine dfStep_general bs isInput cs bis _ _ (DfCovered keys cs) hAout hAin ?_ ?_ ?_ ?_
+        · -- constraint agreement
+          intro denv hA q e hmem c hc
+          obtain ⟨_, hrw⟩ := dfCollectCs_mem_fold ctx cs fs.1 (q, e) hmem
+          obtain ⟨t, hcol⟩ := dfPlan_colRes ix keys cs doms denv htbl hkd hA fs.2 hfilters
+          rw [Array.getD_eq_getD_getElem?, hc] at hrw
+          exact (dfRewrite_ok ctx denv t (by rw [hctx]; exact hcol) c e hrw).1
+        · -- constraint variables
+          intro q e hmem c hc
+          obtain ⟨_, hrw⟩ := dfCollectCs_mem_fold ctx cs fs.1 (q, e) hmem
+          rw [Array.getD_eq_getD_getElem?, hc] at hrw
+          exact dfGo_vars ctx (fun j => by rw [hctx]; exact dfColRes_e? _ _ j) c e hrw
+        · -- interaction agreement
+          intro denv hA q b hmem bi hbi
+          obtain ⟨bi0, hbi0, hrw⟩ := dfCollectBis_spec ctx bis (dfTouched ix.bisB keys)
+            (dfTouched ix.bisB keys).size 0 [] (by omega) (fun _ h => by simp at h) (q, b) hmem
+          rw [hbi] at hbi0
+          obtain rfl : bi = bi0 := Option.some.inj hbi0
+          obtain ⟨t, hcol⟩ := dfPlan_colRes ix keys cs doms denv htbl hkd hA fs.2 hfilters
+          exact (dfRewriteBi_ok ctx denv t (by rw [hctx]; exact hcol) bi b hrw).1
+        · -- interaction variables
+          intro q b hmem bi hbi
+          obtain ⟨bi0, hbi0, hrw⟩ := dfCollectBis_spec ctx bis (dfTouched ix.bisB keys)
+            (dfTouched ix.bisB keys).size 0 [] (by omega) (fun _ h => by simp at h) (q, b) hmem
+          rw [hbi] at hbi0
+          obtain rfl : bi = bi0 := Option.some.inj hbi0
+          exact dfRewriteBi_vars ctx (fun j => by rw [hctx]; exact dfColRes_e? _ _ j) bi b hrw
 
-/-- The array-native loop lands on the list loop's output arrays. -/
-theorem denseFoldLoopArrV_eq :
-    ∀ (targets : List (List VarId)) (d : DenseConstraintSystem p) (fidx : DenseFoldIdx p),
-      fidx.arr = d.algebraicConstraints.toArray →
-      fidx.arrBis = d.busInteractions.toArray →
-      (denseFoldLoopArrV targets fidx).arr
-          = (denseFoldLoopV targets d fidx).algebraicConstraints.toArray
-        ∧ (denseFoldLoopArrV targets fidx).arrBis
-          = (denseFoldLoopV targets d fidx).busInteractions.toArray := by
+
+/-! ## The target loop -/
+
+theorem dfLoop_correct [Fact p.Prime] (bs : BusSemantics p) (isInput : VarId → Bool)
+    (csB bisB : Array (Array Nat)) (tbl : Array (Option (DfDom p))) (src : Array Nat)
+    (htbl : ∀ (v : VarId) (dm : DfDom p), tbl[v.index]? = some (some dm) →
+      denseRootsIn v dm.src = some dm.vals) :
+    ∀ (targets : List (Array VarId)) (cs : Array (DenseExpr p))
+      (bis : Array (BusInteraction (DenseExpr p))) (ch : Bool),
+      DensePassCorrect isInput ⟨cs.toList, bis.toList⟩
+        ⟨(dfLoop ⟨csB, bisB, tbl, src⟩ targets cs bis ch).1.toList,
+         (dfLoop ⟨csB, bisB, tbl, src⟩ targets cs bis ch).2.1.toList⟩ [] bs := by
   intro targets
   induction targets with
-  | nil => intro d fidx harr hbis; exact ⟨harr, hbis⟩
-  | cons xs rest ih =>
-      intro d fidx harr hbis
-      show (denseFoldLoopArrV rest (denseFoldStepArrV fidx xs)).arr
-            = (denseFoldLoopV rest (denseFoldStepV d fidx xs).1
-                (denseFoldStepV d fidx xs).2).algebraicConstraints.toArray
-          ∧ (denseFoldLoopArrV rest (denseFoldStepArrV fidx xs)).arrBis
-            = (denseFoldLoopV rest (denseFoldStepV d fidx xs).1
-                (denseFoldStepV d fidx xs).2).busInteractions.toArray
-      rw [denseFoldStepArrV_eq d fidx xs harr hbis]
-      exact ih (denseFoldStepV d fidx xs).1 (denseFoldStepV d fidx xs).2
-        (denseFoldStepV_snd_arr d fidx xs harr) (denseFoldStepV_snd_arrBis d fidx xs hbis)
+  | nil => intro cs bis ch; exact DensePassCorrect_refl isInput _ bs
+  | cons keys rest ih =>
+      intro cs bis ch
+      rw [dfLoop]
+      by_cases hempty : ((dfPlan ⟨csB, bisB, tbl, src⟩ keys cs bis).1.isEmpty &&
+          (dfPlan ⟨csB, bisB, tbl, src⟩ keys cs bis).2.isEmpty) = true
+      · rw [if_pos hempty]
+        exact ih cs bis ch
+      · rw [if_neg hempty]
+        exact DensePassCorrect.trans
+          (dfPlan_correct bs isInput ⟨csB, bisB, tbl, src⟩ keys cs bis htbl) (ih _ _ true)
 
-/-- The pass transform with the array-native loop, installed as `denseDomainFoldFV`'s compiled
-    body. Every call site keeps the list-loop specification for its proofs. -/
-@[csimp] theorem denseDomainFoldFV_eq_fast : @denseDomainFoldFV = @denseDomainFoldFVFast := by
-  funext p pw d
-  unfold denseDomainFoldFV denseDomainFoldFVFast
-  by_cases hpB : pw.isPrime = true
-  · rw [if_pos hpB, if_pos hpB]
-    by_cases hthr : domainFoldTargetIndexThreshold ≤ (denseTargetsV d).length
-    · rw [if_pos hthr, if_pos hthr]
-      obtain ⟨h1, h2⟩ := denseFoldLoopArrV_eq (denseTargetsV d) d (DenseFoldIdx.mk' d) rfl rfl
-      show denseFoldLoopV (denseTargetsV d) d (DenseFoldIdx.mk' d)
-          = { algebraicConstraints :=
-                (denseFoldLoopArrV (denseTargetsV d) (DenseFoldIdx.mk' d)).arr.toList,
-              busInteractions :=
-                (denseFoldLoopArrV (denseTargetsV d) (DenseFoldIdx.mk' d)).arrBis.toList }
-      rw [h1, h2, List.toList_toArray, List.toList_toArray]
-    · rw [if_neg hthr, if_neg hthr]
-  · rw [if_neg hpB, if_neg hpB]
+/-! ## Coverage preservation -/
 
-/-- The registered domain-fold pass (transform `denseDomainFoldFV`, `DomainFoldRuntime.lean`). -/
+theorem dfRewrite_covered (reg : VarRegistry) (ctx : DfCtx p)
+    (hcol : ∀ j : Nat, ((ctx.colRes.getD j .out).e?) = none)
+    {e e' : DenseExpr p} (h : dfRewrite ctx e = some e') (hc : e.CoveredBy reg) :
+    e'.CoveredBy reg :=
+  fun i hi => hc i (dfRewrite_vars ctx hcol e e' h i hi)
+
+theorem dfApplyCs_covered (reg : VarRegistry) (ctx : DfCtx p)
+    (hcol : ∀ j : Nat, ((ctx.colRes.getD j .out).e?) = none) (cs : Array (DenseExpr p))
+    (fold : List Nat) (hcs : ∀ c ∈ cs.toList, c.CoveredBy reg) :
+    ∀ c ∈ (dfApplyCs cs (dfCollectCs ctx cs fold [])).toList, c.CoveredBy reg := by
+  intro c hc
+  obtain ⟨q, hq⟩ := List.mem_iff_getElem?.1 hc
+  rw [Array.getElem?_toList] at hq
+  rcases dfApplyCs_getElem? (dfCollectCs ctx cs fold []) cs q with h | ⟨e, hmem, he⟩
+  · rw [h] at hq
+    exact hcs c (List.mem_iff_getElem?.2 ⟨q, by rw [Array.getElem?_toList]; exact hq⟩)
+  · rw [he] at hq
+    obtain hec : e = c := Option.some.inj hq
+    rw [hec] at hmem
+    obtain ⟨_, hrw⟩ := dfCollectCs_mem_fold ctx cs fold (q, c) hmem
+    have hin : q < cs.size := by
+      by_contra hcon
+      rw [Array.getD_eq_getD_getElem?, Array.getElem?_eq_none_iff.2 (by omega)] at hrw
+      simp [dfRewrite, dfGo, DfRes.e?] at hrw
+    rw [Array.getD_eq_getD_getElem?, Array.getElem?_eq_getElem hin] at hrw
+    exact dfRewrite_covered reg ctx hcol hrw
+      (hcs cs[q] (List.mem_iff_getElem?.2 ⟨q, by
+        rw [Array.getElem?_toList]; exact Array.getElem?_eq_getElem hin⟩))
+
+theorem dfApplyBis_covered (reg : VarRegistry) (ctx : DfCtx p)
+    (hcol : ∀ j : Nat, ((ctx.colRes.getD j .out).e?) = none)
+    (bis : Array (BusInteraction (DenseExpr p))) (touched : Array Nat)
+    (hbis : ∀ bi ∈ bis.toList, bi.multiplicity.CoveredBy reg ∧
+      ∀ e ∈ bi.payload, e.CoveredBy reg) :
+    ∀ bi ∈ (dfApplyBis bis (dfCollectBis ctx bis 0 touched [])).toList,
+      bi.multiplicity.CoveredBy reg ∧ ∀ e ∈ bi.payload, e.CoveredBy reg := by
+  intro bi' hbi'
+  obtain ⟨q, hq⟩ := List.mem_iff_getElem?.1 hbi'
+  rw [Array.getElem?_toList] at hq
+  obtain ⟨bi0, hbi0, hsub⟩ :=
+    dfApplyBis_vars bis (dfCollectBis ctx bis 0 touched []) bis rfl
+      (fun q bi bi0 h1 h2 => by rw [h1] at h2; rw [Option.some.inj h2]; exact fun i hi => hi)
+      (fun qb hqb bi0 hbi0 => by
+        obtain ⟨bi1, hbi1, hrw⟩ := dfCollectBis_spec ctx bis touched touched.size 0 []
+          (by omega) (fun _ h => by simp at h) qb hqb
+        rw [hbi0] at hbi1
+        obtain rfl : bi0 = bi1 := Option.some.inj hbi1
+        exact dfRewriteBi_vars ctx hcol bi0 qb.2 hrw)
+      q bi' hq
+  obtain ⟨hm, hp⟩ := hbis bi0 (List.mem_iff_getElem?.2 ⟨q, by
+    rw [Array.getElem?_toList]; exact hbi0⟩)
+  refine ⟨fun i hi => ?_, fun e he i hi => ?_⟩
+  · refine (by
+      rcases List.mem_append.1 (hsub i (by rw [denseBIVars, List.mem_append]; exact Or.inl hi))
+        with h1 | h1
+      · exact hm i h1
+      · obtain ⟨e0, he0, hie0⟩ := List.mem_flatMap.1 h1
+        exact hp e0 he0 i hie0)
+  · refine (by
+      rcases List.mem_append.1 (hsub i (by
+        rw [denseBIVars, List.mem_append]
+        exact Or.inr (List.mem_flatMap.2 ⟨e, he, hi⟩))) with h1 | h1
+      · exact hm i h1
+      · obtain ⟨e0, he0, hie0⟩ := List.mem_flatMap.1 h1
+        exact hp e0 he0 i hie0)
+
+theorem dfLoop_covered (reg : VarRegistry) (csB bisB : Array (Array Nat))
+    (tbl : Array (Option (DfDom p))) (src : Array Nat) :
+    ∀ (targets : List (Array VarId)) (cs : Array (DenseExpr p))
+      (bis : Array (BusInteraction (DenseExpr p))) (ch : Bool),
+      (∀ c ∈ cs.toList, c.CoveredBy reg) →
+      (∀ bi ∈ bis.toList, bi.multiplicity.CoveredBy reg ∧ ∀ e ∈ bi.payload, e.CoveredBy reg) →
+      (∀ c ∈ (dfLoop ⟨csB, bisB, tbl, src⟩ targets cs bis ch).1.toList, c.CoveredBy reg) ∧
+      (∀ bi ∈ (dfLoop ⟨csB, bisB, tbl, src⟩ targets cs bis ch).2.1.toList,
+        bi.multiplicity.CoveredBy reg ∧ ∀ e ∈ bi.payload, e.CoveredBy reg) := by
+  intro targets
+  induction targets with
+  | nil => intro cs bis ch hcs hbis; exact ⟨hcs, hbis⟩
+  | cons keys rest ih =>
+      intro cs bis ch hcs hbis
+      rw [dfLoop]
+      by_cases hempty : ((dfPlan ⟨csB, bisB, tbl, src⟩ keys cs bis).1.isEmpty &&
+          (dfPlan ⟨csB, bisB, tbl, src⟩ keys cs bis).2.isEmpty) = true
+      · rw [if_pos hempty]; exact ih cs bis ch hcs hbis
+      · rw [if_neg hempty]
+        refine ih _ _ true ?_ ?_
+        · -- the constraint side of one step
+          rw [dfPlan]
+          split
+          · exact hcs
+          · split
+            · exact hcs
+            · dsimp only
+              split
+              · exact hcs
+              · exact dfApplyCs_covered reg _ (fun j => dfColRes_e? _ _ j) cs _ hcs
+        · rw [dfPlan]
+          split
+          · exact hbis
+          · split
+            · exact hbis
+            · dsimp only
+              split
+              · exact hbis
+              · exact dfApplyBis_covered reg _ (fun j => dfColRes_e? _ _ j) bis _ hbis
+
+/-! ## The pass -/
+
+theorem dfRunWith_correct [Fact p.Prime] (bs : BusSemantics p) (isInput : VarId → Bool)
+    (d : DenseConstraintSystem p) (n : Nat) (svRev : List (Nat × VarId))
+    (dvs : Array (Option (List VarId))) (targets : List (Array VarId)) :
+    DensePassCorrect isInput d (dfRunWith d n svRev dvs targets) [] bs := by
+  rw [dfRunWith]
+  set isTgt := dfMarkKeys targets (Array.replicate n false) with hisTgt
+  set cs := d.algebraicConstraints.toArray with hcsDef
+  set tbl := dfDoms cs isTgt svRev (Array.replicate n none) (Array.replicate n 0) with htblDef
+  set csB := dfCsBuckets isTgt dvs 0 d.algebraicConstraints (Array.replicate n #[]) with hcsB
+  set bisB := dfBisBuckets isTgt 0 d.busInteractions (Array.replicate n #[]) with hbisB
+  have htbl : ∀ (v : VarId) (dm : DfDom p), tbl.1[v.index]? = some (some dm) →
+      denseRootsIn v dm.src = some dm.vals := by
+    intro v dm hv
+    rw [htblDef] at hv
+    exact (dfDoms_sound cs isTgt svRev _ _ (fun w dm' hw => by
+      rw [Array.getElem?_replicate] at hw
+      split at hw <;> simp at hw) v dm hv).1
+  split
+  · have hstep := dfLoop_correct bs isInput csB bisB tbl.1 tbl.2 htbl targets cs
+      d.busInteractions.toArray false
+    simpa [hcsDef] using hstep
+  · exact DensePassCorrect_refl isInput d bs
+
+theorem dfRunWith_covered (reg : VarRegistry) (d : DenseConstraintSystem p) (n : Nat)
+    (svRev : List (Nat × VarId)) (dvs : Array (Option (List VarId)))
+    (targets : List (Array VarId)) (hcov : d.CoveredBy reg) :
+    (dfRunWith d n svRev dvs targets).CoveredBy reg := by
+  rw [dfRunWith]
+  set isTgt := dfMarkKeys targets (Array.replicate n false) with hisTgt
+  set cs := d.algebraicConstraints.toArray with hcsDef
+  set tbl := dfDoms cs isTgt svRev (Array.replicate n none) (Array.replicate n 0) with htblDef
+  set csB := dfCsBuckets isTgt dvs 0 d.algebraicConstraints (Array.replicate n #[]) with hcsB
+  set bisB := dfBisBuckets isTgt 0 d.busInteractions (Array.replicate n #[]) with hbisB
+  split
+  · have h := dfLoop_covered reg csB bisB tbl.1 tbl.2 targets cs d.busInteractions.toArray false
+      (by rw [hcsDef]; simpa using hcov.1) (by simpa using hcov.2)
+    exact ⟨by simpa using h.1, by simpa using h.2⟩
+  · exact hcov
+
+theorem dfRun_correct (pw : PrimeWitness p) (bs : BusSemantics p) (isInput : VarId → Bool)
+    (d : DenseConstraintSystem p) : DensePassCorrect isInput d (dfRun pw d) [] bs := by
+  rw [dfRun]
+  split
+  · rename_i hprime
+    haveI : Fact p.Prime := ⟨pw.correct hprime⟩
+    dsimp only
+    split
+    · exact DensePassCorrect_refl isInput d bs
+    · exact dfRunWith_correct bs isInput d _ _ _ _
+  · exact DensePassCorrect_refl isInput d bs
+
+theorem dfRun_covered (pw : PrimeWitness p) (reg : VarRegistry) (d : DenseConstraintSystem p)
+    (hcov : d.CoveredBy reg) : (dfRun pw d).CoveredBy reg := by
+  rw [dfRun]
+  split
+  · dsimp only
+    split
+    · exact hcov
+    · exact dfRunWith_covered reg d _ _ _ _ hcov
+  · exact hcov
+
+/-- The registered domain-fold pass (transform `dfRun`, `DomainFoldRuntime.lean`). -/
 def denseDomainFoldPassV (pw : PrimeWitness p) : DenseVerifiedPassW p :=
   DenseVerifiedPassW.of
-    (fun _ _ d => denseDomainFoldFV pw d)
+    (fun _ _ d => dfRun pw d)
     (fun _ _ _ => [])
-    (fun reg _ _ d hcov => denseDomainFoldFV_covered pw reg d hcov)
+    (fun reg _ _ d hcov => dfRun_covered pw reg d hcov)
     (fun _ _ _ _ _ => by intro x hx; simp at hx)
-    (fun reg bs _ d _ => denseDomainFoldFV_correct pw bs reg.isInput d)
+    (fun reg bs _ d _ => dfRun_correct pw bs reg.isInput d)
 
 end ApcOptimizer.Dense

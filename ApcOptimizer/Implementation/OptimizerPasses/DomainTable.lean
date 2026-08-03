@@ -20,6 +20,21 @@ variable {p : ℕ}
 
 /-! ## Dense `rootsIn` -/
 
+/-- `a⁻¹`, skipping `ZMod.inv`'s extended gcd for the overwhelmingly common monic coefficient
+    (`ZMod.inv_one`). -/
+def zmodInvFast (a : ZMod p) : ZMod p := if zmodIsOne a then a else a⁻¹
+
+/-- Dictionary-free twin of `denseRootsOfTerms`: the original mentions `⁻¹`, `*`, `+`, `-` and two
+    `≠`, so Lean builds the whole `CommRing (ZMod p)` chain at the head of *every* call — before it
+    even looks at the term list. -/
+def denseRootsOfTermsFast (i : VarId) (c : ZMod p) :
+    List (VarId × ZMod p) → Option (List (ZMod p))
+  | [] => if zmodIsZero c then none else some []
+  | [(j, a)] =>
+      let r := zmodNegP (zmodMulP (zmodInvFast a) c)
+      if j == i && !zmodIsZero a && zmodIsZero (zmodAddP (zmodMulP a r) c) then some [r] else none
+  | _ :: _ :: _ => none
+
 /-- Find the affine root of `c * v + i` if `[(j, a)]` is a single term `j = i` with `a ≠ 0`. -/
 def denseRootsOfTerms (i : VarId) (c : ZMod p) :
     List (VarId × ZMod p) → Option (List (ZMod p))
@@ -28,6 +43,36 @@ def denseRootsOfTerms (i : VarId) (c : ZMod p) :
       let r := -(a⁻¹ * c)
       if j = i ∧ a ≠ 0 ∧ a * r + c = 0 then some [r] else none
   | _ :: _ :: _ => none
+
+theorem zmodInvFast_eq (a : ZMod p) : zmodInvFast a = a⁻¹ := by
+  unfold zmodInvFast
+  by_cases h : zmodIsOne a = true
+  · rw [if_pos h]
+    have ha : a = 1 := by simpa [zmodIsOne_eq] using h
+    rw [ha, ZMod.inv_one]
+  · rw [if_neg h]
+
+theorem denseRootsOfTermsFast_eq (i : VarId) (c : ZMod p) :
+    ∀ l : List (VarId × ZMod p), denseRootsOfTermsFast i c l = denseRootsOfTerms i c l := by
+  intro l
+  match l with
+  | [] => simp [denseRootsOfTermsFast, denseRootsOfTerms, zmodIsZero_eq]
+  | [(j, a)] =>
+      simp only [denseRootsOfTermsFast, denseRootsOfTerms, zmodIsZero_eq, zmodNegP_eq, zmodMulP_eq,
+        zmodAddP_eq, zmodInvFast_eq, beq_iff_eq, Bool.and_eq_true, decide_eq_true_eq,
+        Bool.not_eq_eq_eq_not, Bool.not_true, decide_eq_false_iff_not]
+      by_cases hj : j = i
+      · by_cases ha : a = 0
+        · simp [hj, ha]
+        · by_cases hr : a * -(a⁻¹ * c) + c = 0
+          · simp [hj, ha]
+          · simp [hj, ha]
+      · simp [hj]
+  | _ :: _ :: _ => rfl
+
+@[csimp] theorem denseRootsOfTerms_eq_fast : @denseRootsOfTerms = @denseRootsOfTermsFast := by
+  funext q i c l
+  exact (denseRootsOfTermsFast_eq i c l).symm
 
 /-- The affine root of `i` in `e`, through `denseLinearize` + `DenseLinExpr.norm`. -/
 def denseAffineRootsIn (i : VarId) (e : DenseExpr p) : Option (List (ZMod p)) :=
@@ -337,16 +382,6 @@ def denseCandidates (idx : DenseCovIndex) (xs : List VarId) : List Nat :=
   (xs.flatMap (fun v => idx.buckets.getD v [])) ++ idx.varless
 
 /-! ### `buildStep` bucket projection helpers -/
-
-theorem denseBuildStep_buckets_nil {α : Type} (varsOf : α → List VarId) (ai : α × Nat)
-    (idx : DenseCovIndex) (h : varsOf ai.1 = []) : (denseBuildStep varsOf ai idx).buckets = idx.buckets := by
-  simp only [denseBuildStep, h]
-
-theorem denseBuildStep_buckets_cons {α : Type} (varsOf : α → List VarId) (ai : α × Nat)
-    (idx : DenseCovIndex) (w0 : VarId) (ws : List VarId) (h : varsOf ai.1 = w0 :: ws) :
-    (denseBuildStep varsOf ai idx).buckets
-      = (w0 :: ws).foldl (fun m v => m.insert v (ai.2 :: m.getD v [])) idx.buckets := by
-  simp only [denseBuildStep, h]
 
 /-! ### Dense `ForcedIdx` and its correspondence -/
 

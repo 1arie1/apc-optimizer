@@ -6154,3 +6154,98 @@ Two walks win because `dcAnyVar` exits on the first variable of a removed item a
 walk on a kept one.
 
 **Worked: yes.**
+
+### 167. Runtime: domainFold rebuilt over index-keyed tables and one fused traversal (0.23–0.36x on the pass, sha256 total 0.92x)
+
+**Idea.** Nothing in `domainFold` was superlinear; everything was redundant. Per invocation it walked
+and deduplicated every item's variables **three** times (`denseSvSet`, `denseTargetsV`,
+`denseDedupVarsOf`), re-linearized candidate constraints once per (target, variable) pair inside
+`denseFindDomainAlg`, evaluated every candidate node over the survivors in the no-op gate and then
+*again* in the rewrite, re-compiled each subexpression inside `denseConstOnSurvsV`, and re-walked
+`varsInF xs` at every node (O(size²) per item).
+
+Two measured invariants make all of it cacheable, and they are what the rebuild rests on:
+
+1. **Domains come only from single-variable constraints.** Instrumented over openvm-eth, wasm-eth,
+   keccak, sha256 and SP1 keccak, every cleanup invocation: the domain `denseFindDomainAlg` picks is
+   *identical* to "first single-variable constraint with roots" for every target variable
+   (`domMismatch=0`, `domMissing=0`).
+2. **Such a constraint is never rewritten by this pass**: for a target it is either covered (kept
+   verbatim) or shares no variable (untouched).
+
+**What the pass is now.** One invocation builds, keyed by `VarId.index` into flat arrays:
+`dfScanGo` (one traversal: per-item distinct variables — ascending, aborting past the 8-variable cap
+— the single-variable constraints, and the canonical target keys, so no `mergeSort` and no hashing:
+candidate dedup buckets by the key's smallest variable index), `dfCsBuckets`/`dfBisBuckets` (position
+buckets restricted to target variables, replaying the scan's variable lists), and `dfDoms` (one
+`denseRootsIn` per target variable). Then per target: a k-way merge of the ascending buckets for the
+touched positions, one fused `dfCovScan` for the covered set and the compiled filters, a level-by-
+level enumeration that shares each partial point's prefix and drops the domain-source constraints
+from the filter set (they are zero at every box point by construction — 72 % of the covered set on
+sha256), and **one** bottom-up traversal (`dfGo`) that carries each node's survivor-value class
+(`out` / `uni` / `vec`) *and* its rewrite. A `uni` class **is** "constant on every survivor", so the
+quadratic `varsInF` re-walks, the per-node re-compilation and the per-node re-evaluation all
+disappear; `out` is a nullary constructor and a folded node's rewrite is rebuilt on demand, so the
+traversal allocates nothing at a node it does not change. Both the enumeration and the fold call
+`zmodAddP`/`zmodMulP`/`zmodIsZero` directly — a `DenseZModOps` field is a *closure*, and that alone
+was 26 % of the enumeration.
+
+**Cross-cutting fix found by the same measurement.** `denseRootsOfTerms` mentions `⁻¹`, `*`, `+`, `-`
+and two `≠`, so Lean emitted the whole `CommRing (ZMod p)` chain (7 dictionary constructions) at the
+head of *every* call — before looking at the term list — plus an extended-gcd `ZMod.inv` per affine
+root. `denseRootsOfTermsFast` is the dictionary-free `@[csimp]` twin, with
+`zmodInvFast a = if zmodIsOne a then a else a⁻¹` skipping the gcd for a monic coefficient
+(`ZMod.inv_one`; `monicScale` makes that the common case). It is shared: **flagFold also drops
+1286 → 1095 ms on sha256** and 104 → 89 ms on keccak.
+
+MEASURED (this box, serial, interleaved; sha256 single-shot), pass / total, against `origin/main`:
+
+| case | pass | ratio | total | ratio |
+|---|---:|---:|---:|---:|
+| sha256 `apc_001` | 3 434 → **1 233** | **0.36x** | 35 164 → 32 426 | **0.92x** |
+| keccak `apc_001` | 372 → **120** | **0.32x** | 3 282 → 3 005 | 0.92x |
+| wasm-eth `apc_036` | 352 → **94** | **0.27x** | 3 744 → 3 440 | 0.92x |
+| openvm-eth `apc_009` | 93 → **21** | **0.23x** | 652 → 562 | 0.86x |
+
+Per phase on sha256 `apc_001` (throwaway `IO` probe, summed over all cleanup invocations, ms):
+targets 516 → 236, index build 493 → 135, covered set 119 → 98, domains 536 → 112, survivors
+903 → 427, no-op gate + rewrite 628 → 215.
+
+**Effectiveness: identical** variable / constraint / bus counts on **all 303 local corpus cases**
+(202 OpenVM + 101 SP1), despite two deliberate semantic changes: the unindexed path for runs with at
+most one candidate group is gone (with the index this cheap there is no crossover), and so is the
+per-item `anyVarIn` gate (an item is only visited because a bucket named it; dropping the gate only
+lets a variable-free subexpression in a *stale* bucket entry fold, which is sound and which
+`constFold*` would do in the same cycle anyway).
+
+**The proof story.** The old engine's `DensePassCorrect` came from `DensePassCorrect.ofEvalAgree`,
+which needs the output's interactions to be a `map` of the input's — false for a *positional* rewrite,
+and provable only via bucket completeness. `dfStep_general` replaces it: same four obligations from
+*position-wise* agreement (equal length, entries agreeing under an anchor), so **no index property is
+ever proven** — a missing bucket entry can only skip a fold. The anchor is
+`DfCovered` ("every covered constraint vanishes"), which holds on either side of a step because
+`dfCovScan` never puts a covered position in the fold list. The one place the domain table could have
+forced an index argument — its entries were built from the *original* system — is handled by
+re-checking at use instead: `dfKeyDoms` requires the entailing constraint to still sit at its
+position and be covered by the keys, which is two cheap walks per (target, key) and costs nothing
+measurable. `denseCompileE`-against-`dfRKeys` (the reversed key prefix a level-`m` point is the
+values of) makes the level-relative re-indexing *be* a compile, so the existing
+`denseCompileE_evalV` discharges filter evaluation with no new lemma.
+
+**Measured dead end (do not re-propose without an affine corpus): solving the last key instead of
+enumerating it.** A filter affine in its level's key with invertible coefficient `c` admits only
+`v = -(c⁻¹·rest)`, so the level could evaluate once and test domain membership. Built it
+(`dfCoeff0` static coefficient extraction, per-level solver, `dfExtSolved`) — **it regressed**:
+keccak 134 → 149 ms (1.11x), wasm-eth `apc_036` 90 → 93, openvm-eth `apc_009` 29 → 31. Why: the
+covered constraints are **quadratic or worse in their largest key** (83 % in the first invocation,
+**100 % in every later one** — they are products, not sums), and where a filter *is* affine the
+last-level domain has 2–3 values, so one evaluation plus an inverse plus a membership test saves
+nothing. `dfCoeff0` costs a walk per filter per target, which is the regression.
+
+**Also measured, also dead: prefix pruning.** 119 231 extensions against a 108 708-point box on
+keccak — i.e. *no* pruning, because 66 % of the filters close at the last level (widths 3–8 keys over
+4–5-key targets). The level structure is kept because it costs nothing, but reordering keys to close
+filters early is worth at most ~2x (the last level is half the tree) and would thread a permutation
+through the compile, the columns and the proof.
+
+**Worked: yes.**
