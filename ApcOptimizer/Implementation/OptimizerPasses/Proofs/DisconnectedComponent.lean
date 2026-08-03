@@ -274,14 +274,18 @@ theorem denseDropGuarded_correct (bs : BusSemantics p) (facts : BusFacts p bs)
 theorem denseDisconnectedF_covered {reg : VarRegistry} (bs : BusSemantics p) (facts : BusFacts p bs)
     (d : DenseConstraintSystem p) (hc : d.CoveredBy reg) :
     (denseDisconnectedF bs facts d).CoveredBy reg := by
-  unfold denseDisconnectedF
-  exact denseDropGuarded_covered bs facts d _ hc
+  unfold denseDisconnectedF denseDropWithTable
+  split_ifs with h
+  · exact hc
+  · exact denseDropGuarded_covered bs facts d _ hc
 
 theorem denseDisconnectedF_correct (bs : BusSemantics p) (facts : BusFacts p bs)
     (isInput : VarId → Bool) (d : DenseConstraintSystem p) :
     DensePassCorrect isInput d (denseDisconnectedF bs facts d) [] bs := by
-  unfold denseDisconnectedF
-  exact denseDropGuarded_correct bs facts isInput d _
+  unfold denseDisconnectedF denseDropWithTable
+  split_ifs with h
+  · exact DensePassCorrect.refl isInput d bs
+  · exact denseDropGuarded_correct bs facts isInput d _
 
 /-- The dense disconnected-component pass (see `denseDisconnectedF`). -/
 def denseDisconnectedPass : DenseVerifiedPassW p :=
