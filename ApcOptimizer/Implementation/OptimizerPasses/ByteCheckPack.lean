@@ -42,12 +42,9 @@ def denseCmpFolded (e : DenseExpr p) (c : ZMod p) : Bool := e.constValue? == som
     constant slots with `cmp`: the recognized `DenseByteShape` with the spec and decoded operands,
     or `none`. Sound for any `cmp` whose hits pin evaluation (`denseByteShape?_sound`,
     `Proofs/ByteCheckPack.lean`). -/
-def denseByteShape? (cmp : DenseExpr p → ZMod p → Bool) (bs : BusSemantics p)
-    (facts : BusFacts p bs) (bi : BusInteraction (DenseExpr p)) :
+def denseByteShapeWith? (cmp : DenseExpr p → ZMod p → Bool) (spec : ByteXorSpec p)
+    (bi : BusInteraction (DenseExpr p)) :
     Option (DenseByteShape × ByteXorSpec p × DenseExpr p × DenseExpr p) :=
-  match facts.byteXorSpec bi.busId with
-  | none => none
-  | some spec =>
     if decide (spec.bound = 256) then
       match spec.decode bi.payload with
       | none => none
@@ -69,13 +66,21 @@ def denseByteShape? (cmp : DenseExpr p → ZMod p → Bool) (bs : BusSemantics p
         else none
     else none
 
-/-- The value byte-checked by a multiplicity-1 single-value byte check: the operand of a
-    structurally recognized single-operand shape (`denseByteShape?`), e.g. `x` for the XOR
-    self-check `[x, x, 0]`; `none` otherwise. -/
-def denseSvCheck? (bs : BusSemantics p) (facts : BusFacts p bs)
-    (bi : BusInteraction (DenseExpr p)) : Option (DenseExpr p) :=
+/-- `denseByteShapeWith?` against the bus's own spec. -/
+def denseByteShape? (cmp : DenseExpr p → ZMod p → Bool) (bs : BusSemantics p)
+    (facts : BusFacts p bs) (bi : BusInteraction (DenseExpr p)) :
+    Option (DenseByteShape × ByteXorSpec p × DenseExpr p × DenseExpr p) :=
+  match facts.byteXorSpec bi.busId with
+  | none => none
+  | some spec => denseByteShapeWith? cmp spec bi
+
+/-- The value byte-checked by a multiplicity-1 single-value byte check on a bus with spec `spec`:
+    the operand of a structurally recognized single-operand shape, e.g. `x` for the XOR self-check
+    `[x, x, 0]`; `none` otherwise. -/
+def denseSvCheckWith? (spec : ByteXorSpec p) (bi : BusInteraction (DenseExpr p)) :
+    Option (DenseExpr p) :=
   if bi.multiplicity = DenseExpr.const 1 then
-    match denseByteShape? denseCmpStructural bs facts bi with
+    match denseByteShapeWith? denseCmpStructural spec bi with
     | some (sh, _, o1, o2) =>
       match sh.operands o1 o2 with
       | [e] => some e
@@ -83,40 +88,110 @@ def denseSvCheck? (bs : BusSemantics p) (facts : BusFacts p bs)
     | none => none
   else none
 
-/-- Scan for the next single-value byte check on `busId`, returning the interior `mid`, the
-    interaction `b`, its checked value `eB`, and the remainder `post`. -/
-def denseFindSecond (bs : BusSemantics p) (facts : BusFacts p bs) (busId : Nat) :
-    List (BusInteraction (DenseExpr p)) → List (BusInteraction (DenseExpr p)) →
-    Option (List (BusInteraction (DenseExpr p)) × BusInteraction (DenseExpr p) ×
-      DenseExpr p × List (BusInteraction (DenseExpr p)))
-  | _, [] => none
-  | revMid, b :: rest =>
-    match denseSvCheck? bs facts b with
-    | some eB => if decide (b.busId = busId) then some (revMid.reverse, b, eB, rest)
-                 else denseFindSecond bs facts busId (b :: revMid) rest
-    | none => denseFindSecond bs facts busId (b :: revMid) rest
+/-- `denseSvCheckWith?` against the bus's own spec. -/
+def denseSvCheck? (bs : BusSemantics p) (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) : Option (DenseExpr p) :=
+  match facts.byteXorSpec bi.busId with
+  | none => none
+  | some spec => denseSvCheckWith? spec bi
 
-/-- Fused scan for the first packable pair `denseByteCheckPackPass` fuses: two single-value byte
-    checks on the same byte-XOR bus, e.g. `x < 256` and `y < 256` merged into one `[x, y]` pair
-    check. Returns the positional split `(busId, spec, pre, eA, mid, eB, post)`. -/
-def denseFindGo (bs : BusSemantics p) (facts : BusFacts p bs)
-    (revPre : List (BusInteraction (DenseExpr p))) :
-    List (BusInteraction (DenseExpr p)) →
-    Option (Nat × ByteXorSpec p × List (BusInteraction (DenseExpr p)) × DenseExpr p ×
-      List (BusInteraction (DenseExpr p)) × DenseExpr p × List (BusInteraction (DenseExpr p)))
+/-- The recognizer's full result: the checked value together with the bus's byte-XOR spec, which
+    the pair check emitted in its place is built from. -/
+def denseBpSv? (bs : BusSemantics p) (facts : BusFacts p bs) (bi : BusInteraction (DenseExpr p)) :
+    Option (ByteXorSpec p × DenseExpr p) :=
+  match facts.byteXorSpec bi.busId with
+  | none => none
+  | some spec => (denseSvCheckWith? spec bi).map (fun e => (spec, e))
+
+/-- What the plan proposes at a position: leave it alone, open a pack (the position becomes the
+    pair check), or close one (the position is dropped into the pair opened to its left). -/
+inductive DenseBpAction
+  | keep | openPack | closePack
+
+/-- Resolve `facts.byteXorSpec busId` through the memo `specs`, returning the extended memo. -/
+def denseBpSpecOf (bs : BusSemantics p) (facts : BusFacts p bs)
+    (specs : List (Nat × Option (ByteXorSpec p))) (busId : Nat) :
+    Option (ByteXorSpec p) × List (Nat × Option (ByteXorSpec p)) :=
+  match specs.lookup busId with
+  | some s => (s, specs)
+  | none => let s := facts.byteXorSpec busId; (s, (busId, s) :: specs)
+
+/-- The pairing plan, built left to right: single-value byte checks on a bus alternate between
+    opening a pack and closing it, so the pairs are the bus's checks taken two at a time in source
+    order. `none` when no bus ever closes one, which makes the pass return its input untouched.
+    `specs` memoizes `facts.byteXorSpec`, whose OpenVM instance rebuilds the spec record — and with
+    it the field's `ZMod` literals — on every call; `opened` is the buses with a pack open. Both
+    are assoc lists because a circuit has few buses, and one or two byte-XOR ones.
+
+    The plan is **untrusted**: `denseBpBack` re-checks every action it acts on, so a wrong plan
+    costs packing opportunities, never soundness. It comes out reversed, which is the order
+    `denseBpBack` consumes it in. -/
+def denseBpPlan (bs : BusSemantics p) (facts : BusFacts p bs) :
+    List (BusInteraction (DenseExpr p)) → List (Nat × Option (ByteXorSpec p)) → List Nat →
+      Bool → List DenseBpAction → Option (List DenseBpAction)
+  | [], _, _, packed, acc => if packed then some acc else none
+  | b :: rest, specs, opened, packed, acc =>
+    match denseBpSpecOf bs facts specs b.busId with
+    | (none, specs') => denseBpPlan bs facts rest specs' opened packed (.keep :: acc)
+    | (some spec, specs') =>
+      match denseSvCheckWith? spec b with
+      | none => denseBpPlan bs facts rest specs' opened packed (.keep :: acc)
+      | some _ =>
+        if opened.contains b.busId then
+          denseBpPlan bs facts rest specs' (opened.erase b.busId) true (.closePack :: acc)
+        else
+          denseBpPlan bs facts rest specs' (b.busId :: opened) packed (.openPack :: acc)
+
+/-- A closed check awaiting the pack opened to its left: its bus, the value it checks, and the
+    interaction itself (which supplies that value's variables). -/
+abbrev DenseBpDrop (p : ℕ) := Nat × DenseExpr p × BusInteraction (DenseExpr p)
+
+/-- Take the first drop on `busId` out of `dropped`. -/
+def denseBpTake (busId : Nat) : List (DenseBpDrop p) →
+    Option (DenseExpr p × BusInteraction (DenseExpr p) × List (DenseBpDrop p))
   | [] => none
-  | a :: rest =>
-    match denseSvCheck? bs facts a with
-    | some eA =>
-      match denseFindSecond bs facts a.busId [] rest with
-      | some (mid, _b, eB, post) =>
-        match facts.byteXorSpec a.busId with
-        | some spec =>
-          if decide (spec.bound = 256) then
-            some (a.busId, spec, revPre.reverse, eA, mid, eB, post)
-          else denseFindGo bs facts (a :: revPre) rest
-        | none => denseFindGo bs facts (a :: revPre) rest
-      | none => denseFindGo bs facts (a :: revPre) rest
-    | none => denseFindGo bs facts (a :: revPre) rest
+  | q :: rest =>
+    if q.1 = busId then some (q.2.1, q.2.2, rest)
+    else (denseBpTake busId rest).map (fun r => (r.1, r.2.1, q :: r.2.2))
+
+/-- Apply the plan right to left, building the result in source order: a closed check goes into
+    `dropped`, and an opened one absorbs its bus's drop into a pair check. Every action is
+    re-checked against the recognizer, and a pack is only emitted against a drop actually held, so
+    the two interactions a pair check replaces are exactly the ones it obliges (soundness in
+    `Proofs/ByteCheckPack.lean`). A leftover drop means the plan was inconsistent; the caller then
+    discards the whole result. -/
+def denseBpBack (bs : BusSemantics p) (facts : BusFacts p bs) :
+    List (BusInteraction (DenseExpr p)) → List DenseBpAction → List (DenseBpDrop p) →
+      List (BusInteraction (DenseExpr p)) →
+      List (DenseBpDrop p) × List (BusInteraction (DenseExpr p))
+  | [], _, dropped, out => (dropped, out)
+  | b :: rest, plan, dropped, out =>
+    match plan.headD .keep with
+    | .keep => denseBpBack bs facts rest plan.tail dropped (b :: out)
+    | .closePack =>
+      match denseBpSv? bs facts b with
+      | some (_, e) => denseBpBack bs facts rest plan.tail ((b.busId, e, b) :: dropped) out
+      | none => denseBpBack bs facts rest plan.tail dropped (b :: out)
+    | .openPack =>
+      match denseBpSv? bs facts b with
+      | some (spec, e) =>
+        match denseBpTake b.busId dropped with
+        | some (e', _, dropped') =>
+          denseBpBack bs facts rest plan.tail dropped'
+            (denseMkBytePair spec b.busId e e' :: out)
+        | none => denseBpBack bs facts rest plan.tail dropped (b :: out)
+      | none => denseBpBack bs facts rest plan.tail dropped (b :: out)
+
+/-- Pack single-value byte checks pairwise, per byte-XOR bus, first come first served: `x < 256`
+    and `y < 256` on the bitwise bus become one `[x, y]` pair check at the first one's position.
+    The input list is returned unchanged when nothing pairs. -/
+def denseBytePackBis (bs : BusSemantics p) (facts : BusFacts p bs)
+    (bis : List (BusInteraction (DenseExpr p))) : List (BusInteraction (DenseExpr p)) :=
+  match denseBpPlan bs facts bis [] [] false [] with
+  | none => bis
+  | some revPlan =>
+    match denseBpBack bs facts bis.reverse revPlan [] [] with
+    | ([], out) => out
+    | _ => bis
 
 end ApcOptimizer.Dense

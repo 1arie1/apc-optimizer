@@ -690,6 +690,17 @@ and in `run` alike. Consequences, all measured on busPairCancel:
 
 ### Runtime dead ends (measured; do not re-propose without new evidence)
 
+- **Applying bytePack's packs positionally into an array** (entry 168): `Array (Option
+  BusInteraction)` with `set!` at the two packed positions, then a filtered rebuild. Measures the
+  *same* as the shipped re-checking sweep (sha256 `apc_001` 242 vs 254 ms, identical output), but
+  its correctness needs index distinctness and in-range obligations about the plan — i.e. the plan
+  becomes trusted, for ~1 % of runtime. Prefer a re-checked proposal whenever the check is O(1) per
+  action.
+- **Fusing bytePack's plan pass into its applier** (entry 168): the pairing parity is
+  left-to-right information and the applier must run right-to-left (so the closer's value is in
+  hand when the opener is reached). Fusing them means emitting the pair check at the *closer's*
+  position, which changes the output list order — an effectiveness change, not a runtime one.
+
 - **Solving domainFold's last enumerated key instead of scanning its domain** (entry 167): an affine
   filter with invertible leading coefficient determines its largest key, so the level could evaluate
   once and test membership. Implemented and **reverted — it regressed**: keccak 134 → 149 ms (1.11x),
