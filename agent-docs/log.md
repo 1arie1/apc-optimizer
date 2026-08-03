@@ -6584,3 +6584,86 @@ is **~22 % of what `normalize1` reports**. Nothing new is proposed here; the pla
 alternatives are in R5.
 
 **Worked: yes.**
+
+### 172. Runtime: intervalForce rebuilt — key-shaped seeds, one prepared interaction sweep, an O(t) window walk (0.32–0.34x on the pass, sha256 total 0.96x)
+
+Full redesign of the interval-forcing pass (`intervalForceRedesign.md` has the design, the
+attribution and the rejected alternatives). `intervalForce` is rank 3 of the corpus profile
+(3.82 s / 6.5 %, max 1.76 s on sha256 `apc_001`, nonzero in 162 of 202 APCs).
+
+WHAT THE MEASUREMENT SAID (throwaway `IO` probe in `denseRunCycleTimed`, per invocation, on the
+pass's own input; ms summed over all cleanup invocations):
+
+| phase | sha256 `apc_001` | keccak | wasm-eth `apc_012` |
+|---|---:|---:|---:|
+| `denseBoundIdxBuild` | 259 | 48 | 42 |
+| interaction seeds | 563 | 88 | 83 |
+| constraint seeds | 249 | 18 | 39 |
+| `HashSet.ofList d.occ` | **402** | 36 | 56 |
+| `bHash` constraint buckets | 126 | 8 | 10 |
+| filters + dedup | 53 | 3 | 2 |
+| **pass total** | **1780** | 210 | 234 |
+
+Two of those phases were pure waste. The `occ` filter is **vacuous**: `d.occ` is
+`algebraicConstraints.flatMap vars ++ busInteractions.flatMap denseBIVars`, and every seed variable
+comes from a term of a linearized payload slot or constraint *of `d`* — yet the pass built a
+`Std.HashSet VarId` over 168 k occurrences every invocation, on most of which there were **zero**
+seeds to filter. The already-a-constraint filter `bHash`ed all 200 k constraints — a full tree walk
+each — to answer a few thousand membership questions about expressions of exactly two shapes. The
+`perf` leaf-class table agreed with the direction: `alloc/free` 30.5 %, `refcount` 13.6 %,
+`list-ops` 11.9 % of in-pass samples.
+
+THE REBUILD (`IntervalForce.lean`; the old `denseSlotSeeds`/`denseWalk`/`denseProcTerms`/
+`denseBoundIdxBuild` layer is deleted, `srep`/`term_window`/`int_window`/`maxTerms` stay):
+1. **Seeds are keys.** A seed is only `x = 0` or `x − y = 0`, so it is carried as `DenseIFKey`
+   (two `Nat`s) with a `Std.HashSet` for dedup, and materialized as a `DenseExpr` once, at the end,
+   for survivors only. The constraint-membership filter became a shape-matching sweep (`.var v`, or
+   `.add (.var v) (.mul (.const c) (.var w))` with `c = −1`) that fails at the top node for
+   essentially every constraint, built only when the key list is nonempty.
+2. **The `occ` filter is gone** — discharged structurally in the proof instead.
+3. **One prepared interaction sweep** computes the constant multiplicity and the constant-payload
+   pattern once per interaction and calls `slotBound` once per slot — the union of what the bounds
+   index (bare-variable slots) and the seed sweep (every slot) each recomputed. Literal `.const`
+   slots never ask for a bound; bare `.var` slots whose bound cannot fire the one-term zero arm
+   (`B ≤ srep 1`, i.e. every 256-bounded memory limb) are decided there instead of in the seed pass
+   — keccak collects 890 slots per invocation instead of 14 393.
+4. **An early-aborting linearization**: `denseIFLin` is `denseLinearizeAcc` with one arm changed —
+   when the left factor of a product has terms, the right one only has to be *variable-free*, which
+   `denseIFConst` decides by aborting at the first `.var`. `x·y` fails after one variable instead
+   of after linearizing both factors.
+5. **`denseIFProc`** fuses the zero-drop, the `maxTerms` cap, the bound lookup (aborting at the
+   first unbounded variable, where `denseProcTerms` evaluated the whole tail first) and each term's
+   window `(mn, mx)`.
+6. **The walk is O(t), not O(t²)**: `denseMinSum (seen ++ rest)` is `m − mn_i` off the totals, and
+   the pair arm's is `m − mn_i − mn_j`, so no term list is ever rebuilt and the partner search
+   scans `seen` then `rest` instead of their append.
+
+PROOF SURFACE. The pass is proven **on its own terms**, not against the old implementation: the
+obligations are "every emitted key states a truth about the assignment" and "every emitted key
+mentions a variable of `d`", and neither needs the new pipeline to agree with `denseSlotSeeds` step
+for step — no merge-order, walk-order or dedup equality. `denseIFLin_eq` (via `denseIFConst_eq`)
+buys the whole `Affine`/`Normalize` layer; `denseIFProc_val` casts the integer value back and
+brackets each term with `term_window`; `int_window` pins the signed value to `[0, B)`; the two arms
+are `omega` over that window, with the sums-minus-excluded-terms identity a `List.Perm` split.
+`denseIFPrep_spec` gives both the collected slots and the index one witness (`DenseIFSlotWit`),
+which `BusFacts.slotBound_sound` turns into the value bound.
+
+NUMBERS (this 20-core box, serial, interleaved, 3 reps; `profile` per-pass ms; sha256 one shot):
+keccak `apc_001` **209 → 68 (0.33x)**, run total 2642 → 2455 (0.93x); wasm-eth `apc_012` 238 → 81
+(0.34x), 3072 → 2916 (0.95x); wasm-eth `apc_063` 196 → 65 (0.33x), 2603 → 2473 (0.95x);
+openvm-eth `apc_006` 31 → 10 (0.32x), 359 → 337 (0.94x); sha256 `apc_001` **1772 → 594 (0.34x)**,
+27 185 → 26 150 (0.96x). No other pass moves outside noise.
+VERIFIED: `opt-export` **byte-identical** on 25 cases — 8 openvm-eth, 8 wasm-eth, OpenVM keccak
+`apc_001`, sha256 `apc_001`, 6 SP1 rsp, SP1 keccak `apc_001`; `lake build` clean, no warnings;
+`check-proof-integrity` passes.
+
+RESIDUAL (keccak 68 ms, `IO` phase timers summed over 10 invocations): the prepared interaction
+sweep 42 ms, bus-slot seeds 5, constraint seeds 7, constraint keys 2, materialization 0. Stubbing
+the sweep's pushes and its index leaves it at 14 of 15 ms on cycle 0 — **the sweep is
+`BusFacts.slotBound` and nothing else**, and the cost is per-call dispatch (a record-field closure
+application plus `busMap`'s association-list `lookup`, once per slot). The fix is a `slotBounds`
+field answering one interaction at a time; that is `BusFacts.lean` + `OpenVmFacts.lean` +
+`Sp1Facts.lean`, i.e. ideas.md R13(b), and it serves every bound consumer. See ideas.md for the
+two dead ends recorded here (a pattern-keyed memo, and an `Array`-backed term buffer).
+
+**Worked: yes.**

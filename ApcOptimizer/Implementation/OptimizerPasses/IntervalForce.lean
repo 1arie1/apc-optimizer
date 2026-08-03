@@ -71,7 +71,7 @@ theorem int_window [NeZero p] (S : Int) (B : Nat) (x : ZMod p)
     generalize hX : (p : Int) * k = X at hk h2
     omega
 
-/-- Cap on the number of affine terms analyzed per slot (the walk is quadratic). -/
+/-- Cap on the number of affine terms analyzed per slot. -/
 def maxTerms : Nat := 32
 
 end IntervalForce
@@ -82,173 +82,320 @@ open IntervalForce
 
 variable {p : ℕ}
 
-/-! ## Signed representatives and processed terms -/
+/-! ## Seed keys
 
-/-- A processed affine term: signed integer coefficient `sc`, strict value bound `bnd`, `VarId` `v`. -/
-structure DensePTerm where
+A forced seed is only ever `x = 0` or `x − y = 0`, so it is carried as a key and turned into a
+`DenseExpr` once, at the end, for the survivors only. `b = 0` is the zero arm on `⟨a⟩`;
+`b = w + 1` is the pair arm `⟨a⟩ − ⟨w⟩`. -/
+
+structure DenseIFKey where
+  a : Nat
+  b : Nat
+deriving BEq, Hashable, DecidableEq, Inhabited
+
+/-- The emitted keys in reverse emission order, with the same set mirrored for dedup. -/
+structure DenseIFAcc where
+  keys : List DenseIFKey
+  seen : Std.HashSet DenseIFKey
+
+def denseIFPush (st : DenseIFAcc) (k : DenseIFKey) : DenseIFAcc :=
+  if st.seen.contains k then st else ⟨k :: st.keys, st.seen.insert k⟩
+
+/-! ## Linearization with an early-aborting product
+
+`denseIFLin` is `denseLinearizeAcc` (`Affine.lean`) with one change: when the left factor of a
+product has terms, the right one only has to be *variable-free*, which `denseIFConst` decides by
+aborting at the first `.var` instead of linearizing it. A product of two variables now fails after
+one variable rather than after linearizing both factors. Proven equal in
+`Proofs/IntervalForce.lean`. -/
+
+/-- The constant value of a variable-free expression; `none` at the first `.var`. A `.var` leaf of a
+    linearizable expression always contributes a raw term, even under a zero coefficient, so this is
+    exactly `denseLinearize`'s "the other factor's term list is empty" test. -/
+def denseIFConst : DenseExpr p → Option (ZMod p)
+  | .const n => some n
+  | .var _ => none
+  | .add a b =>
+    match denseIFConst a with
+    | none => none
+    | some x =>
+      match denseIFConst b with
+      | none => none
+      | some y => some (zmodAdd x y)
+  | .mul a b =>
+    match denseIFConst a with
+    | none => none
+    | some x =>
+      match denseIFConst b with
+      | none => none
+      | some y => some (zmodMul x y)
+
+def denseIFLin : DenseExpr p → List (VarId × ZMod p) →
+    Option (ZMod p × List (VarId × ZMod p))
+  | .const n, acc => some (n, acc)
+  | .var i, acc => some (zmodZeroP p, (i, zmodOneP p) :: acc)
+  | .add a b, acc =>
+    match denseIFLin b acc with
+    | none => none
+    | some (cb, acc') =>
+      match denseIFLin a acc' with
+      | none => none
+      | some (ca, acc'') => some (zmodAdd ca cb, acc'')
+  | .mul a b, acc =>
+    match denseIFLin a [] with
+    | none => none
+    | some (ca, ta) =>
+      if ta.isEmpty then
+        match denseIFLin b [] with
+        | none => none
+        | some (cb, tb) => some (zmodMul ca cb, denseScaleAppend ca tb acc)
+      else
+        match denseIFConst b with
+        | none => none
+        | some cb => some (zmodMul cb ca, denseScaleAppend cb ta acc)
+
+/-! ## Processed terms -/
+
+/-- One merged term with its window contributions `mn = min (sc·(B−1)) 0`,
+    `mx = max (sc·(B−1)) 0`, where `B` is the term variable's own bound. -/
+structure DenseIFTerm where
   sc : Int
-  bnd : Nat
+  mn : Int
+  mx : Int
   v : VarId
+deriving Inhabited, DecidableEq
 
-/-- Pair every term of a dense linear form with its variable's bound; `none` if any is unbounded. -/
-def denseProcTerms (bnd : VarId → Option Nat) :
-    List (VarId × ZMod p) → Option (List DensePTerm)
+/-- `srep` with `(p−1)/2` supplied by the caller. -/
+def denseIFSrep (half : Nat) (c : ZMod p) : Int :=
+  let v := c.val
+  if v ≤ half then (v : Int) else (v : Int) - (p : Int)
+
+def denseIFTermOf (half : Nat) (c : ZMod p) (Bv : Nat) (v : VarId) : DenseIFTerm :=
+  let sc := denseIFSrep half c
+  let w := sc * ((Bv : Int) - 1)
+  ⟨sc, if w < 0 then w else 0, if 0 < w then w else 0, v⟩
+
+/-- Pair every merged nonzero term with its variable's bound. `none` when more than `maxTerms`
+    terms survive or a variable is unbounded — aborting at the first one, rather than processing
+    the tail first. -/
+def denseIFProc (half : Nat) (idx : Std.HashMap VarId Nat) (n : Nat) :
+    List (VarId × ZMod p) → Option (List DenseIFTerm)
   | [] => some []
   | (v, c) :: rest =>
-    match bnd v, denseProcTerms bnd rest with
-    | some B, some pts => some (⟨srep c, B, v⟩ :: pts)
-    | _, _ => none
-
-/-- Upper window bound: each term contributes `max (sc·(B−1)) 0`. -/
-def denseMaxSum (pts : List DensePTerm) : Int :=
-  (pts.map (fun t => max (t.sc * ((t.bnd : Int) - 1)) 0)).sum
-
-/-- Lower window bound: each term contributes `min (sc·(B−1)) 0`. -/
-def denseMinSum (pts : List DensePTerm) : Int :=
-  (pts.map (fun t => min (t.sc * ((t.bnd : Int) - 1)) 0)).sum
-
-/-! ## Seed extraction -/
-
-/-- `v − w` as a dense expression. -/
-def densePairDiff (v w : VarId) : DenseExpr p := denseEqExpr (.var v) (.var w)
-
-/-- First term with signed coefficient `g`, and the list without it. -/
-def denseFindPartner (g : Int) : List DensePTerm → Option (DensePTerm × List DensePTerm)
-  | [] => none
-  | t :: rest =>
-    if t.sc = g then some (t, rest)
+    if zmodIsZero c then denseIFProc half idx n rest
+    else if maxTerms ≤ n then none
     else
-      match denseFindPartner g rest with
-      | some (t', rest') => some (t', t :: rest')
+      match idx[v]? with
       | none => none
+      | some Bv =>
+        match denseIFProc half idx (n + 1) rest with
+        | none => none
+        | some ts => some (denseIFTermOf half c Bv v :: ts)
 
-/-- The walk over the term list: at each term, try the zero arm (against all other terms) and,
-    for a positive coefficient, the pair arm against the first `−g` partner among the other terms. -/
-def denseWalk (B : Nat) (c0 : Int) : List DensePTerm → List DensePTerm → List (DenseExpr p)
-  | _, [] => []
-  | seen, t :: rest =>
-    (if (0 < t.sc ∧ (B : Int) ≤ t.sc + (c0 + denseMinSum (seen ++ rest))) ∨
-        (t.sc < 0 ∧ c0 + denseMaxSum (seen ++ rest) + t.sc < 0) then
-      [DenseExpr.var t.v]
-    else []) ++
-    (if 0 < t.sc then
-      match denseFindPartner (-t.sc) (seen ++ rest) with
-      | some (t', others') =>
-        if (B : Int) ≤ t.sc + (c0 + denseMinSum others') ∧
-           c0 + denseMaxSum others' - t.sc < 0 ∧ t.v ≠ t'.v then
-          [densePairDiff t.v t'.v]
-        else []
-      | none => []
-    else []) ++
-    denseWalk B c0 (t :: seen) rest
+/-! ## The window walk
 
-/-! ## Per-slot seeds -/
+`denseMinSum (seen ++ rest)` and its `max` twin are the *totals* minus the excluded terms, so with
+`m = Σ mn` and `M = Σ mx` taken once every arm is O(1) arithmetic and the walk never rebuilds a
+term list. The partner search keeps the first-match order of `seen ++ rest` by scanning `seen`
+before `rest`. -/
 
-/-- All seeds forced by one bounded slot: linearize, merge like terms, pair each variable with its
-    bound, check the integer window, and extract the pair/zero arms. -/
-def denseSlotSeeds (bnd : VarId → Option Nat) (B : Nat) (e : DenseExpr p) : List (DenseExpr p) :=
-  if p = 0 then []
-  else
-    match denseLinearize e with
-    | none => []
-    | some l =>
-      if l.norm.terms.length ≤ maxTerms then
-        match denseProcTerms bnd l.norm.terms with
-        | none => []
-        | some pts =>
-          if srep l.norm.const + denseMaxSum pts ≤ (p : Int) - 1 ∧
-             (B : Int) - (p : Int) ≤ srep l.norm.const + denseMinSum pts then
-            denseWalk B (srep l.norm.const) [] pts
-          else []
-      else []
+def denseIFSumMn : List DenseIFTerm → Int
+  | [] => 0
+  | t :: rest => t.mn + denseIFSumMn rest
 
-/-! ## The per-invocation bounds index (data-only `Std.HashMap VarId Nat`) -/
+def denseIFSumMx : List DenseIFTerm → Int
+  | [] => 0
+  | t :: rest => t.mx + denseIFSumMx rest
 
-/-- Record the bound `denseInteractionBound bi x` (if any), keeping the smaller of duplicates. -/
-def denseBoundIdxInsertVar (bs : BusSemantics p) (facts : BusFacts p bs)
-    (I : Std.HashMap VarId Nat) (bi : BusInteraction (DenseExpr p)) (x : VarId) :
+def denseIFPartner (g : Int) : List DenseIFTerm → Option DenseIFTerm
+  | [] => none
+  | t :: rest => if t.sc == g then some t else denseIFPartner g rest
+
+/-- `t` alone cannot be nonzero without pushing the sum out of `[0, B)`. -/
+def denseIFZeroArm (B : Nat) (c0 m M : Int) (t : DenseIFTerm) (st : DenseIFAcc) : DenseIFAcc :=
+  if (0 < t.sc ∧ (B : Int) ≤ t.sc + (c0 + (m - t.mn))) ∨
+     (t.sc < 0 ∧ c0 + (M - t.mx) + t.sc < 0) then
+    denseIFPush st ⟨t.v.index, 0⟩
+  else st
+
+/-- `t` and the first other term with coefficient `−t.sc` cannot differ without the same
+    overflow. -/
+def denseIFPairArm (B : Nat) (c0 m M : Int) (t : DenseIFTerm) (seen rest : List DenseIFTerm)
+    (st : DenseIFAcc) : DenseIFAcc :=
+  if 0 < t.sc then
+    match (denseIFPartner (-t.sc) seen).or (denseIFPartner (-t.sc) rest) with
+    | some u =>
+      if (B : Int) ≤ t.sc + (c0 + (m - t.mn - u.mn)) ∧
+         c0 + (M - t.mx - u.mx) - t.sc < 0 ∧ t.v ≠ u.v then
+        denseIFPush st ⟨t.v.index, u.v.index + 1⟩
+      else st
+    | none => st
+  else st
+
+def denseIFStep (B : Nat) (c0 m M : Int) (t : DenseIFTerm) (seen rest : List DenseIFTerm)
+    (st : DenseIFAcc) : DenseIFAcc :=
+  denseIFPairArm B c0 m M t seen rest (denseIFZeroArm B c0 m M t st)
+
+def denseIFWalk (B : Nat) (c0 m M : Int) :
+    List DenseIFTerm → List DenseIFTerm → DenseIFAcc → DenseIFAcc
+  | _, [], st => st
+  | seen, t :: rest, st =>
+    denseIFWalk B c0 m M (t :: seen) rest (denseIFStep B c0 m M t seen rest st)
+
+/-- The integer-window gate plus the walk, shared by the general and the bare-variable slot arms. -/
+def denseIFRun (pI : Int) (B : Nat) (c0 : Int) (ts : List DenseIFTerm) (st : DenseIFAcc) :
+    DenseIFAcc :=
+  if c0 + denseIFSumMx ts ≤ pI - 1 ∧ (B : Int) - pI ≤ c0 + denseIFSumMn ts then
+    denseIFWalk B c0 (denseIFSumMn ts) (denseIFSumMx ts) [] ts st
+  else st
+
+/-- All seeds forced by one slot bounded by `B`: linearize, merge like terms, pair each variable
+    with its own bound, check the integer window, and extract the zero/pair arms. For a slot that
+    is a bare variable the term list is a singleton and is built directly. -/
+def denseIFSlot (half : Nat) (pI : Int) (idx : Std.HashMap VarId Nat) (B : Nat) (e : DenseExpr p)
+    (st : DenseIFAcc) : DenseIFAcc :=
+  match e with
+  | .const _ => st
+  | .var x =>
+    match idx[x]? with
+    | none => st
+    | some Bv => denseIFRun pI B 0 [denseIFTermOf half (zmodOneP p) Bv x] st
+  | _ =>
+    match denseIFLin e [] with
+    | none => st
+    | some (c, raw) =>
+      match denseIFProc half idx 0 (denseMergeTerms raw) with
+      | none => st
+      | some ts => denseIFRun pI B (denseIFSrep half c) ts st
+
+/-! ## The prepared interaction sweep
+
+One walk over the interactions computes the constant multiplicity and the constant-payload pattern
+once per interaction and calls `slotBound` once per slot — the union of what the bounds index (bare
+variable slots) and the seed sweep (every slot) each used to recompute for themselves. The bounded
+slots are collected for the seed pass, which cannot start before the *whole* index is known. -/
+
+structure DenseIFPrep (p : ℕ) where
+  /-- Bounded slots as `(slot expression, bound)`, in reverse collection order. -/
+  slots : List (DenseExpr p × Nat)
+  idx : Std.HashMap VarId Nat
+
+/-- A one-term walk has no partner, so only its zero arm can fire, and on coefficient
+    `sc1 = srep 1` that arm's test does not mention the variable's own bound. A bare-variable slot
+    failing this emits nothing and need not be collected — which is every `256`-bounded memory
+    limb. -/
+def denseIFVarLive (sc1 : Int) (B : Nat) : Bool :=
+  (0 < sc1 ∧ (B : Int) ≤ sc1) ∨ sc1 < 0
+
+/-- `true` when no slot before index `i` is literally `.var x` — `denseVarSlot`'s first-match
+    semantics, which is the slot whose bound the index records for `x`. -/
+def denseIFFirstAt (x : VarId) : List (DenseExpr p) → Nat → Bool
+  | _, 0 => true
+  | [], _ => true
+  | e :: rest, n + 1 => if denseIsVarOf x e then false else denseIFFirstAt x rest n
+
+/-- Record the bound for `x`, keeping the smaller of duplicates. -/
+def denseIFIdxInsert (idx : Std.HashMap VarId Nat) (x : VarId) (B : Nat) :
     Std.HashMap VarId Nat :=
-  match denseInteractionBound bs facts bi x with
-  | none => I
-  | some B =>
-    if (match I[x]? with
-        | some old => decide (B < old)
-        | none => true) then
-      I.insert x B
-    else I
+  match idx[x]? with
+  | some old => if B < old then idx.insert x B else idx
+  | none => idx.insert x B
 
-/-- Record every bare-variable slot bound of one interaction. -/
-def denseBoundIdxAddBi (bs : BusSemantics p) (facts : BusFacts p bs)
-    (I : Std.HashMap VarId Nat) (bi : BusInteraction (DenseExpr p)) : Std.HashMap VarId Nat :=
-  (bi.payload.filterMap (fun e =>
-    match e with
-    | .var x => some x
-    | _ => none)).foldl (fun I x => denseBoundIdxInsertVar bs facts I bi x) I
+/-- One payload slot. A literal constant slot linearizes to a term-free form: it is no seed and no
+    index entry, so its bound is never asked for. -/
+def denseIFPrepSlot (bs : BusSemantics p) (facts : BusFacts p bs) (sc1 : Int) (busId : Nat)
+    (mval : ZMod p) (pat : List (Option (ZMod p))) (payload : List (DenseExpr p))
+    (e : DenseExpr p) (i : Nat) (st : DenseIFPrep p) : DenseIFPrep p :=
+  match e with
+  | .const _ => st
+  | _ =>
+    match facts.slotBound busId mval pat i with
+    | none => st
+    | some B =>
+      match e with
+      | .var x =>
+        let sl := if denseIFVarLive sc1 B then (e, B) :: st.slots else st.slots
+        if denseIFFirstAt x payload i then ⟨sl, denseIFIdxInsert st.idx x B⟩
+        else ⟨sl, st.idx⟩
+      | _ => ⟨(e, B) :: st.slots, st.idx⟩
 
-/-- Fold `denseBoundIdxAddBi` over every interaction. -/
-def denseBoundIdxAddAll (bs : BusSemantics p) (facts : BusFacts p bs) :
-    Std.HashMap VarId Nat → List (BusInteraction (DenseExpr p)) → Std.HashMap VarId Nat
-  | I, [] => I
-  | I, bi :: rest => denseBoundIdxAddAll bs facts (denseBoundIdxAddBi bs facts I bi) rest
+def denseIFPrepGo (bs : BusSemantics p) (facts : BusFacts p bs) (sc1 : Int) (busId : Nat)
+    (mval : ZMod p) (pat : List (Option (ZMod p))) (payload : List (DenseExpr p)) :
+    List (DenseExpr p) → Nat → DenseIFPrep p → DenseIFPrep p
+  | [], _, st => st
+  | e :: rest, i, st =>
+    denseIFPrepGo bs facts sc1 busId mval pat payload rest (i + 1)
+      (denseIFPrepSlot bs facts sc1 busId mval pat payload e i st)
 
-/-- Build the bounds index from scratch. -/
-def denseBoundIdxBuild (bs : BusSemantics p) (facts : BusFacts p bs)
-    (bis : List (BusInteraction (DenseExpr p))) : Std.HashMap VarId Nat :=
-  denseBoundIdxAddAll bs facts ∅ bis
+def denseIFPrepBi (bs : BusSemantics p) (facts : BusFacts p bs) (sc1 : Int) (st : DenseIFPrep p)
+    (bi : BusInteraction (DenseExpr p)) : DenseIFPrep p :=
+  match bi.multiplicity.constValue? with
+  | none => st
+  | some mval =>
+    if zmodIsZero mval then st
+    else
+      denseIFPrepGo bs facts sc1 bi.busId mval (bi.payload.map DenseExpr.constValue?) bi.payload
+        bi.payload 0 st
+
+def denseIFPrep (bs : BusSemantics p) (facts : BusFacts p bs) (sc1 : Int)
+    (bis : List (BusInteraction (DenseExpr p))) : DenseIFPrep p :=
+  bis.foldl (denseIFPrepBi bs facts sc1) ⟨[], ∅⟩
 
 /-! ## The pass -/
 
-/-- The per-slot seed walk of `denseInteractionSeeds`, with the constant-payload pattern `pat`
-    computed once by the caller instead of once per slot. -/
-def denseInteractionSeedsGo (bs : BusSemantics p) (facts : BusFacts p bs)
-    (bnd : VarId → Option Nat) (bi : BusInteraction (DenseExpr p)) (mval : ZMod p)
-    (pat : List (Option (ZMod p))) : List (DenseExpr p) :=
-  (List.range bi.payload.length).flatMap (fun i =>
-    match bi.payload[i]?, facts.slotBound bi.busId mval pat i with
-    | some e, some B => denseSlotSeeds bnd B e
-    | _, _ => [])
+def denseIFSlots (half : Nat) (pI : Int) (idx : Std.HashMap VarId Nat) :
+    List (DenseExpr p × Nat) → DenseIFAcc → DenseIFAcc
+  | [], st => st
+  | (e, B) :: rest, st => denseIFSlots half pI idx rest (denseIFSlot half pI idx B e st)
 
-def denseInteractionSeedsImpl (bs : BusSemantics p) (facts : BusFacts p bs)
-    (bnd : VarId → Option Nat) (bi : BusInteraction (DenseExpr p)) : List (DenseExpr p) :=
-  match bi.multiplicity.constValue? with
-  | none => []
-  | some mval =>
-    if zmodIsZero mval then []
-    else denseInteractionSeedsGo bs facts bnd bi mval (bi.payload.map DenseExpr.constValue?)
+def denseIFConstraintSeeds (half : Nat) (pI : Int) (idx : Std.HashMap VarId Nat) :
+    List (DenseExpr p) → DenseIFAcc → DenseIFAcc
+  | [], st => st
+  | c :: rest, st => denseIFConstraintSeeds half pI idx rest (denseIFSlot half pI idx 1 c st)
 
-/-- All seeds of one interaction: every payload slot with a `slotBound`. -/
-def denseInteractionSeeds (bs : BusSemantics p) (facts : BusFacts p bs)
-    (bnd : VarId → Option Nat) (bi : BusInteraction (DenseExpr p)) : List (DenseExpr p) :=
-  match bi.multiplicity.constValue? with
-  | none => []
-  | some mval =>
-    if mval = 0 then []
-    else denseInteractionSeedsGo bs facts bnd bi mval (bi.payload.map DenseExpr.constValue?)
+/-- The key of an algebraic constraint that already *is* a seed shape (`x` or `x − y`); `none`
+    otherwise, decided at the top node. -/
+def denseIFCsKey (negOneVal : Nat) : DenseExpr p → Option DenseIFKey
+  | .var v => some ⟨v.index, 0⟩
+  | .add (.var v) (.mul (.const c) (.var w)) =>
+    if c.val == negOneVal then some ⟨v.index, w.index + 1⟩ else none
+  | _ => none
 
-@[csimp] theorem denseInteractionSeeds_eq_impl :
-    @denseInteractionSeeds = @denseInteractionSeedsImpl := by
-  funext q bs facts bnd bi
-  simp [denseInteractionSeeds, denseInteractionSeedsImpl]
+def denseIFCsKeys (negOneVal : Nat) :
+    List (DenseExpr p) → Std.HashSet DenseIFKey → Std.HashSet DenseIFKey
+  | [], s => s
+  | c :: rest, s =>
+    match denseIFCsKey negOneVal c with
+    | none => denseIFCsKeys negOneVal rest s
+    | some k => denseIFCsKeys negOneVal rest (s.insert k)
 
-/-- All seeds over the system: every bounded interaction slot, plus every algebraic constraint
-    consumed as a bound-`1` slot. -/
-def denseAllSeeds (bs : BusSemantics p) (facts : BusFacts p bs) (bnd : VarId → Option Nat)
-    (d : DenseConstraintSystem p) : List (DenseExpr p) :=
-  HashedDedup.hashedEraseDups DenseExpr.bHash
-    (d.busInteractions.flatMap (denseInteractionSeeds bs facts bnd) ++
-      d.algebraicConstraints.flatMap (fun c => denseSlotSeeds bnd 1 c))
+/-- The dense expression a key stands for (`densePairDiff`'s shape for the pair arm). -/
+def denseIFExprOf (negOne : ZMod p) (k : DenseIFKey) : DenseExpr p :=
+  if k.b = 0 then .var ⟨k.a⟩
+  else .add (.var ⟨k.a⟩) (.mul (.const negOne) (.var ⟨k.b - 1⟩))
 
-/-- The entailed interval-forcing seeds: every seed whose variables all occur in `d` and that is
-    not already a constraint (hash-bucket dedup). Appended by the pass (`Proofs/IntervalForce.lean`). -/
+/-- Every forced key of the system, in emission order: the bounded bus slots, then the algebraic
+    constraints (each bounded by `1`). -/
+def denseIFKeys (bs : BusSemantics p) (facts : BusFacts p bs) (d : DenseConstraintSystem p) :
+    List DenseIFKey :=
+  let half := (p - 1) / 2
+  let prep := denseIFPrep bs facts (denseIFSrep half (zmodOneP p)) d.busInteractions
+  (denseIFConstraintSeeds half (p : Int) prep.idx d.algebraicConstraints
+    (denseIFSlots half (p : Int) prep.idx prep.slots.reverse ⟨[], ∅⟩)).keys.reverse
+
+/-- The entailed interval-forcing seeds: every slot bounded by a `BusFacts` fact — and every
+    algebraic constraint, which is bounded by `1` — analyzed over the integers, deduplicated, and
+    filtered against the constraints already present. Appended by the pass
+    (`Proofs/IntervalForce.lean`). Every seed variable comes from a term of an item of `d`, so the
+    occurrence test the obligation asks for needs no index. -/
 def denseIntervalForceNew (bs : BusSemantics p) (facts : BusFacts p bs)
     (d : DenseConstraintSystem p) : List (DenseExpr p) :=
-  let idx := denseBoundIdxBuild bs facts d.busInteractions
-  let seeds := denseAllSeeds bs facts (fun v => idx[v]?) d
-  -- Hash set / hash-bucket lookups replace per-seed linear scans of `d.occ` and the constraints.
-  let varSet : Std.HashSet VarId := Std.HashSet.ofList d.occ
-  let csBuckets : Std.HashMap UInt64 (List (DenseExpr p)) :=
-    d.algebraicConstraints.foldl (fun m c => m.insert c.bHash (c :: m.getD c.bHash [])) ∅
-  (seeds.filter (fun e => e.vars.all (fun z => varSet.contains z))).filter
-    (fun e => !(csBuckets.getD e.bHash []).contains e)
+  if p = 0 then []
+  else
+    let ks := denseIFKeys bs facts d
+    if ks.isEmpty then []
+    else
+      let cs := denseIFCsKeys (p - 1) d.algebraicConstraints ∅
+      (ks.filter (fun k => !cs.contains k)).map (denseIFExprOf (zmodNegOneP p))
 
 end ApcOptimizer.Dense
