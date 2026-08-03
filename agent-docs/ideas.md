@@ -198,9 +198,10 @@ these need no new proof.
      certificate re-derived the domains from the unbucketed single-variable list per candidate —
      9.2 s of a 13.7 s pass on sha256 `apc_001` — while the bucket built in the same function served
      only the prefilter in front of it. ~~`boxRewrite`, `fxSubst`~~ **done (entry 165)**: all of
-     `flagFold` now reads one `VarId.index`-keyed table built once per invocation. `flagUnify` and
-     `rootPairUnify` still call `denseFindDomainAlg` on whole lists; same fix applies if they show
-     up in a profile (rootPairUnify 9 s is the candidate).
+     `flagFold` now reads one `VarId.index`-keyed table built once per invocation. `flagUnify` still
+     calls `denseFindDomainAlg` on whole lists; same fix applies if it shows up in a profile.
+     `rootPairUnify` keeps a `denseFindDomainMap` table already, and after entry 170 its domain path
+     (the scaled slot bound) is never reached on the measured cases.
    - `busPairCancel`: ~~`liveArr` materialization per candidate~~ **done (#210)** — see R8.
      The O(B²) *certificate* scans remain (R8 design (b)); in coda mode the `addrHash`
      bucket is O(B) per hot address — add a position cursor. ~~`dropWits` from-0 array scan per
@@ -449,13 +450,24 @@ per corpus**. Three things worth carrying forward:
 - **Where a twin already exists, edit only the twin**; the in-place edit costs proof work and buys
   no runtime.
 
-**R9b. What is left, and why it is expensive.** `rootPairUnify` (8.9 s on sha256) barely moved
-(0.99×): its live chain-builders are `denseRpCheckPair`/`denseRpCheckPairIdx`/`denseScaledSlotBound`,
-all reverted above for the definitional-equality reason. Same for `HintCollapse`, `SeqzCollapse`,
-`ByteCheckPack` and `BoxRewrite`. Landing these means restating the affected `…With_eq` bridges to
-rewrite through `zmodZeroP_eq`/`zmodOneP_eq` rather than `rfl` — mechanical, but ~25 proof sites for
-a few percent. Note also `Affine.trySolve`/`trySolveUnit` and `denseScaledSlotBound` need the ring
-for `⁻¹`/`scale` regardless, so converting only their guards would not empty their entries.
+**R9b. What is left, and why it is expensive.** Its `rootPairUnify` half is **superseded by entry
+170**, which rebuilt the pass (0.13–0.53×): the per-candidate chain builders are gone with the
+per-candidate work itself, and the surviving `⁻¹` is one call per distinct coefficient value.
+Still open for `HintCollapse`, `SeqzCollapse`, `ByteCheckPack` and `BoxRewrite`: landing these means
+restating the affected `…With_eq` bridges to rewrite through `zmodZeroP_eq`/`zmodOneP_eq` rather than
+`rfl` — mechanical, but ~25 proof sites for a few percent. Note also `Affine.trySolve`/`trySolveUnit`
+and `denseScaledSlotBound` need the ring for `⁻¹`/`scale` regardless, so converting only their guards
+would not empty their entries.
+
+**R9d (partly done, entry 170). The bound path is what is left of `rootPairUnify`** (sha256 918 ms:
+preparation 274, `denseVarBucket` build 125, ~900 bound queries 122, `substF` 259). A
+**candidate-restricted raw bound sweep** — one pass over the interactions recording, *for the
+candidate variables only*, the first fact-bounded literal `.var x` payload slot, behind a `Thunk` so
+the 8 of 11 sha256 cycles that never query a bound never build it — replaces both the bucket build
+and the per-query walks with ~50–60 ms of sweeping in the three cycles that adopt (**~190 ms of
+918**). It needs a first-yield sweep-equality lemma against `denseFindVarBound`, the shape of the
+existing `denseFindDomainMap_getElem?`. Do **not** widen it to all variables: that is entry 170's
+measured dead end (~1 M index entries to serve ~900 queries, worse on every case).
 
 **R9c (done, entry 159).** `denseRpKeyHash` bucketed rootPairUnify's `seen` accumulator on
 `(k, A.const, δ, A.terms.length)` while the scan re-verified with the exact whole-key test, so on a
@@ -707,6 +719,24 @@ instead of 256 (~30× on those scans). It needs a per-item degree analysis and a
 are non-survivors" argument (`a·y + b = 0` has at most one root when `a ≠ 0`).
 
 ### Runtime dead ends (measured; do not re-propose without new evidence)
+
+- **An eager raw-slot bound index over every variable** (entry 170, rootPairUnify): a sweep building
+  `VarId → List (busId, mult, Thunk pattern, slot)` so a raw bound query costs one `BusFacts` call
+  with no payload walk and no re-derived slot pattern. Worse on **every** case — sha256 `apc_001`
+  1220 → 1324 ms, keccak 93 → 100, wasm-eth `apc_012` flat — because it inserts ~1 M
+  (variable, interaction) entries per invocation to serve **~900 queries in the whole run**. Eager
+  indexing loses whenever the query set is orders of magnitude smaller than the index; restrict the
+  sweep to the variables that will be queried (R9d) or leave it lazy.
+- **A memoizing bound table for rootPairUnify** (entry 170): `Std.HashMap VarId (Thunk (Option Nat))`
+  over the candidate variables, forced on first use, to stop a `seen` entry re-deriving its bound
+  once per compared pair. **Exactly 0** on sha256 (886 vs 887 ms) and noise on keccak: the queries
+  are already almost all for distinct variables, because the bound gate keeps same-key non-twins out
+  of the certificate. A memo needs repeated *keys*, not repeated call sites.
+- **A constant-only pre-walk to skip linearizing** (entry 170, `denseRpConstOf`): computing a
+  factor's linearized constant and term-emptiness without allocating, to decide `δ = 0` before the
+  merge. On sha256 cycle 0 it filters 104 264 products to 40 958 and costs **59 ms against the 68 ms
+  of linearizing all of them** — the tree walk is the expensive half of `denseLinearize`, the
+  allocation is not.
 
 - **An unchanged-node-preserving `DenseExpr.substF` twin** (entry 169): returning the input node
   when no descendant changed cut domainBatch by 144 ms and cost **+2.5 s across every other pass**

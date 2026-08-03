@@ -143,130 +143,283 @@ def denseAnyVarBound (bs : BusSemantics p) (facts : BusFacts p bs)
 /-! ## The pair certificate (dense) -/
 
 /-- Decidable certificate that constraints `cX` (in `x`) and `cY` (in `y`) are two-root twins and
-    both variables are range-bounded below the root gap. -/
-def denseRpCheckPair (bs : BusSemantics p) (facts : BusFacts p bs)
-    (bis : List (BusInteraction (DenseExpr p))) (domCs : List (DenseExpr p))
-    (cX cY : DenseExpr p) (x y : VarId) : Bool :=
+    both variables are range-bounded below the root gap, with the two value bounds served by
+    `bnd` (`denseRpCheckPair` instantiates it with the scanning lookup). -/
+def denseRpCheckPairB (bnd : VarId → Option Nat) (cX cY : DenseExpr p) (x y : VarId) : Bool :=
   match denseTwoRootOf? cX x, denseTwoRootOf? cY y with
   | some (k, A, δ), some (k', A', δ') =>
     decide (k' = k) && decide (A'.terms = A.terms) && decide (A'.const = A.const) &&
     decide (δ' = δ) && decide (k * k⁻¹ = 1) &&
     decide (x ∈ cX.vars) && decide (y ∈ cY.vars) &&
-    (match denseAnyVarBound bs facts bis domCs x, denseAnyVarBound bs facts bis domCs y with
+    (match bnd x, bnd y with
      | some Bx, some By =>
        decide (max Bx By ≤ (k⁻¹ * δ).val) && decide (max Bx By ≤ p - (k⁻¹ * δ).val)
      | _, _ => false)
   | _, _ => false
 
-/-! ## The scan loop and the pass (dense) -/
+/-- The pair certificate with both bounds derived by scanning the full interaction list. -/
+def denseRpCheckPair (bs : BusSemantics p) (facts : BusFacts p bs)
+    (bis : List (BusInteraction (DenseExpr p))) (domCs : List (DenseExpr p))
+    (cX cY : DenseExpr p) (x y : VarId) : Bool :=
+  denseRpCheckPairB (denseAnyVarBound bs facts bis domCs) cX cY x y
 
-/-- A previously seen two-root constraint: the constraint, its variable, and the matching key
-    `(k, A.terms, A.const, δ)`. Keys are compared before the expensive certificate is attempted. -/
-structure DenseRPSeen (p : ℕ) where
+/-! ## Candidate preparation (dense)
+
+A two-root candidate is a `(constraint, variable)` pair whose key `(k, A.terms, A.const, δ)` is
+matched against earlier candidates' keys. Both factors are merged **once** per constraint and each
+candidate reads its data off the merged pair: for a linearized factor `l`,
+`(l.others x).norm.terms` is exactly `(merge l.terms) \ x` — `denseMergeTerms` keeps
+first-occurrence order, so filtering before or after the merge gives the same list. Nothing here is
+trusted; `denseRpCheckPairB` re-derives every proposed pair's two-root data. -/
+
+/-- No entry of `ts` carries `v`. -/
+def denseRpNoVar (v : VarId) : List (VarId × ZMod p) → Bool
+  | [] => true
+  | (w, _) :: rest => !(w.index == v.index) && denseRpNoVar v rest
+
+/-- Whether a term list is already a normal form: distinct variables, no zero coefficient. Checking
+    this costs index compares only, where the general merge allocates a list per term. -/
+def denseRpTermsClean : List (VarId × ZMod p) → Bool
+  | [] => true
+  | (v, c) :: rest => !(c.val == 0) && denseRpNoVar v rest && denseRpTermsClean rest
+
+/-- The normal form of a linearized factor's terms, sharing the input when it is already normal. -/
+def denseRpMerged (ops : DenseZModOps p) (ts : List (VarId × ZMod p)) : List (VarId × ZMod p) :=
+  if denseRpTermsClean ts then ts else denseDropZeroWith ops (denseMergeTermsWith ops ts)
+
+/-- The coefficient `x` carries in a normal form. -/
+def denseRpCoeffIn : List (VarId × ZMod p) → VarId → Option (ZMod p)
+  | [], _ => none
+  | (v, c) :: rest, x => if v.index == x.index then some c else denseRpCoeffIn rest x
+
+/-- Whether `l1 \ x` and `l2 \ y` are equal, by one simultaneous walk skipping each side's own
+    candidate entry (the offset-form comparison behind a key match). -/
+def denseRpSkipEq : List (VarId × ZMod p) → VarId → List (VarId × ZMod p) → VarId → Bool
+  | [], _, [], _ => true
+  | (v, c) :: r1, x, l2, y =>
+      if v.index == x.index then denseRpSkipEq r1 x l2 y
+      else match l2 with
+        | [] => false
+        | (w, dd) :: r2 =>
+            if w.index == y.index then denseRpSkipEq ((v, c) :: r1) x r2 y
+            else v.index == w.index && c.val == dd.val && denseRpSkipEq r1 x r2 y
+  | [], x, (w, _) :: r2, y => if w.index == y.index then denseRpSkipEq [] x r2 y else false
+  termination_by l1 _ l2 _ => l1.length + l2.length
+
+/-- `none` when the two normal forms are identical — every variable is a candidate; otherwise the
+    at most two variables a candidate can still be. Entries before the first difference are equal,
+    so removing a variable occurring there removes the same position from both lists and leaves the
+    difference in place: only the differing position's own variables can qualify. -/
+def denseRpDiffVars : List (VarId × ZMod p) → List (VarId × ZMod p) → Option (List VarId)
+  | [], [] => none
+  | (v, c) :: r1, (w, dd) :: r2 =>
+      if v.index == w.index then
+        (if c.val == dd.val then denseRpDiffVars r1 r2 else some [v])
+      else some [v, w]
+  | (v, _) :: _, [] => some [v]
+  | [], (w, _) :: _ => some [w]
+
+/-- A candidate's shared per-constraint data: the constraint, the first factor's normal form (the
+    key's offset terms with `x` still in), the key's constant and root offset, and a multiset hash
+    of the terms, from which each candidate's bucket hash is one subtraction. -/
+structure DenseRpSrc (p : ℕ) where
   c : DenseExpr p
+  terms : List (VarId × ZMod p)
+  aconst : ZMod p
+  δ : ZMod p
+  tsum : UInt64
+
+/-- A candidate, and once bucketed a previously seen one: its constraint's shared data, its
+    variable and coefficient, its bucket hash, and the root gap `g = k⁻¹·δ` as the two `Nat` bounds
+    the certificate compares against. -/
+structure DenseRPSeen (p : ℕ) where
+  src : DenseRpSrc p
   x : VarId
-  key : ZMod p × List (VarId × ZMod p) × ZMod p × ZMod p
+  k : ZMod p
+  h : UInt64
+  gval : Nat
+  gco : Nat
 
-/-- The two-root candidates of one constraint, with their matching keys. Candidates whose root gap
-    `g = k⁻¹·δ` is tiny are dropped up front: the pair condition `B ≤ min(g.val, p − g.val)` can
-    never hold for a useful bound `B`, and booleanity constraints `b(b−1) = 0` would otherwise make
-    every boolean variable a (never-unifiable, expensive-to-reject) candidate. -/
-def denseRpCandidates (c : DenseExpr p) :
-    List (VarId × (ZMod p × List (VarId × ZMod p) × ZMod p × ZMod p)) :=
-  -- Both factors are linearized once (not per candidate variable); each `x` reads its coefficient
-  -- and x-free part off the shared linear forms — exactly `denseTwoRootOf?`'s values.
-  match c with
-  | .mul f1 f2 =>
-    (match denseLinearize f1, denseLinearize f2 with
-     | some l1, some l2 =>
-       (HashedDedup.hashedEraseDups (hash ·) c.vars).filterMap (fun x =>
-         let k := l1.coeff x
-         let A := (l1.others x).norm
-         let A2 := (l2.others x).norm
-         if k ≠ 0 ∧ l2.coeff x = k ∧ A2.terms = A.terms then
-           let δ := A2.const - A.const
-           if 256 ≤ min (k⁻¹ * δ).val (p - (k⁻¹ * δ).val) then
-             some (x, (k, A.terms, A.const, δ))
-           else none
-         else none)
-     | _, _ => [])
-  | _ => []
+/-- The constraint a candidate came from. -/
+def DenseRPSeen.c (e : DenseRPSeen p) : DenseExpr p := e.src.c
 
-/-- One `DenseZModOps p` above the candidate scan: each variable otherwise derives six instance
-    chains (two coefficients, two normal forms, the zero test and the `k⁻¹ · δ` product). -/
-def denseRpCandidatesWith (ops : DenseZModOps p) (c : DenseExpr p) :
-    List (VarId × (ZMod p × List (VarId × ZMod p) × ZMod p × ZMod p)) :=
+/-- Hash of one term of a key's offset form. -/
+def denseRpTermHash (v : VarId) (c : ZMod p) : UInt64 := mixHash (hash v.index) (hash c.val)
+
+/-- Multiset hash of a term list: a sum, so dropping the candidate's own term is a subtraction. -/
+def denseRpTermsSum : List (VarId × ZMod p) → UInt64
+  | [] => 0
+  | (v, c) :: rest => denseRpTermHash v c + denseRpTermsSum rest
+
+/-- Bucket hash of the key `(k, A.terms, A.const, δ)`, `asum` being `A.terms`' multiset hash.
+    Bucketing never hides a twin — equal keys hash equal — and the scan's exact test separates
+    collisions. -/
+def denseRpBucketHash (k aconst δ : ZMod p) (asum : UInt64) : UInt64 :=
+  mixHash (hash k.val) (mixHash (hash aconst.val) (mixHash (hash δ.val) asum))
+
+/-- The candidate variables of one constraint, with their coefficients: `cands` is the first
+    factor's own normal form when the two forms agreed (shared, not rebuilt). -/
+structure DenseRpPre (p : ℕ) where
+  src : DenseRpSrc p
+  cands : List (VarId × ZMod p)
+
+/-- The candidate variable and coefficient for one explicitly proposed variable: it must carry the
+    same coefficient in both normal forms, which must agree away from it. -/
+def denseRpCandOne (terms n2 : List (VarId × ZMod p)) (x : VarId) : Option (VarId × ZMod p) :=
+  match denseRpCoeffIn terms x, denseRpCoeffIn n2 x with
+  | some k, some k2 =>
+      if k.val == k2.val && denseRpSkipEq terms x n2 x then some (x, k) else none
+  | _, _ => none
+
+/-- One constraint's two-root data: the first factor's normal form, the candidate variables with
+    their coefficients, the key's constant and the root offset. A product of two affine factors
+    whose normal forms differ only in their constant contributes one candidate per variable; a
+    nonzero constant gap `δ` is necessary (the root gap `k⁻¹·δ` would otherwise be `0`), and is
+    checked before merging. -/
+def denseRpDataOf (ops : DenseZModOps p) (c : DenseExpr p) :
+    Option (List (VarId × ZMod p) × List (VarId × ZMod p) × ZMod p × ZMod p) :=
   match c with
   | .mul f1 f2 =>
     (match denseLinearizeWith ops f1, denseLinearizeWith ops f2 with
      | some l1, some l2 =>
-       (HashedDedup.hashedEraseDups (hash ·) c.vars).filterMap (fun x =>
-         let k := denseCoeffSumWith ops x l1.terms
-         let A := (l1.others x).normWith ops
-         let A2 := (l2.others x).normWith ops
-         if k ≠ ops.zero ∧ denseCoeffSumWith ops x l2.terms = k ∧ A2.terms = A.terms then
-           let δ := A2.const - A.const
-           if 256 ≤ min (ops.mul k⁻¹ δ).val (p - (ops.mul k⁻¹ δ).val) then
-             some (x, (k, A.terms, A.const, δ))
-           else none
-         else none)
-     | _, _ => [])
-  | _ => []
+       let δ := ops.add l2.const (ops.mul ops.negOne l1.const)
+       if δ.val == 0 then none else
+       let n1 := denseRpMerged ops l1.terms
+       let n2 := denseRpMerged ops l2.terms
+       match denseRpDiffVars n1 n2 with
+       | none => if n1.isEmpty then none else some (n1, n1, l1.const, δ)
+       | some vs =>
+         match vs.filterMap (denseRpCandOne n1 n2) with
+         | [] => none
+         | cands => some (n1, cands, l1.const, δ)
+     | _, _ => none)
+  | _ => none
 
-def denseRpCandidatesFast (c : DenseExpr p) :
-    List (VarId × (ZMod p × List (VarId × ZMod p) × ZMod p × ZMod p)) :=
-  denseRpCandidatesWith denseZModOps c
+/-- Every constraint's candidate variables, in source order. -/
+def denseRpPres (ops : DenseZModOps p) : List (DenseExpr p) → List (DenseRpPre p)
+  | [] => []
+  | c :: rest =>
+    match denseRpDataOf ops c with
+    | some (terms, cands, aconst, δ) =>
+        (⟨⟨c, terms, aconst, δ, denseRpTermsSum terms⟩, cands⟩ : DenseRpPre p) ::
+          denseRpPres ops rest
+    | none => denseRpPres ops rest
 
-theorem denseRpCandidatesWith_eq (ops : DenseZModOps p) (c : DenseExpr p) :
-    denseRpCandidatesWith ops c = denseRpCandidates c := by
-  simp only [denseRpCandidatesWith, denseRpCandidates, denseLinearizeWith_eq,
-    DenseLinExpr.coeff, denseCoeffSumWith_eq, DenseLinExpr.normWith_eq, ops.zero_eq, ops.mul_eq]
+/-! ### Root gaps
 
-@[csimp] theorem denseRpCandidates_eq_fast :
-    @denseRpCandidates = @denseRpCandidatesFast := by
-  funext p c
-  exact (denseRpCandidatesWith_eq denseZModOps c).symm
+A candidate's root gap `g = k⁻¹·δ` decides whether it can ever be unified: the pair condition
+`B ≤ min(g.val, p − g.val)` cannot hold for a useful bound `B` when the gap is tiny, and booleanity
+constraints `b(b−1) = 0` would otherwise make every boolean variable a (never-unifiable,
+expensive-to-reject) candidate. `ZMod`'s `Inv` is an extended gcd — the single most expensive
+operation in the pass — and a coefficient repeats across every constraint of the same instruction
+shape, so the inverses are tabulated once per invocation by value. -/
 
-/-- Content hash of a two-root key's offset form. Hashing the terms rather than their count keeps
-    key-unequal candidates out of each other's buckets, so the scan's exact `key == key'` test is
-    reached once per genuine twin instead of once per same-arity candidate. -/
-def denseRpTermsHash : List (VarId × ZMod p) → UInt64
-  | [] => 0x9e3779b97f4a7c15
-  | (v, c) :: rest => mixHash (mixHash (hash v.index) (hash c.val)) (denseRpTermsHash rest)
+/-- One inverse per distinct candidate coefficient. -/
+def denseRpInvTable (pres : List (DenseRpPre p)) : Std.HashMap Nat (ZMod p) :=
+  pres.foldl (fun m pre =>
+    pre.cands.foldl (fun m t =>
+      if m.contains t.2.val then m else m.insert t.2.val t.2⁻¹) m) ∅
 
-/-- Hash of a candidate key, used to bucket the `seen` accumulator (bucketing never hides a twin;
-    the exact `key == key'` check inside the scan separates any hash collision). -/
-def denseRpKeyHash (key : ZMod p × List (VarId × ZMod p) × ZMod p × ZMod p) : UInt64 :=
-  mixHash (hash key.1.val)
-    (mixHash (hash key.2.2.1.val) (mixHash (hash key.2.2.2.val) (denseRpTermsHash key.2.1)))
+/-- The candidate record for `x` with coefficient `k`, unless its root gap is tiny. -/
+def denseRpCandAt (ops : DenseZModOps p) (inv : Std.HashMap Nat (ZMod p)) (src : DenseRpSrc p)
+    (x : VarId) (k : ZMod p) : Option (DenseRPSeen p) :=
+  let g := ops.mul ((inv[k.val]?).getD k⁻¹) src.δ
+  let gv := g.val
+  let gc := p - gv
+  if 256 ≤ gv && 256 ≤ gc then
+    some ⟨src, x, k, denseRpBucketHash k src.aconst src.δ (src.tsum - denseRpTermHash x k), gv, gc⟩
+  else none
 
-/-- Prepend seen-entries into their key-hash buckets, preserving per-bucket insertion order. -/
+/-- The candidate records of one constraint that survive the root-gap test. -/
+def denseRpGroupOf (ops : DenseZModOps p) (inv : Std.HashMap Nat (ZMod p)) (src : DenseRpSrc p) :
+    List (VarId × ZMod p) → List (DenseRPSeen p)
+  | [] => []
+  | (v, k) :: rest =>
+    match denseRpCandAt ops inv src v k with
+    | some e => e :: denseRpGroupOf ops inv src rest
+    | none => denseRpGroupOf ops inv src rest
+
+/-- The nonempty candidate groups, in source order. -/
+def denseRpGroupsOf (ops : DenseZModOps p) (inv : Std.HashMap Nat (ZMod p)) :
+    List (DenseRpPre p) → List (List (DenseRPSeen p))
+  | [] => []
+  | pre :: rest =>
+    match denseRpGroupOf ops inv pre.src pre.cands with
+    | [] => denseRpGroupsOf ops inv rest
+    | g => g :: denseRpGroupsOf ops inv rest
+
+/-- Every constraint's two-root candidates, grouped by constraint, in source order. -/
+def denseRpGroups (ops : DenseZModOps p) (cs : List (DenseExpr p)) :
+    List (List (DenseRPSeen p)) :=
+  let pres := denseRpPres ops cs
+  denseRpGroupsOf ops (denseRpInvTable pres) pres
+
+/-- Hash of the part of a key shared by a whole group: a pair match needs equal `A.const` and equal
+    `δ`, i.e. equal factor constants. -/
+def denseRpSigHash (e : DenseRPSeen p) : UInt64 :=
+  mixHash (hash e.src.aconst.val) (hash e.src.δ.val)
+
+/-- How many groups carry each signature. -/
+def denseRpSigCounts (gs : List (List (DenseRPSeen p))) : Std.HashMap UInt64 Nat :=
+  gs.foldl (fun m g =>
+    match g with
+    | [] => m
+    | e :: _ => let s := denseRpSigHash e; m.insert s (m.getD s 0 + 1)) ∅
+
+/-- Drop the groups whose signature no other group shares: they can match nothing, so bucketing and
+    scanning them is pure cost (two candidates of the same group never pair — the scan only looks at
+    earlier constraints). -/
+def denseRpLiveGroups (gs : List (List (DenseRPSeen p))) : List (List (DenseRPSeen p)) :=
+  let counts := denseRpSigCounts gs
+  gs.filter (fun g =>
+    match g with
+    | [] => false
+    | e :: _ => 2 ≤ counts.getD (denseRpSigHash e) 0)
+
+/-! ## The scan and the pass (dense) -/
+
+/-- Prepend seen-entries into their bucket, preserving per-bucket insertion order. -/
 def denseRpInsertAll (m : Std.HashMap UInt64 (List (DenseRPSeen p)))
     (es : List (DenseRPSeen p)) : Std.HashMap UInt64 (List (DenseRPSeen p)) :=
-  es.foldr (fun e acc => acc.insert (denseRpKeyHash e.key) (e :: acc.getD (denseRpKeyHash e.key) []))
-    m
+  es.foldr (fun e acc => acc.insert e.h (e :: acc.getD e.h [])) m
 
-/-- Scan the constraints: for each two-root candidate, look for an earlier twin with the same key
-    whose pair certificate passes, and adopt the entailed equality into the solution map. -/
-def denseRpLoop (bs : BusSemantics p) (facts : BusFacts p bs)
-    (bis : List (BusInteraction (DenseExpr p))) (domCs : List (DenseExpr p)) :
-    List (DenseExpr p) → Std.HashMap UInt64 (List (DenseRPSeen p)) → DenseSolved p → DenseSolved p
+/-- Whether two candidates carry the same key `(k, A.terms, A.const, δ)`. -/
+def denseRpKeyEq (e cand : DenseRPSeen p) : Bool :=
+  e.k.val == cand.k.val && e.src.aconst.val == cand.src.aconst.val &&
+    e.src.δ.val == cand.src.δ.val && denseRpSkipEq e.src.terms e.x cand.src.terms cand.x
+
+/-- The certificate's bound clause, on the candidates' own gap. It is a necessary condition of
+    `denseRpCheckPairB`, so gating on it cannot accept a pair the certificate rejects — and it
+    rejects a same-key non-twin for two bound lookups instead of two two-root re-derivations. -/
+def denseRpBoundGate (bnd : VarId → Option Nat) (e cand : DenseRPSeen p) : Bool :=
+  match bnd e.x, bnd cand.x with
+  | some Bx, some By => decide (max Bx By ≤ cand.gval) && decide (max Bx By ≤ cand.gco)
+  | _, _ => false
+
+/-- Scan the candidate groups in source order: for each candidate, look for an earlier twin with the
+    same key whose pair certificate passes, and adopt the entailed equality into the solution map. -/
+def denseRpScan (bnd : VarId → Option Nat) :
+    List (List (DenseRPSeen p)) → Std.HashMap UInt64 (List (DenseRPSeen p)) → DenseSolved p →
+      DenseSolved p
   | [], _, σ => σ
-  | c :: rest, seen, σ =>
-    let cands := denseRpCandidates c
-    match cands.findSome? (fun xk =>
-        (seen.getD (denseRpKeyHash xk.2) []).findSome? (fun e =>
-          if e.key == xk.2 && e.x != xk.1 &&
-              denseRpCheckPair bs facts bis domCs e.c c e.x xk.1
-          then some (e, xk.1) else none)) with
+  | g :: rest, seen, σ =>
+    match g.findSome? (fun cand =>
+        (seen.getD cand.h []).findSome? (fun e =>
+          if denseRpKeyEq e cand && !(e.x.index == cand.x.index) &&
+              denseRpBoundGate bnd e cand &&
+              denseRpCheckPairB bnd e.c cand.c e.x cand.x
+          then some (e, cand.x) else none)) with
     | some ex =>
-        denseRpLoop bs facts bis domCs rest
-          (denseRpInsertAll seen ((cands.filter (fun xk => xk.1 != ex.2)).map
-            (fun xk => (⟨c, xk.1, xk.2⟩ : DenseRPSeen p))))
+        denseRpScan bnd rest
+          (denseRpInsertAll seen (g.filter (fun cand => !(cand.x.index == ex.2.index))))
           (σ.insertAll [(ex.2, DenseExpr.var ex.1.x)])
-    | none =>
-        denseRpLoop bs facts bis domCs rest
-          (denseRpInsertAll seen (cands.map (fun xk => (⟨c, xk.1, xk.2⟩ : DenseRPSeen p)))) σ
+    | none => denseRpScan bnd rest (denseRpInsertAll seen g) σ
+
+/-- The solution map the scan adopts over a whole system. -/
+def denseRpSigma (bs : BusSemantics p) (facts : BusFacts p bs) (d : DenseConstraintSystem p) :
+    DenseSolved p :=
+  denseRpScan (denseAnyVarBound bs facts d.busInteractions d.algebraicConstraints)
+    (denseRpLiveGroups (denseRpGroups denseZModOps d.algebraicConstraints)) ∅ DenseSolved.empty
 
 /-- For twin constraints `(a+k·x)(a+δ+k·x)=0` and `(a+k·y)(a+δ+k·y)=0` — each pinning its variable
     to one of two roots a fixed gap `g = k⁻¹·δ` apart — when both variables are range-bounded below
@@ -275,8 +428,7 @@ def denseRpLoop (bs : BusSemantics p) (facts : BusFacts p bs)
 def denseRootPairUnifyF (pw : PrimeWitness p) (bs : BusSemantics p) (facts : BusFacts p bs)
     (d : DenseConstraintSystem p) : DenseConstraintSystem p :=
   if pw.isPrime = true then
-    let σ := denseRpLoop bs facts d.busInteractions d.algebraicConstraints
-      d.algebraicConstraints ∅ DenseSolved.empty
+    let σ := denseRpSigma bs facts d
     if σ.map.isEmpty then d else d.substF σ.fn
   else d
 
@@ -343,44 +495,6 @@ def denseAnyVarBoundIdx (bs : BusSemantics p) (facts : BusFacts p bs)
   | some B => some B
   | none => (witsOf x).findSome? (fun bi => denseScaledSlotBoundD bs facts dom bi x)
 
-/-- `denseRpCheckPair` with indexed bound lookups. -/
-def denseRpCheckPairIdx (bs : BusSemantics p) (facts : BusFacts p bs)
-    (witsOf : VarId → List (BusInteraction (DenseExpr p)))
-    (dom : VarId → Option (List (ZMod p)))
-    (cX cY : DenseExpr p) (x y : VarId) : Bool :=
-  match denseTwoRootOf? cX x, denseTwoRootOf? cY y with
-  | some (k, A, δ), some (k', A', δ') =>
-    decide (k' = k) && decide (A'.terms = A.terms) && decide (A'.const = A.const) &&
-    decide (δ' = δ) && decide (k * k⁻¹ = 1) &&
-    decide (x ∈ cX.vars) && decide (y ∈ cY.vars) &&
-    (match denseAnyVarBoundIdx bs facts witsOf dom x, denseAnyVarBoundIdx bs facts witsOf dom y with
-     | some Bx, some By =>
-       decide (max Bx By ≤ (k⁻¹ * δ).val) && decide (max Bx By ≤ p - (k⁻¹ * δ).val)
-     | _, _ => false)
-  | _, _ => false
-
-/-- `denseRpLoop` with indexed bound lookups. -/
-def denseRpLoopIdx (bs : BusSemantics p) (facts : BusFacts p bs)
-    (witsOf : VarId → List (BusInteraction (DenseExpr p)))
-    (dom : VarId → Option (List (ZMod p))) :
-    List (DenseExpr p) → Std.HashMap UInt64 (List (DenseRPSeen p)) → DenseSolved p → DenseSolved p
-  | [], _, σ => σ
-  | c :: rest, seen, σ =>
-    let cands := denseRpCandidates c
-    match cands.findSome? (fun xk =>
-        (seen.getD (denseRpKeyHash xk.2) []).findSome? (fun e =>
-          if e.key == xk.2 && e.x != xk.1 &&
-              denseRpCheckPairIdx bs facts witsOf dom e.c c e.x xk.1
-          then some (e, xk.1) else none)) with
-    | some ex =>
-        denseRpLoopIdx bs facts witsOf dom rest
-          (denseRpInsertAll seen ((cands.filter (fun xk => xk.1 != ex.2)).map
-            (fun xk => (⟨c, xk.1, xk.2⟩ : DenseRPSeen p))))
-          (σ.insertAll [(ex.2, DenseExpr.var ex.1.x)])
-    | none =>
-        denseRpLoopIdx bs facts witsOf dom rest
-          (denseRpInsertAll seen (cands.map (fun xk => (⟨c, xk.1, xk.2⟩ : DenseRPSeen p)))) σ
-
 /-- `denseRootPairUnifyF` with the per-variable interaction index and the tabulated domain map. -/
 def denseRootPairUnifyFFast (pw : PrimeWitness p) (bs : BusSemantics p) (facts : BusFacts p bs)
     (d : DenseConstraintSystem p) : DenseConstraintSystem p :=
@@ -391,8 +505,11 @@ def denseRootPairUnifyFFast (pw : PrimeWitness p) (bs : BusSemantics p) (facts :
       Thunk.mk fun _ => denseVarBucket denseBIVars d.busInteractions
     let domMap : Thunk (Std.HashMap VarId (List (ZMod p))) :=
       Thunk.mk fun _ => denseFindDomainMap d.algebraicConstraints
-    let σ := denseRpLoopIdx bs facts (fun x => denseVarBucketLookup witsIdx.get x)
-      (fun v => (domMap.get)[v]?) d.algebraicConstraints ∅ DenseSolved.empty
+    let bndIdx : VarId → Option Nat := fun x =>
+      denseAnyVarBoundIdx bs facts (fun v => denseVarBucketLookup witsIdx.get v)
+        (fun v => (domMap.get)[v]?) x
+    let gs := denseRpLiveGroups (denseRpGroups denseZModOps d.algebraicConstraints)
+    let σ := denseRpScan bndIdx gs ∅ DenseSolved.empty
     if σ.map.isEmpty then d else d.substF σ.fn
   else d
 
