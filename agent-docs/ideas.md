@@ -612,6 +612,23 @@ the allocation traffic of their results. The `.fallback` row is **done (entry 15
      Preflight's `T.doms xs` is 6.8 % on sha256, all `Std.HashMap VarId` probes: the R12 array-indexed
      prototype belongs here first.
 
+### disconnected residual after entry 166 (the union-find)  ·  *runtime, sha256*
+
+The pass is 479 ms of sha256 `apc_001` and 37 ms of keccak. ~60 % of what is left is the union-find
+build — one path-halving find per variable occurrence, which is the floor for computing connectivity
+from scratch. Two things were looked at and left:
+
+- **An allocation-free `dcFind`.** It returns `Array Nat × Nat`, so it allocates one tuple per
+  variable occurrence. Splitting it into a pure `dcRoot` plus a path-rewriting `dcLink` trades that
+  for four short array walks instead of two — a wash at these path lengths (1–2 after compression),
+  and it makes the link-to-min invariant load-bearing rather than merely useful.
+- **Sharing the zero-evaluations.** Removed items are evaluated twice (once to decide whether their
+  component is poisoned, once by the re-check). Threading a cache into the guarded drop is exactly
+  the argument the re-check exists *not* to trust, and the evaluation is dictionary-free now.
+
+Reusing the partition across cleanup cycles (the pass runs 6–11 times per case) needs incrementality
+the stateless pass framework does not have.
+
 ### gauss residual after entries 160–161 (the sparse engine)  ·  *runtime, sha256*
 
 Entry 160 replaced the pass with a watch-driven sparse engine and entry 161 removed a pointer-sharing
@@ -683,6 +700,13 @@ and in `run` alike. Consequences, all measured on busPairCancel:
      and `Thunk.mk` have the same `.get`, so the choice is invisible to every proof.
 
 ### Runtime dead ends (measured; do not re-propose without new evidence)
+
+- **A three-bit `UInt8` summary walk for disconnected's fused re-check** (entry 166): one walk
+  computing has-a-variable / some-removable / some-not measures the *same* as two separate
+  `dcAnyVar` / `dcAllVar` walks (keccak 35 vs 37 ms, identical output) and costs ~3x the proof
+  (bitmask reasoning against `vars` instead of two `List.any`/`List.all` inductions). Two walks win
+  on their own terms: `dcAnyVar` exits on the first variable of a removed item, and is the only walk
+  a kept item pays.
 
 - **Dropping gauss's second source-order sweep** (entry 160): looks provably fruitless over a prime
   field, and measures openvm-eth `apc_037` gauss **170 → 317 ms** with changed output — 35 % of that
