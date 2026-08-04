@@ -1,19 +1,16 @@
-import ApcOptimizer.MemoryBus
+import ApcOptimizer.MemoryBusM
 import ApcOptimizer.Implementation.MemoryBusCascade
 
 set_option autoImplicit false
 
-/-! # Order-free (multiset) memory-bus discipline
+/-! # Order-free memory-bus discipline: consumption and canonical order
 
-`admissibleMemoryBusM` is a candidate order-free replacement for the positional
-`admissibleMemoryBus` (`ApcOptimizer/MemoryBus.lean`): a property of the *multiset* of evaluated
-messages, invariant under any reordering of the bus-interaction list
-(`admissibleMemoryBusM_perm`). Per evaluated address it states exactly what multiset bus balance
-plus window atomicity provide: the receives' payload multiset exceeds the sends' by at most one
-(the entry receive). `admissibleMemoryBusM_copies` is the consumption form: presenting one
-address group as `k` accesses with strictly increasing send timestamps and the per-access
-LessThan bound, every interior receive is forced to copy the previous send's payload
-(via `cascade_forced`). -/
+Consequences of `admissibleMemoryBusM` (`ApcOptimizer/MemoryBusM.lean`, the proposed order-free
+replacement for the positional `admissibleMemoryBus`). `admissibleMemoryBusM_copies` is the
+consumption form: presenting one address group as `k` accesses with strictly increasing send
+timestamps and the per-access LessThan bound, every interior receive is forced to copy the
+previous send's payload (via `cascade_forced`). The canonical-order section then recovers the
+positional discipline as a theorem (`interleaveAccesses_admissibleMemoryBus_of_M`). -/
 
 variable {p : ℕ}
 
@@ -54,37 +51,6 @@ theorem two_le_count_map_finRange {k : ℕ} {α : Type*} [DecidableEq α]
     rw [h, Multiset.count_cons_self]
     omega
   omega
-
-/-! ## The order-free discipline -/
-
-/-- The active `getPrevious` messages of `M` at evaluated address `addr`. -/
-def recvsAt (shape : MemoryBusShape) (addr : List (Option (ZMod p)))
-    (M : Multiset (BusInteraction (ZMod p))) : Multiset (BusInteraction (ZMod p)) :=
-  M.filter (fun m => m.multiplicity = -shape.setNewMult ∧ shape.address m = addr)
-
-/-- The active `setNew` messages of `M` at evaluated address `addr`. -/
-def sendsAt (shape : MemoryBusShape) (addr : List (Option (ZMod p)))
-    (M : Multiset (BusInteraction (ZMod p))) : Multiset (BusInteraction (ZMod p)) :=
-  M.filter (fun m => m.multiplicity = shape.setNewMult ∧ shape.address m = addr)
-
-/-- Order-free memory-bus discipline: at every evaluated address, the receives' payload multiset
-    exceeds the sends' payload multiset by at most one element — the entry receive. This is the
-    multiset shadow of bus balance plus window atomicity, and (unlike `admissibleMemoryBus`)
-    mentions no ordering of the interaction list. -/
-def admissibleMemoryBusM (shape : MemoryBusShape)
-    (M : Multiset (BusInteraction (ZMod p))) : Prop :=
-  ∀ addr : List (Option (ZMod p)),
-    Multiset.card
-      ((recvsAt shape addr M).map BusInteraction.payload
-        - (sendsAt shape addr M).map BusInteraction.payload) ≤ 1
-
-/-- The point of the definition: the discipline is invariant under reordering the interaction
-    list. -/
-theorem admissibleMemoryBusM_perm (shape : MemoryBusShape)
-    {L L' : List (BusInteraction (ZMod p))} (h : L.Perm L') :
-    admissibleMemoryBusM shape (L : Multiset (BusInteraction (ZMod p))) ↔
-      admissibleMemoryBusM shape (L' : Multiset (BusInteraction (ZMod p))) := by
-  rw [Multiset.coe_eq_coe.mpr h]
 
 /-! ## Consumption -/
 
