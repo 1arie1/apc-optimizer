@@ -6884,5 +6884,64 @@ position cursor fixes it: `pre` holds no candidate of either kind and the emitte
 neither recognizer's bus, so the next search may resume immediately after it. Also unaddressed:
 `denseMatchByteSingle` runs `denseByteShape?` per position with no `@[csimp]` runtime twin (its
 `denseMatchRangeCheck` counterpart has one), which is what the surviving single pass now costs.
+**Worked: yes.**
+
+### 176. Runtime: digitFold plans its lookups, then bounds only those keys (0.29–0.67x on the pass)
+
+`denseDigitFoldF` built its `VarId → Nat` bounds map over **every raw payload variable of every bus
+interaction** (a `facts.slotBound` plus `denseProbedSlotBoundAtP` per entry) and then consulted it only
+for the two operands `densePairByteOps?` returns. The pass fires in **55 of 1443 corpus invocations**;
+the rest measured the whole system to answer nothing. Stubbing the map to `∅` (`@[implemented_by]`,
+output wrong, an upper bound on any fix) put **68 % of the pass** in that build: corpus 1480 → 468 ms.
+
+THE CHANGE: plan first, bound second. `denseFoldPlan` walks the interactions once and, for each
+recognized byte-pair check, linearizes both operands under `denseSolveOperand`'s own
+`2 ≤ terms.length` gate, keeping the ladder forms in scan order plus their variables — exactly the
+keys the solve can query, since `denseAttemptLadder` reads only `bounds` and the form at a
+`mergeSort` permutation of `l.terms`. `denseBuildWith … (some keys)` then builds for those keys only,
+and `denseSolveLadders` solves the planned forms in order. No form ⇒ no lookup ⇒ the map is never
+built, which is the common case. `denseBuild`/`denseAddAll` stay as `keep? := none` wrappers, so
+`CarryBranch`, `SeqzCollapse`, `HintCollapse` and `DegenRange` are untouched.
+
+WHY IT IS VALUE-IDENTICAL: restricting the keys cannot change a kept key's bound — every insertion for
+`i` happens on `i`'s own iteration of `denseAddVars` (including inside `denseGoCands`, which inserts at
+`i`, not at the probed candidate), computing a bound never reads the map, and `denseInsertEntry` keeps
+the tightest per key, so each key's value is the minimum over its own bounds and independent of the
+rest. The plan is a *superset* of the read set, which is the direction that matters: a missing key
+turns a `some` into a `none`. `denseSolveLadders_eq_findFold` is the equality with the interaction
+scan — a plan-walk induction over an arbitrary accumulator (`denseSolveLadders_foldPlanGo`), the
+per-operand contribution (`denseFoldOperand_rev`, an existential packaging the appended forms with
+their solve) and `denseSolveLadders_append`. **No obligation about the bounds themselves broke**: the
+pass's soundness constrains which bounds are *stored*, never which are enumerated.
+
+**SEQUENCING MATTERS HERE.** A first version kept `denseFindFold`'s own walk and added a separate
+candidate walk in front of it, so recognition and linearization ran twice. That measured **0.43–0.56x
+on OpenVM but 1.08–1.13x on SP1** (18 cases >1 ms slower, SP1 rsp wall 1.011x): SP1's byte-pair checks
+are dense while its whole-system sweep was comparatively cheap, so the duplicate cost more than the
+restriction saved. Fusing the two walks fixed it and improved OpenVM further. A corpus-wide per-pass
+sweep is what caught it — the OpenVM-only representatives all looked like wins.
+
+NUMBERS (this 20-core box, serial, interleaved, 3 reps, medians; sha256 2 reps): sha256 `apc_001`
+**517 → 182 ms** on the pass, total 23 650 → 23 117 (0.977x); wasm-eth `apc_012` 72 → 20, total
+0.978x; `apc_063` 57 → 16, 0.983x; keccak `apc_001` 90 → 36, 0.975x; openvm-eth `apc_071` 9 → 3,
+0.950x. **Whole local corpus, 303 APCs interleaved: digitFold 1472 → 586 ms (0.398x), wall
+50.6 → 49.7 s (0.981x)**, every family improving — wasm-eth 0.290x, sha256 0.345x, keccak 0.407x,
+openvm-eth 0.437x, SP1 keccak 0.604x, SP1 rsp 0.669x. Six cases read +2 ms in the single-shot corpus
+sweep; re-measured over 5 reps each they are 1 ms quantization on 0–4 ms passes (`apc_031` base
+`[1,4,4,4,2]` vs new `[0,0,1,0,3]`).
+VERIFIED: final `vars / constraints / bus` **identical on all 303 corpus APCs**; `opt-export`
+byte-identical on openvm-eth `apc_051` / `apc_026` / `apc_037` / `apc_071`, keccak `apc_001`,
+wasm-eth `apc_012`, sha256 `apc_001`, SP1 keccak `apc_001`, SP1 rsp `apc_029`; `lake build` clean with
+no warnings; `check-proof-integrity` passes on the three standard axioms.
+
+RESIDUAL, measured with two more stubs (corpus ms of the 570–591 the pass now costs): **linearize +
+ladder solve ~282**, **restricted bounds sweep 115** (`denseBuildWith → ∅`: 591 → 476; concentrated in
+openvm-eth 54, keccak 19, SP1 rsp 19 — already ~10 ms each on sha256 and wasm-eth), **degree guard
+~108** (R5's floor, now 19 % of this pass), **bare interaction walk ~65** (recognizer → `none`:
+570 → 173, minus the guard). So the sweep is only 19 % of what is left and the whole addressable
+remainder is ~0.8 % of corpus wall — sub-bar, deliberately stopped. If it is ever revisited:
+`denseTryLadder` sorts `l.terms` once per sign per form, and `denseAddVars` still resolves
+`denseVarSlot` per kept variable for interactions whose multiplicity is non-constant, where every
+bound is statically `none`.
 
 **Worked: yes.**
