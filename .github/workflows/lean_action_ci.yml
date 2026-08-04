@@ -62,23 +62,31 @@ jobs:
         run: |
           runs=$(gh run list --workflow "Lean Action CI" --branch main --status success \
             --limit 50 --json databaseId,headSha)
-          # Take the PR's base commit when its build is still around (artifacts live 30 days),
-          # otherwise the newest main build — flagged `exact=false`, so the report can say the
-          # baseline is not this PR's base and the reader knows drift is in the numbers.
-          row=$(jq -c --arg s "$BASE_SHA" 'map(select(.headSha == $s)) | .[0] // empty' <<< "$runs")
-          exact=true
-          if [ -z "$row" ]; then
-            row=$(jq -c '.[0] // empty' <<< "$runs")
-            exact=false
-          fi
+          # Candidates: this PR's base commit first (the only baseline whose diff *is* this PR), then
+          # newest-first. Take the first whose binary still *exists*: a run stays listed forever but
+          # its artifact is pruned at 30 days, so on a long-lived PR the base run can be selectable
+          # with nothing to download -- which would leave the cells with no baseline while the report
+          # still named a sha. Checking availability here keeps the printed sha benchable.
+          ordered=$(jq -c --arg s "$BASE_SHA" \
+            '[.[] | select(.headSha == $s)] + [.[] | select(.headSha != $s)]' <<< "$runs")
           run_id=""; sha=""
-          if [ -n "$row" ]; then
-            run_id=$(jq -r '.databaseId' <<< "$row")
-            sha=$(jq -r '.headSha' <<< "$row")
-          fi
+          for i in $(seq 0 9); do
+            cand=$(jq -c ".[$i] // empty" <<< "$ordered")
+            [ -n "$cand" ] || break
+            rid=$(jq -r '.databaseId' <<< "$cand")
+            live=$(gh api "repos/$GH_REPO/actions/runs/$rid/artifacts" \
+              --jq '[.artifacts[] | select(.name == "apc-optimizer-bin" and .expired == false)]
+                    | length' 2>/dev/null || echo 0)
+            if [ "${live:-0}" -gt 0 ]; then
+              run_id=$rid
+              sha=$(jq -r '.headSha' <<< "$cand")
+              break
+            fi
+          done
+          exact=false
+          if [ -n "$sha" ] && [ "$sha" = "$BASE_SHA" ]; then exact=true; fi
           if [ -z "$run_id" ]; then
-            echo "::warning::no successful main build to bench against; PR-only report"
-            exact=false
+            echo "::warning::no main build with a live apc-optimizer-bin artifact; PR-only report"
           elif [ "$exact" != true ]; then
             echo "::warning::baseline is main $sha, not this PR's base commit $BASE_SHA; \
           size changes and the runtime row may be main's own drift"
@@ -284,10 +292,16 @@ jobs:
           PR_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           echo "psha=$(cut -c1-7 <<< "$PR_SHA")" >> "$GITHUB_OUTPUT"
+          # The footer names a baseline only if one was actually benched. A resolved sha is not
+          # enough: a cell can still fail to download it or time out, and then every set falls back
+          # to PR-only markdown -- naming a sha there would describe a comparison that never ran.
+          bsha="$BASE_SHA"
+          if ! ls main/*.json > /dev/null 2>&1; then bsha=""; fi
+          echo "bsha=$bsha" >> "$GITHUB_OUTPUT"
           # One line of prose when the comparison is against something other than this PR's base, so
           # a reader does not attribute main's own drift to the PR (see the `baseline` job).
           drift=""
-          if [ -n "$BASE_SHA" ] && [ "$BASE_EXACT" != true ]; then
+          if [ -n "$bsha" ] && [ "$BASE_EXACT" != true ]; then
             drift="**The baseline is not this PR's base commit**, so a changed size or a large \
           runtime delta may be main's own drift rather than this PR -- verify against a freshly \
           built base before believing either."
@@ -323,7 +337,7 @@ jobs:
                   && github.event.number || '' }}
           note: >-
             openvm-eth + wasm-eth + keccak + sha256 + sp1/rsp + sp1/keccak, PR `${{ steps.base.outputs.psha }}`
-            ${{ needs.baseline.outputs.sha && format('vs main `{0}`', needs.baseline.outputs.sha)
+            ${{ steps.base.outputs.bsha && format('vs main `{0}`', steps.base.outputs.bsha)
                  || '(no main baseline binary)' }}.
             ${{ steps.base.outputs.drift }}
             Effectiveness is exact. Each set's two sides are benched back to back on one runner, so
