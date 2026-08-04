@@ -188,8 +188,21 @@ def openVmBusSemantics (p : ℕ) (busMap : BusMap := defaultBusMap) :
   maintainsInvariants := maintainsInvariants busMap
   admissible msgs :=
     (∀ (busId : Nat) (shape : MemoryBusShape), memShapeOf busMap busId = some shape →
-      admissibleMemoryBus shape (msgs.filter (fun m => m.busId = busId)))
+      admissibleMemoryBusM shape
+        (↑(msgs.filter (fun m => m.busId = busId)) : Multiset (BusInteraction (ZMod p))))
     ∧ x0ReturnsZero busMap msgs
+
+/-- Auditor sanity: the whole OpenVM rely (`openVmBusSemantics.admissible`) is order-free — it is
+    invariant under reordering the interaction list. -/
+theorem openVmAdmissible_perm (busMap : BusMap)
+    {msgs msgs' : List (BusInteraction (ZMod p))} (h : msgs.Perm msgs') :
+    (openVmBusSemantics p busMap).admissible msgs ↔
+      (openVmBusSemantics p busMap).admissible msgs' := by
+  unfold openVmBusSemantics x0ReturnsZero
+  refine and_congr ?_ ?_
+  · refine forall_congr' fun busId => forall_congr' fun shape => imp_congr Iff.rfl ?_
+    exact admissibleMemoryBusM_perm shape (h.filter _)
+  · exact forall_congr' fun m => imp_congr h.mem_iff Iff.rfl
 
 /-- OpenVM's proving-backend degree bound (powdr's `DEFAULT_DEGREE_BOUND`), used when the optimizer
     is run directly rather than with a bound passed in over the FFI. -/

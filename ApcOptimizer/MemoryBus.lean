@@ -4,17 +4,30 @@ set_option autoImplicit false
 
 /-! Helper definitions to encode the semantics of memory buses, used to implement
     `BusSemantics.admissible`. Memory buses are stateful: bus interactions come in
-    `getPrevious`/`setNew` pairs — a `setNew` commits a cell's value, and the next access's
-    `getPrevious` to the same cell reads it back. So a `setNew` and the next same-address
-    `getPrevious`, with no intervening same-address interaction, carry equal payloads (address,
-    timestamp and value). Both memory reads and memory writes are such a `getPrevious`/`setNew`
-    pair (a read additionally constrains the two values to agree).
+    `getPrevious`/`setNew` pairs — a `setNew` commits a cell's value, and the access reading it
+    back issues a same-address `getPrevious` with the same payload (address, timestamp and
+    value). Both memory reads and memory writes are such a `getPrevious`/`setNew` pair (a read
+    additionally constrains the two values to agree).
 
-    `admissibleMemoryBus` just *asserts* that this discipline holds. In practice it could be
-    enforced (e.g. by an argument like [1]), or not enforced but guaranteed that the prover *can*
-    satisfy it (without sacrificing completeness).
+    The primary discipline is the order-free `admissibleMemoryBusM`: a property of the *multiset*
+    of evaluated messages, assuming nothing about the order of the interaction list
+    (`admissibleMemoryBusM_perm`). Per evaluated address it asserts the multiset shadow of two
+    system-level facts:
 
-    Note that this assumes that *bus interactions are ordered by time*!
+    1. **Bus balance** — a received record is a sent record: matched receives consume send
+       payload tuples injectively (the defining property of the global bus argument, e.g. [1]).
+    2. **Window atomicity** — per address, at most one record enters the block from outside (the
+       entry receive); every other receive consumes an in-block send.
+
+    Together: at every address, the receives' payload multiset exceeds the sends' by at most one
+    element. Grouping is by *evaluated* address, so the statement is independent of how symbolic
+    addresses alias.
+
+    The positional `admissibleMemoryBus` remains temporarily: it additionally trusts that the
+    interaction list is *ordered by time* and asserts payload copying between list-adjacent
+    same-address pairs. It is recoverable from the order-free discipline as a theorem on the
+    canonical access order (`Implementation/MemoryBusMultiset.lean`,
+    `interleaveAccesses_admissibleMemoryBus_of_M`).
 
     [1] https://link.springer.com/article/10.1007/BF01185212
 -/
@@ -68,3 +81,29 @@ def admissibleMemoryBus (shape : MemoryBusShape) (L : List (BusInteraction (ZMod
     shape.address S = shape.address R →
     (∀ m ∈ mid, m.multiplicity ≠ 0 → shape.address m = shape.address S → False) →
     S.payload = R.payload
+
+/-- The `getPrevious` messages of `M` at evaluated address `addr`. -/
+def recvsAt (shape : MemoryBusShape) (addr : List (Option (ZMod p)))
+    (M : Multiset (BusInteraction (ZMod p))) : Multiset (BusInteraction (ZMod p)) :=
+  M.filter (fun m => m.multiplicity = -shape.setNewMult ∧ shape.address m = addr)
+
+/-- The `setNew` messages of `M` at evaluated address `addr`. -/
+def sendsAt (shape : MemoryBusShape) (addr : List (Option (ZMod p)))
+    (M : Multiset (BusInteraction (ZMod p))) : Multiset (BusInteraction (ZMod p)) :=
+  M.filter (fun m => m.multiplicity = shape.setNewMult ∧ shape.address m = addr)
+
+/-- Order-free memory-bus discipline: at every evaluated address, the receives' payload multiset
+    exceeds the sends' payload multiset by at most one element — the entry receive. -/
+def admissibleMemoryBusM (shape : MemoryBusShape)
+    (M : Multiset (BusInteraction (ZMod p))) : Prop :=
+  ∀ addr : List (Option (ZMod p)),
+    Multiset.card
+      ((recvsAt shape addr M).map BusInteraction.payload
+        - (sendsAt shape addr M).map BusInteraction.payload) ≤ 1
+
+/-- The discipline is invariant under reordering the interaction list. -/
+theorem admissibleMemoryBusM_perm (shape : MemoryBusShape)
+    {L L' : List (BusInteraction (ZMod p))} (h : L.Perm L') :
+    admissibleMemoryBusM shape (L : Multiset (BusInteraction (ZMod p))) ↔
+      admissibleMemoryBusM shape (L' : Multiset (BusInteraction (ZMod p))) := by
+  rw [Multiset.coe_eq_coe.mpr h]

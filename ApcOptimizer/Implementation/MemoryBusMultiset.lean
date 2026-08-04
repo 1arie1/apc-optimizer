@@ -1,11 +1,11 @@
-import ApcOptimizer.MemoryBusM
+import ApcOptimizer.MemoryBus
 import ApcOptimizer.Implementation.MemoryBusCascade
 
 set_option autoImplicit false
 
 /-! # Order-free memory-bus discipline: consumption and canonical order
 
-Consequences of `admissibleMemoryBusM` (`ApcOptimizer/MemoryBusM.lean`, the proposed order-free
+Consequences of `admissibleMemoryBusM` (`ApcOptimizer/MemoryBus.lean`, the order-free
 replacement for the positional `admissibleMemoryBus`). `admissibleMemoryBusM_copies` is the
 consumption form: presenting one address group as `k` accesses with strictly increasing send
 timestamps and the per-access LessThan bound, every interior receive is forced to copy the
@@ -54,8 +54,8 @@ theorem two_le_count_map_finRange {k : ℕ} {α : Type*} [DecidableEq α]
 
 /-! ## Consumption -/
 
-/-- Consumption form (the order-free `admissibleMemoryBus.consecutive`): present one address
-    group as `k` accesses — access `i` receiving `recv i` and sending `send i` — with strictly
+/-- Consumption form (the order-free counterpart of positional consecutive-copying): present one
+    address group as `k` accesses — access `i` receiving `recv i` and sending `send i` — with strictly
     increasing send timestamps and the LessThan bound, where the timestamp is computed from the
     payload alone. Then every interior receive copies the previous send's payload. -/
 theorem admissibleMemoryBusM_copies {k : ℕ} (shape : MemoryBusShape)
