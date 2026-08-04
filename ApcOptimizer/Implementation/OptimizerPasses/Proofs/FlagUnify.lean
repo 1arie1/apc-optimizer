@@ -334,6 +334,135 @@ theorem denseFuInsertAll_seen {S : List (BusInteraction (DenseExpr p))} :
         · exact hacc (denseFuKeyHash e0.key) e hmem'
       · exact hacc hsh e hmem
 
+/-- Every match the scan records pairs two interactions of the scanned system: the current one is
+    pending, the twin comes out of the `seen` buckets. -/
+theorem denseFuScan_mem {S : List (BusInteraction (DenseExpr p))} :
+    ∀ (pending : List (BusInteraction (DenseExpr p)))
+      (seen : Std.HashMap UInt64 (List (DenseFUSeen p))) (acc : List (DenseFuMatch p)),
+      (∀ bi ∈ pending, bi ∈ S) →
+      (∀ hsh e, e ∈ seen.getD hsh [] → e.bi ∈ S) →
+      (∀ m ∈ acc, m.biX ∈ S ∧ m.biY ∈ S) →
+      ∀ m ∈ denseFuScan pending seen acc, m.biX ∈ S ∧ m.biY ∈ S := by
+  intro pending
+  induction pending with
+  | nil =>
+      intro seen acc _ _ hacc m hm
+      rw [denseFuScan] at hm
+      exact hacc m (List.mem_reverse.1 hm)
+  | cons c rest ih =>
+      intro seen acc hpend hseen hacc
+      have hcmem : c ∈ S := hpend c (List.mem_cons_self ..)
+      have hrest : ∀ bi ∈ rest, bi ∈ S := fun bi h => hpend bi (List.mem_cons_of_mem _ h)
+      have hseen' : ∀ hsh e, e ∈ (denseFuInsertAll seen
+          ((denseFuCandidates c).map (fun xk => (⟨c, xk.1, xk.2⟩ : DenseFUSeen p)))).getD hsh [] →
+          e.bi ∈ S := by
+        refine denseFuInsertAll_seen _ seen hseen ?_
+        intro e' he'
+        obtain ⟨xk', _hxk', rfl⟩ := List.mem_map.1 he'
+        exact hcmem
+      rw [denseFuScan]
+      cases hf : (denseFuCandidates c).findSome? (fun xk =>
+          (seen.getD (denseFuKeyHash xk.2) []).findSome? (fun e =>
+            if e.key == xk.2 then some (e, xk.1) else none)) with
+      | none =>
+          simp only []
+          exact ih _ acc hrest hseen' hacc
+      | some ex =>
+          simp only []
+          obtain ⟨xk, _hxkmem, hinner⟩ := List.exists_of_findSome?_eq_some hf
+          obtain ⟨e, hemem, hif⟩ := List.exists_of_findSome?_eq_some hinner
+          by_cases hk : (e.key == xk.2) = true
+          · rw [if_pos hk] at hif
+            simp only [Option.some.injEq] at hif
+            have hexbi : ex.1.bi ∈ S := by
+              rw [← hif]; exact hseen (denseFuKeyHash xk.2) e hemem
+            refine ih _ _ hrest hseen' ?_
+            intro m hm
+            rcases List.mem_cons.1 hm with rfl | hm'
+            · exact ⟨hexbi, hcmem⟩
+            · exact hacc m hm'
+          · rw [if_neg hk] at hif
+            exact absurd hif (by simp)
+
+/-- Certifying the recorded matches is sound: the solution map stays entailed (a) and
+    occurrence-closed (b), each adopted `vy = vx` justified by `denseFuCheck_sound`. -/
+theorem denseFuAdopt_sound [Fact p.Prime] (bs : BusSemantics p)
+    (facts : BusFacts p bs) (d : DenseConstraintSystem p) :
+    ∀ (ms : List (DenseFuMatch p)) (σ : DenseSolved p),
+      (∀ m ∈ ms, m.biX ∈ d.busInteractions ∧ m.biY ∈ d.busInteractions) →
+      (∀ denv, d.satisfies bs denv → ∀ i t, σ.fn i = some t → denv i = t.eval denv) →
+      (∀ i t, σ.fn i = some t → ∀ z ∈ t.vars, z ∈ d.occ) →
+      (∀ denv, d.satisfies bs denv → ∀ i t,
+          (denseFuAdopt bs facts
+              (denseVarBucket DenseExpr.vars d.algebraicConstraints) ms σ).fn i
+            = some t → denv i = t.eval denv) ∧
+      (∀ i t, (denseFuAdopt bs facts
+          (denseVarBucket DenseExpr.vars d.algebraicConstraints) ms σ).fn i
+          = some t → ∀ z ∈ t.vars, z ∈ d.occ) := by
+  intro ms
+  induction ms with
+  | nil => intro σ _ hσs hσv; exact ⟨hσs, hσv⟩
+  | cons m rest ih =>
+      intro σ hms hσs hσv
+      obtain ⟨hexbi, hcmem⟩ := hms m (List.mem_cons_self ..)
+      have hrest : ∀ m' ∈ rest, m'.biX ∈ d.busInteractions ∧ m'.biY ∈ d.busInteractions :=
+        fun m' h => hms m' (List.mem_cons_of_mem _ h)
+      rw [denseFuAdopt]
+      cases hd0 : denseFuPairData? bs facts
+          (denseVarBucket DenseExpr.vars d.algebraicConstraints) m.biX m.biY m.x with
+      | none =>
+          simp only []
+          exact ih σ hrest hσs hσv
+      | some d0 =>
+          simp only []
+          refine ih (σ.insertAll _) hrest ?_ ?_
+          ·
+            intro denv hsat i t hti
+            refine DenseSolved.insertAll_preserves _ σ
+              (fun i' t' h' => hσs denv hsat i' t' h') ?_ i t hti
+            intro pr hpr
+            obtain ⟨tt, _htt, hpif⟩ := List.mem_filterMap.1 hpr
+            by_cases hck : denseFuCheckWith d0 tt.2 tt.1 = true
+            · rw [if_pos hck] at hpif
+              simp only [Option.some.injEq] at hpif
+              rw [← hpif]
+              show denv tt.1 = denv tt.2
+              have hfc : denseFuCheck bs facts
+                  (denseVarBucket DenseExpr.vars d.algebraicConstraints)
+                  m.biX m.biY m.x tt.2 tt.1 = true := by
+                unfold denseFuCheck; rw [hd0]; exact hck
+              exact denseFuCheck_sound bs facts
+                  (denseVarBucket DenseExpr.vars d.algebraicConstraints) m.biX m.biY m.x
+                tt.2 tt.1 hfc denv (fun v c' hc' => hsat.1 c'
+                  (denseVarBucket_mem DenseExpr.vars d.algebraicConstraints v c' hc'))
+                (hsat.2 m.biX hexbi) (hsat.2 m.biY hcmem)
+            · rw [if_neg hck] at hpif
+              exact absurd hpif (by simp)
+          ·
+            intro i t hti
+            refine DenseSolved.insertAll_preserves
+              (Q := fun i t => ∀ z ∈ t.vars, z ∈ d.occ) _ σ hσv ?_ i t hti
+            intro pr hpr
+            obtain ⟨tt, _htt, hpif⟩ := List.mem_filterMap.1 hpr
+            by_cases hck : denseFuCheckWith d0 tt.2 tt.1 = true
+            · rw [if_pos hck] at hpif
+              simp only [Option.some.injEq] at hpif
+              rw [← hpif]
+              intro z hz
+              simp only [DenseExpr.vars, List.mem_singleton] at hz
+              subst hz
+              have hfc : denseFuCheck bs facts
+                  (denseVarBucket DenseExpr.vars d.algebraicConstraints)
+                  m.biX m.biY m.x tt.2 tt.1 = true := by
+                unfold denseFuCheck; rw [hd0]; exact hck
+              exact DenseConstraintSystem.mem_occ_of_bi hexbi (by
+                simp only [denseBIVars, List.mem_append]
+                exact Or.inr (denseFuCheck_vars bs facts
+                    (denseVarBucket DenseExpr.vars d.algebraicConstraints)
+                  m.biX m.biY m.x tt.2 tt.1 hfc))
+            · rw [if_neg hck] at hpif
+              exact absurd hpif (by simp)
+
 /-- The flagUnify scan loop is sound: the final solution map is entailed (a) and occurrence-closed
     (b), each adopted `vy = vx` justified by `denseFuCheck_sound`. -/
 theorem denseFuLoop_sound [Fact p.Prime] (bs : BusSemantics p)
@@ -351,99 +480,15 @@ theorem denseFuLoop_sound [Fact p.Prime] (bs : BusSemantics p)
       (∀ i t, (denseFuLoop bs facts
           (denseVarBucket DenseExpr.vars d.algebraicConstraints) pending seen σ).fn i
           = some t → ∀ z ∈ t.vars, z ∈ d.occ) := by
-  intro pending
-  induction pending with
-  | nil =>
-      intro seen σ _ _ hσs hσv
-      exact ⟨hσs, hσv⟩
-  | cons c rest ih =>
-      intro seen σ hpend hseen hσs hσv
-      have hcmem : c ∈ d.busInteractions := hpend c (List.mem_cons_self ..)
-      have hrest : ∀ bi ∈ rest, bi ∈ d.busInteractions :=
-        fun bi h => hpend bi (List.mem_cons_of_mem _ h)
-      have hseen' : ∀ hsh e, e ∈ (denseFuInsertAll seen
-          ((denseFuCandidates c).map (fun xk => (⟨c, xk.1, xk.2⟩ : DenseFUSeen p)))).getD hsh [] →
-          e.bi ∈ d.busInteractions := by
-        refine denseFuInsertAll_seen _ seen hseen ?_
-        intro e' he'
-        obtain ⟨xk', _hxk', rfl⟩ := List.mem_map.1 he'
-        exact hcmem
-      rw [denseFuLoop]
-      cases hf : (denseFuCandidates c).findSome? (fun xk =>
-          (seen.getD (denseFuKeyHash xk.2) []).findSome? (fun e =>
-            if e.key == xk.2 then some (e, xk.1) else none)) with
-      | none =>
-          simp only []
-          exact ih _ σ hrest hseen' hσs hσv
-      | some ex =>
-          simp only []
-          cases hd0 : denseFuPairData? bs facts
-              (denseVarBucket DenseExpr.vars d.algebraicConstraints) ex.1.bi c ex.2 with
-          | none =>
-              simp only []
-              exact ih _ σ hrest hseen' hσs hσv
-          | some d0 =>
-              simp only []
-              obtain ⟨xk, _hxkmem, hinner⟩ := List.exists_of_findSome?_eq_some hf
-              obtain ⟨e, hemem, hif⟩ := List.exists_of_findSome?_eq_some hinner
-              by_cases hk : (e.key == xk.2) = true
-              · rw [if_pos hk] at hif
-                simp only [Option.some.injEq] at hif
-                have hexbi : ex.1.bi ∈ d.busInteractions := by
-                  rw [← hif]; exact hseen (denseFuKeyHash xk.2) e hemem
-                refine ih _ (σ.insertAll _) hrest hseen' ?_ ?_
-                ·
-                  intro denv hsat i t hti
-                  refine DenseSolved.insertAll_preserves _ σ
-                    (fun i' t' h' => hσs denv hsat i' t' h') ?_ i t hti
-                  intro pr hpr
-                  obtain ⟨tt, _htt, hpif⟩ := List.mem_filterMap.1 hpr
-                  by_cases hck : denseFuCheckWith d0 tt.2 tt.1 = true
-                  · rw [if_pos hck] at hpif
-                    simp only [Option.some.injEq] at hpif
-                    rw [← hpif]
-                    show denv tt.1 = denv tt.2
-                    have hfc : denseFuCheck bs facts
-                        (denseVarBucket DenseExpr.vars d.algebraicConstraints)
-                        ex.1.bi c ex.2 tt.2 tt.1 = true := by
-                      unfold denseFuCheck; rw [hd0]; exact hck
-                    exact denseFuCheck_sound bs facts
-                        (denseVarBucket DenseExpr.vars d.algebraicConstraints) ex.1.bi c ex.2
-                      tt.2 tt.1 hfc denv (fun v c' hc' => hsat.1 c'
-                        (denseVarBucket_mem DenseExpr.vars d.algebraicConstraints v c' hc'))
-                      (hsat.2 ex.1.bi hexbi) (hsat.2 c hcmem)
-                  · rw [if_neg hck] at hpif
-                    exact absurd hpif (by simp)
-                ·
-                  intro i t hti
-                  refine DenseSolved.insertAll_preserves
-                    (Q := fun i t => ∀ z ∈ t.vars, z ∈ d.occ) _ σ hσv ?_ i t hti
-                  intro pr hpr
-                  obtain ⟨tt, _htt, hpif⟩ := List.mem_filterMap.1 hpr
-                  by_cases hck : denseFuCheckWith d0 tt.2 tt.1 = true
-                  · rw [if_pos hck] at hpif
-                    simp only [Option.some.injEq] at hpif
-                    rw [← hpif]
-                    intro z hz
-                    simp only [DenseExpr.vars, List.mem_singleton] at hz
-                    subst hz
-                    have hfc : denseFuCheck bs facts
-                        (denseVarBucket DenseExpr.vars d.algebraicConstraints)
-                        ex.1.bi c ex.2 tt.2 tt.1 = true := by
-                      unfold denseFuCheck; rw [hd0]; exact hck
-                    exact DenseConstraintSystem.mem_occ_of_bi hexbi (by
-                      simp only [denseBIVars, List.mem_append]
-                      exact Or.inr (denseFuCheck_vars bs facts
-                          (denseVarBucket DenseExpr.vars d.algebraicConstraints)
-                        ex.1.bi c ex.2 tt.2 tt.1 hfc))
-                  · rw [if_neg hck] at hpif
-                    exact absurd hpif (by simp)
-              · rw [if_neg hk] at hif
-                exact absurd hif (by simp)
+  intro pending seen σ hpend hseen hσs hσv
+  rw [denseFuLoop]
+  exact denseFuAdopt_sound bs facts d _ σ
+    (denseFuScan_mem pending seen [] hpend hseen (by simp)) hσs hσv
 
 /-! ## The dense `flagUnify` pass -/
 
-/-- `denseFlagUnifyF` re-expressed with the loop's solution map named, for the proofs below. -/
+/-- `denseFlagUnifyF` re-expressed with the loop's solution map named, for the proofs below. The
+    scan's empty-match gate is redundant on values: no match adopts nothing. -/
 theorem denseFlagUnifyF_eq (pw : PrimeWitness p) (bs : BusSemantics p) (facts : BusFacts p bs)
     (d : DenseConstraintSystem p) :
     denseFlagUnifyF pw bs facts d
@@ -454,7 +499,15 @@ theorem denseFlagUnifyF_eq (pw : PrimeWitness p) (bs : BusSemantics p) (facts : 
            else d.substF (denseFuLoop bs facts
                (denseVarBucket DenseExpr.vars d.algebraicConstraints) d.busInteractions ∅
                 DenseSolved.empty).fn)
-         else d) := rfl
+         else d) := by
+  by_cases hp : pw.isPrime = true
+  · cases hms : denseFuScan d.busInteractions
+        (∅ : Std.HashMap UInt64 (List (DenseFUSeen p))) [] with
+    | nil =>
+        simp [denseFlagUnifyF, denseFuLoop, hp, hms, denseFuAdopt, DenseSolved.empty]
+    | cons m rest =>
+        simp [denseFlagUnifyF, denseFuLoop, hp, hms]
+  · simp [denseFlagUnifyF, hp]
 
 /-- The final loop solution map is entailed and occurrence-closed (`denseFuLoop_sound` at `∅`). -/
 theorem denseFlagUnify_loop_invariant [Fact p.Prime] (bs : BusSemantics p)
