@@ -376,17 +376,43 @@ def denseAddVars (bs : BusSemantics p) (facts : BusFacts p bs) (bi : BusInteract
       | none => T
     denseAddVars bs facts bi pr xs (denseGoCands bs facts bi pr i slot? pr.cands T1)
 
-/-- Collect bounds from every interaction's fact-bounded raw payload slots. -/
-def denseAddAll (bs : BusSemantics p) (facts : BusFacts p bs) :
+/-- The raw-variable payload entries a build is asked to bound; `none` asks for all of them. -/
+def denseKeptRawVars (keep? : Option (Std.HashSet VarId)) (bi : BusInteraction (DenseExpr p)) :
+    List VarId :=
+  match keep? with
+  | none => denseRawVarsOf bi
+  | some keep => (denseRawVarsOf bi).filter (fun i => keep.contains i)
+
+/-- Collect bounds from every interaction's fact-bounded raw payload slots, for the variables
+    `keep?` asks for. An interaction contributing none pays no `denseBiPrepOf` (with its
+    compound-slot linearizations) and no `facts` call.
+
+    Restricting the keys does not change the bound stored for a key that is kept: every insertion
+    for `i` happens on `i`'s own iteration, `denseInsertEntry` keeps the tightest of them, and the
+    minimum for one key is independent of every other. -/
+def denseAddAllWith (bs : BusSemantics p) (facts : BusFacts p bs)
+    (keep? : Option (Std.HashSet VarId)) :
     List (BusInteraction (DenseExpr p)) → Std.HashMap VarId Nat → Std.HashMap VarId Nat
   | [], T => T
   | bi :: rest, T =>
-    denseAddAll bs facts rest (denseAddVars bs facts bi (denseBiPrepOf bi) (denseRawVarsOf bi) T)
+    match denseKeptRawVars keep? bi with
+    | [] => denseAddAllWith bs facts keep? rest T
+    | vs => denseAddAllWith bs facts keep? rest (denseAddVars bs facts bi (denseBiPrepOf bi) vs T)
+
+def denseAddAll (bs : BusSemantics p) (facts : BusFacts p bs)
+    (dbis : List (BusInteraction (DenseExpr p))) (T : Std.HashMap VarId Nat) :
+    Std.HashMap VarId Nat :=
+  denseAddAllWith bs facts none dbis T
+
+def denseBuildWith (bs : BusSemantics p) (facts : BusFacts p bs)
+    (keep? : Option (Std.HashSet VarId)) (dbis : List (BusInteraction (DenseExpr p))) :
+    Std.HashMap VarId Nat :=
+  denseAddAllWith bs facts keep? dbis ∅
 
 /-- Dense bounds-map build. -/
 def denseBuild (bs : BusSemantics p) (facts : BusFacts p bs)
     (dbis : List (BusInteraction (DenseExpr p))) : Std.HashMap VarId Nat :=
-  denseAddAll bs facts dbis ∅
+  denseBuildWith bs facts none dbis
 
 /-! ## Dense byte-pair recognizer -/
 
@@ -402,6 +428,37 @@ def densePairByteOps? (bs : BusSemantics p) (facts : BusFacts p bs)
           ∧ bi.multiplicity = DenseExpr.const 1
       then some (o1, o2) else none
     | none => none
+
+/-! ## The fold plan: the ladder forms to solve and the keys they will query -/
+
+/-- One operand's contribution: its ladder form (in reverse scan order) and its variables, when
+    `denseSolveOperand` would attempt it — a successful linearization with at least two terms. -/
+def denseFoldOperand (E : DenseExpr p) (acc : List (DenseLinExpr p) × Std.HashSet VarId) :
+    List (DenseLinExpr p) × Std.HashSet VarId :=
+  match denseLinearize E with
+  | none => acc
+  | some l =>
+    if l.terms.length < 2 then acc
+    else (l :: acc.1, l.terms.foldl (fun s t => s.insert t.1) acc.2)
+
+def denseFoldPlanGo (bs : BusSemantics p) (facts : BusFacts p bs) :
+    List (BusInteraction (DenseExpr p)) → List (DenseLinExpr p) × Std.HashSet VarId →
+      List (DenseLinExpr p) × Std.HashSet VarId
+  | [], acc => acc
+  | bi :: rest, acc =>
+    match densePairByteOps? bs facts bi with
+    | none => denseFoldPlanGo bs facts rest acc
+    | some (x, y) => denseFoldPlanGo bs facts rest (denseFoldOperand y (denseFoldOperand x acc))
+
+/-- The ladder forms of every recognized byte-pair check's operands, in scan order (interaction
+    order, first operand before second), paired with all their variables — which is exactly the set
+    of keys the solve can look a bound up for. Recognition and linearization happen here only; the
+    solve consumes the forms (`denseSolveLadders`) and the bounds map is built for the keys
+    (`denseBuildWith`). -/
+def denseFoldPlan (bs : BusSemantics p) (facts : BusFacts p bs)
+    (dbis : List (BusInteraction (DenseExpr p))) : List (DenseLinExpr p) × Std.HashSet VarId :=
+  let acc := denseFoldPlanGo bs facts dbis ([], ∅)
+  (acc.1.reverse, acc.2)
 
 /-! ## Dense ladder recognition and grid solving -/
 
@@ -472,13 +529,37 @@ def denseFindFold (bs : BusSemantics p) (facts : BusFacts p bs) (denseBM : Std.H
         | some r => some r
         | none => denseFindFold bs facts denseBM rest
 
+/-- First planned ladder form with a forced digit, both sign interpretations in
+    `denseSolveOperand`'s order. Reads nothing but `bounds` and the form. -/
+def denseSolveLadders (bounds : Std.HashMap VarId Nat) :
+    List (DenseLinExpr p) → Option (VarId × ℕ)
+  | [] => none
+  | l :: rest =>
+    match denseAttemptLadder true bounds l with
+    | some r => some r
+    | none =>
+      match denseAttemptLadder false bounds l with
+      | some r => some r
+      | none => denseSolveLadders bounds rest
+
+/-- The planned scan: recognize and linearize the byte-pair operands once, bound only the keys those
+    forms can query, then solve the forms in scan order. `denseSolveLadders_eq_findFold` in
+    `Proofs/DigitFold.lean` is the equality with the interaction scan `denseFindFold`.
+
+    No ladder form means no lookup, so the bounds map is not built at all — the common case. -/
+def denseDigitFoldFind (bs : BusSemantics p) (facts : BusFacts p bs)
+    (dbis : List (BusInteraction (DenseExpr p))) : Option (VarId × ℕ) :=
+  let plan := denseFoldPlan bs facts dbis
+  if plan.1.isEmpty then none
+  else denseSolveLadders (denseBuildWith bs facts (some plan.2) dbis) plan.1
+
 /-- Digit-fold transform: when a witness limb is forced to a compile-time constant by a byte check
     over a base-256 ladder (e.g. a limb pinned to `7`), substitute it away. One forced digit per
     invocation; identity if none found. -/
 def denseDigitFoldF (bs : BusSemantics p) (facts : BusFacts p bs) (d : DenseConstraintSystem p) :
     DenseConstraintSystem p :=
   if 256 < p then
-    match denseFindFold bs facts (denseBuild bs facts d.busInteractions) d.busInteractions with
+    match denseDigitFoldFind bs facts d.busInteractions with
     | some (i, dd) => d.subst i (DenseExpr.const (dd : ZMod p))
     | none => d
   else d

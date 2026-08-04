@@ -790,11 +790,14 @@ that is a sound necessary condition changes nothing. Per-pass no-op ms, net of t
 increasing effort:
 
 - **(a) Eager whole-system prologues most invocations never use** — sized by stubbing the prologue to
-  `∅` via `@[implemented_by]` (upper bound; output wrong): `digitFold` **1480 → 468 ms** (68 % of the
-  pass) is `denseBuild`'s bounds map over every raw payload variable of every interaction, queried
-  only for the operands of `densePairByteOps?` hits, and the pass fires in **55 of 1443**
-  invocations — R9d's candidate-restricted shape, since entry 170 already measured that the
-  eager-over-every-variable version loses. `flagUnify` **1073 → 456 ms** (58 %) is
+  `∅` via `@[implemented_by]` (upper bound; output wrong). ~~`digitFold` **1480 → 468 ms** (68 % of the
+  pass)~~ **done (entry 176)**: 0.398x on the pass, every family improving, by planning the lookups in
+  one recognize-and-linearize walk and bounding only the keys that plan can query. Two lessons carry —
+  **fuse the planning walk with the work it plans** (keeping the pass's own walk alongside a separate
+  candidate walk measured 1.08–1.13x on SP1, where dense byte-pair checks made the duplicated
+  recognition cost more than the restriction saved), and **sweep the whole corpus per pass before
+  believing a representative set** (the OpenVM representatives all read as clean wins). Its residual is
+  in *digitFold residual after entry 176* below. `flagUnify` **1073 → 456 ms** (58 %) is
   `denseVarBucket DenseExpr.vars` read only inside `denseFuPairData?`, i.e. only once a same-key twin
   is found — **18 times in the whole corpus** — so here `denseThunkIf` is the fix and the `Thunk` note
   above does not bite (the value is almost never forced, unlike the `cands` dead end). Audit every
@@ -816,6 +819,19 @@ increasing effort:
   cycles cost 1.30 s and between them remove 1 variable, 3 interactions and 1 constraint. Nothing can
   know a cycle is fruitless without running it — this is not a separate lever, it is the argument for
   (a)–(c), since every pass in that cycle is a no-op invocation by construction.
+
+### digitFold residual after entry 176 (the planned bounds map)  ·  *runtime*
+
+570–591 ms corpus-wide, split with two more `@[implemented_by]` stubs: **linearize + ladder solve
+~282 ms**, **the restricted bounds sweep 115** (`denseBuildWith → ∅`: 591 → 476, concentrated in
+openvm-eth 54, keccak 19, SP1 rsp 19 — already ~10 ms each on sha256 and wasm-eth), **the degree guard
+~108** (R5, now 19 % of this pass), **the bare interaction walk ~65** (recognizer → `none`: 570 → 173,
+minus the guard). So the sweep — the obvious next target — is only 19 % of what is left, and the whole
+addressable remainder is ~0.8 % of corpus wall: **deliberately stopped as sub-bar**. If a corpus ever
+makes it matter: `denseTryLadder` sorts `l.terms` once per sign per form, and `denseAddVars` still
+resolves `denseVarSlot` per kept variable for interactions whose multiplicity is non-constant, where
+every bound is statically `none`. The lesson worth keeping is the method — stub the two halves
+separately before designing, because the named half was not the expensive one.
 
 ### tupleRange residual after entry 175 (the single-pass scan)  ·  *runtime*
 
