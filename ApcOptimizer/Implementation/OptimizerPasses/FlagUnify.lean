@@ -136,34 +136,58 @@ def denseFuTargets (biX biY : BusInteraction (DenseExpr p)) (x : VarId) :
     | _, _ => []
   | _, _ => []
 
+/-- A matched pair of scaled checks: the earlier interaction, the current one, and their shared
+    carrier — the arguments the pair certificate is taken at. -/
+structure DenseFuMatch (p : ℕ) where
+  biX : BusInteraction (DenseExpr p)
+  biY : BusInteraction (DenseExpr p)
+  x : VarId
+
 /-- Scan the interactions: for each scaled-check candidate, find an earlier twin with the same key
-    and adopt every flag pair the certificate confirms, accumulating into `DenseSolved`. -/
-def denseFuLoop (bs : BusSemantics p) (facts : BusFacts p bs)
-    (domIdx : Std.HashMap VarId (List (DenseExpr p))) :
-    List (BusInteraction (DenseExpr p)) → Std.HashMap UInt64 (List (DenseFUSeen p)) →
-      DenseSolved p → DenseSolved p
-  | [], _, σ => σ
-  | c :: rest, seen, σ =>
+    and record the match. Reads the interactions alone — `seen` grows the same way whether or not a
+    twin is found — so it runs before any domain bucket exists. Matches come out in scan order.
+    The `seen` insert must stay inside the branches: hoisting it above the lookup leaves `seen`
+    shared there, and every insert then copies the map. -/
+def denseFuScan : List (BusInteraction (DenseExpr p)) →
+    Std.HashMap UInt64 (List (DenseFUSeen p)) → List (DenseFuMatch p) → List (DenseFuMatch p)
+  | [], _, acc => acc.reverse
+  | c :: rest, seen, acc =>
     let cands := denseFuCandidates c
     match cands.findSome? (fun xk =>
         (seen.getD (denseFuKeyHash xk.2) []).findSome? (fun e =>
           if e.key == xk.2 then some (e, xk.1) else none)) with
     | some ex =>
-        -- pair-level work once; per-target checks share it (definitionally `denseFuCheck`)
-        match denseFuPairData? bs facts domIdx ex.1.bi c ex.2 with
-        | none =>
-            denseFuLoop bs facts domIdx rest
-              (denseFuInsertAll seen (cands.map (fun xk => (⟨c, xk.1, xk.2⟩ : DenseFUSeen p)))) σ
-        | some d =>
-        let pairs := (denseFuTargets ex.1.bi c ex.2).filterMap (fun t =>
-          if denseFuCheckWith d t.2 t.1
-          then some (t.1, DenseExpr.var t.2) else none)
-        denseFuLoop bs facts domIdx rest
+        denseFuScan rest
           (denseFuInsertAll seen (cands.map (fun xk => (⟨c, xk.1, xk.2⟩ : DenseFUSeen p))))
-          (σ.insertAll pairs)
+          (⟨ex.1.bi, c, ex.2⟩ :: acc)
     | none =>
-        denseFuLoop bs facts domIdx rest
-          (denseFuInsertAll seen (cands.map (fun xk => (⟨c, xk.1, xk.2⟩ : DenseFUSeen p)))) σ
+        denseFuScan rest
+          (denseFuInsertAll seen (cands.map (fun xk => (⟨c, xk.1, xk.2⟩ : DenseFUSeen p)))) acc
+
+/-- Certify the recorded matches in scan order, adopting every flag pair confirmed, accumulating
+    into `DenseSolved`. -/
+def denseFuAdopt (bs : BusSemantics p) (facts : BusFacts p bs)
+    (domIdx : Std.HashMap VarId (List (DenseExpr p))) :
+    List (DenseFuMatch p) → DenseSolved p → DenseSolved p
+  | [], σ => σ
+  | m :: rest, σ =>
+    -- pair-level work once; per-target checks share it (definitionally `denseFuCheck`)
+    match denseFuPairData? bs facts domIdx m.biX m.biY m.x with
+    | none => denseFuAdopt bs facts domIdx rest σ
+    | some d =>
+      let pairs := (denseFuTargets m.biX m.biY m.x).filterMap (fun t =>
+        if denseFuCheckWith d t.2 t.1
+        then some (t.1, DenseExpr.var t.2) else none)
+      denseFuAdopt bs facts domIdx rest (σ.insertAll pairs)
+
+/-- Scan and certificates composed, the form the soundness proof (`Proofs/FlagUnify.lean`) inducts
+    on. `denseFlagUnifyF` runs the two phases apart so that the domain bucket, read only by
+    `denseFuPairData?`, is never built when the scan found no match. -/
+def denseFuLoop (bs : BusSemantics p) (facts : BusFacts p bs)
+    (domIdx : Std.HashMap VarId (List (DenseExpr p)))
+    (pending : List (BusInteraction (DenseExpr p)))
+    (seen : Std.HashMap UInt64 (List (DenseFUSeen p))) (σ : DenseSolved p) : DenseSolved p :=
+  denseFuAdopt bs facts domIdx (denseFuScan pending seen []) σ
 
 /-- Flag unification across duplicate scaled range checks. When two checks decompose over the same
     carrier `x` with equal coefficient (`k*x + R`, `k*x + R'`) and their offsets force flag `vy` to
@@ -172,10 +196,11 @@ def denseFuLoop (bs : BusSemantics p) (facts : BusFacts p bs)
 def denseFlagUnifyF (pw : PrimeWitness p) (bs : BusSemantics p) (facts : BusFacts p bs)
     (d : DenseConstraintSystem p) : DenseConstraintSystem p :=
   if pw.isPrime = true then
-    let σ := denseFuLoop bs facts
-        (denseVarBucket DenseExpr.vars d.algebraicConstraints) d.busInteractions ∅
-        DenseSolved.empty
-    if σ.map.isEmpty then d else d.substF σ.fn
+    let ms := denseFuScan d.busInteractions ∅ []
+    if ms.isEmpty then d else
+      let σ := denseFuAdopt bs facts
+          (denseVarBucket DenseExpr.vars d.algebraicConstraints) ms DenseSolved.empty
+      if σ.map.isEmpty then d else d.substF σ.fn
   else d
 
 end ApcOptimizer.Dense
