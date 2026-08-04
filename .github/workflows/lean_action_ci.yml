@@ -31,9 +31,79 @@ jobs:
           path: .lake/build/bin/apc-optimizer
           retention-days: 30
 
+  # One baseline for the whole workflow, resolved once and named in the report.
+  #
+  # Every consumer used to run its own `gh run list --branch main --status success --limit 1`: the
+  # three effectiveness cells, the runtime cell, and the report footer — five independent
+  # resolutions, free to land on five different commits, with the footer stating whichever the
+  # *report* job happened to see. Measured on PR #278: one effectiveness cell benched a days-old
+  # main binary (4-5x slower per case, and a different circuit on 3 of its 200 cases) while the
+  # footer labelled the comparison with main's current sha. That reads as a -90% runtime win plus an
+  # effectiveness regression, neither of which existed — and it takes a re-run against a freshly
+  # built main to find that out. So: resolve here, prefer the PR's own base commit (the only baseline
+  # whose diff *is* this PR), and hand every consumer the same run id.
+  baseline:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      # `baseline_*` is what the whole suite benches against; `is_pr_base` says whether that happens
+      # to be this PR's own base commit (the ideal) or a stand-in (drift is then in the numbers).
+      run_id: ${{ steps.pick.outputs.run_id }}
+      baseline_sha: ${{ steps.pick.outputs.baseline_sha }}
+      is_pr_base: ${{ steps.pick.outputs.is_pr_base }}
+    steps:
+      - name: Resolve the main build to bench against
+        id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          runs=$(gh run list --workflow "Lean Action CI" --branch main --status success \
+            --limit 50 --json databaseId,headSha)
+          # Candidates: this PR's base commit first (the only baseline whose diff *is* this PR), then
+          # newest-first. Take the first whose binary still *exists*: a run stays listed forever but
+          # its artifact is pruned at 30 days, so on a long-lived PR the base run can be selectable
+          # with nothing to download -- which would leave the cells with no baseline while the report
+          # still named a sha. Checking availability here keeps the printed sha benchable.
+          ordered=$(jq -c --arg s "$PR_BASE_SHA" \
+            '[.[] | select(.headSha == $s)] + [.[] | select(.headSha != $s)]' <<< "$runs")
+          run_id=""; baseline_sha=""
+          for i in $(seq 0 9); do
+            cand=$(jq -c ".[$i] // empty" <<< "$ordered")
+            [ -n "$cand" ] || break
+            rid=$(jq -r '.databaseId' <<< "$cand")
+            live=$(gh api "repos/$GH_REPO/actions/runs/$rid/artifacts" \
+              --jq '[.artifacts[] | select(.name == "apc-optimizer-bin" and .expired == false)]
+                    | length' 2>/dev/null || echo 0)
+            if [ "${live:-0}" -gt 0 ]; then
+              run_id=$rid
+              baseline_sha=$(jq -r '.headSha' <<< "$cand")
+              break
+            fi
+          done
+          is_pr_base=false
+          if [ -n "$baseline_sha" ] && [ "$baseline_sha" = "$PR_BASE_SHA" ]; then is_pr_base=true; fi
+          if [ -z "$run_id" ]; then
+            echo "::warning::no main build with a live apc-optimizer-bin artifact; PR-only report"
+          elif [ "$is_pr_base" != true ]; then
+            echo "::warning::baseline is main $baseline_sha, not this PR's base commit \
+          $PR_BASE_SHA; size changes and the runtime row may be main's own drift"
+          fi
+          echo "baseline: run=$run_id sha=$baseline_sha is_pr_base=$is_pr_base \
+          (pr base $PR_BASE_SHA)"
+          {
+            echo "run_id=$run_id"
+            echo "baseline_sha=${baseline_sha:0:7}"
+            echo "is_pr_base=$is_pr_base"
+          } >> "$GITHUB_OUTPUT"
+
   # Effectiveness over the full OpenVM (openvm-eth, wasm-eth) and SP1 (rsp) sets plus the keccak and
   # sha256 stress sets. One cell per benchmark group, and each cell benches **both sides itself** --
-  # this PR's binary then the latest main build, back to back on the same runner.
+  # this PR's binary then the `baseline` job's main build, back to back on the same runner.
   #
   # Circuit sizes are deterministic, so for effectiveness the sides needn't share a runner. But
   # benchmark.py also reports each side's wall time, and the report assembles those into the runtime
@@ -43,7 +113,7 @@ jobs:
   # baseline/PR pair is forced onto one machine.
   effectiveness:
     if: github.event_name == 'pull_request'
-    needs: build
+    needs: [build, baseline]
     runs-on: warp-ubuntu-2404-x64-32x
     # Per group, since a cell now runs its sets twice. Measured: the sha256 cell is ~170 s for one
     # side, the others under a minute -- so this is headroom for the stress case growing, not a
@@ -73,16 +143,21 @@ jobs:
         with:
           name: apc-optimizer-bin
           path: bin-pr
-      - name: Latest-main binary
+      # Exactly the run the `baseline` job resolved -- no second query, so this cell cannot bench a
+      # different commit than the report names. A missing artifact leaves no baseline at all, which
+      # `report` already renders as PR-only; that is the honest outcome, unlike a silent swap.
+      - name: Baseline binary (main ${{ needs.baseline.outputs.baseline_sha }})
+        if: needs.baseline.outputs.run_id != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          run_id=$(gh run list --workflow "Lean Action CI" --branch main --status success \
-            --limit 1 --json databaseId -q '.[0].databaseId // empty')
-          if [ -n "$run_id" ]; then
-            gh run download "$run_id" -n apc-optimizer-bin -D bin-main || true
+          gh run download "${{ needs.baseline.outputs.run_id }}" -n apc-optimizer-bin -D bin-main \
+            || true
+          if [ ! -f bin-main/apc-optimizer ]; then
+            echo "::warning::baseline artifact for main \
+          ${{ needs.baseline.outputs.baseline_sha }} \
+          is unavailable; PR-only report"
           fi
-          if [ ! -f bin-main/apc-optimizer ]; then echo "no latest-main binary; PR-only report"; fi
       - name: Effectiveness, both sides (${{ matrix.group.sets }})
         env:
           SETS: ${{ matrix.group.sets }}
@@ -152,7 +227,7 @@ jobs:
   # Feeds the collapsed runtime detail (slowest cases + per-stage) in the report comment.
   bench-runtime:
     if: github.event_name == 'pull_request'
-    needs: build
+    needs: [build, baseline]
     runs-on: warp-ubuntu-2404-x64-32x
     timeout-minutes: 10
     permissions:
@@ -165,13 +240,14 @@ jobs:
           name: apc-optimizer-bin
           path: bin-target
       - run: chmod +x bin-target/apc-optimizer
-      - name: Latest-main binary
+      # The same resolved baseline the effectiveness cells use (see the `baseline` job).
+      - name: Baseline binary (main ${{ needs.baseline.outputs.baseline_sha }})
+        if: needs.baseline.outputs.run_id != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          run_id=$(gh run list --workflow "Lean Action CI" --branch main --status success \
-            --limit 1 --json databaseId -q '.[0].databaseId // empty')
-          if [ -n "$run_id" ] && gh run download "$run_id" -n apc-optimizer-bin -D bin-base; then
+          if gh run download "${{ needs.baseline.outputs.run_id }}" -n apc-optimizer-bin \
+              -D bin-base; then
             chmod +x bin-base/apc-optimizer
           fi
       - name: Runtime, top-10 sequential (per-stage + slowest)
@@ -192,7 +268,7 @@ jobs:
   # openvm-eth, the collapsed runtime detail from bench-runtime. Runs even if a job was skipped.
   report:
     if: always() && github.event_name == 'pull_request'
-    needs: [effectiveness, bench-runtime]
+    needs: [baseline, effectiveness, bench-runtime]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -210,16 +286,31 @@ jobs:
       - uses: actions/download-artifact@v4
         with: { name: bench-runtime, path: rt }
         continue-on-error: true
-      - name: Baseline sha
-        id: base
+      # The baseline sha comes from the `baseline` job -- the same run every cell downloaded.
+      # Resolving it again here is what let the footer name a commit nobody benched.
+      - name: Comment inputs
+        id: note
         env:
-          GH_TOKEN: ${{ github.token }}
+          BASELINE_SHA: ${{ needs.baseline.outputs.baseline_sha }}
+          BASELINE_IS_PR_BASE: ${{ needs.baseline.outputs.is_pr_base }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          rid=$(gh run list --workflow "Lean Action CI" --branch main --status success \
-            --limit 1 --json databaseId -q '.[0].databaseId // empty')
-          sha=""; [ -n "$rid" ] && sha=$(gh run view "$rid" --json headSha -q .headSha | cut -c1-7)
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "psha=$(cut -c1-7 <<< '${{ github.event.pull_request.head.sha }}')" >> "$GITHUB_OUTPUT"
+          echo "pr_sha=$(cut -c1-7 <<< "$PR_HEAD_SHA")" >> "$GITHUB_OUTPUT"
+          # The footer names a baseline only if one was actually benched. A resolved sha is not
+          # enough: a cell can still fail to download it or time out, and then every set falls back
+          # to PR-only markdown -- naming a sha there would describe a comparison that never ran.
+          benched_sha="$BASELINE_SHA"
+          if ! ls main/*.json > /dev/null 2>&1; then benched_sha=""; fi
+          echo "benched_sha=$benched_sha" >> "$GITHUB_OUTPUT"
+          # One line of prose when the comparison is against something other than this PR's base, so
+          # a reader does not attribute main's own drift to the PR (see the `baseline` job).
+          drift=""
+          if [ -n "$benched_sha" ] && [ "$BASELINE_IS_PR_BASE" != true ]; then
+            drift="**The baseline is not this PR's base commit**, so a changed size or a large \
+          runtime delta may be main's own drift rather than this PR -- verify against a freshly \
+          built base before believing either."
+          fi
+          echo "drift=$drift" >> "$GITHUB_OUTPUT"
       - name: Assemble comment
         run: |
           : > bench.md
@@ -249,9 +340,12 @@ jobs:
           pr: ${{ github.event.pull_request.head.repo.full_name == github.repository
                   && github.event.number || '' }}
           note: >-
-            openvm-eth + wasm-eth + keccak + sha256 + sp1/rsp + sp1/keccak, PR `${{ steps.base.outputs.psha }}`
-            ${{ steps.base.outputs.sha && format('vs main `{0}`', steps.base.outputs.sha)
+            openvm-eth + wasm-eth + keccak + sha256 + sp1/rsp + sp1/keccak,
+            PR `${{ steps.note.outputs.pr_sha }}`
+            ${{ steps.note.outputs.benched_sha
+                 && format('vs main `{0}`', steps.note.outputs.benched_sha)
                  || '(no main baseline binary)' }}.
+            ${{ steps.note.outputs.drift }}
             Effectiveness is exact. Each set's two sides are benched back to back on one runner, so
             the runtime row is comparable -- but coarse: benchmark.py runs cases in parallel. For
             per-pass detail: `gh workflow run "Runtime Bench" -f pr=${{ github.event.number }}`.
