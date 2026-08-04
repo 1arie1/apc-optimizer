@@ -236,12 +236,7 @@ theorem denseFindTuplePack_split (bs : BusSemantics p) (facts : BusFacts p bs) (
       obtain ⟨specA, xA⟩ := sx
       simp only [hba] at h
       cases hrp : denseFindRangePartner bs facts s2 [] rest with
-      | none =>
-        simp only [hrp] at h
-        obtain ⟨D₁, D₂, spec, bw, heq, hcase⟩ := ih (a :: revPre) pre x mid y post h
-        exact ⟨D₁, D₂, spec, bw,
-          by simpa only [List.reverse_cons, List.append_assoc, List.singleton_append] using heq,
-          hcase⟩
+      | none => simp only [hrp, reduceCtorEq] at h
       | some res =>
         obtain ⟨mid', yB, bwB, post'⟩ := res
         simp only [hrp, Option.some.injEq, Prod.mk.injEq] at h
@@ -258,12 +253,7 @@ theorem denseFindTuplePack_split (bs : BusSemantics p) (facts : BusFacts p bs) (
         obtain ⟨yA, bwA⟩ := yb
         simp only [hra] at h
         cases hbp : denseFindBytePartner bs facts [] rest with
-        | none =>
-          simp only [hbp] at h
-          obtain ⟨D₁, D₂, spec, bw, heq, hcase⟩ := ih (a :: revPre) pre x mid y post h
-          exact ⟨D₁, D₂, spec, bw,
-            by simpa only [List.reverse_cons, List.append_assoc, List.singleton_append] using heq,
-            hcase⟩
+        | none => simp only [hbp, reduceCtorEq] at h
         | some res =>
           obtain ⟨mid', specB, xB, post'⟩ := res
           simp only [hbp, Option.some.injEq, Prod.mk.injEq] at h

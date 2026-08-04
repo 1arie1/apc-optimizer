@@ -6835,3 +6835,54 @@ of setup and the pass total does not change — `Thunk.get`'s `lean_mark_mt` wal
 invocations that do query it costs what the four that do not save.
 
 **Worked: yes.**
+
+### 175. Runtime: tupleRange's pack scan stops at the first candidate without a partner (0.08x on the pass)
+
+`tupleRange` was **852 ms of sha256 `apc_001` and packed nothing there** — 2.7 % of the local corpus
+in a coda pass that had never been profiled, and the only genuinely quadratic loop left in the top 20
+(see the fresh corpus ranking below). It is also 75 % no-op by wall: 968 of its 1283 corpus ms are
+invocations that return their input.
+
+`denseFindTuplePack` walked the interaction list and, at every position `denseMatchByteSingle`
+recognized, called `denseFindRangePartner` over the whole remaining list; **on failure it recursed to
+the next position and rescanned the remainder again** (mirrored for the range-check/
+`denseFindBytePartner` branch). sha256 is full of byte self-checks and has no exact-width range
+partner for the declared tuple bus, so every one of them paid a full-list scan to find nothing.
+Stubbing `denseMatchByteSingle` to `none` — so no partner scan can start — took the pass from 852 ms
+to 3 ms, which located the whole cost in the rescan before anything was written.
+
+THE CHANGE: the two "partner search failed" recursions become `none`. The scan is then one
+left-to-right pass — skip positions matching neither recognizer into `revPre`, and at the *first*
+position matching either one, scan the suffix once for its complement.
+
+WHY IT IS VALUE-IDENTICAL: let `p` be the first position matching either recognizer. Positions before
+`p` are skipped the same way by both versions, and a hit at `p` produces the same
+`pre`/`mid`/`post` split. If `p`'s complement is absent from `(p, ∞)`, no later position can succeed
+either: each branch's guard and its partner scan test the *same* recognizer at the same
+`bs`/`facts`/`s2`, so a later position either enters the branch whose complement is missing from that
+same suffix, or is gated on the recognizer `p` matched and scans a sub-suffix of `(p, ∞)`. Stating it
+over the recognizers rather than a "kind" partition is what makes it hold for an interaction matching
+both, where the byte branch wins the tie. So the pass makes the same pack decisions in the same order
+and `denseDrainTuplePacks` is untouched. **No new proof obligation** — both dropped branches are
+unreachable in `denseFindTuplePack_split`, whose proof loses two cases (−14 lines).
+
+NUMBERS (this 20-core box, serial, interleaved, 3 reps, medians; sha256 2 reps): sha256 `apc_001`
+**852 → 3 ms** on the pass, total 23 336 → 22 333 (**0.957x**); wasm-eth `apc_028` 85 → 1, total
+443 → 366 (**0.826x**); wasm-eth `apc_006` 93 → 24, total 0.964x; `apc_012` 73 → 17, 0.963x;
+`apc_037` 43 → 8; openvm-eth `apc_100` 5 → 2; keccak `apc_001` 7 → 1. **Whole local corpus, 303 APCs
+interleaved: tupleRange 1283 → 102 ms (0.080x), wall 50.5 → 49.2 s (0.975x), and no case where the
+pass is slower.**
+VERIFIED: final `vars / constraints / bus` **identical on all 303 corpus APCs**; `opt-export`
+byte-identical on wasm-eth `apc_006` / `apc_012` / `apc_037` / `apc_028`, openvm-eth `apc_100` and
+keccak `apc_001` (the first four are cases where the pass fires); `lake build` clean with no
+warnings; `check-proof-integrity` passes on the three standard axioms with no orphaned theorem.
+
+RESIDUAL: 102 ms corpus-wide, 61 of it on the six cases where the pass *fires* — `denseDrainTuplePacks`
+still restarts `denseTryTupleBuses` at position 0 after every pack and recomputes `maxId` plus
+`denseTupleBusCandidates` each step, so a firing drain stays `O(packs × B)` (`apc_006` 24 ms). A
+position cursor fixes it: `pre` holds no candidate of either kind and the emitted tuple check is on
+neither recognizer's bus, so the next search may resume immediately after it. Also unaddressed:
+`denseMatchByteSingle` runs `denseByteShape?` per position with no `@[csimp]` runtime twin (its
+`denseMatchRangeCheck` counterpart has one), which is what the surviving single pass now costs.
+
+**Worked: yes.**

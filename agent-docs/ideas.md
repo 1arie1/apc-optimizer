@@ -174,6 +174,47 @@ still memory traffic, not arithmetic; the `ZMod.commRing` rebuild chain is gone 
 denominator — domainBatch is parallel, so it burns ~25 % of CPU for 4 % of wall. For a serial pass,
 `perf` share × total CPU ≈ its wall time; check both before sizing a change.
 
+### Where the time goes after entries 160–175 (2026-08-04, whole local corpus)
+
+Fresh `profile` sweep of all **303 local APCs** (OpenVM 293 + SP1 10) on a 20-core box, serial, one
+shot each: **50.1 s wall, 43.2 s of it inside passes**. Per family: sha256 23.1 s, wasm-eth 12.5 s,
+openvm-eth 8.0 s, SP1 rsp 2.9 s, OpenVM keccak 2.2 s, SP1 keccak 1.1 s — the corpus total is
+sha256-weighted, so read it together with the per-case numbers.
+
+**The per-pass profile is now flat and the largest line items are no longer inside any one pass.**
+Corpus shares: domainBatch 8.8 %, busPairCancel 7.4 %, gauss 6.5 %, reencode 6.1 %, busUnify 4.9 %,
+flagFold 4.8 %, domainFold 4.1 %, normalize1 3.4 %, carryBranch 3.2 %, rootPairUnify 3.0 %,
+digitFold 3.0 %, degenRange 2.7 %, intervalForce 2.7 %, tupleRange 2.7 % (entry 175), zeroRegister
+2.5 %, normalize2 2.4 %, flagUnify 2.1 %, then 22 passes below 2 %. Top ten = 54 % of wall, the
+remaining thirty = 37 %, on sha256 `apc_001`, keccak `apc_001` and wasm-eth `apc_012` alike. Three
+passes that were never in the old ranking are now in the top 20 (`tupleRange`, `zeroRegister`,
+`flagUnify`), alongside `digitFold`, `degenRange` and `xorEqExtract`.
+
+Against that flatness, two cross-cutting measurements dominate everything per-pass — see R15 and R5:
+
+- **42 % of all pass wall (18.2 s of 43.2 s) is invocations whose output is structurally identical to
+  their input**; 62 % of the 42 900 invocations. Net of the degree guard it is still 16.1 s (37 %).
+- **The degree guard is 10 % of pass wall** (4.4 s): corpus 50.1 → 45.8 s (**0.914×**) with
+  `withinDegreeB` stubbed to `true`, per case 0.907× (sha256 `apc_001`) / 0.924× (wasm-eth `apc_012`)
+  / 0.930× (keccak) / 0.939× (openvm-eth `apc_071`).
+
+Whole-run cost classes (sha256 `apc_001`, LBR, leaf-classified): pass logic 33.6 %, refcount 18.3 %,
+alloc/free 15.3 %, list ops 10.7 %, lean runtime 9.7 %, hash/std 3.6 %, closure-apply 2.4 %,
+field/instance 2.3 %. Top leaves: `lean_dec_ref_cold` 17.8 %, `mi_malloc_small` 7.9 %,
+`DenseExpr.degree` **5.4 %** (95 % of its callers are `withinDegreeB`; `guardDegree` is also 21 % of
+all `lean_dec_ref_cold` callers), `List.reverseAux` 3.3 % (30 % `appendTR`, 23 %
+`DenseConstraintSystem.mapExpr`, 11 % `substF`). `mapExpr` has exactly two callers —
+`denseNormalizePass` and `denseConstantFoldPass`, i.e. five pipeline entries and 3.3 s of corpus —
+and rebuilds both item lists on every invocation whether or not an expression changed.
+
+**Measurement caveat found in the same session:** `profile`'s reported *total* overstates `run` by
+~4.5 %. `varCount`/`sizeKey` frames are 4.81 % of sha256 samples and **95 % of those carry a
+profile-harness frame** (the per-cycle size line the profiler prints); the optimizer itself pays only
+the fixpoint's own `sizeKey`. The per-pass columns are unaffected (entry 164). Also: a pointer-only
+no-op probe reads 20.9 % where structural equality reads 42 %, because `normalize`/`constFold`/
+`degenRange`/`carryBranch`/`intervalForce`/`busPairCancel` rebuild their lists unconditionally — use
+structural equality with a pointer-identity shortcut.
+
 ### Open runtime ideas, priority order
 
 Priority = impact at SHA scale (8× keccak) ÷ effort. The pattern for all index work stays the
@@ -404,8 +445,14 @@ when the whole cycle is unchanged, and carries the previous cycle's `sizeKey` fo
 recomputing `cs.sizeKey` (`FactPass.lean:77`, one redundant O(E) HashSet build per cycle today).
 **Now the single largest line item of a rebuilt pass** (entry 173): after hintCollapse's rebuild the
 guard is ~103 ms of its 178 ms on sha256 `apc_001` — **58 % of the pass**, and 9 of its 10
-invocations return the input untouched. Every pass rebuilt to a cheap sweep hits this floor next;
-sizing it on that case first is one `IO` timer.
+invocations return the input untouched. Every pass rebuilt to a cheap sweep hits this floor next.
+**Sized corpus-wide 2026-08-04**: `withinDegreeB` stubbed to `true` (`@[implemented_by]`) is
+**4.4 s of the 43.2 s of pass time (10 %)**, corpus wall 50.1 → 45.8 s (**0.914×**), per case
+0.907–0.939×; 2.0 s of it is inside no-op invocations (R15). Per-pass guard share is worst exactly
+where a pass has already been rebuilt to a cheap sweep: zeroMultBus **76 %**, oneHotAnnihilate 51 %,
+hintCollapse 39 %, bytePack 34 %, xorEqExtract 26 %, degenRange 16 %, carryBranch 14 %, and 3–8 % for
+the big passes. `DenseExpr.degree` is 5.4 % of whole-run samples and `guardDegree` is 21 % of all
+`lean_dec_ref_cold` callers (`List.all` boxes a closure and a `Bool` per item).
 
 **R6. Cross-cycle dirtiness (the real fix for no-op rescans)**  ·  *large refactor; the cheap
 slice is now a measured dead end*. **Do not build a cross-cycle negative-memo for domainBatch**:
@@ -722,6 +769,76 @@ and in `run` alike. Consequences, all measured on busPairCancel:
      (3672 → 3966 ms);
    - so the decision belongs at the call site, per invocation (`denseThunkIf`, above). `Thunk.pure`
      and `Thunk.mk` have the same `.get`, so the choice is invisible to every proof.
+
+**R15. Do not run a pass that cannot fire — 42 % of pass wall, 37 % net of the guard**  ·
+*measured 2026-08-04, whole corpus; cheapest class of runtime work in the repo*. Probe: a structural
+output-vs-input equality (pointer-identity shortcut) around every invocation in
+`denseRunCycleTimed`, accumulating `(invocations, no-op invocations, ms, no-op ms)` per pass.
+**18.2 s of the 43.2 s of corpus pass time, and 26 647 of 42 900 invocations, produce nothing** —
+sha256 `apc_001` 45 %, SP1 keccak 46 %, wasm-eth `apc_012` 40 %, keccak 39 %. The 62 % invocation
+share reproduces #146's; the *wall* share is the new number, and it is larger than any per-pass
+residual. Net of R5 it is 16.1 s, so the two levers are essentially independent.
+
+This is **not** R6: R6 memoized recomputed work at target granularity and measured a poor fit. This
+is about not doing the work at all, and the framework already permits it — **a pass that declines to
+run needs no soundness argument** (returning the input is a legal result, exactly what
+`guardDegree`'s reject branch builds). A too-eager gate is an *effectiveness* regression only; a gate
+that is a sound necessary condition changes nothing. Per-pass no-op ms, net of the guard: reencode
+1479, domainBatch 1382, flagFold 1309, digitFold 1256, domainFold 1128, zeroRegister 1101, degenRange
+1057, tupleRange 951 (fixed, entry 175), busUnify 967, flagUnify 895, carryBranch 683, rootPairUnify
+589, busPairCancel 606, xorEqExtract 497, intervalForce 465, subsumedRange 414. Four mechanisms, in
+increasing effort:
+
+- **(a) Eager whole-system prologues most invocations never use** — sized by stubbing the prologue to
+  `∅` via `@[implemented_by]` (upper bound; output wrong): `digitFold` **1480 → 468 ms** (68 % of the
+  pass) is `denseBuild`'s bounds map over every raw payload variable of every interaction, queried
+  only for the operands of `densePairByteOps?` hits, and the pass fires in **55 of 1443**
+  invocations — R9d's candidate-restricted shape, since entry 170 already measured that the
+  eager-over-every-variable version loses. `flagUnify` **1073 → 456 ms** (58 %) is
+  `denseVarBucket DenseExpr.vars` read only inside `denseFuPairData?`, i.e. only once a same-key twin
+  is found — **18 times in the whole corpus** — so here `denseThunkIf` is the fix and the `Thunk` note
+  above does not bite (the value is almost never forced, unlike the `cands` dead end). Audit every
+  pass for this shape: an index built at the top of the body, consumed inside a certificate a
+  prefilter rarely reaches.
+- **(b) A quadratic rescan inside a no-op pass** — `tupleRange`, **done (entry 175)**, 0.08x on the
+  pass. Worth re-checking for the same shape elsewhere: a per-candidate scan of the whole remainder
+  whose failure the outer loop cannot learn from.
+- **(c) Per-pass necessary-condition gates**, cheaper than the pass's own discovery. The ≥ 75 %-no-op
+  passes are `degenRange` (96 %, 1057 ms net), `zeroRegister` (96 %, 1101), `flagUnify` (95 %, 895),
+  `digitFold` (91 %, 1256), `xorEqExtract` (77 %, 497), `subsumedRange` (100 %, 414), `zeroMultBus`
+  (72 %), `oneHotAnnihilate` (67 %) — **≈ 5.3 s of corpus pass time**. A shared *per-cycle* digest is
+  the wrong first step: the system changes between passes within a cycle, so a cycle-start digest is
+  stale from the second pass on. Per-pass gates first, over the prepared interaction array of R13(b),
+  which is what makes them cheap.
+- **(d) The discarded final cycle.** `denseIterateToFixpoint` returns the *pre-cycle* state when
+  `sizeKey` does not decrease, so the whole last cycle is computed and thrown away: sha256 `apc_001`
+  **646 ms (2.7 % of wall)**, wasm-eth `apc_012` 101 ms (3.9 %), keccak 36 ms. sha256's last two
+  cycles cost 1.30 s and between them remove 1 variable, 3 interactions and 1 constraint. Nothing can
+  know a cycle is fruitless without running it — this is not a separate lever, it is the argument for
+  (a)–(c), since every pass in that cycle is a no-op invocation by construction.
+
+### tupleRange residual after entry 175 (the single-pass scan)  ·  *runtime*
+
+102 ms corpus-wide, 61 of it on the six cases where the pass *fires*. `denseDrainTuplePacks` restarts
+`denseTryTupleBuses` at position 0 after every pack and recomputes `maxId` plus
+`denseTupleBusCandidates` each step, so a firing drain is `O(packs × B)` (wasm-eth `apc_006` 24 ms,
+`apc_012` 17). A position cursor is sound: `pre` holds no candidate of either recognizer and the
+emitted tuple check is on neither's bus, so the next search may resume just after it. Hoisting the
+candidate-bus list needs care — it is a pure function of `maxId`, which *shrinks* as interactions are
+dropped, so hoisting from the initial list makes it a superset and could pack a pair the current code
+never tries. `denseMatchByteSingle` also runs `denseByteShape?` per position with no `@[csimp]`
+runtime twin (16 dictionary builds in the C, the highest count in the sweep), where its
+`denseMatchRangeCheck` counterpart has one; that is what the surviving single pass costs.
+
+**Effectiveness note, unmeasured:** slot 0 of a tuple check needs `x < 256`, and the pass accepts
+only an XOR-bus byte *self-check* there (`denseByteShape?`, `.selfCheck`). A plain variable-range
+check `[x, 8]` proves the same thing and is not considered, so two range checks whose widths match a
+declared tuple bus's `(s1, s2)` — e.g. 8 and 11 on OpenVM bus 7 (`tupleRangeChecker 256 2048`) —
+never pack. That needs no audited change and reuses `tupleRangeBus_sound`; how often such a pair
+co-occurs is unknown. Note the arity ceiling is two and is *audited*: `OpenVmBusType.tupleRangeChecker`
+carries exactly two sizes, the semantics send any other payload length to `False`, and the parser
+rejects a `TupleRangeChecker` with any other arity — so packing three checks into one interaction is a
+bus-vocabulary change, not a pass change.
 
 ### busPairCancel residual after entry 174 (the checked-form memo + canonical keys)  ·  *runtime*
 

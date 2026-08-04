@@ -99,7 +99,13 @@ def denseFindBytePartner (bs : BusSemantics p) (facts : BusFacts p bs) :
 
 /-- Fused scan for the first packable pair for a tuple bus with second-slot size `s2`: a byte check
     with an exact-width range check partner, in either order, returned as the packed values `x`
-    (byte) and `y` (range) with the surrounding `pre`/`mid`/`post` split. -/
+    (byte) and `y` (range) with the surrounding `pre`/`mid`/`post` split.
+
+    A single left-to-right pass: positions matching neither recognizer are skipped into `revPre`, and
+    at the *first* position matching either one the suffix is scanned once for the complement. That
+    one scan decides the whole list — a failed complement scan over `(p, ∞)` rules out every later
+    position too, since a later candidate either needs the complement that is absent from that same
+    suffix, or is of the same kind and scans a sub-suffix of it. -/
 def denseFindTuplePack (bs : BusSemantics p) (facts : BusFacts p bs) (s2 : Nat)
     (revPre : List (BusInteraction (DenseExpr p))) :
     List (BusInteraction (DenseExpr p)) →
@@ -111,13 +117,13 @@ def denseFindTuplePack (bs : BusSemantics p) (facts : BusFacts p bs) (s2 : Nat)
     | some (_spec, x) =>
       match denseFindRangePartner bs facts s2 [] rest with
       | some (mid, y, _b, post) => some (revPre.reverse, x, mid, y, post)
-      | none => denseFindTuplePack bs facts s2 (a :: revPre) rest
+      | none => none
     | none =>
       match denseMatchRangeCheck bs facts s2 a with
       | some (y, _b) =>
         match denseFindBytePartner bs facts [] rest with
         | some (mid, _spec, x, post) => some (revPre.reverse, x, mid, y, post)
-        | none => denseFindTuplePack bs facts s2 (a :: revPre) rest
+        | none => none
       | none => denseFindTuplePack bs facts s2 (a :: revPre) rest
 
 /-! ## The pass: try every candidate tuple bus, drain every packable pair -/
