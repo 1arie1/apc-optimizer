@@ -49,16 +49,18 @@ jobs:
       contents: read
       actions: read
     outputs:
+      # `baseline_*` is what the whole suite benches against; `is_pr_base` says whether that happens
+      # to be this PR's own base commit (the ideal) or a stand-in (drift is then in the numbers).
       run_id: ${{ steps.pick.outputs.run_id }}
-      sha: ${{ steps.pick.outputs.sha }}
-      exact: ${{ steps.pick.outputs.exact }}
+      baseline_sha: ${{ steps.pick.outputs.baseline_sha }}
+      is_pr_base: ${{ steps.pick.outputs.is_pr_base }}
     steps:
       - name: Resolve the main build to bench against
         id: pick
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           runs=$(gh run list --workflow "Lean Action CI" --branch main --status success \
             --limit 50 --json databaseId,headSha)
@@ -67,9 +69,9 @@ jobs:
           # its artifact is pruned at 30 days, so on a long-lived PR the base run can be selectable
           # with nothing to download -- which would leave the cells with no baseline while the report
           # still named a sha. Checking availability here keeps the printed sha benchable.
-          ordered=$(jq -c --arg s "$BASE_SHA" \
+          ordered=$(jq -c --arg s "$PR_BASE_SHA" \
             '[.[] | select(.headSha == $s)] + [.[] | select(.headSha != $s)]' <<< "$runs")
-          run_id=""; sha=""
+          run_id=""; baseline_sha=""
           for i in $(seq 0 9); do
             cand=$(jq -c ".[$i] // empty" <<< "$ordered")
             [ -n "$cand" ] || break
@@ -79,23 +81,24 @@ jobs:
                     | length' 2>/dev/null || echo 0)
             if [ "${live:-0}" -gt 0 ]; then
               run_id=$rid
-              sha=$(jq -r '.headSha' <<< "$cand")
+              baseline_sha=$(jq -r '.headSha' <<< "$cand")
               break
             fi
           done
-          exact=false
-          if [ -n "$sha" ] && [ "$sha" = "$BASE_SHA" ]; then exact=true; fi
+          is_pr_base=false
+          if [ -n "$baseline_sha" ] && [ "$baseline_sha" = "$PR_BASE_SHA" ]; then is_pr_base=true; fi
           if [ -z "$run_id" ]; then
             echo "::warning::no main build with a live apc-optimizer-bin artifact; PR-only report"
-          elif [ "$exact" != true ]; then
-            echo "::warning::baseline is main $sha, not this PR's base commit $BASE_SHA; \
-          size changes and the runtime row may be main's own drift"
+          elif [ "$is_pr_base" != true ]; then
+            echo "::warning::baseline is main $baseline_sha, not this PR's base commit \
+          $PR_BASE_SHA; size changes and the runtime row may be main's own drift"
           fi
-          echo "baseline: run=$run_id sha=$sha exact=$exact (base $BASE_SHA)"
+          echo "baseline: run=$run_id sha=$baseline_sha is_pr_base=$is_pr_base \
+          (pr base $PR_BASE_SHA)"
           {
             echo "run_id=$run_id"
-            echo "sha=${sha:0:7}"
-            echo "exact=$exact"
+            echo "baseline_sha=${baseline_sha:0:7}"
+            echo "is_pr_base=$is_pr_base"
           } >> "$GITHUB_OUTPUT"
 
   # Effectiveness over the full OpenVM (openvm-eth, wasm-eth) and SP1 (rsp) sets plus the keccak and
@@ -143,7 +146,7 @@ jobs:
       # Exactly the run the `baseline` job resolved -- no second query, so this cell cannot bench a
       # different commit than the report names. A missing artifact leaves no baseline at all, which
       # `report` already renders as PR-only; that is the honest outcome, unlike a silent swap.
-      - name: Baseline binary (main ${{ needs.baseline.outputs.sha }})
+      - name: Baseline binary (main ${{ needs.baseline.outputs.baseline_sha }})
         if: needs.baseline.outputs.run_id != ''
         env:
           GH_TOKEN: ${{ github.token }}
@@ -151,7 +154,8 @@ jobs:
           gh run download "${{ needs.baseline.outputs.run_id }}" -n apc-optimizer-bin -D bin-main \
             || true
           if [ ! -f bin-main/apc-optimizer ]; then
-            echo "::warning::baseline artifact for main ${{ needs.baseline.outputs.sha }} \
+            echo "::warning::baseline artifact for main \
+          ${{ needs.baseline.outputs.baseline_sha }} \
           is unavailable; PR-only report"
           fi
       - name: Effectiveness, both sides (${{ matrix.group.sets }})
@@ -237,7 +241,7 @@ jobs:
           path: bin-target
       - run: chmod +x bin-target/apc-optimizer
       # The same resolved baseline the effectiveness cells use (see the `baseline` job).
-      - name: Baseline binary (main ${{ needs.baseline.outputs.sha }})
+      - name: Baseline binary (main ${{ needs.baseline.outputs.baseline_sha }})
         if: needs.baseline.outputs.run_id != ''
         env:
           GH_TOKEN: ${{ github.token }}
@@ -285,23 +289,23 @@ jobs:
       # The baseline sha comes from the `baseline` job -- the same run every cell downloaded.
       # Resolving it again here is what let the footer name a commit nobody benched.
       - name: Comment inputs
-        id: base
+        id: note
         env:
-          BASE_SHA: ${{ needs.baseline.outputs.sha }}
-          BASE_EXACT: ${{ needs.baseline.outputs.exact }}
-          PR_SHA: ${{ github.event.pull_request.head.sha }}
+          BASELINE_SHA: ${{ needs.baseline.outputs.baseline_sha }}
+          BASELINE_IS_PR_BASE: ${{ needs.baseline.outputs.is_pr_base }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          echo "psha=$(cut -c1-7 <<< "$PR_SHA")" >> "$GITHUB_OUTPUT"
+          echo "pr_sha=$(cut -c1-7 <<< "$PR_HEAD_SHA")" >> "$GITHUB_OUTPUT"
           # The footer names a baseline only if one was actually benched. A resolved sha is not
           # enough: a cell can still fail to download it or time out, and then every set falls back
           # to PR-only markdown -- naming a sha there would describe a comparison that never ran.
-          bsha="$BASE_SHA"
-          if ! ls main/*.json > /dev/null 2>&1; then bsha=""; fi
-          echo "bsha=$bsha" >> "$GITHUB_OUTPUT"
+          benched_sha="$BASELINE_SHA"
+          if ! ls main/*.json > /dev/null 2>&1; then benched_sha=""; fi
+          echo "benched_sha=$benched_sha" >> "$GITHUB_OUTPUT"
           # One line of prose when the comparison is against something other than this PR's base, so
           # a reader does not attribute main's own drift to the PR (see the `baseline` job).
           drift=""
-          if [ -n "$bsha" ] && [ "$BASE_EXACT" != true ]; then
+          if [ -n "$benched_sha" ] && [ "$BASELINE_IS_PR_BASE" != true ]; then
             drift="**The baseline is not this PR's base commit**, so a changed size or a large \
           runtime delta may be main's own drift rather than this PR -- verify against a freshly \
           built base before believing either."
@@ -336,10 +340,12 @@ jobs:
           pr: ${{ github.event.pull_request.head.repo.full_name == github.repository
                   && github.event.number || '' }}
           note: >-
-            openvm-eth + wasm-eth + keccak + sha256 + sp1/rsp + sp1/keccak, PR `${{ steps.base.outputs.psha }}`
-            ${{ steps.base.outputs.bsha && format('vs main `{0}`', steps.base.outputs.bsha)
+            openvm-eth + wasm-eth + keccak + sha256 + sp1/rsp + sp1/keccak,
+            PR `${{ steps.note.outputs.pr_sha }}`
+            ${{ steps.note.outputs.benched_sha
+                 && format('vs main `{0}`', steps.note.outputs.benched_sha)
                  || '(no main baseline binary)' }}.
-            ${{ steps.base.outputs.drift }}
+            ${{ steps.note.outputs.drift }}
             Effectiveness is exact. Each set's two sides are benched back to back on one runner, so
             the runtime row is comparable -- but coarse: benchmark.py runs cases in parallel. For
             per-pass detail: `gh workflow run "Runtime Bench" -f pr=${{ github.event.number }}`.
