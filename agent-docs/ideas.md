@@ -215,6 +215,13 @@ these need no new proof.
      the `bHash` bucket build over every constraint, the duplicated interaction sweep, and the
      per-slot list pipeline are all gone. 0.32–0.34x on the pass; its residual is
      `BusFacts.slotBound` dispatch (see R13(b)).
+   - ~~`hintCollapse`'s per-witness full-system `denseOccursOnlyInTarget` scan~~ **done (entry
+     173)**, with the rest of the discovery layer: one `VarId`-indexed occurrence-code array
+     (bus walk, then constraint walk) replaces the certified scan, the bus-variable `HashSet`, the
+     per-constraint `vars.dedup` counter, the unconditional `denseBuild`, the `d.occ` freshness
+     scan and the by-value target replacement. 0.11–0.17x on the pass. The certified scan was not
+     just expensive but *implied* by the two prefilters already gating it — check for that shape
+     elsewhere before indexing a scan.
    - ~~`rootPairUnify` re-linearization per candidate var~~ **done (entry 104)** — factors
      linearized once per constraint. `anyVarBound` memoization across pairs still open (only
      matters if key-matched pairs are common; measure first).
@@ -395,6 +402,10 @@ of invocations are no-op full scans). Add an `unchanged : Option (out = cs ∧ d
 pointer magic); `andThen` propagates; `iterateToFixpoint` skips both `sizeKey` recomputations
 when the whole cycle is unchanged, and carries the previous cycle's `sizeKey` forward instead of
 recomputing `cs.sizeKey` (`FactPass.lean:77`, one redundant O(E) HashSet build per cycle today).
+**Now the single largest line item of a rebuilt pass** (entry 173): after hintCollapse's rebuild the
+guard is ~103 ms of its 178 ms on sha256 `apc_001` — **58 % of the pass**, and 9 of its 10
+invocations return the input untouched. Every pass rebuilt to a cheap sweep hits this floor next;
+sizing it on that case first is one `IO` timer.
 
 **R6. Cross-cycle dirtiness (the real fix for no-op rescans)**  ·  *large refactor; the cheap
 slice is now a measured dead end*. **Do not build a cross-cycle negative-memo for domainBatch**:
@@ -727,6 +738,23 @@ are non-survivors" argument (`a·y + b = 0` has at most one root when `a ≠ 0`)
 
 ### Runtime dead ends (measured; do not re-propose without new evidence)
 
+- **Scanning constraints before the bus in hintCollapse's code array** (entry 173), to skip the bus
+  walk when nothing can fire: rejected on the structure of the codes, not on a timing. Without the
+  bus marks first, a `2 + i` code means only "in one constraint", which every memory limb satisfies
+  (one constraint plus its bus interactions) — so essentially every system still has entries with
+  two such variables and pays the bus walk anyway, while the constraint sweep does strictly more
+  writes and the candidate list grows from ~4 entries to tens of thousands. Bus-first is what makes
+  a `2 + i` code mean *witness*, and it is why the survivors need no filter at use.
+- **Collapsing every candidate target per hintCollapse invocation** (entry 173) instead of the
+  first: the pass fires ~1× per run on the measured cases, and its cost is the sweeps plus the
+  degree guard, not the collapses — so this buys no runtime while changing the intermediate system
+  the other 26 cleanup passes see. An effectiveness change to argue, not a runtime one.
+- **A dictionary-free `denseExtractLinear`** (entry 173): the generated C rebuilds the whole
+  `ZMod.commRing → … → MulZeroClass` chain at the head of *every* recursive call (for its
+  `.const 0` / `.const 1` leaves), which the mechanical C sweep flags — but the peel runs only on
+  candidate constraints and measured **0 ms** on sha256. Per-candidate cost is not per-system cost;
+  size a C-sweep hit against the phase timers before acting on it.
+
 - **A per-`(busId, multiplicity, pattern)` memo of the whole slot-bound vector** (entry 172,
   intervalForce): rejected on the *keys*, not on a timing. `slotBoundImpl` reads one pattern
   position per bus type (memory slot 0, bitwise slot 3, range-checker slot 1), but memory payloads
@@ -899,6 +927,19 @@ are non-survivors" argument (`a·y + b = 0` has at most one root when `a ≠ 0`)
   the busUnify rebuild came from `IO` phase timers. `OptimizingRuntime.md`'s truncation warning
   understates this case; check the gated `tot` against the pass's share of wall *before* reading
   any pass-restricted table.
+- CI notes: **the effectiveness matrix's `main` side is a downloaded artifact, and it can be stale
+  by days** (`Latest-main binary` step: `gh run list --branch main --status success --limit 1` then
+  `gh run download`). Measured on PR #278 (entry 173): that cell reported wasm-eth
+  `145.9 s → 14.2 s (-90 %)` and SP1 rsp `41.1 s → 2344 ms (-94 %)` for a change worth ~4 %, and
+  flagged "sizes changed on 3 of 200 cases" — while the *same* three cases are identical between the
+  branch and CI's own current-main artifact (checked with CI's own `compare`, 15 repeats, and five
+  consecutive main builds, none of which produces the reported `main` values). A ~6-day-old main
+  build does produce one of them and is 4–5× slower per case, which with the parallel contention
+  accounts for the row. **So a flagged size change or a spectacular runtime row in that cell means
+  "check the baseline first": re-run the size comparison against a freshly built main (or the newest
+  `apc-optimizer-bin` artifact) before believing either.** The serial `Runtime Bench` workflow builds
+  both sides from source on one runner and is unaffected — on #278 it read 0.96× total / 0.11× on the
+  pass, matching the local interleaved bench exactly.
 - CI notes (updated 2026-07-29): the effectiveness-matrix runtime row swung **+51 % → +15 % on
   identical code** for openvm-eth while its own per-pass table showed ≤1.04× — treat the wall row
   as ±50 % noise on the small parallel sets and read the per-pass table instead; the serial

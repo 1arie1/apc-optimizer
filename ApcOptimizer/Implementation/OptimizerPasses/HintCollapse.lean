@@ -99,15 +99,6 @@ def densePeel : List VarId → DenseExpr p → List (DenseExpr p) × DenseExpr p
 /-- The expression `Σ l`. -/
 def denseSumExpr (l : List (DenseExpr p)) : DenseExpr p := l.foldr DenseExpr.add (DenseExpr.const 0)
 
-/-! ## Detection: a witness variable occurring only in the target constraint -/
-
-/-- A witness variable `v` occurs (in the whole system) only in the target constraint `E`, using
-    `DenseExpr.mentions` (`SubstMap.lean`). -/
-def denseOccursOnlyInTarget (d : DenseConstraintSystem p) (E : DenseExpr p) (v : VarId) : Bool :=
-  (d.algebraicConstraints.all (fun c => decide (c = E) || !(c.mentions v))) &&
-  (d.busInteractions.all (fun bi =>
-    !(bi.multiplicity.mentions v) && bi.payload.all (fun e => !(e.mentions v))))
-
 /-! ## Plain-sum coefficient recognizer -/
 
 /-- The single variable a coefficient reduces to: a bare `var a`, or `a·1` / `1·a`. -/
@@ -151,15 +142,86 @@ def denseSqCoeffsOK (reg : VarRegistry) (B : Std.HashMap VarId Nat) (D : List Va
     c.vars.all (fun x => reg.isInput x) &&
     denseSqCoeffsOK reg B D cs
 
-/-! ## The once-in-`E` witness set -/
+/-! ## The occurrence-code array
 
-/-- The witnesses of `E`: variables occurring (in the whole system) only in `E`. The `cnt` /
-    `busVars` prefilters keep the expensive full-system `denseOccursOnlyInTarget` scan to the rare
-    single-occurrence candidates. -/
-def denseWitnessesOf (d : DenseConstraintSystem p) (busVars : Std.HashSet VarId)
-    (cnt : Std.HashMap VarId Nat) (E : DenseExpr p) : List VarId :=
-  E.vars.dedup.filter (fun v => !busVars.contains v && cnt.getD v 0 == 1
-    && denseOccursOnlyInTarget d E v)
+One `VarId`-indexed code per variable answers every discovery question the pass asks:
+
+| code | meaning |
+|---|---|
+| `0` | unseen |
+| `1` | disqualified: occurs in a bus interaction, or in ≥ 2 constraint entries |
+| `2 + i` | occurs in exactly one constraint entry, at index `i` |
+
+The bus walk runs first, so a `2 + i` code *is* a witness (`denseHcWits`) — no filter needed at use,
+and no set of all bus variables is ever built. -/
+
+/-- Disqualify every variable of `e`. The already-disqualified read spares the write: bus variables
+    repeat heavily across interactions (addresses, timestamps). -/
+def denseHcBusMark : DenseExpr p → Array Nat → Array Nat
+  | .const _, st => st
+  | .var v, st => if st.getD v.index 1 == 1 then st else st.setIfInBounds v.index 1
+  | .add a b, st => denseHcBusMark b (denseHcBusMark a st)
+  | .mul a b, st => denseHcBusMark b (denseHcBusMark a st)
+
+/-- Both list walks are explicit recursions rather than `List.foldl`: a closure application per
+    payload slot is a measurable share of a sweep this shallow. -/
+def denseHcBusMarkL : List (DenseExpr p) → Array Nat → Array Nat
+  | [], st => st
+  | e :: es, st => denseHcBusMarkL es (denseHcBusMark e st)
+
+def denseHcBusScan : List (BusInteraction (DenseExpr p)) → Array Nat → Array Nat
+  | [], st => st
+  | bi :: rest, st =>
+    denseHcBusScan rest (denseHcBusMarkL bi.payload (denseHcBusMark bi.multiplicity st))
+
+/-- Record constraint entry `i`'s leaves. A repeat inside the same entry keeps its code — that is
+    the per-constraint deduplication, without a `vars` list or a `dedup`. -/
+def denseHcCsMark (i : Nat) : DenseExpr p → Array Nat → Array Nat
+  | .const _, st => st
+  | .var v, st =>
+      let c := st.getD v.index 1
+      if c == 0 then st.setIfInBounds v.index (2 + i)
+      else if c == 2 + i || c == 1 then st
+      else st.setIfInBounds v.index 1
+  | .add a b, st => denseHcCsMark i b (denseHcCsMark i a st)
+  | .mul a b, st => denseHcCsMark i b (denseHcCsMark i a st)
+
+def denseHcCsScan : Nat → List (DenseExpr p) → Array Nat → Array Nat
+  | _, [], st => st
+  | i, c :: cs, st => denseHcCsScan (i + 1) cs (denseHcCsMark i c st)
+
+/-- The occurrence codes of `d`, over `nvars` (the registry size). -/
+def denseHcScan (nvars : Nat) (d : DenseConstraintSystem p) : Array Nat :=
+  denseHcCsScan 0 d.algebraicConstraints
+    (denseHcBusScan d.busInteractions (Array.replicate nvars 0))
+
+/-- Constraint entries holding at least two witnesses, ascending — the only collapse candidates,
+    since a collapse needs `2 ≤ D.length`. -/
+def denseHcGroups (st : Array Nat) : List Nat :=
+  let m : Std.HashMap Nat Nat := st.foldl (init := ∅) fun m c =>
+    if 2 ≤ c then m.insert (c - 2) (m.getD (c - 2) 0 + 1) else m
+  ((m.toList.filter (fun kv => 2 ≤ kv.2)).map (·.1)).mergeSort (· ≤ ·)
+
+/-- The constraints at the ascending indices `is`, paired with their index. -/
+def denseHcPick (j : Nat) (is : List Nat) :
+    List (DenseExpr p) → List (Nat × DenseExpr p)
+  | [] => []
+  | c :: cs =>
+    match is with
+    | [] => []
+    | i :: is' =>
+      if i == j then (i, c) :: denseHcPick (j + 1) is' cs else denseHcPick (j + 1) is cs
+
+/-- `E`'s witnesses in first-occurrence order (the order that fixes `denom`'s term order and the
+    minted variable's name), deduplicated. -/
+def denseHcWitsGo (st : Array Nat) (code : Nat) : DenseExpr p → List VarId → List VarId
+  | .const _, acc => acc
+  | .var v, acc => if st.getD v.index 0 == code && !acc.contains v then v :: acc else acc
+  | .add a b, acc => denseHcWitsGo st code b (denseHcWitsGo st code a acc)
+  | .mul a b, acc => denseHcWitsGo st code b (denseHcWitsGo st code a acc)
+
+def denseHcWits (st : Array Nat) (idx : Nat) (E : DenseExpr p) : List VarId :=
+  (denseHcWitsGo st (2 + idx) E []).reverse
 
 /-! ## Freshness: no collision with the current system -/
 
@@ -170,98 +232,118 @@ def denseIsFresh (reg : VarRegistry) (d : DenseConstraintSystem p) (v : Variable
   | some i => !d.occ.contains i
   | none => true
 
-/-! ## The plain-sum collapse attempt (`is-zero`/`seqz`) -/
+/-- `denseIsFresh` served from the occurrence codes: `i ∈ d.occ` is exactly `st[i] ≠ 0`. -/
+def denseHcFresh (reg : VarRegistry) (st : Array Nat) (v : Variable) : Bool :=
+  match reg.idOf? v with
+  | some i => st.getD i.index 0 == 0
+  | none => true
 
-/-- Attempt the plain-sum collapse for target `E` with witness set `D`. The fresh witness `inv` is
-    registered only on the accepting branch. -/
-def denseTryOne (reg : VarRegistry) (d : DenseConstraintSystem p) (Bm : Std.HashMap VarId Nat)
-    (E : DenseExpr p) (D : List VarId) :
+/-! ## The bounds map, restricted to the queried variables -/
+
+/-- The coefficient variables whose bounds the certificates will query. -/
+def denseHcWantVars : List (DenseExpr p) → List VarId
+  | [] => []
+  | c :: cs =>
+    let f := c.fold
+    (match denseCoeffVar f with
+     | some a => [a]
+     | none => match denseDiffVarsOf f with
+       | some (a, b) => [a, b]
+       | none => []) ++ denseHcWantVars cs
+
+/-- The wanted variables as `VarId`-indexed marks: the sweep tests one array element per payload
+    slot, where a `Std.HashSet VarId` hashed a boxed `VarId` per slot. -/
+def denseHcWantArr (nvars : Nat) (want : List VarId) : Array Bool :=
+  want.foldl (fun a v => a.setIfInBounds v.index true) (Array.replicate nvars false)
+
+def denseHcAnyWanted (want : Array Bool) : List (DenseExpr p) → Bool
+  | [] => false
+  | .var v :: rest => want.getD v.index false || denseHcAnyWanted want rest
+  | _ :: rest => denseHcAnyWanted want rest
+
+/-- `denseBuild` over the interactions that can bound a wanted variable: an interaction whose raw
+    payload slots hold no wanted variable is dropped, so it pays no `denseBiPrepOf` (with its
+    compound-slot linearizations) and no `slotBound` call. This is `denseAddAll` on a sublist, so its
+    bounds are sound for exactly the reason `denseBuild`'s are (`denseHcBounds_sound`) — dropping
+    interactions can only lose bounds, never invent one. -/
+def denseHcBounds (bs : BusSemantics p) (facts : BusFacts p bs) (nvars : Nat) (want : List VarId)
+    (dbis : List (BusInteraction (DenseExpr p))) : Std.HashMap VarId Nat :=
+  match want with
+  | [] => ∅
+  | _ =>
+    let w := denseHcWantArr nvars want
+    denseAddAll bs facts (dbis.filter (fun bi => denseHcAnyWanted w bi.payload)) ∅
+
+/-! ## The collapse attempt -/
+
+/-- The accepted collapse: mint `invVar` and replace the target at its index. Replacing at the index
+    rather than by value is the same list — the target is unique among the constraints, since a
+    duplicate entry would have disqualified every witness (`hcSet_eq_map` in the proof). -/
+def denseHcAccept (reg : VarRegistry) (d : DenseConstraintSystem p) (idx : Nat) (invVar : Variable)
+    (denom rest : DenseExpr p) : VarRegistry × DenseConstraintSystem p × DenseDerivations p :=
+  let invId := (reg.register invVar).2
+  ((reg.register invVar).1,
+    { d with algebraicConstraints :=
+        d.algebraicConstraints.set idx (.add (.mul denom (.var invId)) rest) },
+    [(invId, DenseComputationMethod.quotientOrZero (.mul (.const (-1)) rest) denom)])
+
+/-- One collapse attempt on the candidate target `E` at index `idx` with witnesses `D`: peel once,
+    then offer the peel to the plain-sum recognizer (`is-zero`/`seqz`) and, failing that, to the
+    sum-of-squares one (`is-equal`). The fresh witness is registered only on the accepting branch. -/
+def denseHcTry (bs : BusSemantics p) (facts : BusFacts p bs) (reg : VarRegistry)
+    (d : DenseConstraintSystem p) (st : Array Nat) (idx : Nat) (E : DenseExpr p) (D : List VarId) :
     Option (VarRegistry × DenseConstraintSystem p × DenseDerivations p) :=
-  let invVar : Variable := ⟨"hcinv#" ++ (reg.resolve (D.headD default)).name, none⟩
   if 2 ≤ D.length then
-    let (coeffs, rest) := densePeel D E
-    if denseCoeffsByteOK reg Bm D coeffs then
+    let coeffs := (densePeel D E).1
+    let rest := (densePeel D E).2
     if D.all (fun wv => decide (wv ∉ rest.vars)) then
     if rest.vars.all (fun x => reg.isInput x) then
-    if denseIsFresh reg d invVar then
-    if coeffs.length * 256 ≤ p then
-      let (reg1, invId) := reg.register invVar
-      let denom := denseSumExpr coeffs
-      let E' : DenseExpr p := .add (.mul denom (.var invId)) rest
-      some (reg1,
-        { d with algebraicConstraints :=
-            d.algebraicConstraints.map (fun c => if c = E then E' else c) },
-        [(invId, DenseComputationMethod.quotientOrZero (.mul (.const (-1)) rest) denom)])
-    else none
-    else none
-    else none
+      let Bm := denseHcBounds bs facts st.size (denseHcWantVars coeffs) d.busInteractions
+      if denseCoeffsByteOK reg Bm D coeffs && decide (coeffs.length * 256 ≤ p) then
+        let invVar : Variable := ⟨"hcinv#" ++ (reg.resolve (D.headD default)).name, none⟩
+        if denseHcFresh reg st invVar then
+          some (denseHcAccept reg d idx invVar (denseSumExpr coeffs) rest)
+        else none
+      else if denseSqCoeffsOK reg Bm D coeffs && decide (coeffs.length * 65536 ≤ p) then
+        let invVar : Variable := ⟨"hcsq#" ++ (reg.resolve (D.headD default)).name, none⟩
+        if denseHcFresh reg st invVar then
+          some (denseHcAccept reg d idx invVar
+            (denseSumExpr (coeffs.map (fun c => DenseExpr.mul c c))) rest)
+        else none
+      else none
     else none
     else none
   else none
 
-/-! ## The sum-of-squares collapse attempt (`is-equal`) -/
-
-/-- Attempt the sum-of-squares collapse (the `is-equal` shape); shares `denseTryOne`'s mint
-    discipline. -/
-def denseTryOneSq (reg : VarRegistry) (d : DenseConstraintSystem p) (Bm : Std.HashMap VarId Nat)
-    (E : DenseExpr p) (D : List VarId) :
-    Option (VarRegistry × DenseConstraintSystem p × DenseDerivations p) :=
-  let invVar : Variable := ⟨"hcsq#" ++ (reg.resolve (D.headD default)).name, none⟩
-  if 2 ≤ D.length then
-    let (coeffs, rest) := densePeel D E
-    if denseSqCoeffsOK reg Bm D coeffs then
-    if D.all (fun wv => decide (wv ∉ rest.vars)) then
-    if rest.vars.all (fun x => reg.isInput x) then
-    if denseIsFresh reg d invVar then
-    if coeffs.length * 65536 ≤ p then
-      let (reg1, invId) := reg.register invVar
-      let denom := denseSumExpr (coeffs.map (fun c => DenseExpr.mul c c))
-      let E' : DenseExpr p := .add (.mul denom (.var invId)) rest
-      some (reg1,
-        { d with algebraicConstraints :=
-            d.algebraicConstraints.map (fun c => if c = E then E' else c) },
-        [(invId, DenseComputationMethod.quotientOrZero (.mul (.const (-1)) rest) denom)])
-    else none
-    else none
-    else none
-    else none
-    else none
-  else none
-
-/-! ## The scanning driver -/
-
-/-- Scan a constraint sublist for the first collapsible target, trying both the plain-sum and the
-    sum-of-squares shape on each constraint, sharing the once-per-constraint witness set `D`. -/
-def denseTryList (reg : VarRegistry) (d : DenseConstraintSystem p) (Bm : Std.HashMap VarId Nat)
-    (busVars : Std.HashSet VarId) (cnt : Std.HashMap VarId Nat) :
-    List (DenseExpr p) → Option (VarRegistry × DenseConstraintSystem p × DenseDerivations p)
+/-- The first candidate target that collapses. -/
+def denseHcScanTry (bs : BusSemantics p) (facts : BusFacts p bs) (reg : VarRegistry)
+    (d : DenseConstraintSystem p) (st : Array Nat) :
+    List (Nat × DenseExpr p) → Option (VarRegistry × DenseConstraintSystem p × DenseDerivations p)
   | [] => none
-  | E :: rest =>
-    let D := denseWitnessesOf d busVars cnt E
-    match denseTryOne reg d Bm E D with
+  | (idx, E) :: rest =>
+    match denseHcTry bs facts reg d st idx E (denseHcWits st idx E) with
     | some r => some r
-    | none =>
-      match denseTryOneSq reg d Bm E D with
-      | some r => some r
-      | none => denseTryList reg d Bm busVars cnt rest
+    | none => denseHcScanTry bs facts reg d st rest
 
 /-! ## The pass, as a registry-extending transform -/
 
 /-- Collapses a group of witnesses that each occur in a single constraint into one reciprocal hint:
     `Σ aᵢ·wᵢ + rest = 0` (byte-bounded `wᵢ`, each occurring only here) becomes `denom·inv + rest`
     with `denom = Σ aᵢ` and one fresh `inv := QuotientOrZero(−rest, denom)` (the `seqz`/`is-zero`
-    idiom; a sum-of-squares variant handles `is-equal`). Identity unless `p` is witnessed prime. -/
+    idiom; a sum-of-squares variant handles `is-equal`). Identity unless `p` is witnessed prime.
+
+    Everything past the occurrence-code scan is proportional to the candidate constraints: with no
+    candidate group there is no bounds map and no per-constraint work at all. -/
 def denseHintCollapseF (pw : PrimeWitness p) (reg : VarRegistry) (bsem : BusSemantics p)
     (facts : BusFacts p bsem) (d : DenseConstraintSystem p) :
     VarRegistry × DenseConstraintSystem p × DenseDerivations p :=
   if pw.isPrime = true then
-    let Bm : Std.HashMap VarId Nat := denseBuild bsem facts d.busInteractions
-    let busVars : Std.HashSet VarId := d.busInteractions.foldl (init := ∅) fun s bi =>
-      bi.payload.foldl (fun s e => e.vars.foldl (·.insert ·) s)
-        (bi.multiplicity.vars.foldl (·.insert ·) s)
-    let cnt : Std.HashMap VarId Nat := d.algebraicConstraints.foldl (init := ∅) fun m c =>
-      c.vars.dedup.foldl (fun m v => m.insert v (m.getD v 0 + 1)) m
-    (denseTryList reg d Bm busVars cnt d.algebraicConstraints).getD (reg, d, [])
+    let st := denseHcScan reg.byId.size d
+    match denseHcGroups st with
+    | [] => (reg, d, [])
+    | is =>
+      (denseHcScanTry bsem facts reg d st
+        (denseHcPick 0 is d.algebraicConstraints)).getD (reg, d, [])
   else (reg, d, [])
 
 end ApcOptimizer.Dense
