@@ -797,12 +797,16 @@ increasing effort:
   candidate walk measured 1.08–1.13x on SP1, where dense byte-pair checks made the duplicated
   recognition cost more than the restriction saved), and **sweep the whole corpus per pass before
   believing a representative set** (the OpenVM representatives all read as clean wins). Its residual is
-  in *digitFold residual after entry 176* below. `flagUnify` **1073 → 456 ms** (58 %) is
-  `denseVarBucket DenseExpr.vars` read only inside `denseFuPairData?`, i.e. only once a same-key twin
-  is found — **18 times in the whole corpus** — so here `denseThunkIf` is the fix and the `Thunk` note
-  above does not bite (the value is almost never forced, unlike the `cands` dead end). Audit every
-  pass for this shape: an index built at the top of the body, consumed inside a certificate a
-  prefilter rarely reaches.
+  in *digitFold residual after entry 176* below. ~~`flagUnify` **1073 → 456 ms** (58 %)~~ **done
+  (entry 177)**, 0.546x on the pass: the scan runs first and the bucket is built only when it recorded a
+  twin. **An earlier version of this item said a `Thunk` was the fix here; that was wrong.**
+  `denseVarBucket` stores the *items themselves* (`VarBucket.lean:23`), so a bucket over
+  `d.algebraicConstraints` aliases every expression tree in the system, and forcing a `Thunk.mk` over it
+  `lean_mark_mt`s that whole graph — after which `lean_is_exclusive` is `false` for those objects forever
+  and reset/reuse is dead for the rest of the run. Split the phases instead; its residual is in
+  *flagUnify residual after entry 177* below. Audit every pass for this shape: an index built at the top
+  of the body, consumed inside a certificate a prefilter rarely reaches — and check what the index
+  *holds* before reaching for laziness.
 - **(b) A quadratic rescan inside a no-op pass** — `tupleRange`, **done (entry 175)**, 0.08x on the
   pass. Worth re-checking for the same shape elsewhere: a per-candidate scan of the whole remainder
   whose failure the outer loop cannot learn from.
@@ -832,6 +836,18 @@ makes it matter: `denseTryLadder` sorts `l.terms` once per sign per form, and `d
 resolves `denseVarSlot` per kept variable for interactions whose multiplicity is non-constant, where
 every bound is statically `none`. The lesson worth keeping is the method — stub the two halves
 separately before designing, because the named half was not the expensive one.
+
+### flagUnify residual after entry 177 (the scanned-then-built bucket)  ·  *runtime*
+
+576 ms corpus-wide against a 456 ms `∅`-stub bound, and the whole gap is **sha256**. gdb hit counts on
+`denseFuAdopt`: wasm-eth `apc_012` finds a twin in **0 of 9** invocations, keccak **0 of 10** — those
+reach the bound, and what is left there is the scan itself — while sha256 finds matches in **6 of 11**,
+**701 of them, every one failing the certificate**, so it still builds the bucket six times (0.587x on
+that case, which is 571 of the 1054 ms baseline). Two levers, both unsized: a cheaper pre-filter before
+the bucket is needed (701 matches producing 0 adoptions means `denseFuPairData?`'s
+multiplicity/`slotBound`/`splitAt`/no-wrap prefix rejects *late*), or a bucket restricted to the joint
+offset variables the certificate actually queries, which makes the build proportional to the match
+rather than to the system — the entry-176 shape one level finer.
 
 ### tupleRange residual after entry 175 (the single-pass scan)  ·  *runtime*
 

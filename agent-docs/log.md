@@ -6945,3 +6945,65 @@ remainder is ~0.8 % of corpus wall — sub-bar, deliberately stopped. If it is e
 bound is statically `none`.
 
 **Worked: yes.**
+
+### 177. Runtime: flagUnify scans for twins before building its domain bucket (0.39–0.65x on the pass)
+
+`denseFlagUnifyF` built `denseVarBucket DenseExpr.vars d.algebraicConstraints` — a whole-system
+per-variable index — on **every** invocation and passed it to `denseFuLoop` as `domIdx`. It is read at
+exactly one place (inside `denseFuPairData?`), which the loop reaches only once a same-key twin has been
+found, and the pass changes its output in **18 of 1443 corpus invocations**. Stubbing the bucket to `∅`
+(upper bound) measured corpus **1073 → 456 ms, 58 % of the pass**. Same shape as entry 176's digitFold
+prologue; this is R15(a)'s second half.
+
+THE CHANGE: split the loop into its two independent halves. `denseFuScan` walks the interactions with
+the same candidates, key search and `denseFuInsertAll`, recording each match `(biX, biY, x)` in scan
+order — `seen` grows identically in all three of the old branches, so the scan never depended on
+`domIdx`. `denseFuAdopt` certifies the recorded matches in order. `denseFlagUnifyF` runs the scan first
+and returns the input when it found nothing. `denseFuLoop` keeps its signature as
+`denseFuAdopt … (denseFuScan …)` — the form the proof inducts on — and the adopt phase recomputes
+nothing the scan did (the digitFold trap, avoided by construction here).
+
+WHY IT IS VALUE-IDENTICAL: `seen` and the match list are functions of the interactions alone, and `σ`
+receives the same `insertAll` calls with the same pair lists in the same order, so the empty-match gate
+is value-redundant (`denseFlagUnifyF_eq`). Soundness splits the same way: `denseFuScan_mem` (both
+interactions of a recorded match belong to the system) feeds `denseFuAdopt_sound`, which is the old
+inner argument unchanged. `denseFuCheck_sound`/`denseFuCheck_vars` stay live through it.
+
+**NO `Thunk` — deliberately.** `denseVarBucket` stores the *items themselves* (`VarBucket.lean:23`), so
+with `items = d.algebraicConstraints` the bucket aliases every expression tree in the system. Forcing a
+`Thunk.mk` over it runs `lean_thunk_get_core` → `lean_mark_mt`, which walks transitively and marks that
+whole graph multi-threaded; `lean_is_exclusive` then returns `false` for those objects **forever**
+(4.30 `lean_is_exclusive`: `lean_is_st(o) && rc == 1`, else `false`), so reset/reuse cannot rebuild them
+in place and every downstream pass pays. `Thunk.pure` avoids the mark but also the laziness. The
+two-phase split avoids the hazard instead of betting on how often it triggers. **Correcting R15(a)**,
+which said a `Thunk` was the fix here.
+
+**A second exclusivity trap, measured:** hoisting `let seen' := denseFuInsertAll seen …` above the key
+lookup is value-identical and **3.1x slower on sha256 (581 → 1812 ms)** — with `seen` still live at the
+lookup its refcount is above one, so `Std.HashMap.insert` loses exclusivity and copies the whole map per
+interaction. The insert must stay inside each branch; the code carries a comment saying so.
+
+NUMBERS (this 20-core box, serial, interleaved, 3 reps, medians; sha256 2 reps): sha256 `apc_001`
+**584 → 336 ms** on the pass, total 22 331 → 22 014 (0.986x); wasm-eth `apc_063` 45 → 14, 0.991x;
+`apc_012` 55 → 21, 0.988x; keccak `apc_001` 42 → 22, 0.990x; openvm-eth `apc_005` (fires) 12 → 9,
+0.995x; `apc_071` 3 → 2. **Whole local corpus, 303 APCs interleaved: flagUnify 1054 → 576 ms (0.546x),
+wall 48.4 → 47.9 s (0.991x)**, every family improving — wasm-eth 0.386x, SP1 keccak 0.429x, SP1 rsp
+0.464x, keccak 0.541x, sha256 0.587x, openvm-eth 0.651x. One case read +2 ms in the single-shot corpus
+sweep (SP1 rsp `apc_019`); 5 reps give base `[0,0,0,1,1]` vs new `[0,0,0,0,1]`.
+VERIFIED: final `vars / constraints / bus` **identical on all 303 corpus APCs**; `opt-export`
+byte-identical on openvm-eth `apc_005` / `apc_015` / `apc_067` / `apc_009` / `apc_075`, wasm-eth
+`apc_011` / `apc_012`, keccak `apc_001`, sha256 `apc_001`; `lake build` clean with no warnings;
+`check-proof-integrity` passes on the three standard axioms with no unused theorem.
+
+WHY IT STOPS AT 0.546x and not the 456 ms bound — gdb hit counts on `denseFuAdopt` (entered once per
+invocation with ≥1 match, i.e. once per bucket build) and on its `denseFuPairData?` call site:
+wasm-eth `apc_012` **0 of 9** invocations find a match, keccak **0 of 10**, openvm-eth `apc_005` 2 of 6
+(64 matches) — those cases hit the stub bound and their residual is the scan itself. **sha256 finds
+matches in 6 of its 11 invocations — 701 of them, every one failing the certificate** — so it still
+builds the bucket 6 times and reaches only 0.587x, and since sha256 is 571 of the 1054 ms baseline it
+sets the corpus number. The next lever there is either a cheaper pre-filter (701 matches, 0 adoptions,
+so `denseFuPairData?`'s multiplicity/`slotBound`/`splitAt`/no-wrap prefix rejects late) or a bucket
+restricted to the joint offset variables actually queried, which would make the build proportional to
+the match rather than to the system.
+
+**Worked: yes.**
