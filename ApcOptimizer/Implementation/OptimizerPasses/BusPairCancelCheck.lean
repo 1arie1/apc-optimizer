@@ -106,27 +106,34 @@ def denseShieldScanSegP {α : Type} (P Q : α → Bool) (preArr : Array α) (ali
       | none => r
     else r
 
-theorem denseShieldScanSegP_eq {α : Type} (f : BusInteraction (DenseExpr p) → α)
-    (P Q : α → Bool) (arr : Array (BusInteraction (DenseExpr p))) (alive : Array Bool) :
+/-- `denseShieldScanSegP` is `denseShieldScanW` over the live segment, given per-position agreement
+    of both tests (see `denseLiveAllSegP_eqOf`). -/
+theorem denseShieldScanSegP_eqOf {α : Type} (P Q : α → Bool)
+    (P' Q' : BusInteraction (DenseExpr p) → Bool)
+    (arr : Array (BusInteraction (DenseExpr p))) (alive : Array Bool) (preArr : Array α)
+    (hsz : preArr.size = arr.size)
+    (hpt : ∀ (q : Nat) (m0 : BusInteraction (DenseExpr p)), arr[q]? = some m0 →
+      ∃ m, preArr[q]? = some m ∧ P m = P' m0 ∧ Q m = Q' m0) :
     ∀ (lo n : Nat),
-      denseShieldScanSegP P Q (arr.map f) alive lo n
-        = denseShieldScanW (fun m => P (f m)) (fun m => Q (f m))
-            (denseLiveSeg arr alive lo n) := by
+      denseShieldScanSegP P Q preArr alive lo n
+        = denseShieldScanW P' Q' (denseLiveSeg arr alive lo n) := by
   intro lo n
   induction n generalizing lo with
   | zero => rfl
   | succ n ih =>
-      rw [denseShieldScanSegP, ih (lo + 1), Array.getElem?_map]
+      rw [denseShieldScanSegP, ih (lo + 1)]
       cases halive : alive[lo]?.getD false with
       | false => rw [denseLiveSeg_skip arr alive lo n halive, if_neg (by simp)]
       | true =>
           rw [if_pos rfl]
           cases harr : arr[lo]? with
           | some m0 =>
-              rw [denseLiveSeg_peel arr alive lo n m0 halive harr]
-              rfl
+              obtain ⟨m, hm, hP, hQ⟩ := hpt lo m0 harr
+              rw [denseLiveSeg_peel arr alive lo n m0 halive harr, hm, denseShieldScanW]
+              simp only [hP, hQ]
           | none =>
-              rw [denseLiveSeg, halive, harr, if_pos rfl]
+              rw [Array.getElem?_eq_none (by rw [hsz]; exact Array.getElem?_eq_none_iff.1 harr),
+                denseLiveSeg, halive, harr, if_pos rfl]
               simp
 
 /-- Single-value byte check on `e`, emitted through `spec` (multiplicity `1`). -/
@@ -168,11 +175,12 @@ def denseEmitOk (ops : DenseZModOps p) (bs : BusSemantics p) (facts : BusFacts p
 def denseUnjustifiedSlots (bound : Nat) (deep : Bool)
     (domIdx : Std.HashMap VarId (List (DenseExpr p)))
     (candsOf : VarId → List (DenseExpr p)) (bs : BusSemantics p)
-    (facts : BusFacts p bs) (wits fwits : VarId → List (BusInteraction (DenseExpr p)))
+    (facts : BusFacts p bs) (wits : VarId → List (BusInteraction (DenseExpr p)))
+    (fbasis : VarId → List (DenseLinExpr p × Nat))
     (slots : List Nat) (R : BusInteraction (DenseExpr p)) : List Nat :=
   slots.filter (fun slot =>
     match R.payload[slot]? with
-    | some e => !denseByteJustifiedW bound deep domIdx candsOf bs facts wits fwits e
+    | some e => !denseByteJustifiedW bound deep domIdx candsOf bs facts wits fbasis e
     | none => false)
 
 /-- The per-candidate certificate: bus/multiplicity/payload of the pair, the emitted checks'
@@ -183,7 +191,8 @@ def denseCheckCancel (ops : DenseZModOps p) (deep : Bool) (bs : BusSemantics p)
     (facts : BusFacts p bs)
     (M : Thunk (DenseEqConstraintMap p))
     (domIdx : Std.HashMap VarId (List (DenseExpr p))) (candsOf : VarId → List (DenseExpr p))
-    (wits fwits : VarId → List (BusInteraction (DenseExpr p)))
+    (wits : VarId → List (BusInteraction (DenseExpr p)))
+    (fbasis : VarId → List (DenseLinExpr p × Nat))
     (busId : Nat) (shape : MemoryBusShape) (slots : List Nat) (bound : Nat)
     (S R : BusInteraction (DenseExpr p))
     (checks : List (BusInteraction (DenseExpr p))) : Bool :=
@@ -192,6 +201,6 @@ def denseCheckCancel (ops : DenseZModOps p) (deep : Bool) (bs : BusSemantics p)
     decide (denseMultConst R = some (denseGetPreviousMult ops shape)) &&
   densePayloadEntailedEq M S.payload R.payload &&
   checks.all (denseEmitOk ops bs facts busId shape slots R) &&
-  denseRecvSlotsJustified bound deep domIdx candsOf bs facts wits fwits slots R
+  denseRecvSlotsJustified bound deep domIdx candsOf bs facts wits fbasis slots R
 
 end ApcOptimizer.Dense

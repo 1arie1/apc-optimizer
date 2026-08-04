@@ -16,16 +16,24 @@ namespace ApcOptimizer.Dense
 variable {p : ℕ}
 
 /-- Prepared per-address-slot data: the raw slot expression plus its lazily-computed constant
-    value, linear form, and two-root reductions. -/
+    value, linear form, canonical term key (with the key's hash) and keyed two-root reductions.
+    The keys are what make the affine and two-root arms integer-and-list comparisons instead of a
+    normalization per compared pair (`denseTermKey`, `AddrDiseq.lean`). -/
 structure DenseSlotPre (p : ℕ) where
   expr : DenseExpr p
   cval : Thunk (Option (ZMod p))
   lin : Thunk (Option (DenseLinExpr p))
-  reds : Thunk (List (DenseLinExpr p × DenseLinExpr p))
+  key : Thunk (UInt64 × List (VarId × ZMod p))
+  reds : Thunk (List (UInt64 × List (VarId × ZMod p) × ZMod p × ZMod p))
 
 def denseSlotPrep (T : DenseTwoRootMap p) (e : DenseExpr p) : DenseSlotPre p :=
-  ⟨e, Thunk.pure e.constValue?, Thunk.mk fun _ => denseLinearize e,
-   Thunk.mk fun _ => densePtrReductions T e⟩
+  let lin : Thunk (Option (DenseLinExpr p)) := Thunk.mk fun _ => denseLinearize e
+  ⟨e, Thunk.pure e.constValue?, lin,
+   Thunk.mk fun _ =>
+     match lin.get with
+     | some L => let k := denseTermKey L; (denseTermKeyHash k, k)
+     | none => (0, []),
+   Thunk.mk fun _ => (densePtrReductions T e).map denseRedKey⟩
 
 /-- Prepared per-interaction address data relative to one memory-bus shape: the bus id, the
     multiplicity constant, and the prepared slot record at each of the shape's address fields. -/
@@ -38,6 +46,18 @@ def denseAddrPrep (shape : MemoryBusShape) (T : DenseTwoRootMap p)
     (bi : BusInteraction (DenseExpr p)) : DenseAddrPre p :=
   ⟨bi.busId, Thunk.mk fun _ => denseMultConst bi,
    shape.addressFields.map (fun slot => (bi.payload[slot]?).map (denseSlotPrep T))⟩
+
+/-- One prepared array for *every* memory bus at once: a position gets its own bus's shape, and a
+    position on no memory bus gets a bus-id-only stub. Sound for every candidate bus because every
+    test reads `busId` first and answers there (`denseMidRefutedP`/`densePreRefutedP` refute, and
+    `denseProvRecvP` fails) whenever the compared position is off the candidate's bus — so a record
+    prepared under another bus's shape, or not prepared at all, is never looked into. -/
+def denseAddrPrepAll (memShape : Nat → Option MemoryBusShape) (T : DenseTwoRootMap p)
+    (arr : Array (BusInteraction (DenseExpr p))) : Array (DenseAddrPre p) :=
+  arr.map (fun bi =>
+    match memShape bi.busId with
+    | some shape => denseAddrPrep shape T bi
+    | none => ⟨bi.busId, Thunk.pure none, []⟩)
 
 /-! ## The prepared certificate tests
 
@@ -73,14 +93,15 @@ def denseAddrConstsEqP (a b : DenseAddrPre p) : Bool :=
 def denseAddrAffineNeqP (a b : DenseAddrPre p) : Bool :=
   denseSlotsAny (fun sa sb =>
     match sa.lin.get, sb.lin.get with
-    | some L, some L' => denseConstDiffNZ L L'
+    | some L, some L' =>
+      let ka := sa.key.get
+      let kb := sb.key.get
+      (ka.1 == kb.1 && decide (ka.2 = kb.2)) && decide (L.const ≠ L'.const)
     | _, _ => false) a.slots b.slots
 
 def denseAddrTwoRootNeqP (a b : DenseAddrPre p) : Bool :=
   denseSlotsAny (fun sa sb =>
-    sa.reds.get.any (fun red => sb.reds.get.any (fun red' =>
-      denseConstDiffNZ red.1 red'.1 && denseConstDiffNZ red.1 red'.2 &&
-      denseConstDiffNZ red.2 red'.1 && denseConstDiffNZ red.2 red'.2))) a.slots b.slots
+    sa.reds.get.any (fun r => sb.reds.get.any (denseRedKeysNeq r))) a.slots b.slots
 
 /-- `denseDiffSumOver` over prepared slot pairs (same fold, linearizations read from the prep). -/
 def denseDiffSumP : List (Option (DenseSlotPre p) × Option (DenseSlotPre p)) →

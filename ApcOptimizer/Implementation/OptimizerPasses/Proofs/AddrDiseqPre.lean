@@ -83,7 +83,9 @@ theorem denseAddrAffineNeqP_eq (shape : MemoryBusShape) (T : DenseTwoRootMap p)
     (S m : BusInteraction (DenseExpr p)) :
     denseAddrAffineNeqP (denseAddrPrep shape T S) (denseAddrPrep shape T m)
       = denseAddrAffineNeq shape S m :=
-  denseSlotsAny_eq T S m _ _ (fun _ _ => rfl) shape.addressFields
+  denseSlotsAny_eq T S m _ _ (fun e e' => by
+    unfold denseSlotPrep denseKeyDiffNZ
+    cases denseLinearize e <;> cases denseLinearize e' <;> rfl) shape.addressFields
 
 theorem denseAddrTwoRootNeqP_eq (shape : MemoryBusShape) (T : DenseTwoRootMap p)
     (S m : BusInteraction (DenseExpr p)) :
@@ -143,5 +145,38 @@ theorem denseProvRecvP_eq (ops : DenseZModOps p) (shape : MemoryBusShape)
   unfold denseProvRecvP denseProvRecv
   rw [denseAddrConstsEqP_eq]
   rfl
+
+/-! ## Off-bus records
+
+A prepared record for a position on another bus is only ever asked for its `busId`: the mid and pre
+tests answer `true` on their first arm and `denseProvRecvP` answers `false`. That is what lets one
+prepared array serve every memory bus, with a bus-id-only stub off all of them
+(`denseAddrPrepAll`). -/
+
+theorem denseMidRefutedP_offBus (ops : DenseZModOps p) (nw : DenseNonzeroWits p) (busId : Nat)
+    (a b : DenseAddrPre p) (h : b.busId ≠ busId) : denseMidRefutedP ops nw busId a b = true := by
+  unfold denseMidRefutedP
+  rw [decide_eq_true h]
+  simp
+
+theorem densePreRefutedP_offBus (ops : DenseZModOps p) (nw : DenseNonzeroWits p) (busId : Nat)
+    (setMult : ZMod p) (a b : DenseAddrPre p) (h : b.busId ≠ busId) :
+    densePreRefutedP ops nw busId setMult a b = true := by
+  unfold densePreRefutedP
+  rw [denseMidRefutedP_offBus ops nw busId a b h]
+  simp
+
+theorem denseProvRecvP_offBus (busId : Nat) (getPrevMult : ZMod p) (a b : DenseAddrPre p)
+    (h : b.busId ≠ busId) : denseProvRecvP busId getPrevMult a b = false := by
+  unfold denseProvRecvP
+  rw [decide_eq_false h]
+  simp
+
+theorem denseProvRecv_offBus (ops : DenseZModOps p) (shape : MemoryBusShape) (busId : Nat)
+    (S m : BusInteraction (DenseExpr p)) (h : m.busId ≠ busId) :
+    denseProvRecv ops shape busId S m = false := by
+  unfold denseProvRecv
+  rw [decide_eq_false h]
+  simp
 
 end ApcOptimizer.Dense

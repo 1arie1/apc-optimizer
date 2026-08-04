@@ -405,14 +405,13 @@ theorem denseFormBoundAt_sound {bs : BusSemantics p} (facts : BusFacts p bs)
 /-- Fuel-bounded induction: at each step it either finishes on the plain per-variable natural bound,
     or subtracts an integer multiple `μ` of a range-checked slot form accounting `μ·(B_F − 1)`
     against the budget (exact `DenseLinExpr` algebra). -/
-theorem denseBasisReduceGo_sound (bound : Nat) (bnd : VarId → Option Nat) {bs : BusSemantics p}
-    (facts : BusFacts p bs) (fwits : VarId → List (BusInteraction (DenseExpr p)))
+theorem denseBasisReduceGo_sound (bound : Nat) (bnd : VarId → Option Nat)
+    (fbasis : VarId → List (DenseLinExpr p × Nat))
     (denv : VarId → ZMod p)
     (hbnd : ∀ v b, bnd v = some b → (denv v).val < b)
-    (hfw : ∀ v, ∀ bi ∈ fwits v, (denseBIEval bi denv).multiplicity ≠ 0 →
-      bs.accepts (denseBIEval bi denv)) :
+    (hfb : ∀ v, ∀ LB ∈ fbasis v, (LB.1.eval denv).val < LB.2) :
     ∀ (fuel used : Nat) (L : DenseLinExpr p),
-      denseBasisReduceGo bound bnd facts fwits fuel used L = true →
+      denseBasisReduceGo bound bnd fbasis fuel used L = true →
       ∃ n : ℕ, L.eval denv = (n : ZMod p) ∧ n + used < bound ∧ n + used < p := by
   intro fuel
   induction fuel with
@@ -447,54 +446,47 @@ theorem denseBasisReduceGo_sound (bound : Nat) (bnd : VarId → Option Nat) {bs 
             omega
     ·
       rw [List.any_eq_true] at hstep
-      obtain ⟨v, _, hstep⟩ := hstep
+      obtain ⟨t, _, hstep⟩ := hstep
+      dsimp only at hstep
       rw [List.any_eq_true] at hstep
-      obtain ⟨bi, hbi, hstep⟩ := hstep
-      rw [List.any_eq_true] at hstep
-      obtain ⟨i, _, hstep⟩ := hstep
-      cases hfb : denseFormBoundAt facts bi i with
-      | none => rw [hfb] at hstep; simp at hstep
-      | some LfBf =>
-        obtain ⟨Lf, Bf⟩ := LfBf
-        rw [hfb] at hstep
-        simp only at hstep
-        split_ifs at hstep with hcond
-        obtain ⟨n', heval', hb', hp'⟩ := ih _ _ hstep
-        haveI : NeZero p := ⟨by omega⟩
-        have hef : (Lf.eval denv).val < Bf :=
-          denseFormBoundAt_sound facts bi i Lf Bf hfb denv (hfw v bi hbi)
-        set μ := (IntervalForce.srep (L.coeff v) / IntervalForce.srep (Lf.coeff v)).toNat with hμ
-        have hdecomp : L.eval denv
-            = (μ : ZMod p) * Lf.eval denv + ((L.add (Lf.scale (-(μ : ZMod p)))).norm).eval denv := by
-          rw [DenseLinExpr.norm_eval, DenseLinExpr.add_eval, DenseLinExpr.scale_eval]
-          ring
-        refine ⟨μ * (Lf.eval denv).val + n', ?_, ?_, ?_⟩
-        · rw [hdecomp, heval']
-          push_cast
-          rw [ZMod.natCast_val, ZMod.cast_id]
-        · have hmul : μ * (Lf.eval denv).val ≤ μ * (Bf - 1) :=
-            Nat.mul_le_mul_left _ (by omega)
-          omega
-        · have hmul : μ * (Lf.eval denv).val ≤ μ * (Bf - 1) :=
-            Nat.mul_le_mul_left _ (by omega)
-          omega
+      obtain ⟨LB, hLB, hstep⟩ := hstep
+      split_ifs at hstep with hcond
+      obtain ⟨n', heval', hb', hp'⟩ := ih _ _ hstep
+      haveI : NeZero p := ⟨by omega⟩
+      have hef : (LB.1.eval denv).val < LB.2 := hfb t.1 LB hLB
+      set μ := (IntervalForce.srep (L.coeff t.1) / IntervalForce.srep (LB.1.coeff t.1)).toNat
+        with hμ
+      have hdecomp : L.eval denv
+          = (μ : ZMod p) * LB.1.eval denv
+            + ((L.add (LB.1.scale (-(μ : ZMod p)))).norm).eval denv := by
+        rw [DenseLinExpr.norm_eval, DenseLinExpr.add_eval, DenseLinExpr.scale_eval]
+        ring
+      refine ⟨μ * (LB.1.eval denv).val + n', ?_, ?_, ?_⟩
+      · rw [hdecomp, heval']
+        push_cast
+        rw [ZMod.natCast_val, ZMod.cast_id]
+      · have hmul : μ * (LB.1.eval denv).val ≤ μ * (LB.2 - 1) :=
+          Nat.mul_le_mul_left _ (by omega)
+        omega
+      · have hmul : μ * (LB.1.eval denv).val ≤ μ * (LB.2 - 1) :=
+          Nat.mul_le_mul_left _ (by omega)
+        omega
 
 /-- If `e` linearizes to a form the fuel-bounded reduction proves `< bound`, then `e` is a byte/limb
     under any assignment respecting the bounds and never violating the witness interactions. -/
-theorem denseBasisJustified_sound (bound : Nat) (bnd : VarId → Option Nat) {bs : BusSemantics p}
-    (facts : BusFacts p bs) (fwits : VarId → List (BusInteraction (DenseExpr p)))
+theorem denseBasisJustified_sound (bound : Nat) (bnd : VarId → Option Nat)
+    (fbasis : VarId → List (DenseLinExpr p × Nat))
     (e : DenseExpr p) (denv : VarId → ZMod p)
     (hbnd : ∀ v b, bnd v = some b → (denv v).val < b)
-    (hfw : ∀ v, ∀ bi ∈ fwits v, (denseBIEval bi denv).multiplicity ≠ 0 →
-      bs.accepts (denseBIEval bi denv))
-    (h : denseBasisJustified bound bnd facts fwits e = true) : (e.eval denv).val < bound := by
+    (hfb : ∀ v, ∀ LB ∈ fbasis v, (LB.1.eval denv).val < LB.2)
+    (h : denseBasisJustified bound bnd fbasis e = true) : (e.eval denv).val < bound := by
   unfold denseBasisJustified at h
   cases hL : denseLinearize e with
   | none => rw [hL] at h; simp at h
   | some L =>
     rw [hL] at h
     obtain ⟨n, heval, hb, hp'⟩ :=
-      denseBasisReduceGo_sound bound bnd facts fwits denv hbnd hfw basisFuel 0 L.norm h
+      denseBasisReduceGo_sound bound bnd fbasis denv hbnd hfb basisFuel 0 L.norm h
     haveI : NeZero p := ⟨by omega⟩
     rw [denseLinearize_eval e L hL denv, ← DenseLinExpr.norm_eval, heval, ZMod.val_natCast,
       Nat.mod_eq_of_lt (by omega)]
@@ -513,14 +505,15 @@ theorem denseByteJustifiedW_sound (bound : Nat) (deep : Bool) (all : List (Dense
     (domIdx : Std.HashMap VarId (List (DenseExpr p)))
     (candsOf : VarId → List (DenseExpr p)) (bs : BusSemantics p)
     (facts : BusFacts p bs) (rest : List (BusInteraction (DenseExpr p)))
-    (wits fwits : VarId → List (BusInteraction (DenseExpr p))) (e : DenseExpr p)
+    (wits : VarId → List (BusInteraction (DenseExpr p)))
+    (fbasis : VarId → List (DenseLinExpr p × Nat)) (e : DenseExpr p)
     (hdeep : deep = true → p.Prime)
     (hdomIdx : ∀ v, ∀ c ∈ denseVarBucketLookup domIdx v, c ∈ all)
     (hcands : ∀ x, ∀ c ∈ candsOf x, c ∈ all)
     (hwits : ∀ v, ∀ bi ∈ wits v, bi ∈ rest)
-    (hfwits : ∀ v, ∀ bi ∈ fwits v, bi ∈ rest)
-    (h : denseByteJustifiedW bound deep domIdx candsOf bs facts wits fwits e = true)
+    (h : denseByteJustifiedW bound deep domIdx candsOf bs facts wits fbasis e = true)
     (denv : VarId → ZMod p)
+    (hfb : ∀ v, ∀ LB ∈ fbasis v, (LB.1.eval denv).val < LB.2)
     (hall : ∀ c' ∈ all, c'.eval denv = 0)
     (hbus : ∀ bi ∈ rest, (denseBIEval bi denv).multiplicity ≠ 0 →
       bs.accepts (denseBIEval bi denv)) :
@@ -575,9 +568,9 @@ theorem denseByteJustifiedW_sound (bound : Nat) (deep : Bool) (all : List (Dense
       exact denseAffineJustified_sound bound (fun x => denseFindVarBound bs facts (wits x) x) e denv
         (fun v b hb => denseFindVarBound_sound bs facts (wits v) v b hb denv (hbusW v)) h
     ·
-      exact denseBasisJustified_sound bound (fun x => denseFindVarBound bs facts (wits x) x) facts
-        fwits e denv (fun v b hb => denseFindVarBound_sound bs facts (wits v) v b hb denv (hbusW v))
-        (fun v bi hbi => hbus bi (hfwits v bi hbi)) h
+      exact denseBasisJustified_sound bound (fun x => denseFindVarBound bs facts (wits x) x)
+        fbasis e denv (fun v b hb => denseFindVarBound_sound bs facts (wits v) v b hb denv (hbusW v))
+        hfb h
 
 /-- If every declared byte slot of `R` is justified, then at every such slot the evaluated payload
     entry of `R` (under any `denv` zeroing `all` and never violating the remaining witnessed
@@ -586,14 +579,15 @@ theorem denseRecvSlotsJustified_sound (bound : Nat) (deep : Bool) (all : List (D
     (domIdx : Std.HashMap VarId (List (DenseExpr p)))
     (candsOf : VarId → List (DenseExpr p)) (bs : BusSemantics p)
     (facts : BusFacts p bs) (rest : List (BusInteraction (DenseExpr p)))
-    (wits fwits : VarId → List (BusInteraction (DenseExpr p))) (slots : List Nat)
+    (wits : VarId → List (BusInteraction (DenseExpr p)))
+    (fbasis : VarId → List (DenseLinExpr p × Nat)) (slots : List Nat)
     (R : BusInteraction (DenseExpr p)) (hdeep : deep = true → p.Prime)
     (hdomIdx : ∀ v, ∀ c ∈ denseVarBucketLookup domIdx v, c ∈ all)
     (hcands : ∀ x, ∀ c ∈ candsOf x, c ∈ all)
     (hwits : ∀ v, ∀ bi ∈ wits v, bi ∈ rest)
-    (hfwits : ∀ v, ∀ bi ∈ fwits v, bi ∈ rest)
-    (h : denseRecvSlotsJustified bound deep domIdx candsOf bs facts wits fwits slots R = true)
+    (h : denseRecvSlotsJustified bound deep domIdx candsOf bs facts wits fbasis slots R = true)
     (denv : VarId → ZMod p)
+    (hfb : ∀ v, ∀ LB ∈ fbasis v, (LB.1.eval denv).val < LB.2)
     (hall : ∀ c' ∈ all, c'.eval denv = 0)
     (hbus : ∀ bi ∈ rest, (denseBIEval bi denv).multiplicity ≠ 0 →
       bs.accepts (denseBIEval bi denv)) :
@@ -609,7 +603,7 @@ theorem denseRecvSlotsJustified_sound (bound : Nat) (deep : Bool) (all : List (D
     rw [he] at hget' hcheck
     simp only [Option.map_some, Option.some.injEq] at hget'
     subst hget'
-    exact denseByteJustifiedW_sound bound deep all domIdx candsOf bs facts rest wits fwits e hdeep
-      hdomIdx hcands hwits hfwits hcheck denv hall hbus
+    exact denseByteJustifiedW_sound bound deep all domIdx candsOf bs facts rest wits fbasis e hdeep
+      hdomIdx hcands hwits hcheck denv hfb hall hbus
 
 end ApcOptimizer.Dense

@@ -176,48 +176,57 @@ def denseFormBoundAt {bs : BusSemantics p} (facts : BusFacts p bs)
   funext q bs facts bi i
   simp [denseFormBoundAt, denseFormBoundAtImpl]
 
+/-- The checked linear forms of an interaction's payload slots, with their bounds — the only thing
+    the basis reduction ever asks of a witness interaction. A pure function of the interaction, so
+    the pass prepares it once per position (`denseBuildFormBounds`) instead of re-deriving it at
+    every node of the reduction below. -/
+def denseFormBoundsOf {bs : BusSemantics p} (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) : List (DenseLinExpr p × Nat) :=
+  (List.range bi.payload.length).filterMap (denseFormBoundAt facts bi)
+
 /-- Fuel-bounded basis reduction: is `L`'s value provably `< bound − used` via per-variable bounds
-    (finish arm) after subtracting integer multiples of range-checked slot forms from `fwits`? -/
-def denseBasisReduceGo (bound : Nat) (bnd : VarId → Option Nat) {bs : BusSemantics p}
-    (facts : BusFacts p bs) (fwits : VarId → List (BusInteraction (DenseExpr p))) :
+    (finish arm) after subtracting integer multiples of the checked forms `fbasis` offers for one of
+    `L`'s variables? -/
+def denseBasisReduceGo (bound : Nat) (bnd : VarId → Option Nat)
+    (fbasis : VarId → List (DenseLinExpr p × Nat)) :
     Nat → Nat → DenseLinExpr p → Bool
   | 0, _, _ => false
   | fuel + 1, used, L =>
     (match L.natBound bnd with
      | some M => decide (used + M < bound) && decide (used + M < p)
      | none => false) ||
-    (L.terms.map Prod.fst).any (fun v =>
-      (fwits v).any (fun bi =>
-        (List.range bi.payload.length).any (fun i =>
-          match denseFormBoundAt facts bi i with
-          | none => false
-          | some (Lf, Bf) =>
-            let cF := IntervalForce.srep (Lf.coeff v)
-            let μi := IntervalForce.srep (L.coeff v) / cF
-            if cF ≠ 0 ∧ 0 < μi ∧ cF * μi = IntervalForce.srep (L.coeff v) then
-              denseBasisReduceGo bound bnd facts fwits fuel (used + μi.toNat * (Bf - 1))
-                ((L.add (Lf.scale (-(μi.toNat : ZMod p)))).norm)
-            else false)))
+    -- `L.coeff v` is invariant across the candidate forms, and `L.terms.map Prod.fst` would
+    -- allocate a variable list per node: both are hoisted out of the inner scan.
+    L.terms.any (fun t =>
+      let v := t.1
+      let cL := IntervalForce.srep (L.coeff v)
+      (fbasis v).any (fun LB =>
+        let cF := IntervalForce.srep (LB.1.coeff v)
+        let μi := cL / cF
+        if cF ≠ 0 ∧ 0 < μi ∧ cF * μi = cL then
+          denseBasisReduceGo bound bnd fbasis fuel (used + μi.toNat * (LB.2 - 1))
+            ((L.add (LB.1.scale (-(μi.toNat : ZMod p)))).norm)
+        else false))
 
 /-- Basis justification: `e` linearizes to a form the fuel-bounded reduction proves `< bound`. -/
-def denseBasisJustified (bound : Nat) (bnd : VarId → Option Nat) {bs : BusSemantics p}
-    (facts : BusFacts p bs) (fwits : VarId → List (BusInteraction (DenseExpr p)))
-    (e : DenseExpr p) : Bool :=
+def denseBasisJustified (bound : Nat) (bnd : VarId → Option Nat)
+    (fbasis : VarId → List (DenseLinExpr p × Nat)) (e : DenseExpr p) : Bool :=
   match denseLinearize e with
-  | some L => denseBasisReduceGo bound bnd facts fwits basisFuel 0 L.norm
+  | some L => denseBasisReduceGo bound bnd fbasis basisFuel 0 L.norm
   | none => false
 
 /-- Is `e` provably a byte under every assignment satisfying the remaining system? Tries, in order:
     a constant `< bound`; a variable with a bus-fact bound `≤ bound`; (when `deep`) a
     selector-flag-domain deep justification or a single-variable finite-domain justification; an
-    affine recomposition of bounded limbs; or a basis reduction against range-checked slot forms
-    (`fwits`). Remaining interactions are consulted through `wits`; `domIdx`/`candsOf` are
-    precomputed per-variable indexes (passed as values — a closure payload would be re-evaluated
-    per call, cf. `agent-docs/log.md` entry 106). -/
+    affine recomposition of bounded limbs; or a basis reduction against the range-checked slot forms
+    `fbasis` offers per variable. Remaining interactions are consulted through `wits`;
+    `domIdx`/`candsOf` are precomputed per-variable indexes (passed as values — a closure payload
+    would be re-evaluated per call, cf. `agent-docs/log.md` entry 106). -/
 def denseByteJustifiedW (bound : Nat) (deep : Bool)
     (domIdx : Std.HashMap VarId (List (DenseExpr p)))
     (candsOf : VarId → List (DenseExpr p)) (bs : BusSemantics p)
-    (facts : BusFacts p bs) (wits fwits : VarId → List (BusInteraction (DenseExpr p)))
+    (facts : BusFacts p bs) (wits : VarId → List (BusInteraction (DenseExpr p)))
+    (fbasis : VarId → List (DenseLinExpr p × Nat))
     (e : DenseExpr p) : Bool :=
   match e.constValue? with
   | some c => decide (c.val < bound)
@@ -232,18 +241,19 @@ def denseByteJustifiedW (bound : Nat) (deep : Bool)
      | _ => false) ||
     (deep && decide (256 ≤ bound) && denseDomainByteJustified domIdx e) ||
     denseAffineJustified bound (fun x => denseFindVarBound bs facts (wits x) x) e ||
-    denseBasisJustified bound (fun x => denseFindVarBound bs facts (wits x) x) facts fwits e
+    denseBasisJustified bound (fun x => denseFindVarBound bs facts (wits x) x) fbasis e
 
 /-- Are all of `R`'s payload entries at the declared byte slots justified (through the witness
     lookup `wits` and precomputed `domIdx`/`candsOf`, see `denseByteJustifiedW`)? -/
 def denseRecvSlotsJustified (bound : Nat) (deep : Bool)
     (domIdx : Std.HashMap VarId (List (DenseExpr p)))
     (candsOf : VarId → List (DenseExpr p)) (bs : BusSemantics p)
-    (facts : BusFacts p bs) (wits fwits : VarId → List (BusInteraction (DenseExpr p)))
+    (facts : BusFacts p bs) (wits : VarId → List (BusInteraction (DenseExpr p)))
+    (fbasis : VarId → List (DenseLinExpr p × Nat))
     (slots : List Nat) (R : BusInteraction (DenseExpr p)) : Bool :=
   slots.all (fun slot =>
     match R.payload[slot]? with
-    | some e => denseByteJustifiedW bound deep domIdx candsOf bs facts wits fwits e
+    | some e => denseByteJustifiedW bound deep domIdx candsOf bs facts wits fbasis e
     | none => true)
 
 end ApcOptimizer.Dense

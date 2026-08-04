@@ -241,38 +241,6 @@ theorem denseBUNonzeroNeq_eq (shape : MemoryBusShape) (T : DenseTwoRootMap p)
   rw [denseBUDiffSum_eq]
   rfl
 
-/-! ## Canonical term keys
-
-`denseConstDiffNZ a b` holds when `a − b` has no terms and a nonzero constant. The engine decides
-that by comparing `denseBUTermKey` — the merged, zero-dropped, *sorted* term list — so equal keys
-mean the two forms' normalized terms are permutations of each other, hence evaluate equally, and
-the whole difference is the (differing) constants. Only this direction is needed: the engine may
-refute less than `denseConstDiffNZ` would, never more. -/
-
-theorem denseBUTermKey_perm (a b : DenseLinExpr p) (h : denseBUTermKey a = denseBUTermKey b) :
-    a.norm.terms.Perm b.norm.terms := by
-  have ha := List.mergeSort_perm a.norm.terms (fun x y => decide (x.1.index ≤ y.1.index))
-  have hb := List.mergeSort_perm b.norm.terms (fun x y => decide (x.1.index ≤ y.1.index))
-  unfold denseBUTermKey at h
-  rw [h] at ha
-  exact ha.symm.trans hb
-
-/-- A linear form's value is its constant plus the sum over its *normalized* terms. -/
-private theorem denseBU_eval_norm (a : DenseLinExpr p) (denv : VarId → ZMod p) :
-    a.eval denv = a.const + (a.norm.terms.map (fun t => t.2 * denv t.1)).sum := by
-  rw [← DenseLinExpr.norm_eval a denv]; rfl
-
-/-- Equal canonical keys and different constants force different values — the engine's replacement
-    for `denseConstDiffNZ_sound`. -/
-theorem denseBUKeyNeq_sound (a b : DenseLinExpr p) (hk : denseBUTermKey a = denseBUTermKey b)
-    (hc : a.const ≠ b.const) (denv : VarId → ZMod p) : a.eval denv ≠ b.eval denv := by
-  have hsum : (a.norm.terms.map (fun t => t.2 * denv t.1)).sum
-      = (b.norm.terms.map (fun t => t.2 * denv t.1)).sum :=
-    ((denseBUTermKey_perm a b hk).map _).sum_eq
-  intro heq
-  rw [denseBU_eval_norm a denv, denseBU_eval_norm b denv, hsum] at heq
-  exact hc (add_right_cancel heq)
-
 /-! ## The affine and two-root arms -/
 
 theorem denseBUAffineNeq_sound (shape : MemoryBusShape) (T : DenseTwoRootMap p)
@@ -306,41 +274,13 @@ theorem denseBUAffineNeq_sound (shape : MemoryBusShape) (T : DenseTwoRootMap p)
           obtain ⟨⟨_, hkey⟩, hconst⟩ := hcond
           refine denseAddr_slot_neq shape S m denv hslot hSp hbp ?_
           rw [denseLinearize_eval e L hL denv, denseLinearize_eval e' L' hL' denv]
-          exact denseBUKeyNeq_sound L L' hkey hconst denv
-
-/-- Both branch forms of a reduction differ by a constant, so they share a canonical key. -/
-theorem densePtrBranchesOf_key (k : ZMod p) (A : DenseLinExpr p) (δ cx : ZMod p)
-    (rest : DenseLinExpr p) :
-    denseBUTermKey (densePtrBranchesOf k A δ cx rest).2
-      = denseBUTermKey (densePtrBranchesOf k A δ cx rest).1 := by
-  unfold denseBUTermKey densePtrBranchesOf DenseLinExpr.norm DenseLinExpr.add DenseLinExpr.scale
-  simp
-
-theorem densePtrReductions_key {T : DenseTwoRootMap p} {E : DenseExpr p} {b1 b2 : DenseLinExpr p}
-    (h : (b1, b2) ∈ densePtrReductions T E) : denseBUTermKey b2 = denseBUTermKey b1 := by
-  unfold densePtrReductions at h
-  cases hL : denseLinearize E with
-  | none => rw [hL] at h; simp at h
-  | some L =>
-    rw [hL, List.mem_filterMap] at h
-    obtain ⟨v, _, hmatch⟩ := h
-    cases htm : T.map[v]? with
-    | none => rw [htm] at hmatch; simp at hmatch
-    | some kAδ =>
-      obtain ⟨k, A, δ⟩ := kAδ
-      rw [htm] at hmatch
-      simp only [Option.some.injEq] at hmatch
-      rw [show b1 = (densePtrBranchesOf k A δ (L.coeff v) (L.others v)).1 from
-            (congrArg Prod.fst hmatch).symm,
-          show b2 = (densePtrBranchesOf k A δ (L.coeff v) (L.others v)).2 from
-            (congrArg Prod.snd hmatch).symm]
-      exact densePtrBranchesOf_key k A δ (L.coeff v) (L.others v)
+          exact denseKeyNeq_sound L L' hkey hconst denv
 
 /-- A stored reduction entry comes from an actual `densePtrReductions` pair, with the stored key
     the canonical key of both its branches and the stored constants their constants. -/
 theorem denseBUSlot_reds_mem {T : DenseTwoRootMap p} {e : DenseExpr p}
     {r : UInt64 × List (VarId × ZMod p) × ZMod p × ZMod p} (h : r ∈ (denseBUSlotPrep T e).reds) :
-    ∃ b1 b2, (b1, b2) ∈ densePtrReductions T e ∧ r.2.1 = denseBUTermKey b1 ∧
+    ∃ b1 b2, (b1, b2) ∈ densePtrReductions T e ∧ r.2.1 = denseTermKey b1 ∧
       r.2.2.1 = b1.const ∧ r.2.2.2 = b2.const := by
   simp only [denseBUSlotPrep, List.mem_map] at h
   obtain ⟨⟨b1, b2⟩, hmem, rfl⟩ := h
@@ -371,19 +311,19 @@ theorem denseBUTwoRootNeq_sound {dcs : List (DenseExpr p)} (shape : MemoryBusSha
       obtain ⟨rb, hrb, hchk⟩ := List.any_eq_true.1 hinner
       obtain ⟨a1, a2, hared, hakey, hac1, hac2⟩ := denseBUSlot_reds_mem hra
       obtain ⟨b1, b2, hbred, hbkey, hbc1, hbc2⟩ := denseBUSlot_reds_mem hrb
-      simp only [Bool.and_eq_true, decide_eq_true_eq, beq_iff_eq] at hchk
+      simp only [denseRedKeysNeq, Bool.and_eq_true, decide_eq_true_eq, beq_iff_eq] at hchk
       obtain ⟨⟨⟨_, hkeq⟩, h11, h12⟩, h21, h22⟩ := hchk
-      have hka : denseBUTermKey a2 = denseBUTermKey a1 := densePtrReductions_key hared
-      have hkb : denseBUTermKey b2 = denseBUTermKey b1 := densePtrReductions_key hbred
-      have hkab : denseBUTermKey a1 = denseBUTermKey b1 := by rw [← hakey, ← hbkey]; exact hkeq
+      have hka : denseTermKey a2 = denseTermKey a1 := densePtrReductions_key hared
+      have hkb : denseTermKey b2 = denseTermKey b1 := densePtrReductions_key hbred
+      have hkab : denseTermKey a1 = denseTermKey b1 := by rw [← hakey, ← hbkey]; exact hkeq
       have hev := densePtrReductions_sound T hT e a1 a2 hared denv hcon
       have hev' := densePtrReductions_sound T hT e' b1 b2 hbred denv hcon
       refine denseAddr_slot_neq shape S m denv hslot hSp hbp ?_
       rcases hev with ha | ha <;> rcases hev' with hb | hb <;> rw [ha, hb]
-      · exact denseBUKeyNeq_sound a1 b1 hkab (by rw [← hac1, ← hbc1]; exact h11) denv
-      · exact denseBUKeyNeq_sound a1 b2 (by rw [hkab, ← hkb]) (by rw [← hac1, ← hbc2]; exact h12) denv
-      · exact denseBUKeyNeq_sound a2 b1 (by rw [hka, hkab]) (by rw [← hac2, ← hbc1]; exact h21) denv
-      · exact denseBUKeyNeq_sound a2 b2 (by rw [hka, hkab, ← hkb])
+      · exact denseKeyNeq_sound a1 b1 hkab (by rw [← hac1, ← hbc1]; exact h11) denv
+      · exact denseKeyNeq_sound a1 b2 (by rw [hkab, ← hkb]) (by rw [← hac1, ← hbc2]; exact h12) denv
+      · exact denseKeyNeq_sound a2 b1 (by rw [hka, hkab]) (by rw [← hac2, ← hbc1]; exact h21) denv
+      · exact denseKeyNeq_sound a2 b2 (by rw [hka, hkab, ← hkb])
           (by rw [← hac2, ← hbc2]; exact h22) denv
 
 /-! ## The verifier -/

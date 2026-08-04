@@ -124,21 +124,8 @@ One record per memory-bus interaction, built once per invocation. `cval` / `lin`
 data the certificates of `AddrDiseq.lean` re-derive per compared pair; `linSig` / `redSig` are the
 order-insensitive term signatures that let the sweep decide the same tests by comparing integers.
 Two linear forms differ by a nonzero constant exactly when their normalized term lists agree and
-their constants do not, so equal signature + different constant is `denseConstDiffNZ` up to a hash
-collision — and a collision can only over-report a refutation, which the verifier catches. Both
-branches of one two-root reduction differ by a constant, hence share one signature. -/
-
-/-- The canonical form of a linear form's terms: merged, zero-dropped, sorted by variable. Two
-    forms differ by a nonzero constant (`denseConstDiffNZ`) exactly when their canonical terms are
-    equal and their constants are not, so this list *is* the affine/two-root comparison. -/
-def denseBUTermKey (l : DenseLinExpr p) : List (VarId × ZMod p) :=
-  l.norm.terms.mergeSort (fun a b => decide (a.1.index ≤ b.1.index))
-
-/-- Hash *of the canonical key*, which gates the list compare: unequal hashes are unequal keys,
-    and that is the overwhelmingly common case. Deriving it from the key rather than from the term
-    list makes the gate's soundness `congrArg` and saves a second `norm`. -/
-def denseBUKeyHash (k : List (VarId × ZMod p)) : UInt64 :=
-  k.foldl (fun h t => mixHash h (mixHash (hash t.1) (hash t.2.val))) 0
+their constants do not (`denseKeyDiffNZ`), so the arms compare an integer and a list. Both branches
+of one two-root reduction differ by a constant, hence share one signature. -/
 
 structure DenseBUSlot (p : ℕ) where
   expr : DenseExpr p
@@ -162,13 +149,12 @@ structure DenseBUPre (p : ℕ) where
 
 def denseBUSlotPrep (T : DenseTwoRootMap p) (e : DenseExpr p) : DenseBUSlot p :=
   let lin := denseLinearize e
-  let key := match lin with | some L => denseBUTermKey L | none => []
+  let key := match lin with | some L => denseTermKey L | none => []
   { expr := e, eHash := e.bHash, cval := e.constValue?
     lin := lin
     linKey := key
-    linSig := denseBUKeyHash key
-    reds := (densePtrReductions T e).map
-      (fun r => let k := denseBUTermKey r.1; (denseBUKeyHash k, k, r.1.const, r.2.const)) }
+    linSig := denseTermKeyHash key
+    reds := (densePtrReductions T e).map denseRedKey }
 
 /-- Assemble a prepared interaction from its slot records. -/
 def denseBUOfSlots (bi : BusInteraction (DenseExpr p))
@@ -220,8 +206,7 @@ def denseBUConstsNeq (a b : DenseBUPre p) : Bool :=
     match sa.cval, sb.cval with | some c, some c' => decide (c ≠ c') | _, _ => false)
     a.slots b.slots
 
-/-- `denseConstDiffNZ` on two prepared slots: the canonical keys agree and the constants do not.
-    The hash short-circuits the list compare. -/
+/-- `denseKeyDiffNZ` on two prepared slots: the canonical keys agree and the constants do not. -/
 @[inline] def denseBUAffineNeqSlot (sa sb : DenseBUSlot p) : Bool :=
   match sa.lin, sb.lin with
   | some L, some L' =>
@@ -231,10 +216,7 @@ def denseBUConstsNeq (a b : DenseBUPre p) : Bool :=
 /-- One key compare per reduction pair decides all four branch differences, which differ only in
     their constants. -/
 @[inline] def denseBUTwoRootNeqSlot (sa sb : DenseBUSlot p) : Bool :=
-  sa.reds.any (fun r => sb.reds.any (fun r' =>
-    ((r.1 == r'.1 && decide (r.2.1 = r'.2.1)) &&
-      (decide (r.2.2.1 ≠ r'.2.2.1) && decide (r.2.2.1 ≠ r'.2.2.2))) &&
-      (decide (r.2.2.2 ≠ r'.2.2.1) && decide (r.2.2.2 ≠ r'.2.2.2))))
+  sa.reds.any (fun r => sb.reds.any (denseRedKeysNeq r))
 
 /-- `denseAddrAffineNeq` on prepared records. -/
 def denseBUAffineNeq (a b : DenseBUPre p) : Bool :=
