@@ -394,22 +394,6 @@ theorem denseSqCoeffsOK_sound (reg : VarRegistry) (B : Std.HashMap VarId Nat) (D
               | some bb => intro hbb; exact ⟨bb, rfl, of_decide_eq_true hbb⟩
       · exact ih hrec c hcs
 
-/-! ## Once-in-target soundness -/
-
-theorem denseOccursOnlyInTarget_constr {d : DenseConstraintSystem p} {E : DenseExpr p} {v : VarId}
-    (h : denseOccursOnlyInTarget d E v = true) :
-    ∀ c ∈ d.algebraicConstraints, v ∈ c.vars → c = E := by
-  grind [denseOccursOnlyInTarget, denseMentions_false_not_mem]
-
-theorem denseOccursOnlyInTarget_bus {d : DenseConstraintSystem p} {E : DenseExpr p} {v : VarId}
-    (h : denseOccursOnlyInTarget d E v = true) : ∀ bi ∈ d.busInteractions,
-      v ∉ bi.multiplicity.vars ∧ ∀ e ∈ bi.payload, v ∉ e.vars := by
-  intro bi hbi
-  simp only [denseOccursOnlyInTarget, Bool.and_eq_true, List.all_eq_true, Bool.not_eq_true'] at h
-  obtain ⟨hm, hp⟩ := h.2 bi hbi
-  exact ⟨denseMentions_false_not_mem v bi.multiplicity hm,
-    fun e he => denseMentions_false_not_mem v e (hp e he)⟩
-
 /-! ## `occ` membership, registry/freshness helpers -/
 
 theorem hcMemOcc {d : DenseConstraintSystem p} {i : VarId} :
@@ -775,213 +759,775 @@ theorem dense_collapse_bundle [Fact p.Prime] (reg : VarRegistry) (invVar : Varia
       (reg.register invVar).1
     exact ⟨DenseExpr.coveredBy_mul.mpr ⟨DenseExpr.coveredBy_const _ (-1), hrestCov⟩, hdenCov⟩
 
-/-! ## The two collapse attempts (correctness) -/
+/-! ## The occurrence-code scan (`denseHcScan`)
+
+The discovery layer reads every claim it makes off the code array, so three facts about it carry the
+pass: a `2 + i` code means the variable occurs in no bus interaction (`denseHcScan_bus`) and in no
+constraint entry but `i` (`denseHcScan_unique`), and a `0` code means it does not occur at all
+(`denseHcScan_zero`). Out-of-range indices read the `0` default, so a nonzero code is in range and
+the `setIfInBounds` writes that built it landed.
+
+`Array.getD` unfolds to a `dite` on the bound, which `split` would case on instead of on the mark's
+own tests — hence `by_cases` on the `Bool` conditions plus the `hc*_var` equations throughout. -/
+
+private theorem hcGetD_set_self {A : Array Nat} {i x dflt : Nat} (h : i < A.size) :
+    (A.setIfInBounds i x).getD i dflt = x := by
+  simp [Array.getD, Array.setIfInBounds, h]
+
+private theorem hcGetD_set_ne {A : Array Nat} {i j x dflt : Nat} (h : j ≠ i) :
+    (A.setIfInBounds i x).getD j dflt = A.getD j dflt := by
+  simp only [Array.getD, Array.setIfInBounds]
+  split <;> simp [Array.getElem_set, Ne.symm h]
+
+private theorem hcGetD_of_ge {A : Array Nat} {i dflt : Nat} (h : A.size ≤ i) :
+    A.getD i dflt = dflt := by
+  simp [Array.getD, Nat.not_lt.mpr h]
+
+/-- In range the default is irrelevant: `denseHcCsMark` reads with `1`, its users with `0`. -/
+private theorem hcGetD_dflt {A : Array Nat} {i d1 d2 : Nat} (h : i < A.size) :
+    A.getD i d1 = A.getD i d2 := by
+  simp [Array.getD, h]
+
+private theorem hcLt_of_ne_zero {A : Array Nat} {i : Nat} (h : A.getD i 0 ≠ 0) : i < A.size := by
+  by_contra hge
+  exact h (hcGetD_of_ge (Nat.le_of_not_lt hge))
+
+private theorem hcBusMark_var (w : VarId) (A : Array Nat) :
+    denseHcBusMark (p := p) (.var w) A =
+      (if (A.getD w.index 1 == 1) = true then A else A.setIfInBounds w.index 1) := rfl
+
+private theorem hcCsMark_var (i : Nat) (w : VarId) (A : Array Nat) :
+    denseHcCsMark (p := p) i (.var w) A =
+      (if (A.getD w.index 1 == 0) = true then A.setIfInBounds w.index (2 + i)
+       else if (A.getD w.index 1 == 2 + i || A.getD w.index 1 == 1) = true then A
+       else A.setIfInBounds w.index 1) := rfl
+
+/-! ### The bus phase: every bus variable ends at code `1` -/
+
+private theorem hcBusMark_size (e : DenseExpr p) (A : Array Nat) :
+    (denseHcBusMark e A).size = A.size := by
+  induction e generalizing A with
+  | const c => rfl
+  | var w =>
+      rw [hcBusMark_var]
+      by_cases h1 : (A.getD w.index 1 == 1) = true
+      · rw [if_pos h1]
+      · rw [if_neg h1]; simp
+  | add a b iha ihb => simp only [denseHcBusMark, ihb, iha]
+  | mul a b iha ihb => simp only [denseHcBusMark, ihb, iha]
+
+private theorem hcBusMarkL_size (es : List (DenseExpr p)) (A : Array Nat) :
+    (denseHcBusMarkL es A).size = A.size := by
+  induction es generalizing A with
+  | nil => rfl
+  | cons e es ih => simp only [denseHcBusMarkL, ih, hcBusMark_size]
+
+private theorem hcBusScan_size (bis : List (BusInteraction (DenseExpr p))) (A : Array Nat) :
+    (denseHcBusScan bis A).size = A.size := by
+  induction bis generalizing A with
+  | nil => rfl
+  | cons bi rest ih => simp only [denseHcBusScan, ih, hcBusMarkL_size, hcBusMark_size]
+
+/-- Code `1` is absorbing in the bus phase. -/
+private theorem hcBusMark_one (e : DenseExpr p) (A : Array Nat) (v : VarId)
+    (h : A.getD v.index 0 = 1) : (denseHcBusMark e A).getD v.index 0 = 1 := by
+  induction e generalizing A with
+  | const c => exact h
+  | var w =>
+      have hlt : v.index < A.size := hcLt_of_ne_zero (by rw [h]; omega)
+      rw [hcBusMark_var]
+      by_cases hvw : v.index = w.index
+      · have h1 : (A.getD w.index 1 == 1) = true := by
+          rw [← hvw, hcGetD_dflt hlt (d2 := 0), h]; simp
+        rw [if_pos h1]; exact h
+      · by_cases h1 : (A.getD w.index 1 == 1) = true
+        · rw [if_pos h1]; exact h
+        · rw [if_neg h1, hcGetD_set_ne hvw]; exact h
+  | add a b iha ihb => exact ihb _ (iha _ h)
+  | mul a b iha ihb => exact ihb _ (iha _ h)
+
+private theorem hcBusMarkL_one (es : List (DenseExpr p)) (A : Array Nat) (v : VarId)
+    (h : A.getD v.index 0 = 1) : (denseHcBusMarkL es A).getD v.index 0 = 1 := by
+  induction es generalizing A with
+  | nil => exact h
+  | cons e es ih => exact ih _ (hcBusMark_one e A v h)
+
+private theorem hcBusScan_one (bis : List (BusInteraction (DenseExpr p))) (A : Array Nat)
+    (v : VarId) (h : A.getD v.index 0 = 1) : (denseHcBusScan bis A).getD v.index 0 = 1 := by
+  induction bis generalizing A with
+  | nil => exact h
+  | cons bi rest ih => exact ih _ (hcBusMarkL_one _ _ v (hcBusMark_one _ _ v h))
+
+/-- An occurrence in a marked expression ends at code `1`. -/
+private theorem hcBusMark_hit (e : DenseExpr p) (A : Array Nat) (v : VarId) (hv : v ∈ e.vars)
+    (hlt : v.index < A.size) : (denseHcBusMark e A).getD v.index 0 = 1 := by
+  induction e generalizing A with
+  | const c => simp [DenseExpr.vars] at hv
+  | var w =>
+      simp only [DenseExpr.vars, List.mem_singleton] at hv
+      subst hv
+      rw [hcBusMark_var]
+      by_cases h1 : (A.getD v.index 1 == 1) = true
+      · rw [if_pos h1, hcGetD_dflt hlt (d2 := 1)]; simpa using h1
+      · rw [if_neg h1]; exact hcGetD_set_self hlt
+  | add a b iha ihb =>
+      simp only [DenseExpr.vars, List.mem_append] at hv
+      simp only [denseHcBusMark]
+      rcases hv with ha | hb
+      · exact hcBusMark_one b _ v (iha A ha hlt)
+      · exact ihb _ hb (by rw [hcBusMark_size]; exact hlt)
+  | mul a b iha ihb =>
+      simp only [DenseExpr.vars, List.mem_append] at hv
+      simp only [denseHcBusMark]
+      rcases hv with ha | hb
+      · exact hcBusMark_one b _ v (iha A ha hlt)
+      · exact ihb _ hb (by rw [hcBusMark_size]; exact hlt)
+
+private theorem hcBusMarkL_hit (es : List (DenseExpr p)) (A : Array Nat) (v : VarId)
+    (e : DenseExpr p) (he : e ∈ es) (hv : v ∈ e.vars) (hlt : v.index < A.size) :
+    (denseHcBusMarkL es A).getD v.index 0 = 1 := by
+  induction es generalizing A with
+  | nil => simp at he
+  | cons e0 es ih =>
+      simp only [denseHcBusMarkL]
+      rcases List.mem_cons.1 he with rfl | hes
+      · exact hcBusMarkL_one _ _ v (hcBusMark_hit _ A v hv hlt)
+      · exact ih _ hes (by rw [hcBusMark_size]; exact hlt)
+
+private theorem hcBusScan_hit (bis : List (BusInteraction (DenseExpr p))) (A : Array Nat)
+    (v : VarId) (bi : BusInteraction (DenseExpr p)) (hbi : bi ∈ bis) (hv : v ∈ denseBIVars bi)
+    (hlt : v.index < A.size) : (denseHcBusScan bis A).getD v.index 0 = 1 := by
+  induction bis generalizing A with
+  | nil => simp at hbi
+  | cons bi0 rest ih =>
+      simp only [denseHcBusScan]
+      rcases List.mem_cons.1 hbi with rfl | hrest
+      · refine hcBusScan_one _ _ v ?_
+        simp only [denseBIVars, List.mem_append, List.mem_flatMap] at hv
+        rcases hv with hm | ⟨e, he, hve⟩
+        · exact hcBusMarkL_one _ _ v (hcBusMark_hit _ A v hm hlt)
+        · exact hcBusMarkL_hit _ _ v e he hve (by rw [hcBusMark_size]; exact hlt)
+      · exact ih _ hrest (by rw [hcBusMarkL_size, hcBusMark_size]; exact hlt)
+
+/-! ### The constraint phase: a `2 + i` code names the one entry the variable occurs in -/
+
+private theorem hcCsMark_size (i : Nat) (e : DenseExpr p) (A : Array Nat) :
+    (denseHcCsMark i e A).size = A.size := by
+  induction e generalizing A with
+  | const c => rfl
+  | var w =>
+      rw [hcCsMark_var]
+      by_cases h0 : (A.getD w.index 1 == 0) = true
+      · rw [if_pos h0]; simp
+      · rw [if_neg h0]
+        by_cases hk : (A.getD w.index 1 == 2 + i || A.getD w.index 1 == 1) = true
+        · rw [if_pos hk]
+        · rw [if_neg hk]; simp
+  | add a b iha ihb => simp only [denseHcCsMark, ihb, iha]
+  | mul a b iha ihb => simp only [denseHcCsMark, ihb, iha]
+
+private theorem hcCsScan_size (k : Nat) (l : List (DenseExpr p)) (A : Array Nat) :
+    (denseHcCsScan k l A).size = A.size := by
+  induction l generalizing k A with
+  | nil => rfl
+  | cons c cs ih => simp only [denseHcCsScan, ih, hcCsMark_size]
+
+/-- Code `1` is absorbing in the constraint phase too. -/
+private theorem hcCsMark_one (i : Nat) (e : DenseExpr p) (A : Array Nat) (v : VarId)
+    (h : A.getD v.index 0 = 1) : (denseHcCsMark i e A).getD v.index 0 = 1 := by
+  induction e generalizing A with
+  | const c => exact h
+  | var w =>
+      have hlt : v.index < A.size := hcLt_of_ne_zero (by rw [h]; omega)
+      rw [hcCsMark_var]
+      by_cases hvw : v.index = w.index
+      · have hc : A.getD w.index 1 = 1 := by rw [← hvw, hcGetD_dflt hlt (d2 := 0)]; exact h
+        rw [if_neg (by rw [hc]; simp), if_pos (by rw [hc]; simp)]
+        exact h
+      · by_cases h0 : (A.getD w.index 1 == 0) = true
+        · rw [if_pos h0, hcGetD_set_ne hvw]; exact h
+        · rw [if_neg h0]
+          by_cases hk : (A.getD w.index 1 == 2 + i || A.getD w.index 1 == 1) = true
+          · rw [if_pos hk]; exact h
+          · rw [if_neg hk, hcGetD_set_ne hvw]; exact h
+  | add a b iha ihb => exact ihb _ (iha _ h)
+  | mul a b iha ihb => exact ihb _ (iha _ h)
+
+private theorem hcCsScan_one (k : Nat) (l : List (DenseExpr p)) (A : Array Nat) (v : VarId)
+    (h : A.getD v.index 0 = 1) : (denseHcCsScan k l A).getD v.index 0 = 1 := by
+  induction l generalizing k A with
+  | nil => exact h
+  | cons c cs ih => exact ih _ _ (hcCsMark_one k c A v h)
+
+/-- The set `{2 + m, 1}` is closed under every mark: a mark at a different entry demotes `2 + m` to
+    `1`, which is in the set, and `1` is absorbing. This is what pins a variable's final code to the
+    entry that first claimed it. -/
+private theorem hcCsMark_keep (i m : Nat) (e : DenseExpr p) (A : Array Nat) (v : VarId)
+    (h : A.getD v.index 0 = 2 + m ∨ A.getD v.index 0 = 1) :
+    (denseHcCsMark i e A).getD v.index 0 = 2 + m ∨ (denseHcCsMark i e A).getD v.index 0 = 1 := by
+  induction e generalizing A with
+  | const c => exact h
+  | var w =>
+      have hne0 : A.getD v.index 0 ≠ 0 := by rcases h with h | h <;> rw [h] <;> omega
+      have hlt : v.index < A.size := hcLt_of_ne_zero hne0
+      rw [hcCsMark_var]
+      by_cases hvw : v.index = w.index
+      · have hc : A.getD w.index 1 = A.getD v.index 0 := by
+          rw [← hvw, hcGetD_dflt hlt (d2 := 0)]
+        rw [if_neg (by rw [hc]; simpa using hne0)]
+        by_cases hk : (A.getD w.index 1 == 2 + i || A.getD w.index 1 == 1) = true
+        · rw [if_pos hk]; exact h
+        · rw [if_neg hk, ← hvw]; exact Or.inr (hcGetD_set_self hlt)
+      · by_cases h0 : (A.getD w.index 1 == 0) = true
+        · rw [if_pos h0, hcGetD_set_ne hvw]; exact h
+        · rw [if_neg h0]
+          by_cases hk : (A.getD w.index 1 == 2 + i || A.getD w.index 1 == 1) = true
+          · rw [if_pos hk]; exact h
+          · rw [if_neg hk, hcGetD_set_ne hvw]; exact h
+  | add a b iha ihb => exact ihb _ (iha _ h)
+  | mul a b iha ihb => exact ihb _ (iha _ h)
+
+private theorem hcCsScan_keep (m : Nat) (l : List (DenseExpr p)) (k : Nat) (A : Array Nat)
+    (v : VarId) (h : A.getD v.index 0 = 2 + m ∨ A.getD v.index 0 = 1) :
+    (denseHcCsScan k l A).getD v.index 0 = 2 + m ∨ (denseHcCsScan k l A).getD v.index 0 = 1 := by
+  induction l generalizing k A with
+  | nil => exact h
+  | cons c cs ih => exact ih _ _ (hcCsMark_keep k m c A v h)
+
+/-- An occurrence in entry `i` leaves the variable at `2 + i` or `1`. -/
+private theorem hcCsMark_hit (i : Nat) (e : DenseExpr p) (A : Array Nat) (v : VarId)
+    (hv : v ∈ e.vars) (hlt : v.index < A.size) :
+    (denseHcCsMark i e A).getD v.index 0 = 2 + i ∨ (denseHcCsMark i e A).getD v.index 0 = 1 := by
+  induction e generalizing A with
+  | const c => simp [DenseExpr.vars] at hv
+  | var w =>
+      simp only [DenseExpr.vars, List.mem_singleton] at hv
+      subst hv
+      rw [hcCsMark_var]
+      by_cases h0 : (A.getD v.index 1 == 0) = true
+      · rw [if_pos h0]; exact Or.inl (hcGetD_set_self hlt)
+      · rw [if_neg h0]
+        by_cases hk : (A.getD v.index 1 == 2 + i || A.getD v.index 1 == 1) = true
+        · rw [if_pos hk, hcGetD_dflt hlt (d2 := 1)]
+          have hk' : A.getD v.index 1 = 2 + i ∨ A.getD v.index 1 = 1 := by simpa using hk
+          exact hk'.imp id id
+        · rw [if_neg hk]; exact Or.inr (hcGetD_set_self hlt)
+  | add a b iha ihb =>
+      simp only [DenseExpr.vars, List.mem_append] at hv
+      simp only [denseHcCsMark]
+      rcases hv with ha | hb
+      · exact hcCsMark_keep i i b _ v (iha A ha hlt)
+      · exact ihb _ hb (by rw [hcCsMark_size]; exact hlt)
+  | mul a b iha ihb =>
+      simp only [DenseExpr.vars, List.mem_append] at hv
+      simp only [denseHcCsMark]
+      rcases hv with ha | hb
+      · exact hcCsMark_keep i i b _ v (iha A ha hlt)
+      · exact ihb _ hb (by rw [hcCsMark_size]; exact hlt)
+
+/-- **Uniqueness.** A final code of `2 + i` forces every entry containing the variable to be `i`. -/
+private theorem hcCsScan_unique (v : VarId) :
+    ∀ (l : List (DenseExpr p)) (k : Nat) (A : Array Nat) (i j : Nat) (c : DenseExpr p),
+      (denseHcCsScan k l A).getD v.index 0 = 2 + i → l[j]? = some c → v ∈ c.vars → i = k + j := by
+  intro l
+  induction l with
+  | nil => intro _ _ _ j _ _ hj _; simp at hj
+  | cons c0 cs ih =>
+      intro k A i j c hfin hj hv
+      have hlt : v.index < A.size := by
+        have h1 := hcLt_of_ne_zero (A := denseHcCsScan k (c0 :: cs) A) (i := v.index)
+          (by rw [hfin]; omega)
+        rwa [hcCsScan_size] at h1
+      cases j with
+      | zero =>
+          simp only [List.getElem?_cons_zero, Option.some.injEq] at hj
+          subst hj
+          have hkeep := hcCsScan_keep k cs (k + 1) (denseHcCsMark k c0 A) v
+            (hcCsMark_hit k c0 A v hv hlt)
+          simp only [denseHcCsScan] at hfin
+          rcases hkeep with h | h <;> rw [hfin] at h <;> omega
+      | succ j =>
+          simp only [List.getElem?_cons_succ] at hj
+          simp only [denseHcCsScan] at hfin
+          have h1 := ih (k + 1) (denseHcCsMark k c0 A) i j c hfin hj hv
+          omega
+
+/-- An occurrence anywhere in the scanned entries leaves a nonzero code. -/
+private theorem hcCsScan_nonzero (v : VarId) :
+    ∀ (l : List (DenseExpr p)) (k : Nat) (A : Array Nat) (c : DenseExpr p),
+      c ∈ l → v ∈ c.vars → v.index < A.size → (denseHcCsScan k l A).getD v.index 0 ≠ 0 := by
+  intro l
+  induction l with
+  | nil => intro _ _ _ hc; simp at hc
+  | cons c0 cs ih =>
+      intro k A c hc hv hlt
+      simp only [denseHcCsScan]
+      rcases List.mem_cons.1 hc with rfl | hcs
+      · have hkeep := hcCsScan_keep k cs (k + 1) (denseHcCsMark k c A) v
+          (hcCsMark_hit k c A v hv hlt)
+        rcases hkeep with h | h <;> rw [h] <;> omega
+      · exact ih (k + 1) (denseHcCsMark k c0 A) c hcs hv (by rw [hcCsMark_size]; exact hlt)
+
+/-! ### The three facts the pass consumes -/
+
+theorem denseHcScan_size (nvars : Nat) (d : DenseConstraintSystem p) :
+    (denseHcScan nvars d).size = nvars := by
+  simp only [denseHcScan, hcCsScan_size, hcBusScan_size, Array.size_replicate]
+
+/-- A `2 + i` code names the only constraint entry the variable occurs in. -/
+theorem denseHcScan_unique {nvars : Nat} {d : DenseConstraintSystem p} {v : VarId} {i j : Nat}
+    {c : DenseExpr p} (h : (denseHcScan nvars d).getD v.index 0 = 2 + i)
+    (hj : d.algebraicConstraints[j]? = some c) (hv : v ∈ c.vars) : i = j := by
+  simpa using hcCsScan_unique v d.algebraicConstraints 0 _ i j c h hj hv
+
+/-- A `2 + i` code rules out every bus occurrence: a bus variable is left at `1`, and the constraint
+    phase cannot undo that. -/
+theorem denseHcScan_bus {nvars : Nat} {d : DenseConstraintSystem p} {v : VarId} {i : Nat}
+    (h : (denseHcScan nvars d).getD v.index 0 = 2 + i) {bi : BusInteraction (DenseExpr p)}
+    (hbi : bi ∈ d.busInteractions) : v ∉ denseBIVars bi := by
+  intro hv
+  have hlt : v.index < nvars := by
+    have h1 := hcLt_of_ne_zero (A := denseHcScan nvars d) (i := v.index) (by rw [h]; omega)
+    rwa [denseHcScan_size] at h1
+  have hbus : (denseHcBusScan d.busInteractions (Array.replicate nvars 0)).getD v.index 0 = 1 :=
+    hcBusScan_hit _ _ v bi hbi hv (by rw [Array.size_replicate]; exact hlt)
+  have h1 : (denseHcScan nvars d).getD v.index 0 = 1 := by
+    simp only [denseHcScan]; exact hcCsScan_one _ _ _ v hbus
+  rw [h] at h1; omega
+
+/-- A `0` code rules out every occurrence — exactly the `d.occ` test `denseIsFresh` runs. -/
+theorem denseHcScan_zero {nvars : Nat} {d : DenseConstraintSystem p} {v : VarId}
+    (h : (denseHcScan nvars d).getD v.index 0 = 0) (hlt : v.index < nvars) : v ∉ d.occ := by
+  intro hocc
+  rcases hcMemOcc.1 hocc with ⟨c, hc, hvc⟩ | ⟨bi, hbi, hvbi⟩
+  · exact hcCsScan_nonzero v d.algebraicConstraints 0
+      (denseHcBusScan d.busInteractions (Array.replicate nvars 0)) c hc hvc
+      (by rw [hcBusScan_size, Array.size_replicate]; exact hlt)
+      (by simpa only [denseHcScan] using h)
+  · have hbus : (denseHcBusScan d.busInteractions (Array.replicate nvars 0)).getD v.index 0 = 1 :=
+      hcBusScan_hit _ _ v bi hbi hvbi (by rw [Array.size_replicate]; exact hlt)
+    have h1 : (denseHcScan nvars d).getD v.index 0 = 1 := by
+      simp only [denseHcScan]; exact hcCsScan_one _ _ _ v hbus
+    rw [h] at h1; omega
+
+/-! ## The candidate targets, their witnesses, and the indexed replacement -/
+
+/-- `denseHcPick` reports constraint entries at the indices it pairs them with. -/
+private theorem hcPick_spec :
+    ∀ (l : List (DenseExpr p)) (is : List Nat) (j i : Nat) (E : DenseExpr p),
+      (i, E) ∈ denseHcPick j is l → ∃ k, i = j + k ∧ l[k]? = some E := by
+  intro l
+  induction l with
+  | nil => intro is j i E hmem; simp [denseHcPick] at hmem
+  | cons c cs ih =>
+      intro is j i E hmem
+      cases is with
+      | nil => simp [denseHcPick] at hmem
+      | cons i0 is' =>
+          simp only [denseHcPick] at hmem
+          by_cases hij : (i0 == j) = true
+          · rw [if_pos hij] at hmem
+            rcases List.mem_cons.1 hmem with heq | htl
+            · simp only [Prod.mk.injEq] at heq
+              obtain ⟨rfl, rfl⟩ := heq
+              exact ⟨0, by simpa using eq_of_beq hij, rfl⟩
+            · obtain ⟨k, rfl, hk⟩ := ih is' (j + 1) i E htl
+              exact ⟨k + 1, by omega, by simpa using hk⟩
+          · rw [if_neg hij] at hmem
+            obtain ⟨k, rfl, hk⟩ := ih (i0 :: is') (j + 1) i E hmem
+            exact ⟨k + 1, by omega, by simpa using hk⟩
+
+private theorem hcWitsGo_var (st : Array Nat) (code : Nat) (w : VarId) (acc : List VarId) :
+    denseHcWitsGo (p := p) st code (.var w) acc =
+      (if (st.getD w.index 0 == code && !acc.contains w) = true then w :: acc else acc) := rfl
+
+private theorem hcWitsGo_mem (st : Array Nat) (code : Nat) :
+    ∀ (E : DenseExpr p) (acc : List VarId) (v : VarId), v ∈ denseHcWitsGo st code E acc →
+      v ∈ acc ∨ (st.getD v.index 0 = code ∧ v ∈ E.vars) := by
+  intro E
+  induction E with
+  | const c => intro acc v hv; exact Or.inl hv
+  | var w =>
+      intro acc v hv
+      rw [hcWitsGo_var] at hv
+      by_cases hc : (st.getD w.index 0 == code && !acc.contains w) = true
+      · rw [if_pos hc] at hv
+        rcases List.mem_cons.1 hv with rfl | hacc
+        · refine Or.inr ⟨?_, by simp [DenseExpr.vars]⟩
+          rw [Bool.and_eq_true] at hc
+          simpa using hc.1
+        · exact Or.inl hacc
+      · rw [if_neg hc] at hv; exact Or.inl hv
+  | add a b iha ihb =>
+      intro acc v hv
+      simp only [denseHcWitsGo] at hv
+      rcases ihb _ v hv with h | ⟨hcode, hb⟩
+      · rcases iha acc v h with h' | ⟨hcode, ha⟩
+        · exact Or.inl h'
+        · exact Or.inr ⟨hcode, by simp [DenseExpr.vars, ha]⟩
+      · exact Or.inr ⟨hcode, by simp [DenseExpr.vars, hb]⟩
+  | mul a b iha ihb =>
+      intro acc v hv
+      simp only [denseHcWitsGo] at hv
+      rcases ihb _ v hv with h | ⟨hcode, hb⟩
+      · rcases iha acc v h with h' | ⟨hcode, ha⟩
+        · exact Or.inl h'
+        · exact Or.inr ⟨hcode, by simp [DenseExpr.vars, ha]⟩
+      · exact Or.inr ⟨hcode, by simp [DenseExpr.vars, hb]⟩
+
+private theorem hcWitsGo_nodup (st : Array Nat) (code : Nat) :
+    ∀ (E : DenseExpr p) (acc : List VarId), acc.Nodup → (denseHcWitsGo st code E acc).Nodup := by
+  intro E
+  induction E with
+  | const c => intro acc h; exact h
+  | var w =>
+      intro acc h
+      rw [hcWitsGo_var]
+      by_cases hc : (st.getD w.index 0 == code && !acc.contains w) = true
+      · rw [if_pos hc]
+        have hw : w ∉ acc := by
+          rw [Bool.and_eq_true] at hc
+          simpa [List.contains_iff_mem] using hc.2
+        exact List.nodup_cons.2 ⟨hw, h⟩
+      · rw [if_neg hc]; exact h
+  | add a b iha ihb => intro acc h; exact ihb _ (iha acc h)
+  | mul a b iha ihb => intro acc h; exact ihb _ (iha acc h)
+
+private theorem hcWits_code {st : Array Nat} {idx : Nat} {E : DenseExpr p} {v : VarId}
+    (h : v ∈ denseHcWits st idx E) : st.getD v.index 0 = 2 + idx := by
+  rcases hcWitsGo_mem st (2 + idx) E [] v (by simpa [denseHcWits] using h) with h' | ⟨hc, _⟩
+  · simp at h'
+  · exact hc
+
+private theorem hcWits_mem {st : Array Nat} {idx : Nat} {E : DenseExpr p} {v : VarId}
+    (h : v ∈ denseHcWits st idx E) : v ∈ E.vars := by
+  rcases hcWitsGo_mem st (2 + idx) E [] v (by simpa [denseHcWits] using h) with h' | ⟨_, hm⟩
+  · simp at h'
+  · exact hm
+
+private theorem hcWits_nodup (st : Array Nat) (idx : Nat) (E : DenseExpr p) :
+    (denseHcWits st idx E).Nodup := by
+  simpa [denseHcWits] using hcWitsGo_nodup st (2 + idx) E [] List.nodup_nil
+
+/-- With `E` at index `idx` and nowhere else, replacing at the index is replacing every copy — so
+    the collapse transport (`dense_collapse_bundle`) applies to the indexed output unchanged. -/
+private theorem hcSet_eq_map {α : Type} [DecidableEq α] :
+    ∀ (l : List α) (idx : Nat) (E E' : α), l[idx]? = some E →
+      (∀ j, j ≠ idx → l[j]? ≠ some E) →
+      l.set idx E' = l.map (fun c => if c = E then E' else c) := by
+  intro l
+  induction l with
+  | nil => intro idx E E' hidx _; simp at hidx
+  | cons a t ih =>
+      intro idx E E' hidx huniq
+      cases idx with
+      | zero =>
+          simp only [List.getElem?_cons_zero, Option.some.injEq] at hidx
+          subst hidx
+          have htail : t.map (fun c => if c = a then E' else c) = t := by
+            conv_rhs => rw [← List.map_id t]
+            refine List.map_congr_left (fun x hx => ?_)
+            obtain ⟨k, hk⟩ := List.getElem?_of_mem hx
+            have hne : x ≠ a := by
+              intro hxa
+              exact huniq (k + 1) (by omega) (by simpa [hxa] using hk)
+            simp [hne]
+          simp [List.set, htail]
+      | succ k =>
+          simp only [List.getElem?_cons_succ] at hidx
+          have hane : a ≠ E := by
+            intro hae
+            exact huniq 0 (by omega) (by simp [hae])
+          have huniq' : ∀ j, j ≠ k → t[j]? ≠ some E :=
+            fun j hj => huniq (j + 1) (by omega)
+          simp only [List.set, List.map_cons, if_neg hane]
+          rw [ih k E E' hidx huniq']
+
+/-! ## The bounds map over the wanted interactions -/
+
+/-- **Bounds soundness.** `denseHcBounds` is `denseAddAll` over a sublist of the interactions, so
+    every bound it stores is justified exactly as `denseBuild`'s are — the `want` marks are an
+    untrusted filter that can only lose bounds. -/
+theorem denseHcBounds_sound (bs : BusSemantics p) (facts : BusFacts p bs) (nvars : Nat)
+    (want : List VarId) (bis : List (BusInteraction (DenseExpr p))) (i : VarId) (b : Nat)
+    (hlk : (denseHcBounds bs facts nvars want bis)[i]? = some b) (denv : VarId → ZMod p)
+    (hbus : ∀ bi ∈ bis, (denseBIEval bi denv).multiplicity ≠ 0 →
+      bs.accepts (denseBIEval bi denv)) : (denv i).val < b := by
+  unfold denseHcBounds at hlk
+  split at hlk
+  · rw [Std.HashMap.getElem?_empty] at hlk; exact absurd hlk (by simp)
+  · exact denseAddAll_soundAt bs facts denv _
+      (fun bi hbi => hbus bi (List.mem_of_mem_filter hbi)) ∅ (DenseBMSoundAt.empty denv) i b hlk
+
+/-! ## Freshness from the occurrence codes -/
+
+/-- The array-served freshness test is the `d.occ` test: a `0` code means no occurrence. -/
+private theorem hcFresh_isFresh {reg : VarRegistry} {d : DenseConstraintSystem p} {v : Variable}
+    (h : denseHcFresh reg (denseHcScan reg.byId.size d) v = true) : denseIsFresh reg d v = true := by
+  unfold denseHcFresh at h
+  unfold denseIsFresh
+  cases hlook : reg.idOf? v with
+  | none => simp
+  | some i =>
+      rw [hlook] at h
+      simp only [beq_iff_eq] at h
+      have hlt : i.index < reg.byId.size := VarRegistry.valid_of_idOf hlook
+      have hnot : i ∉ d.occ := denseHcScan_zero h hlt
+      show (!d.occ.contains i) = true
+      simp [hnot]
+
+/-! ## The collapse attempt (correctness) -/
+
+/-- The `ofExtending` bundle for an accepted collapse at a known index: with the target unique in
+    the list, the indexed replacement is the by-value one, and `dense_collapse_bundle` transports
+    it. -/
+theorem denseHcAccept_correct [Fact p.Prime] (reg : VarRegistry) (invVar : Variable)
+    (hpv : invVar.powdrId? = none) (d : DenseConstraintSystem p) (bs : BusSemantics p)
+    (E denom rest : DenseExpr p) (D : List VarId) (idx : Nat)
+    (reasg : (VarId → ZMod p) → ZMod p → (VarId → ZMod p)) (hcov : d.CoveredBy reg)
+    (hidx : d.algebraicConstraints[idx]? = some E)
+    (huniq : ∀ j, j ≠ idx → d.algebraicConstraints[j]? ≠ some E)
+    (hagree : ∀ (denv : VarId → ZMod p) (w : ZMod p) (v : VarId), v ∉ D → reasg denv w v = denv v)
+    (hEeq : ∀ (denv : VarId → ZMod p) (w : ZMod p),
+      E.eval (reasg denv w) = denom.eval denv * w + rest.eval denv)
+    (hbyte : ∀ denv, d.satisfies bs denv → denom.eval denv = 0 → rest.eval denv = 0)
+    (hfresh : denseIsFresh reg d invVar = true)
+    (hDonce : ∀ dw ∈ D, ∀ c ∈ d.algebraicConstraints, dw ∈ c.vars → c = E)
+    (hDbus : ∀ dw ∈ D, ∀ bi ∈ d.busInteractions,
+      dw ∉ bi.multiplicity.vars ∧ ∀ e ∈ bi.payload, dw ∉ e.vars)
+    (hrest_sub : ∀ x ∈ rest.vars, x ∈ d.occ) (hden_sub : ∀ x ∈ denom.vars, x ∈ d.occ)
+    (hden_pow : ∀ x ∈ denom.vars, reg.isInput x = true)
+    (hrest_pow : ∀ x ∈ rest.vars, reg.isInput x = true) :
+    reg.Extends (denseHcAccept reg d idx invVar denom rest).1 ∧
+      (denseHcAccept reg d idx invVar denom rest).2.1.CoveredBy
+        (denseHcAccept reg d idx invVar denom rest).1 ∧
+      DenseDerivations.CoveredBy (denseHcAccept reg d idx invVar denom rest).1
+        (denseHcAccept reg d idx invVar denom rest).2.2 ∧
+      DensePassCorrect (denseHcAccept reg d idx invVar denom rest).1.isInput d
+        (denseHcAccept reg d idx invVar denom rest).2.1
+        (denseHcAccept reg d idx invVar denom rest).2.2 bs := by
+  have hset : d.algebraicConstraints.set idx
+      (DenseExpr.add (DenseExpr.mul denom (DenseExpr.var (reg.register invVar).2)) rest)
+      = d.algebraicConstraints.map (fun c => if c = E then
+          DenseExpr.add (DenseExpr.mul denom (DenseExpr.var (reg.register invVar).2)) rest
+          else c) :=
+    hcSet_eq_map _ idx E _ hidx huniq
+  have hb := dense_collapse_bundle reg invVar hpv d bs E denom rest D reasg hcov
+    (List.mem_of_getElem? hidx) hagree hEeq hbyte hfresh hDonce hDbus hrest_sub hden_sub
+    hden_pow hrest_pow
+  simpa only [denseHcAccept, hset] using hb
 
 set_option maxHeartbeats 1000000 in
-/-- Plain-sum collapse attempt correctness. -/
-theorem denseTryOne_correct [Fact p.Prime] {bs : BusSemantics p} (facts : BusFacts p bs)
-    (reg : VarRegistry) (d : DenseConstraintSystem p) (E : DenseExpr p) (D : List VarId)
-    (hcov : d.CoveredBy reg) (hE : E ∈ d.algebraicConstraints)
-    (hDcert : ∀ v ∈ D, denseOccursOnlyInTarget d E v = true)
+/-- One attempt's correctness: whichever shape it accepts, the result is a `DensePassCorrect`
+    collapse. The two occurrence obligations come from the code array (`denseHcScan_unique`,
+    `denseHcScan_bus`), the bound obligations from `denseHcBounds_sound`. -/
+theorem denseHcTry_correct [Fact p.Prime] {bs : BusSemantics p} (facts : BusFacts p bs)
+    (reg : VarRegistry) (d : DenseConstraintSystem p) (idx : Nat) (E : DenseExpr p)
+    (hcov : d.CoveredBy reg) (hidx : d.algebraicConstraints[idx]? = some E)
     (r : VarRegistry × DenseConstraintSystem p × DenseDerivations p)
-    (hr : denseTryOne reg d (denseBuild bs facts d.busInteractions) E D = some r) :
+    (hr : denseHcTry bs facts reg d (denseHcScan reg.byId.size d) idx E
+      (denseHcWits (denseHcScan reg.byId.size d) idx E) = some r) :
     reg.Extends r.1 ∧ r.2.1.CoveredBy r.1 ∧ DenseDerivations.CoveredBy r.1 r.2.2 ∧
       DensePassCorrect r.1.isInput d r.2.1 r.2.2 bs := by
   have hp0 : 0 < p := (Fact.out : p.Prime).pos
-  simp only [denseTryOne] at hr
-  -- `split_ifs` discharges every non-accepting branch (its `none = some r` is impossible).
-  split_ifs at hr with h2len hbyteOK hrfreeG hrpowG hfreshG hfitG
-  obtain rfl := Option.some.inj hr
-  have hcfree : ∀ c ∈ (densePeel D E).1, ∀ dw ∈ D, dw ∉ c.vars := by
-    intro c hc dw hd
-    obtain ⟨a, _, hDf, _, _, _⟩ :=
-      denseCoeffsByteOK_sound reg (denseBuild bs facts d.busInteractions) D (densePeel D E).1 hbyteOK c hc
-    exact hDf dw hd
-  have hrfree : ∀ dw ∈ D, dw ∉ (densePeel D E).2.vars :=
-    fun dw hd => of_decide_eq_true (List.all_eq_true.1 hrfreeG dw hd)
-  have hrest_sub2 : ∀ x ∈ (densePeel D E).2.vars, x ∈ d.occ :=
-    fun x hx => DenseConstraintSystem.mem_occ_of_constraint hE (densePeel_snd_vars D E x hx)
-  have hden_sub2 : ∀ x ∈ (denseSumExpr (densePeel D E).1).vars, x ∈ d.occ := by
-    intro x hx
-    obtain ⟨c, hc, hxc⟩ := denseSumExpr_vars hx
-    exact DenseConstraintSystem.mem_occ_of_constraint hE (densePeel_fst_vars D E c hc x hxc)
-  have hden_pow : ∀ x ∈ (denseSumExpr (densePeel D E).1).vars, reg.isInput x = true := by
-    intro x hx
-    obtain ⟨c, hc, hxc⟩ := denseSumExpr_vars hx
-    obtain ⟨a, _, _, hpow, _, _⟩ :=
-      denseCoeffsByteOK_sound reg (denseBuild bs facts d.busInteractions) D (densePeel D E).1 hbyteOK c hc
-    exact hpow x hxc
-  have hbyte : ∀ denv, d.satisfies bs denv → (denseSumExpr (densePeel D E).1).eval denv = 0 →
-      (densePeel D E).2.eval denv = 0 := by
-    intro denv hsat hden0
-    have hE0 : E.eval denv = 0 := hsat.1 E hE
-    have hbytes : ∀ c ∈ (densePeel D E).1, (c.eval denv).val < 256 := by
-      intro c hc
-      obtain ⟨a, heval, _, _, _, b, hlk, hb256⟩ :=
-        denseCoeffsByteOK_sound reg (denseBuild bs facts d.busInteractions) D (densePeel D E).1 hbyteOK c hc
-      have hlt := denseBuild_sound bs facts d.busInteractions a b hlk denv hsat.2
-      rw [heval denv]; omega
-    have hsum0 : ((densePeel D E).1.map (fun c => c.eval denv)).sum = 0 := by
-      rw [← denseSumExpr_eval]; exact hden0
-    have hfit' : (((densePeel D E).1.map (fun c => c.eval denv)).map (fun x => x.val)).sum < p := by
-      have hle := List.sum_le_card_nsmul
-        (((densePeel D E).1.map (fun c => c.eval denv)).map (fun x => x.val)) 255 (by
-          intro x hx
-          simp only [List.mem_map] at hx
-          obtain ⟨b, ⟨c, hc, rfl⟩, rfl⟩ := hx
-          have := hbytes c hc; omega)
-      simp only [List.length_map, smul_eq_mul] at hle
-      omega
-    have hallz : ∀ c ∈ (densePeel D E).1, c.eval denv = 0 := fun c hc =>
-      sum_zero_all_zero hp0 _ hfit' hsum0 (c.eval denv) (List.mem_map.2 ⟨c, hc, rfl⟩)
-    have hfz := denseFoldr_zero ((densePeel D E).1.zip D) denv
-      (fun cd hcd => hallz cd.1 (List.of_mem_zip hcd).1)
-    rw [densePeel_eval D E denv, hfz, zero_add] at hE0
-    exact hE0
-  exact dense_collapse_bundle reg ⟨"hcinv#" ++ (reg.resolve (D.headD default)).name, none⟩ rfl d bs E
-    (denseSumExpr (densePeel D E).1) (densePeel D E).2 D (fun denv w => denseReassign D w denv) hcov hE
-    (fun denv w v hv => by show (if v ∈ D then w else denv v) = denv v; rw [if_neg hv])
-    (fun denv w => densePeel_reassign_eval D E hcfree hrfree denv w)
-    hbyte hfreshG
-    (fun dw hd => denseOccursOnlyInTarget_constr (hDcert dw hd))
-    (fun dw hd => denseOccursOnlyInTarget_bus (hDcert dw hd))
-    hrest_sub2 hden_sub2 hden_pow
-    (fun x hx => List.all_eq_true.1 hrpowG x hx)
+  set st := denseHcScan reg.byId.size d with hst
+  set D := denseHcWits st idx E with hDdef
+  set Bm := denseHcBounds bs facts st.size (denseHcWantVars (densePeel D E).1) d.busInteractions
+    with hBm
+  -- the three occurrence facts, read off the codes
+  have hDcode : ∀ v ∈ D, st.getD v.index 0 = 2 + idx := fun v hv => hcWits_code hv
+  have hDE : ∀ v ∈ D, v ∈ E.vars := fun v hv => hcWits_mem hv
+  have hnd : D.Nodup := hcWits_nodup st idx E
+  have hDonce : ∀ dw ∈ D, ∀ c ∈ d.algebraicConstraints, dw ∈ c.vars → c = E := by
+    intro dw hdw c hc hdwc
+    obtain ⟨j, hj⟩ := List.getElem?_of_mem hc
+    have hij : idx = j := denseHcScan_unique (hst ▸ hDcode dw hdw) hj hdwc
+    rw [← hij, hidx] at hj
+    exact (Option.some.inj hj).symm
+  have hDbus : ∀ dw ∈ D, ∀ bi ∈ d.busInteractions,
+      dw ∉ bi.multiplicity.vars ∧ ∀ e ∈ bi.payload, dw ∉ e.vars := by
+    intro dw hdw bi hbi
+    have hnot : dw ∉ denseBIVars bi := denseHcScan_bus (hst ▸ hDcode dw hdw) hbi
+    refine ⟨fun hm => hnot ?_, fun e he hme => hnot ?_⟩
+    · simp only [denseBIVars, List.mem_append]; exact Or.inl hm
+    · simp only [denseBIVars, List.mem_append, List.mem_flatMap]; exact Or.inr ⟨e, he, hme⟩
+  -- the bound lookups the certificates make are sound
+  have hBmSound : ∀ (a : VarId) (b : Nat), Bm[a]? = some b → ∀ denv, d.satisfies bs denv →
+      (denv a).val < b := by
+    intro a b hlk denv hsat
+    exact denseHcBounds_sound bs facts st.size _ d.busInteractions a b hlk denv hsat.2
+  simp only [denseHcTry, ← hBm] at hr
+  split_ifs at hr with h2len hrfreeG hrpowG hplain hfreshP hsq hfreshS
+  all_goals obtain rfl := Option.some.inj hr
+  -- shared framing, common to both shapes
+  all_goals (
+    have hrfree : ∀ dw ∈ D, dw ∉ (densePeel D E).2.vars :=
+      fun dw hd => of_decide_eq_true (List.all_eq_true.1 hrfreeG dw hd)
+    have hrest_sub2 : ∀ x ∈ (densePeel D E).2.vars, x ∈ d.occ :=
+      fun x hx => DenseConstraintSystem.mem_occ_of_constraint (List.mem_of_getElem? hidx)
+        (densePeel_snd_vars D E x hx)
+    have huniq : ∀ j, j ≠ idx → d.algebraicConstraints[j]? ≠ some E := by
+      intro j hj hjE
+      obtain ⟨dw, hdw⟩ : ∃ dw, dw ∈ D := by
+        cases hDl : D with
+        | nil => rw [hDl] at h2len; simp at h2len
+        | cons a t => exact ⟨a, List.mem_cons_self ..⟩
+      exact hj (denseHcScan_unique (hst ▸ hDcode dw hdw) hjE (hDE dw hdw)).symm)
+  · -- the plain-sum shape
+    rw [Bool.and_eq_true] at hplain
+    obtain ⟨hbyteOK, hfitG⟩ := hplain
+    have hcfree : ∀ c ∈ (densePeel D E).1, ∀ dw ∈ D, dw ∉ c.vars := by
+      intro c hc dw hd
+      obtain ⟨a, _, hDf, _, _, _⟩ := denseCoeffsByteOK_sound reg Bm D (densePeel D E).1 hbyteOK c hc
+      exact hDf dw hd
+    have hden_sub2 : ∀ x ∈ (denseSumExpr (densePeel D E).1).vars, x ∈ d.occ := by
+      intro x hx
+      obtain ⟨c, hc, hxc⟩ := denseSumExpr_vars hx
+      exact DenseConstraintSystem.mem_occ_of_constraint (List.mem_of_getElem? hidx)
+        (densePeel_fst_vars D E c hc x hxc)
+    have hden_pow : ∀ x ∈ (denseSumExpr (densePeel D E).1).vars, reg.isInput x = true := by
+      intro x hx
+      obtain ⟨c, hc, hxc⟩ := denseSumExpr_vars hx
+      obtain ⟨a, _, _, hpow, _, _⟩ := denseCoeffsByteOK_sound reg Bm D (densePeel D E).1 hbyteOK c hc
+      exact hpow x hxc
+    have hbyte : ∀ denv, d.satisfies bs denv → (denseSumExpr (densePeel D E).1).eval denv = 0 →
+        (densePeel D E).2.eval denv = 0 := by
+      intro denv hsat hden0
+      have hE0 : E.eval denv = 0 := hsat.1 E (List.mem_of_getElem? hidx)
+      have hbytes : ∀ c ∈ (densePeel D E).1, (c.eval denv).val < 256 := by
+        intro c hc
+        obtain ⟨a, heval, _, _, _, b, hlk, hb256⟩ :=
+          denseCoeffsByteOK_sound reg Bm D (densePeel D E).1 hbyteOK c hc
+        have hlt := hBmSound a b hlk denv hsat
+        rw [heval denv]; omega
+      have hsum0 : ((densePeel D E).1.map (fun c => c.eval denv)).sum = 0 := by
+        rw [← denseSumExpr_eval]; exact hden0
+      have hfit' : (((densePeel D E).1.map (fun c => c.eval denv)).map (fun x => x.val)).sum < p := by
+        have hle := List.sum_le_card_nsmul
+          (((densePeel D E).1.map (fun c => c.eval denv)).map (fun x => x.val)) 255 (by
+            intro x hx
+            simp only [List.mem_map] at hx
+            obtain ⟨b, ⟨c, hc, rfl⟩, rfl⟩ := hx
+            have := hbytes c hc; omega)
+        simp only [List.length_map, smul_eq_mul] at hle
+        have hlen : (densePeel D E).1.length = D.length := densePeel_length D E
+        have hfit := of_decide_eq_true hfitG
+        omega
+      have hallz : ∀ c ∈ (densePeel D E).1, c.eval denv = 0 := fun c hc =>
+        sum_zero_all_zero hp0 _ hfit' hsum0 (c.eval denv) (List.mem_map.2 ⟨c, hc, rfl⟩)
+      have hfz := denseFoldr_zero ((densePeel D E).1.zip D) denv
+        (fun cd hcd => hallz cd.1 (List.of_mem_zip hcd).1)
+      rw [densePeel_eval D E denv, hfz, zero_add] at hE0
+      exact hE0
+    exact denseHcAccept_correct reg ⟨"hcinv#" ++ (reg.resolve (D.headD default)).name, none⟩ rfl
+      d bs E (denseSumExpr (densePeel D E).1) (densePeel D E).2 D idx
+      (fun denv w => denseReassign D w denv) hcov hidx huniq
+      (fun denv w v hv => by show (if v ∈ D then w else denv v) = denv v; rw [if_neg hv])
+      (fun denv w => densePeel_reassign_eval D E hcfree hrfree denv w)
+      hbyte (hcFresh_isFresh hfreshP) hDonce hDbus hrest_sub2 hden_sub2 hden_pow
+      (fun x hx => List.all_eq_true.1 hrpowG x hx)
+  · -- the sum-of-squares shape
+    rw [Bool.and_eq_true] at hsq
+    obtain ⟨hsqOK, hfitG⟩ := hsq
+    have hlen : (densePeel D E).1.length = D.length := densePeel_length D E
+    have hcfree : ∀ c ∈ (densePeel D E).1, ∀ dw ∈ D, dw ∉ c.vars := by
+      intro c hc dw hd
+      obtain ⟨a, b, _, hDf, _, _, _, _, _⟩ :=
+        denseSqCoeffsOK_sound reg Bm D (densePeel D E).1 hsqOK c hc
+      exact hDf dw hd
+    have hmap2 : ((densePeel D E).1.zip D).map (fun x => x.2) = D :=
+      List.map_snd_zip (by rw [hlen])
+    have hdenvars : ∀ x ∈ (denseSumExpr ((densePeel D E).1.map (fun c => DenseExpr.mul c c))).vars,
+        ∃ c ∈ (densePeel D E).1, x ∈ c.vars := by
+      intro x hx
+      obtain ⟨e, he, hxe⟩ := denseSumExpr_vars hx
+      obtain ⟨c, hc, rfl⟩ := List.mem_map.1 he
+      simp only [DenseExpr.vars, List.mem_append, or_self] at hxe
+      exact ⟨c, hc, hxe⟩
+    have hden_sub2 : ∀ x ∈ (denseSumExpr ((densePeel D E).1.map (fun c => DenseExpr.mul c c))).vars,
+        x ∈ d.occ := by
+      intro x hx
+      obtain ⟨c, hc, hxc⟩ := hdenvars x hx
+      exact DenseConstraintSystem.mem_occ_of_constraint (List.mem_of_getElem? hidx)
+        (densePeel_fst_vars D E c hc x hxc)
+    have hden_pow : ∀ x ∈ (denseSumExpr ((densePeel D E).1.map (fun c => DenseExpr.mul c c))).vars,
+        reg.isInput x = true := by
+      intro x hx
+      obtain ⟨c, hc, hxc⟩ := hdenvars x hx
+      obtain ⟨a, b, _, _, hpow, _, _, _, _⟩ :=
+        denseSqCoeffsOK_sound reg Bm D (densePeel D E).1 hsqOK c hc
+      exact hpow x hxc
+    have hbyte : ∀ denv, d.satisfies bs denv →
+        (denseSumExpr ((densePeel D E).1.map (fun c => DenseExpr.mul c c))).eval denv = 0 →
+        (densePeel D E).2.eval denv = 0 := by
+      intro denv hsat hden0
+      have hE0 : E.eval denv = 0 := hsat.1 E (List.mem_of_getElem? hidx)
+      have hbytes : ∀ c ∈ (densePeel D E).1, ((c.eval denv) * (c.eval denv)).val < 65536 := by
+        intro c hc
+        obtain ⟨a, b, heval, _, _, _, _, ⟨ba, hlka, hba⟩, ⟨bb, hlkb, hbb⟩⟩ :=
+          denseSqCoeffsOK_sound reg Bm D (densePeel D E).1 hsqOK c hc
+        have hlta := hBmSound a ba hlka denv hsat
+        have hltb := hBmSound b bb hlkb denv hsat
+        haveI : NeZero p := ⟨hp0.ne'⟩
+        rw [heval denv]
+        have hfit := of_decide_eq_true hfitG
+        exact sq_diff_val_lt (by omega) (denv a) (denv b) (by omega) (by omega)
+      have hdeneval : (denseSumExpr ((densePeel D E).1.map (fun c => DenseExpr.mul c c))).eval denv
+          = ((densePeel D E).1.map (fun c => c.eval denv * c.eval denv)).sum := by
+        rw [denseSumExpr_eval, List.map_map]; rfl
+      have hsum0 : ((densePeel D E).1.map (fun c => c.eval denv * c.eval denv)).sum = 0 := by
+        rw [← hdeneval]; exact hden0
+      have hfit' : (((densePeel D E).1.map (fun c => c.eval denv * c.eval denv)).map
+          (fun x => x.val)).sum < p := by
+        have hle := List.sum_le_card_nsmul
+          (((densePeel D E).1.map (fun c => c.eval denv * c.eval denv)).map (fun x => x.val))
+          65535 (by
+            intro x hx
+            simp only [List.mem_map] at hx
+            obtain ⟨s, ⟨c, hc, rfl⟩, rfl⟩ := hx
+            have := hbytes c hc; omega)
+        simp only [List.length_map, smul_eq_mul] at hle
+        have hfit := of_decide_eq_true hfitG
+        omega
+      have hallz : ∀ c ∈ (densePeel D E).1, c.eval denv * c.eval denv = 0 := fun c hc =>
+        sum_zero_all_zero hp0 _ hfit' hsum0 (c.eval denv * c.eval denv) (List.mem_map.2 ⟨c, hc, rfl⟩)
+      have hallz0 : ∀ c ∈ (densePeel D E).1, c.eval denv = 0 := fun c hc =>
+        mul_self_eq_zero.1 (hallz c hc)
+      have hfz := denseFoldr_zero ((densePeel D E).1.zip D) denv
+        (fun cd hcd => hallz0 cd.1 (List.of_mem_zip hcd).1)
+      rw [densePeel_eval D E denv, hfz, zero_add] at hE0
+      exact hE0
+    exact denseHcAccept_correct reg ⟨"hcsq#" ++ (reg.resolve (D.headD default)).name, none⟩ rfl
+      d bs E (denseSumExpr ((densePeel D E).1.map (fun c => DenseExpr.mul c c)))
+      (densePeel D E).2 D idx
+      (fun denv w => denseAssocReassign ((densePeel D E).1.zip D) denv w) hcov hidx huniq
+      (fun denv w v hv => denseAssocReassign_agree _ denv w v (by rw [hmap2]; exact hv))
+      (fun denv w => densePeel_sqReassign_eval D E hnd hcfree hrfree denv w)
+      hbyte (hcFresh_isFresh hfreshS) hDonce hDbus hrest_sub2 hden_sub2 hden_pow
+      (fun x hx => List.all_eq_true.1 hrpowG x hx)
 
-set_option maxHeartbeats 1000000 in
-/-- Sum-of-squares collapse attempt correctness. -/
-theorem denseTryOneSq_correct [Fact p.Prime] {bs : BusSemantics p} (facts : BusFacts p bs)
-    (reg : VarRegistry) (d : DenseConstraintSystem p) (E : DenseExpr p) (D : List VarId)
-    (hcov : d.CoveredBy reg) (hE : E ∈ d.algebraicConstraints)
-    (hDcert : ∀ v ∈ D, denseOccursOnlyInTarget d E v = true) (hnd : D.Nodup)
-    (r : VarRegistry × DenseConstraintSystem p × DenseDerivations p)
-    (hr : denseTryOneSq reg d (denseBuild bs facts d.busInteractions) E D = some r) :
-    reg.Extends r.1 ∧ r.2.1.CoveredBy r.1 ∧ DenseDerivations.CoveredBy r.1 r.2.2 ∧
-      DensePassCorrect r.1.isInput d r.2.1 r.2.2 bs := by
-  have hp0 : 0 < p := (Fact.out : p.Prime).pos
-  have hlen : (densePeel D E).1.length = D.length := densePeel_length D E
-  simp only [denseTryOneSq] at hr
-  split_ifs at hr with h2len hsqOK hrfreeG hrpowG hfreshG hfitG
-  obtain rfl := Option.some.inj hr
-  have hcfree : ∀ c ∈ (densePeel D E).1, ∀ dw ∈ D, dw ∉ c.vars := by
-    intro c hc dw hd
-    obtain ⟨a, b, _, hDf, _, _, _, _, _⟩ :=
-      denseSqCoeffsOK_sound reg (denseBuild bs facts d.busInteractions) D (densePeel D E).1 hsqOK c hc
-    exact hDf dw hd
-  have hrfree : ∀ dw ∈ D, dw ∉ (densePeel D E).2.vars :=
-    fun dw hd => of_decide_eq_true (List.all_eq_true.1 hrfreeG dw hd)
-  have hmap2 : ((densePeel D E).1.zip D).map (fun x => x.2) = D :=
-    List.map_snd_zip (by rw [hlen])
-  have hrest_sub2 : ∀ x ∈ (densePeel D E).2.vars, x ∈ d.occ :=
-    fun x hx => DenseConstraintSystem.mem_occ_of_constraint hE (densePeel_snd_vars D E x hx)
-  have hdenvars : ∀ x ∈ (denseSumExpr ((densePeel D E).1.map (fun c => DenseExpr.mul c c))).vars,
-      ∃ c ∈ (densePeel D E).1, x ∈ c.vars := by
-    intro x hx
-    obtain ⟨e, he, hxe⟩ := denseSumExpr_vars hx
-    obtain ⟨c, hc, rfl⟩ := List.mem_map.1 he
-    simp only [DenseExpr.vars, List.mem_append, or_self] at hxe
-    exact ⟨c, hc, hxe⟩
-  have hden_sub2 : ∀ x ∈ (denseSumExpr ((densePeel D E).1.map (fun c => DenseExpr.mul c c))).vars,
-      x ∈ d.occ := by
-    intro x hx
-    obtain ⟨c, hc, hxc⟩ := hdenvars x hx
-    exact DenseConstraintSystem.mem_occ_of_constraint hE (densePeel_fst_vars D E c hc x hxc)
-  have hden_pow : ∀ x ∈ (denseSumExpr ((densePeel D E).1.map (fun c => DenseExpr.mul c c))).vars,
-      reg.isInput x = true := by
-    intro x hx
-    obtain ⟨c, hc, hxc⟩ := hdenvars x hx
-    obtain ⟨a, b, _, _, hpow, _, _, _, _⟩ :=
-      denseSqCoeffsOK_sound reg (denseBuild bs facts d.busInteractions) D (densePeel D E).1 hsqOK c hc
-    exact hpow x hxc
-  have hbyte : ∀ denv, d.satisfies bs denv →
-      (denseSumExpr ((densePeel D E).1.map (fun c => DenseExpr.mul c c))).eval denv = 0 →
-      (densePeel D E).2.eval denv = 0 := by
-    intro denv hsat hden0
-    have hE0 : E.eval denv = 0 := hsat.1 E hE
-    have hbytes : ∀ c ∈ (densePeel D E).1, ((c.eval denv) * (c.eval denv)).val < 65536 := by
-      intro c hc
-      obtain ⟨a, b, heval, _, _, _, _, ⟨ba, hlka, hba⟩, ⟨bb, hlkb, hbb⟩⟩ :=
-        denseSqCoeffsOK_sound reg (denseBuild bs facts d.busInteractions) D (densePeel D E).1 hsqOK c hc
-      have hlta := denseBuild_sound bs facts d.busInteractions a ba hlka denv hsat.2
-      have hltb := denseBuild_sound bs facts d.busInteractions b bb hlkb denv hsat.2
-      haveI : NeZero p := ⟨hp0.ne'⟩
-      rw [heval denv]
-      exact sq_diff_val_lt (by omega) (denv a) (denv b) (by omega) (by omega)
-    have hdeneval : (denseSumExpr ((densePeel D E).1.map (fun c => DenseExpr.mul c c))).eval denv
-        = ((densePeel D E).1.map (fun c => c.eval denv * c.eval denv)).sum := by
-      rw [denseSumExpr_eval, List.map_map]; rfl
-    have hsum0 : ((densePeel D E).1.map (fun c => c.eval denv * c.eval denv)).sum = 0 := by
-      rw [← hdeneval]; exact hden0
-    have hfit' : (((densePeel D E).1.map (fun c => c.eval denv * c.eval denv)).map
-        (fun x => x.val)).sum < p := by
-      have hle := List.sum_le_card_nsmul
-        (((densePeel D E).1.map (fun c => c.eval denv * c.eval denv)).map (fun x => x.val)) 65535 (by
-          intro x hx
-          simp only [List.mem_map] at hx
-          obtain ⟨s, ⟨c, hc, rfl⟩, rfl⟩ := hx
-          have := hbytes c hc; omega)
-      simp only [List.length_map, smul_eq_mul] at hle
-      omega
-    have hallz : ∀ c ∈ (densePeel D E).1, c.eval denv * c.eval denv = 0 := fun c hc =>
-      sum_zero_all_zero hp0 _ hfit' hsum0 (c.eval denv * c.eval denv) (List.mem_map.2 ⟨c, hc, rfl⟩)
-    have hallz0 : ∀ c ∈ (densePeel D E).1, c.eval denv = 0 := fun c hc =>
-      mul_self_eq_zero.1 (hallz c hc)
-    have hfz := denseFoldr_zero ((densePeel D E).1.zip D) denv
-      (fun cd hcd => hallz0 cd.1 (List.of_mem_zip hcd).1)
-    rw [densePeel_eval D E denv, hfz, zero_add] at hE0
-    exact hE0
-  exact dense_collapse_bundle reg ⟨"hcsq#" ++ (reg.resolve (D.headD default)).name, none⟩ rfl d bs E
-    (denseSumExpr ((densePeel D E).1.map (fun c => DenseExpr.mul c c))) (densePeel D E).2 D
-    (fun denv w => denseAssocReassign ((densePeel D E).1.zip D) denv w) hcov hE
-    (fun denv w v hv => denseAssocReassign_agree _ denv w v (by rw [hmap2]; exact hv))
-    (fun denv w => densePeel_sqReassign_eval D E hnd hcfree hrfree denv w)
-    hbyte hfreshG
-    (fun dw hd => denseOccursOnlyInTarget_constr (hDcert dw hd))
-    (fun dw hd => denseOccursOnlyInTarget_bus (hDcert dw hd))
-    hrest_sub2 hden_sub2 hden_pow
-    (fun x hx => List.all_eq_true.1 hrpowG x hx)
-
-/-! ## The scanning driver -/
-
-/-- First-hit scan correctness: whatever candidate is selected, it is a `DensePassCorrect`
+/-- First-hit scan correctness: whichever candidate target collapses, it is a `DensePassCorrect`
     collapse. -/
-theorem denseTryList_correct [Fact p.Prime] {bs : BusSemantics p} (facts : BusFacts p bs)
-    (reg : VarRegistry) (d : DenseConstraintSystem p) (busVars : Std.HashSet VarId)
-    (cnt : Std.HashMap VarId Nat) (hcov : d.CoveredBy reg) :
-    ∀ (L : List (DenseExpr p)), (∀ E ∈ L, E ∈ d.algebraicConstraints) →
-      ∀ r, denseTryList reg d (denseBuild bs facts d.busInteractions) busVars cnt L = some r →
+theorem denseHcScanTry_correct [Fact p.Prime] {bs : BusSemantics p} (facts : BusFacts p bs)
+    (reg : VarRegistry) (d : DenseConstraintSystem p) (hcov : d.CoveredBy reg) :
+    ∀ (cands : List (Nat × DenseExpr p)),
+      (∀ ie ∈ cands, d.algebraicConstraints[ie.1]? = some ie.2) →
+      ∀ r, denseHcScanTry bs facts reg d (denseHcScan reg.byId.size d) cands = some r →
         reg.Extends r.1 ∧ r.2.1.CoveredBy r.1 ∧ DenseDerivations.CoveredBy r.1 r.2.2 ∧
           DensePassCorrect r.1.isInput d r.2.1 r.2.2 bs := by
-  intro L
-  induction L with
-  | nil => intro _ r hr; simp [denseTryList] at hr
-  | cons E rest ih =>
+  intro cands
+  induction cands with
+  | nil => intro _ r hr; simp [denseHcScanTry] at hr
+  | cons ie rest ih =>
       intro hmem r hr
-      have hE : E ∈ d.algebraicConstraints := hmem E (List.mem_cons_self ..)
-      have hDcert : ∀ v ∈ denseWitnessesOf d busVars cnt E,
-          denseOccursOnlyInTarget d E v = true := by
-        intro v hv
-        simp only [denseWitnessesOf, List.mem_filter, Bool.and_eq_true] at hv
-        exact hv.2.2
-      have hnd : (denseWitnessesOf d busVars cnt E).Nodup := by
-        simp only [denseWitnessesOf]
-        exact (List.nodup_dedup E.vars).filter _
-      simp only [denseTryList] at hr
+      obtain ⟨idx, E⟩ := ie
+      simp only [denseHcScanTry] at hr
       split at hr
-      · rename_i r1 heq1
+      · rename_i r1 heq
         obtain rfl := Option.some.inj hr
-        exact denseTryOne_correct facts reg d E (denseWitnessesOf d busVars cnt E) hcov hE hDcert
-          r1 heq1
-      · rename_i heq1
-        split at hr
-        · rename_i r2 heq2
-          obtain rfl := Option.some.inj hr
-          exact denseTryOneSq_correct facts reg d E (denseWitnessesOf d busVars cnt E) hcov hE hDcert
-            hnd r2 heq2
-        · rename_i heq2
-          exact ih (fun E' h => hmem E' (List.mem_cons_of_mem _ h)) r hr
-
-/-! ## The pass, as a registry-extending transform -/
+        exact denseHcTry_correct facts reg d idx E hcov (hmem (idx, E) (List.mem_cons_self ..))
+          r1 heq
+      · exact ih (fun x hx => hmem x (List.mem_cons_of_mem _ hx)) r hr
 
 theorem denseHintCollapseF_props (pw : PrimeWitness p) (reg : VarRegistry) (bs : BusSemantics p)
     (facts : BusFacts p bs) (d : DenseConstraintSystem p) (hcov : d.CoveredBy reg) :
@@ -991,23 +1537,30 @@ theorem denseHintCollapseF_props (pw : PrimeWitness p) (reg : VarRegistry) (bs :
         (denseHintCollapseF pw reg bs facts d).2.2
     ∧ DensePassCorrect (denseHintCollapseF pw reg bs facts d).1.isInput d
         (denseHintCollapseF pw reg bs facts d).2.1 (denseHintCollapseF pw reg bs facts d).2.2 bs := by
-  unfold denseHintCollapseF
+  have hrefl : reg.Extends reg ∧ d.CoveredBy reg ∧
+      DenseDerivations.CoveredBy (p := p) reg [] ∧
+      DensePassCorrect reg.isInput d d ([] : DenseDerivations p) bs :=
+    ⟨VarRegistry.Extends.refl reg, hcov, (by intro x hx; simp at hx),
+      DensePassCorrect.refl reg.isInput d bs⟩
+  simp only [denseHintCollapseF]
   by_cases hpr : pw.isPrime = true
   · rw [if_pos hpr]
     haveI : Fact p.Prime := ⟨pw.correct hpr⟩
-    extract_lets Bm busVars cnt
-    cases hL : denseTryList reg d Bm busVars cnt d.algebraicConstraints with
-    | none =>
-        simp only [Option.getD_none]
-        exact ⟨VarRegistry.Extends.refl reg, hcov, (by intro x hx; simp at hx),
-          DensePassCorrect.refl reg.isInput d bs⟩
-    | some r =>
-        simp only [Option.getD_some]
-        exact denseTryList_correct facts reg d busVars cnt hcov d.algebraicConstraints
-          (fun _ h => h) r hL
-  · rw [if_neg hpr]
-    exact ⟨VarRegistry.Extends.refl reg, hcov, (by intro x hx; simp at hx),
-      DensePassCorrect.refl reg.isInput d bs⟩
+    cases hgs : denseHcGroups (denseHcScan reg.byId.size d) with
+    | nil => exact hrefl
+    | cons i0 is =>
+        have hpick : ∀ ie ∈ denseHcPick 0 (i0 :: is) d.algebraicConstraints,
+            d.algebraicConstraints[ie.1]? = some ie.2 := by
+          intro ie hie
+          obtain ⟨k, hk, hget⟩ := hcPick_spec d.algebraicConstraints (i0 :: is) 0 ie.1 ie.2 hie
+          rw [hk]; simpa using hget
+        cases hres : denseHcScanTry bs facts reg d (denseHcScan reg.byId.size d)
+            (denseHcPick 0 (i0 :: is) d.algebraicConstraints) with
+        | none => simpa only [hres, Option.getD_none] using hrefl
+        | some r =>
+            simpa only [hres, Option.getD_some] using
+              denseHcScanTry_correct facts reg d hcov _ hpick r hres
+  · rw [if_neg hpr]; exact hrefl
 
 /-- The registry-extending hint-collapse pass. -/
 def denseHintCollapsePass (pw : PrimeWitness p) : DenseVerifiedPassW p :=
