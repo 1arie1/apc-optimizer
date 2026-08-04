@@ -83,7 +83,6 @@ def cleanupPasses (b : DegreeBound) : List (String × DenseVerifiedPassW p) :=
     ("zeroMultBus", denseZeroMultBusDropPass),
     ("tautoBus", denseTautoBusDropPass),
     ("domainFold", denseDomainFoldPassV pw),
-    ("busUnify", denseBusUnifyPass),
     ("busPairCancel", denseBusPairCancelPass pw false),
     ("bytePack", denseByteCheckPackPass),
     ("disconnected", denseDisconnectedPass),

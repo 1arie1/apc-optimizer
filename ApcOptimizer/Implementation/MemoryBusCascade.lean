@@ -98,7 +98,7 @@ theorem cascade_forced {k : ℕ} {T : Type*} [LinearOrder T]
       exact hmono.lt_iff_lt.mp h)
     hinj hnone
 
-/-- Payload consumption form (the order-free `admissibleMemoryBus.consecutive`): if the matching
+/-- Payload consumption form (order-free consecutive-copying): if the matching
     additionally carries full payload equality, then access `0`'s receive is the group's unique
     entry and every interior receive copies the previous send's payload. -/
 theorem cascade_payload_forced {k : ℕ} {T α : Type*} [LinearOrder T]

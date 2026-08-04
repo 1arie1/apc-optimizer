@@ -672,38 +672,24 @@ def sp1Facts (p : ℕ) [NeZero p]
         · simp [hb]
       rwa [hlist] at hd
     admissible_dropPair := by
-      intro hp1 busId shape hshape A B C S R hSbus hRbus _hSm _hRm haddrEq hcons hshield hadm_full
+      intro busId shape hshape A B C S R hSbus hRbus hSm hRm hpay hadm_full
       obtain ⟨hdisc, hzero⟩ := hadm_full
       refine ⟨fun busId' shape' hshape' => ?_, ?_⟩
       · by_cases hbb : busId' = busId
         · subst busId'
           obtain rfl : shape = shape' := Option.some.inj (hshape.symm.trans hshape')
-          have hgoal : (A ++ B ++ C).filter (fun m => m.busId = busId)
-              = A.filter (fun m => m.busId = busId) ++ B.filter (fun m => m.busId = busId)
-                ++ C.filter (fun m => m.busId = busId) := by
-            simp only [List.filter_append]
-          rw [hgoal]
           have hfull := hdisc busId shape hshape
           have hfiltFull : (A ++ S :: B ++ R :: C).filter (fun m => m.busId = busId)
               = A.filter (fun m => m.busId = busId) ++ S :: B.filter (fun m => m.busId = busId)
                 ++ R :: C.filter (fun m => m.busId = busId) := by
             simp only [List.filter_append, List.filter_cons, hSbus, hRbus, decide_true, if_true]
-          rw [hfiltFull] at hfull
-          refine admissibleMemoryBus_dropPair shape hp1 _ _ _ S R hfull ?_ ?_ haddrEq
-          · intro m hm hmne hmaddr
-            rw [List.mem_filter] at hm
-            exact hcons m hm.1 (of_decide_eq_true hm.2) hmne hmaddr
-          · intro A₁' Sx A₂' hAsplit hSxne hSxaddr hSxmult
-            obtain ⟨A₁, A₂, hAeq, _, hA₂filt⟩ :=
-              filter_split (fun m => m.busId = busId) Sx A A₁' A₂' hAsplit
-            have hSxbus : Sx.busId = busId := by
-              have : Sx ∈ A.filter (fun m => m.busId = busId) := by
-                rw [hAsplit]; exact List.mem_append_right A₁' (List.mem_cons_self ..)
-              exact of_decide_eq_true (List.mem_filter.mp this).2
-            obtain ⟨m, hmem, hmbus, hmne, hmaddr, hmmult⟩ :=
-              hshield A₁ Sx A₂ hAeq hSxbus hSxne hSxaddr hSxmult
-            refine ⟨m, ?_, hmne, hmaddr, hmmult⟩
-            rw [← hA₂filt]; exact List.mem_filter.mpr ⟨hmem, by simp [hmbus]⟩
+          have hgoal : (A ++ B ++ C).filter (fun m => m.busId = busId)
+              = A.filter (fun m => m.busId = busId) ++ B.filter (fun m => m.busId = busId)
+                ++ C.filter (fun m => m.busId = busId) := by
+            simp only [List.filter_append]
+          rw [hfiltFull, coe_split_pair] at hfull
+          rw [hgoal]
+          exact admissibleMemoryBusM_dropPair shape hSm hRm hpay hfull
         · have hne : busId ≠ busId' := fun h => hbb h.symm
           have heq : (A ++ B ++ C).filter (fun m => m.busId = busId')
               = (A ++ S :: B ++ R :: C).filter (fun m => m.busId = busId') := by

@@ -6,8 +6,11 @@ set_option autoImplicit false
 
 /-! # Dense consecutive-match bus unification (runtime transform for `busUnify`)
 
-Impl-only (no soundness lemma). `denseBusUnifyF` matches the `denseF` shape
-`DenseVerifiedPassW.of` (`Bridge.lean`) wraps directly.
+The pass is *not scheduled*: its soundness relied on the positional list-order memory discipline,
+and the order-free rely (`admissibleMemoryBusM`) offers no consumption route without timestamp
+facts the circuit does not provide (see `Proofs/BusUnify.lean`, which now hosts only the shared
+helpers other pass proofs consume: `denseEqExpr`, `denseAddrConsts{Eq,Neq}`,
+`denseSetNewMult`/`denseGetPreviousMult`, `denseMultConst`).
 
 The engine prepares every memory-bus interaction once (`denseBUPrep`) — the address slots'
 constant value, linear form and two-root reductions, plus an order-insensitive *fingerprint* of
@@ -497,9 +500,7 @@ def denseBusUnifyNewCs (bs : BusSemantics p) (facts : BusFacts p bs)
 /-- For a memory bus, a `set` (send) at address `a` immediately followed by a matching `get`
     (receive) at the same address must carry the same payload, so this adds the entailed slot
     equalities `getᵢ = setᵢ` for every provably-matched consecutive send→receive pair on each
-    declared memory / execution-bridge bus (skipping equations already present or zero).
-
-    No-new-variable side condition holds by construction (`denseMemEqConstraints_vars`). -/
+    declared memory / execution-bridge bus (skipping equations already present or zero). -/
 def denseBusUnifyF (bs : BusSemantics p) (facts : BusFacts p bs) (d : DenseConstraintSystem p) :
     DenseConstraintSystem p :=
   if (1 : ZMod p) ≠ 0 then
