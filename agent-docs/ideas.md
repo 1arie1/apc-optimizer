@@ -927,6 +927,19 @@ are non-survivors" argument (`a·y + b = 0` has at most one root when `a ≠ 0`)
   the busUnify rebuild came from `IO` phase timers. `OptimizingRuntime.md`'s truncation warning
   understates this case; check the gated `tot` against the pass's share of wall *before* reading
   any pass-restricted table.
+- CI notes: **the effectiveness matrix's `main` side is a downloaded artifact, and it can be stale
+  by days** (`Latest-main binary` step: `gh run list --branch main --status success --limit 1` then
+  `gh run download`). Measured on PR #278 (entry 173): that cell reported wasm-eth
+  `145.9 s → 14.2 s (-90 %)` and SP1 rsp `41.1 s → 2344 ms (-94 %)` for a change worth ~4 %, and
+  flagged "sizes changed on 3 of 200 cases" — while the *same* three cases are identical between the
+  branch and CI's own current-main artifact (checked with CI's own `compare`, 15 repeats, and five
+  consecutive main builds, none of which produces the reported `main` values). A ~6-day-old main
+  build does produce one of them and is 4–5× slower per case, which with the parallel contention
+  accounts for the row. **So a flagged size change or a spectacular runtime row in that cell means
+  "check the baseline first": re-run the size comparison against a freshly built main (or the newest
+  `apc-optimizer-bin` artifact) before believing either.** The serial `Runtime Bench` workflow builds
+  both sides from source on one runner and is unaffected — on #278 it read 0.96× total / 0.11× on the
+  pass, matching the local interleaved bench exactly.
 - CI notes (updated 2026-07-29): the effectiveness-matrix runtime row swung **+51 % → +15 % on
   identical code** for openvm-eth while its own per-pass table showed ≤1.04× — treat the wall row
   as ±50 % noise on the small parallel sets and read the per-pass table instead; the serial
