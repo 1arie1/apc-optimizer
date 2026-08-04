@@ -262,13 +262,15 @@ theorem denseAddVars_soundAt (bs : BusSemantics p) (facts : BusFacts p bs)
         · exact hT
       exact ih _ (denseGoCands_soundAt bs facts bi i denv hob (denseBiPrepOf bi).cands _ hT1)
 
-/-- `addAll` preserves the invariant across every interaction. -/
-theorem denseAddAll_soundAt (bs : BusSemantics p) (facts : BusFacts p bs) (denv : VarId → ZMod p) :
+/-- `addAllWith` preserves the invariant across every interaction, for any key restriction —
+    which bounds are inserted is unconstrained by soundness. -/
+theorem denseAddAllWith_soundAt (bs : BusSemantics p) (facts : BusFacts p bs)
+    (keep? : Option (Std.HashSet VarId)) (denv : VarId → ZMod p) :
     ∀ (dbis : List (BusInteraction (DenseExpr p))),
       (∀ bi ∈ dbis, (denseBIEval bi denv).multiplicity ≠ 0 →
         bs.accepts (denseBIEval bi denv)) →
       ∀ (T : Std.HashMap VarId Nat), DenseBMSoundAt denv T →
-        DenseBMSoundAt denv (denseAddAll bs facts dbis T) := by
+        DenseBMSoundAt denv (denseAddAllWith bs facts keep? dbis T) := by
   intro dbis
   induction dbis with
   | nil => intro _ T hT; exact hT
@@ -279,20 +281,40 @@ theorem denseAddAll_soundAt (bs : BusSemantics p) (facts : BusFacts p bs) (denv 
       have hrest : ∀ b ∈ rest, (denseBIEval b denv).multiplicity ≠ 0 →
           bs.accepts (denseBIEval b denv) :=
         fun b hb => hob b (List.mem_cons_of_mem _ hb)
-      unfold denseAddAll
-      exact ih hrest _ (denseAddVars_soundAt bs facts bi denv hbi (denseRawVarsOf bi) T hT)
+      unfold denseAddAllWith
+      split
+      · exact ih hrest T hT
+      · exact ih hrest _ (denseAddVars_soundAt bs facts bi denv hbi _ T hT)
+
+/-- `addAll` preserves the invariant across every interaction. -/
+theorem denseAddAll_soundAt (bs : BusSemantics p) (facts : BusFacts p bs) (denv : VarId → ZMod p) :
+    ∀ (dbis : List (BusInteraction (DenseExpr p))),
+      (∀ bi ∈ dbis, (denseBIEval bi denv).multiplicity ≠ 0 →
+        bs.accepts (denseBIEval bi denv)) →
+      ∀ (T : Std.HashMap VarId Nat), DenseBMSoundAt denv T →
+        DenseBMSoundAt denv (denseAddAll bs facts dbis T) :=
+  denseAddAllWith_soundAt bs facts none denv
 
 /-! ## The bounds-map soundness capstone -/
 
-/-- **Bounds-map soundness.** A bound stored by `denseBuild` for `i` is a strict upper bound
+/-- **Bounds-map soundness.** A bound stored by `denseBuildWith` for `i` is a strict upper bound
     on `denv i` for every assignment whose bus interactions are non-violating. -/
+theorem denseBuildWith_sound (bs : BusSemantics p) (facts : BusFacts p bs)
+    (keep? : Option (Std.HashSet VarId)) (bis : List (BusInteraction (DenseExpr p)))
+    (i : VarId) (b : Nat)
+    (hlk : (denseBuildWith bs facts keep? bis)[i]? = some b) (denv : VarId → ZMod p)
+    (hbus : ∀ bi ∈ bis, (denseBIEval bi denv).multiplicity ≠ 0 →
+      bs.accepts (denseBIEval bi denv)) : (denv i).val < b := by
+  unfold denseBuildWith at hlk
+  exact denseAddAllWith_soundAt bs facts keep? denv bis hbus ∅ (DenseBMSoundAt.empty denv) i b hlk
+
 theorem denseBuild_sound (bs : BusSemantics p) (facts : BusFacts p bs)
     (bis : List (BusInteraction (DenseExpr p))) (i : VarId) (b : Nat)
     (hlk : (denseBuild bs facts bis)[i]? = some b) (denv : VarId → ZMod p)
     (hbus : ∀ bi ∈ bis, (denseBIEval bi denv).multiplicity ≠ 0 →
-      bs.accepts (denseBIEval bi denv)) : (denv i).val < b := by
-  unfold denseBuild at hlk
-  exact denseAddAll_soundAt bs facts denv bis hbus ∅ (DenseBMSoundAt.empty denv) i b hlk
+      bs.accepts (denseBIEval bi denv)) : (denv i).val < b :=
+  denseBuildWith_sound bs facts none bis i b hlk denv hbus
+
 
 /-! # Correctness of the dense digit-fold pass (`denseDigitFoldPass`, `DigitFold.lean`), reducing
 the forced substitution to `DenseConstraintSystem.substF_denseCorrect` (`Proofs/DomainTable.lean`). -/
@@ -559,17 +581,117 @@ theorem denseFindFold_sound [NeZero p] (hp : 256 < p) (bs : BusSemantics p) (fac
                   exact denseSolveOperand_sound hp bounds y i dd hsy denv hB hby
               | none => rw [hsy] at h; dsimp only at h; exact ih hrest i dd h
 
-/-- If `denseFindFold` over the fact-built bounds map fires `(i, dd)`, every satisfying assignment
-    of `d` has `denv i = dd` (bounds validity from `denseBuild_sound`). -/
+/-! ## The planned scan is the interaction scan -/
+
+/-- The empty-plan guard is redundant: with no ladder form there is nothing to solve. -/
+theorem denseDigitFoldFind_eq (bs : BusSemantics p) (facts : BusFacts p bs)
+    (dbis : List (BusInteraction (DenseExpr p))) :
+    denseDigitFoldFind bs facts dbis
+      = denseSolveLadders (denseBuildWith bs facts (some (denseFoldPlan bs facts dbis).2) dbis)
+          (denseFoldPlan bs facts dbis).1 := by
+  unfold denseDigitFoldFind
+  dsimp only
+  split_ifs with h
+  · have hnil : (denseFoldPlan bs facts dbis).1 = [] := by simpa using h
+    rw [hnil]; rfl
+  · rfl
+
+/-- The solve scans an append left to right. -/
+theorem denseSolveLadders_append (bounds : Std.HashMap VarId Nat)
+    (a b : List (DenseLinExpr p)) :
+    denseSolveLadders bounds (a ++ b)
+      = match denseSolveLadders bounds a with
+        | some r => some r
+        | none => denseSolveLadders bounds b := by
+  induction a with
+  | nil => rfl
+  | cons l rest ih =>
+    cases hT : denseAttemptLadder true bounds l with
+    | some r => simp [List.cons_append, denseSolveLadders, hT]
+    | none =>
+      cases hF : denseAttemptLadder false bounds l with
+      | some r => simp [List.cons_append, denseSolveLadders, hT, hF]
+      | none => simp [List.cons_append, denseSolveLadders, hT, hF, ih]
+
+/-- One operand appends the forms whose solve is exactly `denseSolveOperand` on it: the linearized
+    form when it has at least two terms, nothing otherwise. -/
+theorem denseFoldOperand_rev (bounds : Std.HashMap VarId Nat) (E : DenseExpr p)
+    (acc : List (DenseLinExpr p) × Std.HashSet VarId) :
+    ∃ fs, (denseFoldOperand E acc).1.reverse = acc.1.reverse ++ fs ∧
+      denseSolveLadders bounds fs = denseSolveOperand bounds E := by
+  unfold denseFoldOperand denseSolveOperand
+  cases hl : denseLinearize E with
+  | none => exact ⟨[], by simp, by simp [denseSolveLadders]⟩
+  | some l =>
+    by_cases h2 : l.terms.length < 2
+    · exact ⟨[], by simp [h2], by simp [h2, denseSolveLadders]⟩
+    · refine ⟨[l], by simp [h2], ?_⟩
+      cases hT : denseAttemptLadder true bounds l with
+      | some r => simp [denseSolveLadders, h2, hT]
+      | none =>
+        cases hF : denseAttemptLadder false bounds l with
+        | some r => simp [denseSolveLadders, h2, hT, hF]
+        | none => simp [denseSolveLadders, h2, hT, hF]
+
+/-- The plan walk, with any accumulator: solving the accumulated forms and then the walk's own is
+    solving the accumulator, then scanning the interactions. -/
+theorem denseSolveLadders_foldPlanGo (bs : BusSemantics p) (facts : BusFacts p bs)
+    (bounds : Std.HashMap VarId Nat) :
+    ∀ (dbis : List (BusInteraction (DenseExpr p)))
+      (acc : List (DenseLinExpr p) × Std.HashSet VarId),
+      denseSolveLadders bounds ((denseFoldPlanGo bs facts dbis acc).1.reverse)
+        = match denseSolveLadders bounds acc.1.reverse with
+          | some r => some r
+          | none => denseFindFold bs facts bounds dbis := by
+  intro dbis
+  induction dbis with
+  | nil =>
+    intro acc
+    cases h : denseSolveLadders bounds acc.1.reverse <;>
+      simp [denseFoldPlanGo, denseFindFold, h]
+  | cons bi rest ih =>
+    intro acc
+    unfold denseFoldPlanGo denseFindFold
+    cases hb : densePairByteOps? bs facts bi with
+    | none => simpa using ih acc
+    | some xy =>
+      obtain ⟨x, y⟩ := xy
+      dsimp only
+      obtain ⟨fx, hfx, hsx⟩ := denseFoldOperand_rev bounds x acc
+      obtain ⟨fy, hfy, hsy⟩ := denseFoldOperand_rev bounds y (denseFoldOperand x acc)
+      rw [ih (denseFoldOperand y (denseFoldOperand x acc)), hfy, hfx, List.append_assoc,
+        denseSolveLadders_append, denseSolveLadders_append, hsx, hsy]
+      cases denseSolveLadders bounds acc.1.reverse with
+      | some r => rfl
+      | none =>
+        cases denseSolveOperand bounds x with
+        | some r => rfl
+        | none => cases denseSolveOperand bounds y <;> rfl
+
+/-- The planned solve is the interaction scan: the plan holds the ladder forms of both operands of
+    each recognized check in scan order, keeping exactly those `denseSolveOperand` would attempt (a
+    successful linearization with at least two terms), and `denseAttemptLadder` reads nothing but
+    `bounds` and the form. -/
+theorem denseSolveLadders_eq_findFold (bs : BusSemantics p) (facts : BusFacts p bs)
+    (bounds : Std.HashMap VarId Nat) (dbis : List (BusInteraction (DenseExpr p))) :
+    denseSolveLadders bounds (denseFoldPlan bs facts dbis).1
+      = denseFindFold bs facts bounds dbis := by
+  have h := denseSolveLadders_foldPlanGo bs facts bounds dbis ([], ∅)
+  simpa using h
+
+/-- If the planned scan over the key-restricted bounds map fires `(i, dd)`, every satisfying
+    assignment of `d` has `denv i = dd` (bounds validity from `denseBuildWith_sound`). -/
 theorem denseDigitFoldFindFold_entails [NeZero p] (hp : 256 < p) (bs : BusSemantics p)
     (facts : BusFacts p bs) (d : DenseConstraintSystem p) (i : VarId) (dd : ℕ)
-    (h : denseFindFold bs facts (denseBuild bs facts d.busInteractions) d.busInteractions
-      = some (i, dd)) :
+    (h : denseDigitFoldFind bs facts d.busInteractions = some (i, dd)) :
     ∀ denv, d.satisfies bs denv → denv i = (dd : ZMod p) := by
   intro denv hsat
   have hbus := hsat.2
-  have hB : ∀ w bnd, (denseBuild bs facts d.busInteractions)[w]? = some bnd → (denv w).val < bnd :=
-    fun w bnd hlk => denseBuild_sound bs facts d.busInteractions w bnd hlk denv hbus
+  rw [denseDigitFoldFind_eq, denseSolveLadders_eq_findFold] at h
+  have hB : ∀ w bnd,
+      (denseBuildWith bs facts (some (denseFoldPlan bs facts d.busInteractions).2)
+        d.busInteractions)[w]? = some bnd → (denv w).val < bnd :=
+    fun w bnd hlk => denseBuildWith_sound bs facts _ d.busInteractions w bnd hlk denv hbus
   exact denseFindFold_sound hp bs facts _ denv hB d.busInteractions hbus i dd h
 
 /-! ## Reducing the point substitution to `substF` -/
@@ -607,7 +729,7 @@ theorem denseDigitFoldF_covered (reg : VarRegistry) (bs : BusSemantics p) (facts
   unfold denseDigitFoldF
   by_cases hp : 256 < p
   · rw [if_pos hp]
-    cases denseFindFold bs facts (denseBuild bs facts d.busInteractions) d.busInteractions with
+    cases denseDigitFoldFind bs facts d.busInteractions with
     | none => exact hcov
     | some idd =>
         obtain ⟨i, dd⟩ := idd
@@ -624,8 +746,7 @@ theorem denseDigitFoldF_correct (reg : VarRegistry) (bs : BusSemantics p) (facts
   by_cases hp : 256 < p
   · rw [if_pos hp]
     haveI : NeZero p := ⟨by omega⟩
-    cases hff : denseFindFold bs facts (denseBuild bs facts d.busInteractions)
-        d.busInteractions with
+    cases hff : denseDigitFoldFind bs facts d.busInteractions with
     | none => exact DensePassCorrect.refl reg.isInput d bs
     | some idd =>
         obtain ⟨i, dd⟩ := idd
