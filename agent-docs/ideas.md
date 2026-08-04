@@ -830,15 +830,35 @@ never tries. `denseMatchByteSingle` also runs `denseByteShape?` per position wit
 runtime twin (16 dictionary builds in the C, the highest count in the sweep), where its
 `denseMatchRangeCheck` counterpart has one; that is what the surviving single pass costs.
 
-**Effectiveness note, unmeasured:** slot 0 of a tuple check needs `x < 256`, and the pass accepts
-only an XOR-bus byte *self-check* there (`denseByteShape?`, `.selfCheck`). A plain variable-range
-check `[x, 8]` proves the same thing and is not considered, so two range checks whose widths match a
-declared tuple bus's `(s1, s2)` — e.g. 8 and 11 on OpenVM bus 7 (`tupleRangeChecker 256 2048`) —
-never pack. That needs no audited change and reuses `tupleRangeBus_sound`; how often such a pair
-co-occurs is unknown. Note the arity ceiling is two and is *audited*: `OpenVmBusType.tupleRangeChecker`
-carries exactly two sizes, the semantics send any other payload length to `False`, and the parser
-rejects a `TupleRangeChecker` with any other arity — so packing three checks into one interaction is a
-bus-vocabulary change, not a pass change.
+**Widening what feeds a tuple check is a measured dead end — worth 1 bus interaction in the whole
+corpus** (2026-08-04). Slot 0 needs `x < 256` and the pass accepts only an XOR-bus byte *self-check*
+there (`denseByteShape?`, `.selfCheck`), while `denseByteShape?` recognizes five other single-operand
+shapes and a plain variable-range check `[x, 8]` proves the same bound — so the pass looks
+under-powered. It is not. Counting the *leftovers* in the optimized exports of all 303 corpus APCs
+(202 have a declared tuple bus; no Lean needed, three scans of ~95 s each):
+
+- **Width-8 variable-range checks never survive: 0 in all 202 cases.** Byte-bounded values are
+  checked on the bitwise chip, not the variable range checker, so slot 0 can only ever be fed by a
+  byte check — which is what the pass already does. Two range checks whose widths match `(s1, s2)`
+  never co-occur.
+- **Where exact-width-`s2` checks are left over (79 cases), the leftover byte interactions are
+  load-bearing XOR relations** — 6 651 of them corpus-wide, `op = xorOp` with three symbolic operands
+  (`z = x ⊕ y`). They imply three byte bounds *and* the relation, so removing one would weaken the
+  output; `denseByteShape?` correctly returns `none`. wasm-eth `apc_028` is the extreme: 156 leftover
+  width-12 checks against 360 byte interactions, **all** of them real XORs.
+- **Where byte-check capacity is left over (91 cases: 3 269 pair checks + 41 self-checks), the
+  exact-width range side is exhausted** (`n_s2 = 0`). The leftover pairs are already `bytePackLate`'s
+  output, i.e. maximally packed 2 → 1 by another pass.
+
+Of 31 cases that end with both a leftover exact-width check and *some* byte interaction, exactly
+**one** has a leftover byte interaction that is a byte *check* (wasm-eth `apc_006`, one `xorZeroL`).
+The pass is saturated on the two-slot bus: it is limited by whichever side runs out first, and the
+two never co-exist. Re-propose only for a corpus whose range checks land on the declared `(s1, s2)`
+widths.
+
+The arity ceiling of two is *audited*, so widening the bus is not a pass change:
+`OpenVmBusType.tupleRangeChecker` carries exactly two sizes, the semantics send any other payload
+length to `False`, and the parser rejects a `TupleRangeChecker` with any other arity.
 
 ### busPairCancel residual after entry 174 (the checked-form memo + canonical keys)  ·  *runtime*
 
