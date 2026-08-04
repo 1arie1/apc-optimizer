@@ -271,31 +271,33 @@ A pass's reported time is the pass and nothing else: `denseApplyTimed` adds no w
 derivation list — it threads `reg`/`out`/`coverage` and drops `derivs`, while `pipeline` appends
 them at every `andThen` and decodes them at the exit. -/
 
-/-- The threaded dense cleanup state: the registry, the dense system, and its coverage proof (erased
-    at runtime — it just lets `DenseVerifiedPassW` application typecheck). -/
-abbrev DenseProfState (p : ℕ) :=
-  Σ' (reg : VarRegistry) (d : DenseConstraintSystem p), d.CoveredBy reg
+/-- The threaded dense cleanup state: the registry, the dense system, its coverage proof (erased at
+    runtime — it just lets `DenseGuardedPassW` application typecheck) and its degree certificate. -/
+abbrev DenseProfState (p : ℕ) (b : DegreeBound) :=
+  Σ' (reg : VarRegistry) (d : DenseConstraintSystem p) (_ : d.CoveredBy reg), DenseDegCert b d
 
 /-- Apply one dense pass and return the threaded state plus elapsed milliseconds.
 
     `IO.lazyPure fn` is `pure (fn ())`, so the application — and with it the whole pass — runs
     between the two clock reads; that is all it is here for (a plain `let` the compiler may float
     across an IO action would not be timed at all). Nothing further needs forcing: Lean is strict,
-    so the returned `DensePassResult`'s `out` is already a fully built `DenseConstraintSystem`
+    so the returned result's `out` is already a fully built `DenseConstraintSystem`
     (two `List`s of `DenseExpr`, no `Thunk` anywhere in the type), and its remaining fields are
     `Prop`s, erased at runtime. -/
-def denseApplyTimed {p : ℕ} (pass : DenseVerifiedPassW p) (st : DenseProfState p)
-    (bs : BusSemantics p) (facts : BusFacts p bs) : IO (DenseProfState p × Nat) := do
+def denseApplyTimed {p : ℕ} {b : DegreeBound} (pass : DenseGuardedPassW p b)
+    (st : DenseProfState p b) (bs : BusSemantics p) (facts : BusFacts p bs) :
+    IO (DenseProfState p b × Nat) := do
   let t0 ← IO.monoMsNow
-  let r ← IO.lazyPure (fun _ => pass st.1 st.2.1 st.2.2 bs facts)
+  let r ← IO.lazyPure (fun _ => pass st.1 st.2.1 st.2.2.1 st.2.2.2 bs facts)
   let t1 ← IO.monoMsNow
-  pure (⟨r.reg', r.out, r.covered⟩, t1 - t0)
+  pure (⟨r.res.reg', r.res.out, r.res.covered, r.cert⟩, t1 - t0)
 
 /-- Run one dense stage's passes in order (prelude/coda; the cleanup stage iterates the cycle to a
     fixpoint below), threading the dense state and accumulating per-pass elapsed time. -/
-def denseRunCycleTimed {p : ℕ} (passes : List (String × DenseVerifiedPassW p))
-    (st : DenseProfState p) (bs : BusSemantics p) (facts : BusFacts p bs)
-    (acc : Std.HashMap String Nat) (verbose : Bool := false) : IO (DenseProfState p × Std.HashMap String Nat) := do
+def denseRunCycleTimed {p : ℕ} {b : DegreeBound} (passes : List (String × DenseGuardedPassW p b))
+    (st : DenseProfState p b) (bs : BusSemantics p) (facts : BusFacts p bs)
+    (acc : Std.HashMap String Nat) (verbose : Bool := false) :
+    IO (DenseProfState p b × Std.HashMap String Nat) := do
   let mut s := st
   let mut a := acc
   for (name, pass) in passes do
@@ -312,13 +314,14 @@ def denseRunCycleTimed {p : ℕ} (passes : List (String × DenseVerifiedPassW p)
     otherwise return the pre-cycle state. Reports each iteration's dense sizes and wall time.
     Terminates by well-founded recursion on the threaded key `k` (the current state's `sizeKey`),
     which strictly decreases at every recursive call — no fuel, no `partial`. -/
-def denseProfileLoop {p : ℕ} (passes : List (String × DenseVerifiedPassW p))
-    (st : DenseProfState p) (bs : BusSemantics p) (facts : BusFacts p bs)
+def denseProfileLoop {p : ℕ} {b : DegreeBound} (passes : List (String × DenseGuardedPassW p b))
+    (st : DenseProfState p b) (bs : BusSemantics p) (facts : BusFacts p bs)
     (acc : Std.HashMap String Nat) (iter : Nat) (k : Nat ×ₗ Nat ×ₗ Nat)
     (verbose : Bool := false) :
-    IO (DenseProfState p × Std.HashMap String Nat × Nat) := do
+    IO (DenseProfState p b × Std.HashMap String Nat × Nat) := do
   let t0 ← IO.monoMsNow
-  let (st', acc') ← denseRunCycleTimed passes st bs facts acc verbose
+  -- `denseIterateToFixpoint` re-enters the cycle through `toPass`, i.e. with no certificate.
+  let (st', acc') ← denseRunCycleTimed passes ⟨st.1, st.2.1, st.2.2.1, none⟩ bs facts acc verbose
   let t1 ← IO.monoMsNow
   IO.println s!"  cycle {iter}: {st'.2.1.varCount} vars, {st'.2.1.busInteractions.length} bus, \
     {st'.2.1.algebraicConstraints.length} constraints ({t1 - t0} ms)"
@@ -351,7 +354,7 @@ def profileRun {p : ℕ} (b : DegreeBound) (fileName : String) (cs : Circuit p)
     e.2.varCount + e.2.algebraicConstraints.length + e.2.busInteractions.length)
   let tEnc1 ← IO.monoMsNow
   IO.println s!"  encode: {tEnc1 - tEnc0} ms"
-  let st0 : DenseProfState p := ⟨e.1, e.2, VarRegistry.empty.encodeCS_covered cs⟩
+  let st0 : DenseProfState p b := ⟨e.1, e.2, VarRegistry.empty.encodeCS_covered cs, none⟩
   -- Prelude (dense, run once).
   let (st0, acc) ← denseRunCycleTimed (preludePasses (p := p) b) st0 bs facts ∅
   -- Step the dense cleanup fixpoint (the SAME `cleanupPasses` list the optimizer runs), threading
@@ -359,7 +362,9 @@ def profileRun {p : ℕ} (b : DegreeBound) (fileName : String) (cs : Circuit p)
   let (stF, acc, iters) ←
     denseProfileLoop (cleanupPasses (p := p) b) st0 bs facts acc 0 st0.2.1.sizeKey verbose
   -- Coda (dense, run once).
-  let (stF, acc) ← denseRunCycleTimed (codaPasses (p := p) b) stF bs facts acc
+  -- The three stage lists are composed with `DenseVerifiedPassW.andThen`, so each starts fresh.
+  let (stF, acc) ← denseRunCycleTimed (codaPasses (p := p) b)
+    ⟨stF.1, stF.2.1, stF.2.2.1, none⟩ bs facts acc
   -- Decode once at the pipeline output (reported on its own line).
   let tDec0 ← IO.monoMsNow
   let csAfter ← IO.lazyPure (fun _ => stF.1.decodeCS stF.2.1)

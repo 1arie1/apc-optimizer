@@ -102,6 +102,110 @@ def DenseConstraintSystem.withinDegreeB (d : DenseConstraintSystem p) (b : Degre
     decide (bi.multiplicity.degree ≤ b.busInteractions) &&
       bi.payload.all (fun e => e.degree ≤ b.busInteractions))
 
+/-! ### The incremental degree check
+
+`withinDegreeB` runs after every pass, and most of what it walks it has already accepted: a pass
+rewrites a few items and physically shares the rest of the list, or appends and shares every old
+element. Given a certificate that the *input* system is within bound, `degOkFrom` scans the output
+list in lockstep with the input list and uses `withPtrEq` — core Lean, safe, inlined by the
+compiler to a bare `lean_ptr_addr` compare with no closure — to skip a whole shared suffix, or a
+single shared item, without walking it.
+
+`withPtrEq a b k h` *is* `k ()`, so these are hints and nothing more: `degOkFrom_eq` proves the
+result equals `withinDegreeB`. The definitions return their own specification
+(`{ r : Bool // r = … }`) because `withPtrEq`'s `h` obligation has to be discharged while the
+recursion is being elaborated; a `Subtype` whose only runtime field is a `Bool` is that `Bool`. -/
+
+/-- `withinDegreeB`'s per-constraint test. -/
+@[inline] def denseCsDegOk (bnd : Nat) (e : DenseExpr p) : Bool := e.degree ≤ bnd
+
+/-- `List.all` over `denseCsDegOk` without the per-interaction closure `List.all` allocates. -/
+def denseExprsDegOk (bnd : Nat) : List (DenseExpr p) → Bool
+  | [] => true
+  | e :: rest => denseCsDegOk bnd e && denseExprsDegOk bnd rest
+
+theorem denseExprsDegOk_eq (bnd : Nat) (l : List (DenseExpr p)) :
+    denseExprsDegOk bnd l = l.all (fun e => e.degree ≤ bnd) := by
+  induction l with
+  | nil => rfl
+  | cons e rest ih => rw [denseExprsDegOk, ih, List.all_cons, denseCsDegOk]
+
+/-- `withinDegreeB`'s per-interaction test. -/
+def denseBiDegOk (bnd : Nat) (bi : BusInteraction (DenseExpr p)) : Bool :=
+  decide (bi.multiplicity.degree ≤ bnd) && denseExprsDegOk bnd bi.payload
+
+/-- Lockstep degree scan of `ol` against a within-bound `dl`: a pointer-identical remaining list
+    ends the scan, a pointer-identical item is skipped, everything else is walked. -/
+def denseCsDegFrom (bnd : Nat) : (ol dl : List (DenseExpr p)) →
+    dl.all (denseCsDegOk bnd) = true → { r : Bool // r = ol.all (denseCsDegOk bnd) }
+  | [], _, _ => ⟨true, rfl⟩
+  | o :: ot, [], _ =>
+      ⟨denseCsDegOk bnd o && (denseCsDegFrom bnd ot [] rfl).1, by
+        rw [(denseCsDegFrom bnd ot [] rfl).2, List.all_cons]⟩
+  | o :: ot, x :: xt, hd =>
+      have hx : denseCsDegOk bnd x = true :=
+        ((Bool.and_eq_true _ _).mp (by rwa [List.all_cons] at hd)).1
+      have hxt : xt.all (denseCsDegOk bnd) = true :=
+        ((Bool.and_eq_true _ _).mp (by rwa [List.all_cons] at hd)).2
+      have hval : (withPtrEq o x (fun _ => denseCsDegOk bnd o) (fun h => by rw [h]; exact hx)
+            && (denseCsDegFrom bnd ot xt hxt).1) = (o :: ot).all (denseCsDegOk bnd) := by
+        show (denseCsDegOk bnd o && (denseCsDegFrom bnd ot xt hxt).1) = _
+        rw [(denseCsDegFrom bnd ot xt hxt).2, List.all_cons]
+      ⟨withPtrEq (o :: ot) (x :: xt)
+          (fun _ => withPtrEq o x (fun _ => denseCsDegOk bnd o) (fun h => by rw [h]; exact hx)
+            && (denseCsDegFrom bnd ot xt hxt).1)
+          (fun h => hval.trans (by rw [h]; exact hd)),
+        hval⟩
+
+/-- `denseCsDegFrom` for bus interactions. -/
+def denseBiDegFrom (bnd : Nat) : (ol dl : List (BusInteraction (DenseExpr p))) →
+    dl.all (denseBiDegOk bnd) = true → { r : Bool // r = ol.all (denseBiDegOk bnd) }
+  | [], _, _ => ⟨true, rfl⟩
+  | o :: ot, [], _ =>
+      ⟨denseBiDegOk bnd o && (denseBiDegFrom bnd ot [] rfl).1, by
+        rw [(denseBiDegFrom bnd ot [] rfl).2, List.all_cons]⟩
+  | o :: ot, x :: xt, hd =>
+      have hx : denseBiDegOk bnd x = true :=
+        ((Bool.and_eq_true _ _).mp (by rwa [List.all_cons] at hd)).1
+      have hxt : xt.all (denseBiDegOk bnd) = true :=
+        ((Bool.and_eq_true _ _).mp (by rwa [List.all_cons] at hd)).2
+      have hval : (withPtrEq o x (fun _ => denseBiDegOk bnd o) (fun h => by rw [h]; exact hx)
+            && (denseBiDegFrom bnd ot xt hxt).1) = (o :: ot).all (denseBiDegOk bnd) := by
+        show (denseBiDegOk bnd o && (denseBiDegFrom bnd ot xt hxt).1) = _
+        rw [(denseBiDegFrom bnd ot xt hxt).2, List.all_cons]
+      ⟨withPtrEq (o :: ot) (x :: xt)
+          (fun _ => withPtrEq o x (fun _ => denseBiDegOk bnd o) (fun h => by rw [h]; exact hx)
+            && (denseBiDegFrom bnd ot xt hxt).1)
+          (fun h => hval.trans (by rw [h]; exact hd)),
+        hval⟩
+
+/-- `withinDegreeB` in the shape `denseCsDegFrom`/`denseBiDegFrom` decide. -/
+theorem DenseConstraintSystem.withinDegreeB_eq_all (d : DenseConstraintSystem p) (b : DegreeBound) :
+    d.withinDegreeB b =
+      (d.algebraicConstraints.all (denseCsDegOk b.identities) &&
+        d.busInteractions.all (denseBiDegOk b.busInteractions)) := by
+  have hbi : (fun bi : BusInteraction (DenseExpr p) =>
+        decide (bi.multiplicity.degree ≤ b.busInteractions) &&
+          bi.payload.all (fun e => e.degree ≤ b.busInteractions))
+      = denseBiDegOk b.busInteractions := by
+    funext bi; rw [denseBiDegOk, denseExprsDegOk_eq]
+  rw [DenseConstraintSystem.withinDegreeB, hbi]
+  rfl
+
+/-- `withinDegreeB` on `out`, computed against a within-bound `d` so that items `out` shares with
+    `d` cost one pointer compare instead of an AST walk (`degOkFrom_eq`). -/
+def DenseConstraintSystem.degOkFrom (b : DegreeBound) (d out : DenseConstraintSystem p)
+    (h : d.withinDegreeB b = true) : Bool :=
+  (denseCsDegFrom b.identities out.algebraicConstraints d.algebraicConstraints
+      ((Bool.and_eq_true _ _).mp (d.withinDegreeB_eq_all b ▸ h)).1).1 &&
+  (denseBiDegFrom b.busInteractions out.busInteractions d.busInteractions
+      ((Bool.and_eq_true _ _).mp (d.withinDegreeB_eq_all b ▸ h)).2).1
+
+theorem DenseConstraintSystem.degOkFrom_eq (b : DegreeBound) (d out : DenseConstraintSystem p)
+    (h : d.withinDegreeB b = true) : d.degOkFrom b out h = out.withinDegreeB b := by
+  rw [DenseConstraintSystem.degOkFrom, (denseCsDegFrom ..).2, (denseBiDegFrom ..).2,
+    out.withinDegreeB_eq_all b]
+
 /-- The dense degree check equals the spec degree check on the decoded system. -/
 theorem VarRegistry.decodeCS_withinDegreeB (r : VarRegistry) (d : DenseConstraintSystem p)
     (b : DegreeBound) : (r.decodeCS d).withinDegreeB b = d.withinDegreeB b := by

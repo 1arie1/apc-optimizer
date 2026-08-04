@@ -6835,3 +6835,86 @@ of setup and the pass total does not change — `Thunk.get`'s `lean_mark_mt` wal
 invocations that do query it costs what the four that do not save.
 
 **Worked: yes.**
+
+### 175. Runtime: guardDegree made incremental — a threaded degree certificate and a pointer-lockstep scan (guard 0.31–0.37x, total 0.93–0.95x on four cases)
+
+`guardDegree` is not a pass but the wrapper `guardAll` puts on every entry of the three stage lists,
+so it runs 200–290 whole-system `withinDegreeB` walks per run. `guardDegreeRedesign.md` has the
+design, the node-level attribution and the dead ends.
+
+WHAT IT COSTS NOW: against a build with the guard deleted (`if true then r`, `sorry` on
+`guardDegree_respectsDeg`), interleaved: openvm-eth `apc_006` 315 → 285 ms (0.905x), wasm-eth
+`apc_012` 2653 → 2425 (0.914x), keccak `apc_001` 2203 → 2018 (0.916x). The guard is **8–10 % of
+total wall**, up from the 6–7 % measured before entries 171–174 — those rewrites cut the passes, not
+the guard, so its share grew. That is the ceiling for everything below.
+
+WHERE THE REDUNDANCY IS: a throwaway probe classified every AST node the guard visits by how a
+lockstep scan against the input system would treat it (probe uses unsafe pointer identity; the
+shipped code uses core Lean's safe `withPtrEq`). Of 7.79 M / 64.9 M / 36.1 M nodes (apc_006 /
+apc_012 / keccak): **35–45 % sit in a remaining list that *is* the input's remaining list**, another
+**23–25 % in an item pointer-identical to the aligned input item**, and 30–39 % are genuinely
+rebuilt. Most of the guard's work is re-deciding degrees it has already accepted.
+
+THE CHANGE:
+1. **A degree certificate threaded through the guarded stage lists.** `DenseDegCert b d :=
+   Option (PLift (d.withinDegreeB b = true))` — the proof is erased, so a certificate is a
+   constructor tag at runtime. `guardAll` now returns `DenseGuardedPassW p b` (system + certificate
+   in, result + certificate out) and *produces* `some` whenever its own check passes, so the
+   certificate establishes itself on the first invocation of a stage; the optimizer's input circuit
+   is not assumed within bound. Stage-list entries stay plain `DenseVerifiedPassW`, so AGENTS.md's
+   one-line pass-adding contract is unchanged; `DenseGuardedPassW.toPass` feeds `none` and hands the
+   chain back to `denseIterateToFixpoint` and `pipeline`.
+2. **A sharing-aware check** (`degOkFrom`, `Measure.lean`): walk the output's item list in lockstep
+   with the input's, using `withPtrEq` at two granularities — a pointer-identical *remaining list*
+   ends the scan, a pointer-identical *item* skips its AST walk. `withPtrEq a b k h` is
+   definitionally `k ()`, so these are hints only: `degOkFrom_eq` proves the result equals
+   `withinDegreeB` and the compiler emits a bare `lean_ptr_addr` compare with no closure. Each
+   definition returns its own specification (`{ r : Bool // r = ol.all ok }`) because `withPtrEq`'s
+   `h` obligation must be discharged while the recursion is elaborated; a one-field `Subtype` is
+   that field. Two monomorphic copies (constraints, interactions) keep the per-item test a direct
+   call, which also removes the boxed closure `List.all` allocated per item.
+3. `attribute [local irreducible] densePipeline` after `densePipeline_respectsDeg`: the extra
+   definitional layer pushed `optimizerWithBusFacts_correct`'s `change`s past the heartbeat limit.
+   Sealing the pipeline where it is used only through its `DensePassResult` fields takes that file
+   from 8.7 s to 1.3 s — faster than before the change.
+
+NUMBERS (20-core box, serial, interleaved, 2–3 reps; sha256 one shot per rep, first rep discarded as
+cold): openvm-eth `apc_006` 315 → 293 ms (**0.930x**), wasm-eth `apc_012` 2653 → 2510 (**0.946x**),
+keccak `apc_001` 2203 → 2075 (**0.942x**), sha256 `apc_001` 24 055 → 22 563 (**0.938x**). That
+recovers 63–73 % of the guard's cost (guard 0.31–0.37x). Per pass, what shrinks is the entries that
+share their items (`carryBranch`, `bytePack`, `busPairCancel`, `tautoBus`, `disconnected`,
+`rootPairUnify`); what still pays is the entries that rebuild everything (`normalize1/2`,
+`constFold0/1/2`, `gauss`, `domainBatch`). A pass that shares nothing pays two pointer compares per
+item on top of the walk it would have done anyway.
+VERIFIED: `opt-export` **byte-identical** on 8 cases — openvm-eth `apc_006` / `apc_100`, wasm-eth
+`apc_012` / `apc_063`, OpenVM keccak `apc_001`, SP1 keccak `apc_001`, SP1 rsp `apc_001` / `apc_002`;
+`lake build` clean, no warnings; `check-proof-integrity` passes (no `sorry`, three standard axioms).
+
+DEAD ENDS, all measured on this revision:
+* **Sub-expression lockstep down `add` spines** — sound (every subterm of a certified expression is
+  certified, and an `add` node needs only a Boolean from each child), and worth **0.01 % of nodes**:
+  the passes that rebuild items materialize fresh trees all the way down. This is the only idea that
+  could have attacked the residual from inside the guard.
+* **An unboxed `UInt64` honest walk** (`denseDegU` saturating at 65536, one prepared machine-word
+  bound per invocation; the C is a pure register recursion — no boxed `Nat`, no `lean_dec`).
+  Implemented and measured **flat** (apc_012 2507 vs 2492, keccak 2079 vs 2098, apc_006 292 vs 293).
+  The honest walk is memory-bound on the AST, not arithmetic-bound. Note for other hot `Nat`
+  comparisons: a first version capped at `2^32` was **5 % worse** because Lean emits
+  `lean_cstr_to_nat("4294967296")` *per call* for a literal above the scalar range.
+* **Per-pass degree monotonicity (ideas.md R5's "no check at all")** — sized with `sorry`-certified
+  entries for `constFold0/1/2`, `constFoldEnd`, `dedup`, `dedupLate`, `trivialConstr`,
+  `zeroMultBus`, `tautoBus`, `subsumedRange`, `subsumedCheck`, `disconnected`: keccak `constFold1`
+  66 → 55 ms, `constFold2` 59 → 52, `constFold0` 38 → 34, nothing else moves — **~22 ms of 2075
+  (1 %)**, inside the noise on the total. The drop passes gain nothing (lockstep already serves
+  them). `DenseExpr.fold`'s monotonicity is a 15-line lemma but it needs a mixed
+  guarded/certified stage list, and the big walkers (`gauss`, `normalize1/2`, `domainBatch`) need
+  real per-pass degree theorems.
+* **Threading the certificate through `denseIterateToFixpointFrom`** — the first cleanup pass
+  (`degenRange`) then stops paying a full walk: ~10 ms of keccak (0.5 %), against a second copy of
+  the fixpoint definition and its `respectsDeg` induction.
+* **Resynchronizing the lockstep cursor after a drop or a prepend** — impossible in the safe
+  fragment: `withPtrEq` may only skip work whose value is already known `true`, so the pointer test
+  cannot be observed and the cursor must advance blindly. `domainBatch` and `dedup`, both
+  drop-and-append passes, are the two largest residual walkers because of exactly this.
+
+**Worked: yes.**

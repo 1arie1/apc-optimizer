@@ -42,21 +42,21 @@ correctness theorems in `ApcOptimizer/Optimizer.lean` are projections of `optimi
 /-- Wrap every pass of a stage list in the degree guard, so degree safety holds uniformly
     (`guardAll_chain_respectsDeg`) with zero per-pass proof burden. -/
 def guardAll (b : DegreeBound) (l : List (String × DenseVerifiedPassW p)) :
-    List (String × DenseVerifiedPassW p) :=
+    List (String × DenseGuardedPassW p b) :=
   l.map (fun (n, f) => (n, f.guardDegree b))
 
 /-- Stage 1 of 3 (`preludePasses`, `cleanupPasses`, `codaPasses`): run once to canonicalize the
     freshly-parsed system. The three lists are the single source of truth for the pass sequence —
     `pipeline` folds them and the `profile` CLI (`Main.lean`) times the same lists, so they cannot
     drift. `String` labels name passes in the profiler only. -/
-def preludePasses (b : DegreeBound) : List (String × DenseVerifiedPassW p) :=
+def preludePasses (b : DegreeBound) : List (String × DenseGuardedPassW p b) :=
   guardAll b [ ("constFold0", denseConstantFoldPass) ]
 
 /-- Stage 2 of 3 (see `preludePasses`): the cleanup schedule, iterated to a fixpoint
     (`denseIterateToFixpoint`, no budget). Each entry's optimization is documented at its own
     definition. To add a pass, append one `(name, pass)` entry here (AGENTS.md →
     "Adding an optimization"). -/
-def cleanupPasses (b : DegreeBound) : List (String × DenseVerifiedPassW p) :=
+def cleanupPasses (b : DegreeBound) : List (String × DenseGuardedPassW p b) :=
   -- One primality decision per run, threaded to every prime-gated pass (each reads the `Bool` in
   -- O(1) instead of re-running `decide (Nat.Prime p)`).
   let pw := PrimeWitness.of p
@@ -92,7 +92,7 @@ def cleanupPasses (b : DegreeBound) : List (String × DenseVerifiedPassW p) :=
 /-- Stage 3 of 3 (see `preludePasses`): run once after the cleanup fixpoint. Order matters — the
     inline notes below flag the non-obvious sequencing; each pass's own definition documents what it
     does. -/
-def codaPasses (b : DegreeBound) : List (String × DenseVerifiedPassW p) :=
+def codaPasses (b : DegreeBound) : List (String × DenseGuardedPassW p b) :=
   let pw := PrimeWitness.of p
   guardAll b
   [ ("busPairCancelLate", denseBusPairCancelPass pw true),
@@ -123,8 +123,9 @@ between a single encode at entry and a single decode at output (no decode betwee
 /-- Every pass of a `guardAll`-built stage list respects the degree bound — one lemma covering all
     three stage lists, with no per-entry case analysis. -/
 theorem guardAll_chain_respectsDeg (b : DegreeBound) (l : List (String × DenseVerifiedPassW p)) :
-    DenseRespectsDeg b (denseChain ((guardAll b l).map (·.2))) := by
-  apply denseChain_respectsDeg
+    DenseRespectsDeg b (denseGuardedChain ((guardAll b l).map (·.2))).toPass := by
+  apply DenseGuardedPassW.toPass_respectsDeg
+  apply denseGuardedChain_respectsDeg
   intro f hf
   simp only [guardAll, List.map_map, List.mem_map] at hf
   obtain ⟨⟨n, g⟩, -, rfl⟩ := hf
@@ -134,10 +135,10 @@ theorem guardAll_chain_respectsDeg (b : DegreeBound) (l : List (String × DenseV
     (`denseIterateToFixpoint`, no budget — runs until the lexicographic dense size key stops
     shrinking), then the coda chain. -/
 def densePipeline (b : DegreeBound) : DenseVerifiedPassW p :=
-  DenseVerifiedPassW.andThen (denseChain ((preludePasses b).map (·.2)))
+  DenseVerifiedPassW.andThen (denseGuardedChain ((preludePasses b).map (·.2))).toPass
     (DenseVerifiedPassW.andThen
-      (denseIterateToFixpoint (denseChain ((cleanupPasses b).map (·.2))))
-      (denseChain ((codaPasses b).map (·.2))))
+      (denseIterateToFixpoint (denseGuardedChain ((cleanupPasses b).map (·.2))).toPass)
+      (denseGuardedChain ((codaPasses b).map (·.2))).toPass)
 
 theorem densePipeline_respectsDeg (b : DegreeBound) :
     DenseRespectsDeg b (densePipeline (p := p) b) := by
@@ -146,6 +147,10 @@ theorem densePipeline_respectsDeg (b : DegreeBound) :
     (DenseVerifiedPassW.andThen_respectsDeg
       (denseIterateToFixpoint_respectsDeg (guardAll_chain_respectsDeg b _))
       (guardAll_chain_respectsDeg b _))
+
+-- Past this point the pipeline is used only through its `DensePassResult` fields; sealing it keeps
+-- the elaborator from unfolding the whole 40-pass chain when it checks those projections.
+attribute [local irreducible] densePipeline
 
 /-- The circuit optimizer: encode once into the dense `VarId` representation, run `densePipeline`,
     then decode the result and its derivations once. `decode ∘ encode = id` turns the dense

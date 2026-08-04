@@ -392,20 +392,25 @@ index gate**  ·  domainFold **done (entry 167)**, reencode open:
      components and use Markowitz in purely affine components; this could safely extend dynamic
      scheduling below the coarse 8192-row gate.
 
-**R5. Framework: track "pass returned input unchanged" and skip the per-pass degree check**  ·
-*medium value, one framework change*. Every pass is `guardDegree`-wrapped, and the guard runs
-`withinDegreeB` — a full AST walk — on every pass output, ~30×/cycle, ~245×/run
-(`FactPass.lean:98`), even though most invocations return `cs` itself (the #146 measurement: ~61 %
-of invocations are no-op full scans). Add an `unchanged : Option (out = cs ∧ derivs = [])` field
-(default `none`) to `PassResult`; no-op branches supply `some ⟨rfl, rfl⟩`; `guardDegree` returns
-`r` directly when set (out = cs is within-degree by the pipeline invariant — provable, not
-pointer magic); `andThen` propagates; `iterateToFixpoint` skips both `sizeKey` recomputations
-when the whole cycle is unchanged, and carries the previous cycle's `sizeKey` forward instead of
-recomputing `cs.sizeKey` (`FactPass.lean:77`, one redundant O(E) HashSet build per cycle today).
-**Now the single largest line item of a rebuilt pass** (entry 173): after hintCollapse's rebuild the
-guard is ~103 ms of its 178 ms on sha256 `apc_001` — **58 % of the pass**, and 9 of its 10
-invocations return the input untouched. Every pass rebuilt to a cheap sweep hits this floor next;
-sizing it on that case first is one `IO` timer.
+**R5. Framework: the per-pass degree check**  ·  **done for the sharing half (entry 175)**; what is
+left is per-pass degree proofs. `guardDegree` wraps every stage-list entry and used to run
+`withinDegreeB` — a whole-system AST walk — 200–290×/run. Entry 175 threads an erased degree
+certificate through the guarded stage lists and scans the output's item list in lockstep with the
+input's, skipping a pointer-identical remaining list or item (`degOkFrom`, `Measure.lean`): the guard
+went 0.31–0.37x, total **0.93–0.95x** on four cases, byte-identical, with no pass-side change. That
+also retires the `unchanged : Option (out = cs)` variant listed here before — pointer lockstep
+reaches 65 % of *nodes* and subsumes whole-invocation no-ops.
+   What remains is the 30–39 % of nodes in genuinely rebuilt items — `normalize1/2`, `constFold0/1/2`,
+   `gauss`, `domainBatch`, in that order — and the only lever left is **not checking them at all**:
+   a pass that provably cannot raise the degree can carry `DenseRespectsDeg b f` (for all `b`) and
+   hand the certificate straight through. Sized with `sorry` certificates: the easy set
+   (`constFold*` + the drop passes) is **~1 % of the run** (keccak `constFold1` 66 → 55 ms), so it
+   only pays if `normalize` and `gauss` are included, and those need real per-pass degree theorems.
+   `degreeGuardRefactor.md` (untracked) has the fuller plan, including why the ∀-`b` quantification
+   blocks a whole class of passes. Two smaller residuals, both measured: threading the certificate
+   through `denseIterateToFixpointFrom` (~0.5 % of keccak, needs a second copy of the fixpoint proof)
+   and the `withPtrEq` cursor's inability to resync after a drop or prepend (structural, not fixable
+   in the safe fragment — see entry 175's dead ends).
 
 **R6. Cross-cycle dirtiness (the real fix for no-op rescans)**  ·  *large refactor; the cheap
 slice is now a measured dead end*. **Do not build a cross-cycle negative-memo for domainBatch**:
@@ -764,6 +769,20 @@ instead of 256 (~30× on those scans). It needs a per-item degree analysis and a
 are non-survivors" argument (`a·y + b = 0` has at most one root when `a ≠ 0`).
 
 ### Runtime dead ends (measured; do not re-propose without new evidence)
+
+- **Sub-expression sharing in the degree guard** (entry 175): descending into an unmatched item and
+  pointer-comparing aligned `add`-spine subtrees is sound (every subterm of a certified expression is
+  certified) and recovers **0.01 % of the guard's nodes** — the passes that rebuild items
+  (`normalize`, `constFold`, `gauss`, `digitFold`) materialize fresh trees all the way down. Item- and
+  list-level pointer identity is all the sharing there is.
+- **An unboxed `UInt64` walk for the degree check** (entry 175): the C is a pure register recursion
+  with no boxed `Nat` and no refcount traffic, and it measures **flat** — that walk is memory-bound on
+  the AST. Also: a `Nat` literal above the scalar range (`2^32`) in a per-item comparison costs
+  `lean_cstr_to_nat` *per call* and made the same change 5 % worse before the cap moved to 65536.
+- **Resynchronizing a `withPtrEq` lockstep cursor** (entry 175): `withPtrEq a b k h` is
+  definitionally `k ()`, so a pointer test may only skip work already known to be `true` — its
+  outcome cannot steer control flow. Any scan that must *search* for the matching item (after a drop
+  or a prepend) needs pointer identity as a `Bool`, i.e. `unsafe`/`implemented_by`.
 
 - **Deferring a per-invocation index's force to its first query** (entry 174, busPairCancel's
   `cands`): the counters say it is queried 2 498 times in sha256 cycle 1, 0 times in cycles 8–10 and
