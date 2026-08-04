@@ -763,14 +763,41 @@ theorem denseArrEntry_of_mem {q : Nat} {l : List Nat} (h : q ∈ l) :
   obtain ⟨k, hk⟩ := List.mem_iff_getElem?.mp h
   exact ⟨k, by rw [List.getElem?_toArray]; exact hk⟩
 
+/-- What a prepared address array must satisfy to serve candidate bus `busId`: it covers every
+    position, carries each position's own bus id, and *is* the exact `denseAddrPrep` record wherever
+    the position is on `busId`. Off-bus records are only ever asked for that bus id, which is what
+    lets one array serve every memory bus (`denseAddrPrepAll_ok`). -/
+def DensePreArrOk (shape : MemoryBusShape) (T : Thunk (DenseAddrCerts p)) (busId : Nat)
+    (arr : Array (BusInteraction (DenseExpr p))) (preArr : Array (DenseAddrPre p)) : Prop :=
+  preArr.size = arr.size ∧
+  ∀ (q : Nat) (m0 : BusInteraction (DenseExpr p)), arr[q]? = some m0 →
+    ∃ m, preArr[q]? = some m ∧ m.busId = m0.busId ∧
+      (m0.busId = busId → m = denseAddrPrep shape T.get.tworoot m0)
+
+theorem denseAddrPrepAll_ok (memShape : Nat → Option MemoryBusShape) (shape : MemoryBusShape)
+    (T : Thunk (DenseAddrCerts p)) (busId : Nat) (hshape : memShape busId = some shape)
+    (arr : Array (BusInteraction (DenseExpr p))) :
+    DensePreArrOk shape T busId arr (denseAddrPrepAll memShape T.get.tworoot arr) := by
+  refine ⟨by simp [denseAddrPrepAll], fun q m0 hq => ?_⟩
+  refine ⟨_, by rw [denseAddrPrepAll, Array.getElem?_map, hq]; rfl, ?_, ?_⟩
+  · show (match memShape m0.busId with
+      | some sh => denseAddrPrep sh T.get.tworoot m0
+      | none => (⟨m0.busId, Thunk.pure none, []⟩ : DenseAddrPre p)).busId = m0.busId
+    cases memShape m0.busId <;> rfl
+  · intro hbus
+    show (match memShape m0.busId with
+      | some sh => denseAddrPrep sh T.get.tworoot m0
+      | none => (⟨m0.busId, Thunk.pure none, []⟩ : DenseAddrPre p))
+        = denseAddrPrep shape T.get.tworoot m0
+    rw [hbus, hshape]
+
 /-- What one candidate's scan pair establishes. The two arrays need only be ascending and jointly
     cover every position that is not already mid-refuted; which arrays those are — the candidate's
     key bucket plus the symbolic positions, or all of the bus's positions — is the caller's choice. -/
 theorem denseScanDecide_sound (ops : DenseZModOps p) (shape : MemoryBusShape)
     (T : Thunk (DenseAddrCerts p)) (busId : Nat)
     (arr : Array (BusInteraction (DenseExpr p))) (alive : Array Bool)
-    (preArr : Array (DenseAddrPre p))
-    (hpre : preArr = arr.map (denseAddrPrep shape T.get.tworoot))
+    (preArr : Array (DenseAddrPre p)) (hok : DensePreArrOk shape T busId arr preArr)
     (S : BusInteraction (DenseExpr p)) (preS : DenseAddrPre p)
     (hpreS : preS = denseAddrPrep shape T.get.tworoot S)
     (i j : Nat) (hij : i < j) (b s : Array Nat)
@@ -785,49 +812,75 @@ theorem denseScanDecide_sound (ops : DenseZModOps p) (shape : MemoryBusShape)
     (∀ m0 ∈ denseLiveSeg arr alive (i + 1) (j - i - 1),
         denseMidRefuted ops shape T busId S m0 = true) ∧
       denseShieldOk ops shape T busId S (denseLiveSeg arr alive 0 i) = true := by
+  obtain ⟨hpsz, hpre⟩ := hok
   rw [denseScanDecide, Bool.and_eq_true, Bool.and_eq_true] at hw
   obtain ⟨⟨hmidB, hmidS⟩, hshieldB⟩ := hw
-  -- the prepared record at a position is the prepared record of the interaction there
-  have hentry : ∀ (q : Nat) m, preArr[q]? = some m →
-      ∃ m0, arr[q]? = some m0 ∧ m = denseAddrPrep shape T.get.tworoot m0 := by
-    intro q m hm
-    rw [hpre, Array.getElem?_map] at hm
-    cases hq : arr[q]? with
-    | none => rw [hq] at hm; exact absurd hm (by simp)
-    | some m0 => rw [hq] at hm; exact ⟨m0, rfl, (Option.some.inj hm).symm⟩
+  -- an on-bus position carries the exact prepared record; an off-bus one answers on the bus-id arm
+  have hmidPt : ∀ (q : Nat) (m0 : BusInteraction (DenseExpr p)), arr[q]? = some m0 →
+      ∃ m, preArr[q]? = some m ∧
+        denseMidRefutedP ops T.get.nonzero busId preS m
+          = denseMidRefuted ops shape T busId S m0 := by
+    intro q m0 hq
+    obtain ⟨m, hm, hbid, hexact⟩ := hpre q m0 hq
+    refine ⟨m, hm, ?_⟩
+    by_cases hbus : m0.busId = busId
+    · rw [hexact hbus, hpreS, denseMidRefutedP_eq]
+    · rw [denseMidRefutedP_offBus ops T.get.nonzero busId preS m (by rw [hbid]; exact hbus),
+        denseMidRefuted_of_crossBus ops shape T busId S m0 hbus]
+  have hshieldPt : ∀ (q : Nat) (m0 : BusInteraction (DenseExpr p)), arr[q]? = some m0 →
+      ∃ m, preArr[q]? = some m ∧
+        densePreRefutedP ops T.get.nonzero busId (denseSetNewMult ops shape) preS m
+          = densePreRefuted ops shape T busId S m0 ∧
+        denseProvRecvP busId (denseGetPreviousMult ops shape) preS m
+          = denseProvRecv ops shape busId S m0 := by
+    intro q m0 hq
+    obtain ⟨m, hm, hbid, hexact⟩ := hpre q m0 hq
+    refine ⟨m, hm, ?_, ?_⟩
+    · by_cases hbus : m0.busId = busId
+      · rw [hexact hbus, hpreS, densePreRefutedP_eq]
+      · rw [densePreRefutedP_offBus ops T.get.nonzero busId (denseSetNewMult ops shape) preS m
+              (by rw [hbid]; exact hbus),
+          densePreRefuted_of_midRefuted ops shape T busId S m0
+            (denseMidRefuted_of_crossBus ops shape T busId S m0 hbus)]
+    · by_cases hbus : m0.busId = busId
+      · rw [hexact hbus, hpreS, denseProvRecvP_eq]
+      · rw [denseProvRecvP_offBus busId (denseGetPreviousMult ops shape) preS m
+              (by rw [hbid]; exact hbus),
+          denseProvRecv_offBus ops shape busId S m0 hbus]
   -- the mid `all` and the shield fold, converted to the forms `denseMkDropResult` consumes
   have hmidOf : denseLiveAllSegP preArr alive
       (denseMidRefutedP ops T.get.nonzero busId preS) (i + 1) (j - i - 1) = true →
       ∀ m0 ∈ denseLiveSeg arr alive (i + 1) (j - i - 1),
         denseMidRefuted ops shape T busId S m0 = true := by
     intro hmidA
-    rw [hpre, denseLiveAllSegP_eq] at hmidA
-    intro m0 hm0
-    have h := List.all_eq_true.mp hmidA m0 hm0
-    rw [hpreS] at h
-    rwa [denseMidRefutedP_eq] at h
+    rw [denseLiveAllSegP_eqOf arr alive preArr _ (denseMidRefuted ops shape T busId S) hpsz
+      hmidPt] at hmidA
+    exact fun m0 hm0 => List.all_eq_true.mp hmidA m0 hm0
   have hshieldOf : (denseShieldScanSegP
       (densePreRefutedP ops T.get.nonzero busId (denseSetNewMult ops shape) preS)
       (denseProvRecvP busId (denseGetPreviousMult ops shape) preS)
       preArr alive 0 i).2 = true →
       denseShieldOk ops shape T busId S (denseLiveSeg arr alive 0 i) = true := by
     intro hshieldA
-    rw [hpre, denseShieldScanSegP_eq] at hshieldA
-    have hP : (fun m => densePreRefutedP ops T.get.nonzero busId
-          (denseSetNewMult ops shape) preS (denseAddrPrep shape T.get.tworoot m))
-        = densePreRefuted ops shape T busId S :=
-      funext fun m => by rw [hpreS]; exact densePreRefutedP_eq ops shape T busId S m
-    have hQ : (fun m => denseProvRecvP busId (denseGetPreviousMult ops shape) preS
-          (denseAddrPrep shape T.get.tworoot m))
-        = denseProvRecv ops shape busId S :=
-      funext fun m => by rw [hpreS]; exact denseProvRecvP_eq ops shape T.get.tworoot busId S m
-    rw [hP, hQ, denseShieldScanW_eq] at hshieldA
+    rw [denseShieldScanSegP_eqOf _ _ (densePreRefuted ops shape T busId S)
+        (denseProvRecv ops shape busId S) arr alive preArr hpsz
+        (fun q m0 hq => (hshieldPt q m0 hq).imp
+          (fun _ h => ⟨h.1, h.2.1, h.2.2⟩)),
+      denseShieldScanW_eq] at hshieldA
     exact hshieldA
+  -- every position the prepared array answers for is a position of `arr`
+  have hidx : ∀ (q : Nat) (m : DenseAddrPre p), preArr[q]? = some m → ∃ m0, arr[q]? = some m0 := by
+    intro q m hm
+    have hq : q < preArr.size := by
+      by_contra hc
+      rw [Array.getElem?_eq_none (Nat.le_of_not_lt hc)] at hm
+      exact absurd hm (by simp)
+    exact ⟨arr[q], Array.getElem?_eq_getElem (by omega)⟩
   -- the mid region
   have hmidPos : ∀ q, i + 1 ≤ q → q < j → alive[q]?.getD false = true →
       ∀ m, preArr[q]? = some m → denseMidRefutedP ops T.get.nonzero busId preS m = true := by
     intro q hq1 hq2 hal m hme
-    obtain ⟨m0, hq, rfl⟩ := hentry q m hme
+    obtain ⟨m0, hq⟩ := hidx q m hme
     rcases hclass q m0 hq with ⟨k, hkq⟩ | ⟨k, hkq⟩ | href
     · exact denseLiveAllGated_sound _ preArr alive b (i + 1) j _ _ hmidB k q
         (denseLowerBound_le_of_le hbs hkq hq1) (denseLowerBound_lt_of_lt hbs hkq hq2) hkq hq1 hq2
@@ -835,7 +888,9 @@ theorem denseScanDecide_sound (ops : DenseZModOps p) (shape : MemoryBusShape)
     · exact denseLiveAllGated_sound _ preArr alive s (i + 1) j _ _ hmidS k q
         (denseLowerBound_le_of_le hss hkq hq1) (denseLowerBound_lt_of_lt hss hkq hq2) hkq hq1 hq2
         hal _ hme
-    · rw [hpreS, denseMidRefutedP_eq]; exact href
+    · obtain ⟨m', hm', hPQ⟩ := hmidPt q m0 hq
+      rw [Option.some.inj (hm'.symm.trans hme)] at hPQ
+      rw [hPQ]; exact href
   -- the shield region
   obtain ⟨q0, hq0, habB, habS⟩ := denseShieldEarly_sound
     (densePreRefutedP ops T.get.nonzero busId (denseSetNewMult ops shape) preS)
@@ -845,11 +900,13 @@ theorem denseScanDecide_sound (ops : DenseZModOps p) (shape : MemoryBusShape)
       (i + 1) (le_refl _) (by omega)), ?_⟩
   refine hshieldOf (denseShieldScanSegP_true_of _ _ preArr alive q0 i
     (fun q hq => (hq0 q hq).2) (fun q hqi hgt hal m hme => ?_) (fun r hr => (hq0 r hr).1))
-  obtain ⟨m0, hq, rfl⟩ := hentry q m hme
+  obtain ⟨m0, hq⟩ := hidx q m hme
   rcases hclass q m0 hq with ⟨k, hkq⟩ | ⟨k, hkq⟩ | href
   · exact habB k q (denseLowerBound_lt_of_lt hbs hkq hqi) hkq hgt hqi hal _ hme
   · exact habS k q (denseLowerBound_lt_of_lt hss hkq hqi) hkq hgt hqi hal _ hme
-  · rw [hpreS, densePreRefutedP_eq]
+  · obtain ⟨m', hm', hPQ, _⟩ := hshieldPt q m0 hq
+    rw [Option.some.inj (hm'.symm.trans hme)] at hPQ
+    rw [hPQ]
     exact densePreRefuted_of_midRefuted ops shape T busId S m0 href
 
 /-! ## The combined region test
@@ -866,8 +923,7 @@ consumes. -/
 def denseRegionTests (ops : DenseZModOps p) (shape : MemoryBusShape)
     (T : Thunk (DenseAddrCerts p)) (busId : Nat)
     (arr : Array (BusInteraction (DenseExpr p))) (alive : Array Bool)
-    (preArr : Array (DenseAddrPre p))
-    (hpre : preArr = arr.map (denseAddrPrep shape T.get.tworoot))
+    (preArr : Array (DenseAddrPre p)) (hok : DensePreArrOk shape T busId arr preArr)
     (kIdx : DenseKeyIdx p) (hkIdx : kIdx = denseKeyIdxBuild shape busId arr)
     (S : BusInteraction (DenseExpr p)) (preS : DenseAddrPre p)
     (hpreS : preS = denseAddrPrep shape T.get.tworoot S)
@@ -889,7 +945,7 @@ def denseRegionTests (ops : DenseZModOps p) (shape : MemoryBusShape)
           (denseProvRecvP busId (denseGetPreviousMult ops shape) preS)
           preArr alive (kIdx.byKeyA.getD (denseKeyHash kS) #[]) kIdx.symA i j, by
         intro hw
-        refine denseScanDecide_sound ops shape T busId arr alive preArr hpre S preS hpreS i j hij
+        refine denseScanDecide_sound ops shape T busId arr alive preArr hok S preS hpreS i j hij
           _ _ (by rw [hbA, List.toList_toArray]; exact hsound.sorted_key _)
           (by rw [hsA, List.toList_toArray]; exact hsound.sorted_sym) (fun q m0 hq => ?_) hw
         by_cases hbus : m0.busId = busId
@@ -914,7 +970,7 @@ def denseRegionTests (ops : DenseZModOps p) (shape : MemoryBusShape)
           (denseProvRecvP busId (denseGetPreviousMult ops shape) preS)
           preArr alive kIdx.allA #[] i j, by
         intro hw
-        refine denseScanDecide_sound ops shape T busId arr alive preArr hpre S preS hpreS i j hij
+        refine denseScanDecide_sound ops shape T busId arr alive preArr hok S preS hpreS i j hij
           _ _ (by rw [haA, List.toList_toArray]; exact hsound.sorted_all) (by simp)
           (fun q m0 hq => ?_) hw
         by_cases hbus : m0.busId = busId

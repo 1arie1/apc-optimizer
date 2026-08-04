@@ -6755,3 +6755,83 @@ prefilter in place of the counting walk (it cannot decide a global property, and
 variables are common — thousands would pass, each then needing the ~23 ms global check).
 
 **Worked: yes.**
+
+### 174. Runtime: busPairCancel round two — a prepared checked-form memo, canonical affine keys and one prepared address array (0.61–0.89x on the pass, sha256 total 0.97x)
+
+Second full redesign of the pair cancellation (`busPairCancelRedesign.md` has the design and the
+attribution; round one is #267). `busPairCancel` was again the top pass on sha256 `apc_001`
+(2 682 ms of 24 965, 10.7 %), plus 202 ms for the aggressive coda instance.
+
+**The round-one attribution ("index-lifecycle-bound, ~45 % building/marking/freeing seven
+`O(system)` indexes") no longer held** — the shared `constValue?`/`ZMod`/`substF` work landed since
+had cut the index builds. Fresh `IO` phase timers plus `probeStart`/`probeEnd` nanosecond timers
+around the four in-loop phases and per-candidate counters put the pass at: **byte justification
+1 172 ms (43 %)**, index setup 960 (35 %), region tests 350 (13 %), `guardDegree` 85, the rest ~150.
+On keccak and wasm-eth `apc_012` justification is 7 and 11 ms and setup is ~45 % — three different
+villains on three cases.
+
+**Effectively all of the justification is `denseBasisJustified`**: stubbing it to `false`
+(`@[implemented_by]`) zeroes every `chk`/`unjust` column. And the cost is where nothing is achieved
+— cycles 6–10 plus the coda spend **1 030 ms justifying ~19 candidates each and drop 9 pairs
+between them**, ~7.5 ms per candidate. `denseFormBoundAt facts bi i` is a pure function of
+`(interaction, slot)` — multiplicity constant, `payload.map constValue?`, `slotBound`,
+`denseLinearize`, `norm` — and the fuel-bounded DFS re-derived it at *every node*, for every
+variable, witness, slot, justified slot, candidate and invocation. LBR leaves on the
+justification-framed samples agreed: 43 % allocator/refcount, 15 % `denseLinearizeAcc` and friends,
+4.7 % `constValueImpl`, 2.8 % `slotBound` — `denseFormBoundAt`'s body and its garbage, nothing else.
+
+THE CHANGES:
+1. **Prepared checked-form records.** `fwits` had exactly one consumer and only ever wanted those
+   forms, so the channel *becomes* the derived one: `denseBuildFormBounds` puts one lazily-forced
+   `Thunk (List (DenseLinExpr × Nat))` per position, `denseDropFormBasis` gathers `v`'s indexed
+   positions under the old live/≠S/≠R gate, and `denseBasisReduceGo` loses `facts` entirely. The
+   soundness obligation gets *simpler*: `∀ v, ∀ LB ∈ fbasis v, (LB.1.eval denv).val < LB.2` arrives
+   ready-made instead of `denseFormBoundAt_sound` running inside the induction.
+2. **Canonical affine slot keys.** `denseConstDiffNZ a b` normalized `a − b` per compared pair; two
+   forms differ by a nonzero constant exactly when their merged, zero-dropped, variable-sorted terms
+   agree and their constants do not. `denseTermKey`/`denseTermKeyHash`/`denseKeyDiffNZ` moved out of
+   busUnify into `AddrDiseq.lean` (busUnify had them as `denseBU*`), `denseAddrAffineNeq` and
+   `denseExprTwoRootNeq` are stated on keys, and `DenseSlotPre` memoizes the key per slot. One key
+   compare decides all four two-root branch differences (`densePtrReductions_key`: both branches
+   differ only by a constant). `denseConstDiffNZ` and its `_sound` are gone.
+3. **One prepared address array for every memory bus** (`denseAddrPrepAll`): a position gets its own
+   bus's shape and a bus-id-only stub if it is on no memory bus. Sound because a position off the
+   candidate's bus is refuted on the bus-id arm (`denseMidRefutedP_offBus` and friends) — and is not
+   even in that bus's key index. `hpre` weakens from `preArr = arr.map (denseAddrPrep shape T)` to
+   `DensePreArrOk`, which needed pointwise versions of the two scan-equality lemmas
+   (`denseLiveAllSegP_eqOf`, `denseShieldScanSegP_eqOf`).
+4. **Index-build cleanups**: `denseRecvIndexAll`/`denseBuildBoundIdx`/`denseBuildFormIdx` walk the
+   array by index instead of folding `arr.toList.zipIdx` (three 12–71 k-element intermediate pair
+   lists per invocation); `denseBuildBoundIdx` gates on the multiplicity before building the
+   constant pattern; `denseBusIdsOf` replaces `(bis.map (·.busId)).dedup`; `DenseNonzeroWits.build`
+   computes its `flatMap` once instead of twice (it was written out in both fields).
+5. **Two micros in the reduction**: `L.coeff v` is invariant across the candidate forms and was
+   recomputed twice per form; `L.terms.map Prod.fst` allocated a variable list per node.
+
+NUMBERS (this 20-core box, serial, interleaved, 3 reps; sha256 one shot; `profile` per-pass ms,
+medians): sha256 `apc_001` **2682 → 1647 (0.61x)**, run 24 965 → 24 262 (0.97x); keccak `apc_001`
+195 → 140 (0.72x), 2377 → 2257 (0.95x); wasm-eth `apc_012` 283 → 238 (0.84x), 2803 → 2718 (0.97x);
+wasm-eth `apc_063` 274 → 245 (0.89x); wasm-eth `apc_036` 274 → 240 (0.88x); openvm-eth `apc_006`
+16 → 16. `busPairCancelLate` 202 → 112 on sha256. No other pass moves outside noise.
+VERIFIED: `opt-export` **byte-identical** on 14 cases — openvm-eth `apc_006` / `apc_037` /
+`apc_071` / `apc_100`, wasm-eth `apc_012` / `apc_028` / `apc_036` / `apc_063`, OpenVM keccak
+`apc_001`, sha256 `apc_001`, SP1 keccak `apc_001`, SP1 rsp `apc_001` / `apc_003` / `apc_005`;
+`lake build` clean, no warnings; `check-proof-integrity` passes.
+
+RESIDUAL (sha256, phase timers): index setup ~800 ms is now the largest item (`bidx` 200,
+`cands` 200, `fidx` 120, `domIdx` 96, `certs` 100, `prep` ~35 after (3)), justification ~430,
+region tests ~230, `guardDegree` 85. See ideas.md for what is sized and left: R12 arrays for
+`cands`/`domIdx`, the same memo shape on the *bound* side, and an allocation-free basis channel.
+
+DEAD ENDS, each measured: **merging the two justification sweeps** — `denseCheckCancel`'s
+`denseRecvSlotsJustified` (`slots.all`) and the `denseUnjustifiedSlots` (`slots.filter ¬`) on the
+next line are the same predicate at the same witnesses, and `chk` ≈ `unjust` in every invocation, so
+splitting `denseCheckCancel` at that conjunct looked worth ~570 ms — but after change (1) both
+sweeps share the memo and it is worth ~50, not worth its own split lemma. **`cands` left lazy past
+the eagerness decision**: `DenseVarCsIdx.lookup` is called 2 498 times in sha256 cycle 1, **0 times
+in cycles 8–10 and the coda, and once in the whole keccak run**, so its 198 ms looks wasted; moving
+the force to the first query (`fun x => candsT.get.lookup x` with `Thunk.mk`) moves all 198 ms out
+of setup and the pass total does not change — `Thunk.get`'s `lean_mark_mt` walk on the seven
+invocations that do query it costs what the four that do not save.
+
+**Worked: yes.**

@@ -440,7 +440,11 @@ computes the same boolean while touching only the positions above the last prova
 Design (b) (a maintained per-address-key `pending` bit with recompute-on-drop) is therefore
 **retired**: the early exit gets the same asymptotics with no cross-candidate state, no drop
 invalidation, and a value-identical transformation of the existing fold.
-   **What is left in the pass (6.4 s on sha256 `apc_001`, measured post-153)**, in order:
+   **Entries 167 and 174 rebuilt the pass twice more** (windowed region scans + scoped two-root
+   table + in-place tombstones, then the prepared checked-form memo + canonical affine keys + one
+   shared prepared address array): sha256 `apc_001` 6.4 s → 1.65 s. What is left is in
+   *busPairCancel residual after entry 174* below. The pre-167 list is kept for the shapes it names:
+   **What was left in the pass (6.4 s on sha256 `apc_001`, measured post-153)**, in order:
    the surviving certificate evaluations — `denseAddrNonzeroNeqP` is allocation- and
    allocation-bound (`denseIsZeroLin`'s zero test is dictionary-free since entry 156, but
    `denseDiffSumP` still rebuilds the chain per subset, 4 subsets per compared pair on a
@@ -674,15 +678,16 @@ eager back-substitution's exponent). What is left, LBR shares of the *new* pass 
   active-degree index back. The scheduler is 3.8 % of the pass, so it is affordable — but measure the
   bus trade before doing it.
 
-**R14. The per-invocation index lifecycle is now the dominant cost of the index-heavy passes**  ·
-*measured 2026-08-02 on the rebuilt busPairCancel; cross-pass, framework-level effort*. After that
-pass was rebuilt (windowed region scans, scoped two-root table, in-place tombstones, non-allocating
-`constValue?`, per-invocation eagerness decision — 0.36–0.60x), its remaining profile is **~45 %
-building, marking and freeing `O(system)` indexes**, not scanning: on sha256 `apc_001` it constructs
-seven of them (receive index, per-bus key index, per-bus prepared address records, bound-witness
-index, form-witness index, candidate-constraint index, single-variable domain buckets) on **each of
-11 invocations**, while the last five invocations produce **nine drops between them**. `entry` alone
-is 14 % of the pass and 57 % of that is `lean_dec_ref_cold` freeing exactly those structures.
+**R14. The per-invocation index lifecycle is the dominant cost of the index-heavy passes**  ·
+*measured 2026-08-02, re-measured 2026-08-04 (entry 174); cross-pass, framework-level effort*.
+On busPairCancel after **two** rebuilds the index builds are ~800 ms of its 1 647 ms on sha256
+`apc_001` — seven of them (receive index, per-bus key index, one prepared address array,
+bound-witness index, form-witness index, candidate-constraint index, single-variable domain buckets)
+on **each of 11 invocations**, while the last five invocations produce **nine drops between them**.
+Entry 174's counters make the waste concrete: `DenseVarCsIdx.lookup` is called 2 498 times in sha256
+cycle 1, **0 times in cycles 8–10 and the coda, and once in the whole keccak run** — and the index is
+built every time. (The obvious per-index fix, deferring the force to the first query, is a **measured
+wash**: see the dead ends.)
 
 Every index-heavy pass has the same shape — the indexes are a pure function of the system, the
 system barely changes across the terminal cycles, and the pass framework's type
@@ -698,8 +703,8 @@ its output, keyed by a cheap system fingerprint, and hand it back on the next in
   a `∀ c ∈ lookup v, c ∈ cs.algebraicConstraints` obligation, which a fingerprint on
   `cs.algebraicConstraints` does not discharge — those either stay per-invocation or need the
   membership proof carried in the cache.
-- Sizing before building: on sha256 `apc_001` busPairCancel would save on the order of 1 s of its
-  3.2 s; the same lever exists in reencode, domainBatch, gauss and flagFold, whose per-invocation
+- Sizing before building: on sha256 `apc_001` busPairCancel would save on the order of 0.7 s of its
+  1.65 s; the same lever exists in reencode, domainBatch, gauss and flagFold, whose per-invocation
   index builds were never separately attributed.
 - The cheap slice that is already **done** and should be done first everywhere else: decide
   *eagerness* per invocation instead of caching across them (`denseThunkIf` + a cheap
@@ -717,6 +722,28 @@ and in `run` alike. Consequences, all measured on busPairCancel:
      (3672 → 3966 ms);
    - so the decision belongs at the call site, per invocation (`denseThunkIf`, above). `Thunk.pure`
      and `Thunk.mk` have the same `.get`, so the choice is invisible to every proof.
+
+### busPairCancel residual after entry 174 (the checked-form memo + canonical keys)  ·  *runtime*
+
+The pass is 1 647 ms of sha256 `apc_001`, 140 ms of keccak, 238 ms of wasm-eth `apc_012`. Phase
+timers put the sha256 remainder at: **index setup ~800 ms**, byte justification ~430, region tests
+~230, `guardDegree` 85. Ranked, with what each needs:
+
+- **R12 for `cands` and `domIdx`** — 294 ms of the setup in `Std.HashMap VarId` probes and inserts;
+  `VarId.index`-keyed arrays should halve it. Both carry a `∀ c ∈ lookup v, c ∈ constraints`
+  obligation, so each needs its builder's soundness restated over arrays.
+- **The bound side of the justification, memoized like the form side** (entry 174 change 1).
+  `bnd v = denseFindVarBound bs facts (wits v) v` is recomputed at every DFS node for every term, and
+  each call re-runs `denseInteractionBound`'s `payload.map constValue?` plus a `slotBound`. A
+  per-position `(multiplicity constant, constant pattern)` record is the shared R13(b) item.
+- **An allocation-free basis channel.** `denseDropFormBasis` allocates a `flatMap` list per node; a
+  higher-order channel (`VarId → ((DenseLinExpr × Nat) → Bool) → Bool`) removes it at the cost of an
+  existential spec. Worth ~70 ms of the 430.
+- **`bidx` is 200 ms of setup** and its per-(interaction, payload variable) `facts.slotBound` call is
+  ~0.5 µs, most of it dispatch — R13(b) again, and (e)'s array-backed `busMap` lookup.
+- The region tests' residual after canonical keys is the `denseShieldEarly` walk itself plus the
+  constant-slot compares; there is no index left to sharpen without a *per-slot affine* key index
+  (which would let wasm-eth's symbolic-address-key candidates use sparse buckets instead of `allA`).
 
 ### domainBatch: a staged evaluator for the box scan  ·  *runtime*  ·  medium value
 
@@ -737,6 +764,23 @@ instead of 256 (~30× on those scans). It needs a per-item degree analysis and a
 are non-survivors" argument (`a·y + b = 0` has at most one root when `a ≠ 0`).
 
 ### Runtime dead ends (measured; do not re-propose without new evidence)
+
+- **Deferring a per-invocation index's force to its first query** (entry 174, busPairCancel's
+  `cands`): the counters say it is queried 2 498 times in sha256 cycle 1, 0 times in cycles 8–10 and
+  the coda, and **once in the whole keccak run**, so its 198 ms of build looks pure waste. Passing
+  `fun x => candsT.get.lookup x` instead of `candsT.get.lookup` (which forces the thunk where the
+  *closure* is built) with `Thunk.mk` moves all 198 ms out of setup and into the first query — and
+  the pass total is unchanged, 2 224 → 2 224 ms. `Thunk.get`'s `lean_mark_mt` walk over the index on
+  the seven invocations that do query it costs what the four that do not save. The `Thunk` note below
+  predicts this; the lesson is that it applies to *conditional* forcing too, not just to eagerness.
+- **Merging busPairCancel's two byte-justification sweeps** (entry 174): `denseCheckCancel`'s last
+  conjunct (`denseRecvSlotsJustified` = `slots.all justified`) and the `denseUnjustifiedSlots`
+  (`slots.filter (¬ justified)`) on the next line are the same per-slot predicate at the same
+  `wits`/`fbasis`, and the phase timers had `chk` ≈ `unjust` in **every** invocation — so splitting
+  `denseCheckCancel` at that conjunct and reading the verdict off `unjust.isEmpty` was worth ~570 ms
+  of the pass. Sequencing killed it: with the prepared checked-form memo in place first, both sweeps
+  share the memo and the second costs what the first does, so the merge is worth ~50 ms and not its
+  own split lemma. Re-propose only if the justification ever becomes expensive again.
 
 - **Scanning constraints before the bus in hintCollapse's code array** (entry 173), to skip the bus
   walk when nothing can fire: rejected on the structure of the codes, not on a timing. Without the

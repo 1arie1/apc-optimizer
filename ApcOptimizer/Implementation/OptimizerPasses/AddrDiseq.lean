@@ -212,41 +212,50 @@ def densePtrReductionsFast (T : DenseTwoRootMap p) (E : DenseExpr p) :
   | none => rfl
   | some L => dsimp only; rw [HashedDedup.hashedEraseDups_eq]
 
-/-! ## Nonzero-constant differences -/
+/-! ## Nonzero-constant differences, by canonical term key
 
-/-- The two forms differ by a nonzero field constant (checked structurally after normalization). -/
-def denseConstDiffNZ (a b : DenseLinExpr p) : Bool :=
-  let d := (a.add (b.scale (-1))).norm
-  d.terms.isEmpty && decide (d.const ≠ 0)
+Two linear forms differ by a nonzero constant exactly when their *canonical* terms — merged,
+zero-dropped, sorted by variable — agree and their constants do not. A key is derived once per
+expression, so the certificate arms below compare an integer and a list instead of normalizing
+`a − b` per compared pair. Soundness is `denseKeyDiffNZ_sound` (`Proofs/AddrDiseq.lean`). -/
 
-/-- Boxed twin: called from the nested `any`/`any` over branch pairs, and the `-1`, the `add`, the
-    `scale`, the `norm` and the `≠ 0` each derive their own instance chain. One shared
-    `DenseZModOps p` covers all five. -/
-def denseConstDiffNZWith (ops : DenseZModOps p) (a b : DenseLinExpr p) : Bool :=
-  let d := (a.addWith ops (b.scaleWith ops ops.negOne)).normWith ops
-  d.terms.isEmpty && decide (d.const ≠ ops.zero)
+/-- The canonical form of a linear form's terms: merged, zero-dropped, sorted by variable. -/
+def denseTermKey (l : DenseLinExpr p) : List (VarId × ZMod p) :=
+  l.norm.terms.mergeSort (fun a b => decide (a.1.index ≤ b.1.index))
 
-def denseConstDiffNZFast (a b : DenseLinExpr p) : Bool :=
-  denseConstDiffNZWith denseZModOps a b
+/-- Hash *of the canonical key*, which gates the list compare: unequal hashes are unequal keys, and
+    that is the common case. -/
+def denseTermKeyHash (k : List (VarId × ZMod p)) : UInt64 :=
+  k.foldl (fun h t => mixHash h (mixHash (hash t.1) (hash t.2.val))) 0
 
-theorem denseConstDiffNZWith_eq (ops : DenseZModOps p) (a b : DenseLinExpr p) :
-    denseConstDiffNZWith ops a b = denseConstDiffNZ a b := by
-  simp only [denseConstDiffNZWith, denseConstDiffNZ, DenseLinExpr.addWith_eq,
-    DenseLinExpr.scaleWith_eq, DenseLinExpr.normWith_eq, ops.negOne_eq, ops.zero_eq]
+/-- The two forms differ by a nonzero field constant. -/
+def denseKeyDiffNZ (a b : DenseLinExpr p) : Bool :=
+  let ka := denseTermKey a
+  let kb := denseTermKey b
+  (denseTermKeyHash ka == denseTermKeyHash kb && decide (ka = kb)) && decide (a.const ≠ b.const)
 
-@[csimp] theorem denseConstDiffNZ_eq_fast : @denseConstDiffNZ = @denseConstDiffNZFast := by
-  funext p a b
-  exact (denseConstDiffNZWith_eq denseZModOps a b).symm
+/-- One two-root reduction, keyed: the canonical key of its branches with that key's hash, plus the
+    two branch constants. Both branches differ from each other only by a constant
+    (`densePtrReductions_key`), so one key describes the pair and the four branch-pair differences
+    of `denseRedKeysNeq` are four constant comparisons. -/
+def denseRedKey (r : DenseLinExpr p × DenseLinExpr p) :
+    UInt64 × List (VarId × ZMod p) × ZMod p × ZMod p :=
+  let k := denseTermKey r.1
+  (denseTermKeyHash k, k, r.1.const, r.2.const)
+
+/-- All four branch-pair differences of two keyed reductions are nonzero constants. -/
+def denseRedKeysNeq (r r' : UInt64 × List (VarId × ZMod p) × ZMod p × ZMod p) : Bool :=
+  ((r.1 == r'.1 && decide (r.2.1 = r'.2.1)) &&
+    (decide (r.2.2.1 ≠ r'.2.2.1) && decide (r.2.2.1 ≠ r'.2.2.2))) &&
+    (decide (r.2.2.2 ≠ r'.2.2.1) && decide (r.2.2.2 ≠ r'.2.2.2))
 
 /-! ## The expression- and address-level certificates -/
 
 /-- Two dense expressions provably evaluate differently: some two-root reduction of each yields
     four branch-pair differences that are all nonzero field constants. -/
 def denseExprTwoRootNeq (T : DenseTwoRootMap p) (e e' : DenseExpr p) : Bool :=
-  (densePtrReductions T e).any (fun red =>
-    (densePtrReductions T e').any (fun red' =>
-      denseConstDiffNZ red.1 red'.1 && denseConstDiffNZ red.1 red'.2 &&
-      denseConstDiffNZ red.2 red'.1 && denseConstDiffNZ red.2 red'.2))
+  ((densePtrReductions T e).map denseRedKey).any (fun r =>
+    ((densePtrReductions T e').map denseRedKey).any (denseRedKeysNeq r))
 
 /-- Some address slot of `S` and `bi` provably evaluates differently: the two interactions have
     different addresses. -/
@@ -266,35 +275,9 @@ def denseAddrAffineNeq (shape : MemoryBusShape) (S bi : BusInteraction (DenseExp
     match S.payload[slot]?, bi.payload[slot]? with
     | some e, some e' =>
       (match denseLinearize e, denseLinearize e' with
-       | some L, some L' => denseConstDiffNZ L L'
+       | some L, some L' => denseKeyDiffNZ L L'
        | _, _ => false)
     | _, _ => false)
-
-/-- One `DenseZModOps p` above the slot scan: each slot otherwise derives three instance chains
-    (two linearizations and the constant-difference test). -/
-def denseAddrAffineNeqWith (ops : DenseZModOps p) (shape : MemoryBusShape)
-    (S bi : BusInteraction (DenseExpr p)) : Bool :=
-  shape.addressFields.any (fun slot =>
-    match S.payload[slot]?, bi.payload[slot]? with
-    | some e, some e' =>
-      (match denseLinearizeWith ops e, denseLinearizeWith ops e' with
-       | some L, some L' => denseConstDiffNZWith ops L L'
-       | _, _ => false)
-    | _, _ => false)
-
-def denseAddrAffineNeqFast (shape : MemoryBusShape) (S bi : BusInteraction (DenseExpr p)) : Bool :=
-  denseAddrAffineNeqWith denseZModOps shape S bi
-
-theorem denseAddrAffineNeqWith_eq (ops : DenseZModOps p) (shape : MemoryBusShape)
-    (S bi : BusInteraction (DenseExpr p)) :
-    denseAddrAffineNeqWith ops shape S bi = denseAddrAffineNeq shape S bi := by
-  simp only [denseAddrAffineNeqWith, denseAddrAffineNeq, denseLinearizeWith_eq,
-    denseConstDiffNZWith_eq]
-
-@[csimp] theorem denseAddrAffineNeq_eq_fast :
-    @denseAddrAffineNeq = @denseAddrAffineNeqFast := by
-  funext p shape S bi
-  exact (denseAddrAffineNeqWith_eq denseZModOps shape S bi).symm
 
 /-! ## The nonzero-witness (register-vs-RAM) address-disequality certificate -/
 
@@ -352,9 +335,9 @@ structure DenseNonzeroWits (p : ℕ) where
   index : Std.HashMap UInt64 (List (DenseLinExpr p))
 
 /-- Collect every reciprocal-witness linear form from the constraint list. -/
-def DenseNonzeroWits.build (constraints : List (DenseExpr p)) : DenseNonzeroWits p where
-  wits := constraints.flatMap denseReciprocalWits?
-  index := denseNZIndexOf (constraints.flatMap denseReciprocalWits?)
+def DenseNonzeroWits.build (constraints : List (DenseExpr p)) : DenseNonzeroWits p :=
+  let w := constraints.flatMap denseReciprocalWits?
+  ⟨w, denseNZIndexOf w⟩
 
 /-- `Σ_{f ∈ fields} (m.payload[f] − S.payload[f])` as a dense linear form; `none` if any listed
     slot is absent from either payload or is nonlinear. -/

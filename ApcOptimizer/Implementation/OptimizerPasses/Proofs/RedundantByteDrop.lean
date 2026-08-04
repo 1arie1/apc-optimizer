@@ -102,8 +102,8 @@ theorem denseRedundantByteDropF_correct (pw : PrimeWitness p) (bs : BusSemantics
         (fun x c hc => denseVarBucket_mem DenseExpr.vars d.algebraicConstraints x c hc)
         (fun v bi'' hbi'' =>
           denseVarBucket_mem denseBIVars (denseByteDropBase bs facts d) v bi'' hbi'')
-        (fun _ bi'' hbi'' => absurd hbi'' (by simp))
         (List.all_eq_true.mp hjust e he) denv
+        (fun _ LB hLB => absurd hLB (by simp))
         (fun c hc => hsat.1 c hc) hbusbase
 
 /-- The dense redundant byte-check drop pass; transform `denseRedundantByteDropF`

@@ -16,21 +16,39 @@ namespace ApcOptimizer.Dense
 
 variable {p : ℕ}
 
-/-! ## Nonzero-constant differences -/
+/-! ## Nonzero-constant differences, by canonical term key
 
-/-- Two dense linear forms whose difference is a nonzero constant evaluate differently. -/
-theorem denseConstDiffNZ_sound (a b : DenseLinExpr p) (h : denseConstDiffNZ a b = true)
-    (denv : VarId → ZMod p) : a.eval denv ≠ b.eval denv := by
-  unfold denseConstDiffNZ at h
-  simp only [Bool.and_eq_true] at h
-  obtain ⟨hterms, hconst⟩ := h
-  have hd : ((a.add (b.scale (-1))).norm).eval denv = a.eval denv - b.eval denv := by
-    rw [DenseLinExpr.norm_eval, DenseLinExpr.add_eval, DenseLinExpr.scale_eval]; ring
-  have hd2 : ((a.add (b.scale (-1))).norm).eval denv = ((a.add (b.scale (-1))).norm).const := by
-    simp only [DenseLinExpr.eval, List.isEmpty_iff.1 hterms, List.map_nil, List.sum_nil, add_zero]
+`denseKeyDiffNZ` compares per-form canonical keys (`denseTermKey`: merged, zero-dropped, sorted by
+variable). Equal keys make the two forms' normalized term lists permutations of each other, hence
+equal in value, so the whole difference is the (differing) constants. -/
+
+theorem denseTermKey_perm (a b : DenseLinExpr p) (h : denseTermKey a = denseTermKey b) :
+    a.norm.terms.Perm b.norm.terms := by
+  have ha := List.mergeSort_perm a.norm.terms (fun x y => decide (x.1.index ≤ y.1.index))
+  have hb := List.mergeSort_perm b.norm.terms (fun x y => decide (x.1.index ≤ y.1.index))
+  unfold denseTermKey at h
+  rw [h] at ha
+  exact ha.symm.trans hb
+
+/-- A linear form's value is its constant plus the sum over its *normalized* terms. -/
+private theorem denseLin_eval_norm (a : DenseLinExpr p) (denv : VarId → ZMod p) :
+    a.eval denv = a.const + (a.norm.terms.map (fun t => t.2 * denv t.1)).sum := by
+  rw [← DenseLinExpr.norm_eval a denv]; rfl
+
+/-- Equal canonical keys and different constants force different values. -/
+theorem denseKeyNeq_sound (a b : DenseLinExpr p) (hk : denseTermKey a = denseTermKey b)
+    (hc : a.const ≠ b.const) (denv : VarId → ZMod p) : a.eval denv ≠ b.eval denv := by
+  have hsum : (a.norm.terms.map (fun t => t.2 * denv t.1)).sum
+      = (b.norm.terms.map (fun t => t.2 * denv t.1)).sum :=
+    ((denseTermKey_perm a b hk).map _).sum_eq
   intro heq
-  have hz : ((a.add (b.scale (-1))).norm).const = 0 := by rw [← hd2, hd, heq, sub_self]
-  exact (of_decide_eq_true hconst) hz
+  rw [denseLin_eval_norm a denv, denseLin_eval_norm b denv, hsum] at heq
+  exact hc (add_right_cancel heq)
+
+theorem denseKeyDiffNZ_sound (a b : DenseLinExpr p) (h : denseKeyDiffNZ a b = true)
+    (denv : VarId → ZMod p) : a.eval denv ≠ b.eval denv := by
+  simp only [denseKeyDiffNZ, Bool.and_eq_true, decide_eq_true_eq] at h
+  exact denseKeyNeq_sound a b h.1.2 h.2 denv
 
 /-! ## Address-slot glue: a per-slot value (dis)equality forces an address (dis)equality -/
 
@@ -99,7 +117,7 @@ theorem denseAddrAffineNeq_sound (reg : VarRegistry) (shape : MemoryBusShape)
           simp only [hL, hL'] at hcond
           refine denseAddr_slot_neq shape S bi denv hslot hSp hbp ?_
           rw [denseLinearize_eval e L hL denv, denseLinearize_eval e' L' hL' denv]
-          exact denseConstDiffNZ_sound L L' hcond denv
+          exact denseKeyDiffNZ_sound L L' hcond denv
 
 /-! ## The two-root map: the lookup-wise soundness invariant -/
 
@@ -293,24 +311,55 @@ theorem densePtrReductions_sound {dcs : List (DenseExpr p)}
       · left; rw [hEL, hsplit, hr, hb1, he1]; ring
       · right; rw [hEL, hsplit, hr, hb2, he2]; ring
 
+/-- Both branch forms of a reduction differ by a constant, so they share a canonical key. -/
+theorem densePtrBranchesOf_key (k : ZMod p) (A : DenseLinExpr p) (δ cx : ZMod p)
+    (rest : DenseLinExpr p) :
+    denseTermKey (densePtrBranchesOf k A δ cx rest).2
+      = denseTermKey (densePtrBranchesOf k A δ cx rest).1 := by
+  unfold denseTermKey densePtrBranchesOf DenseLinExpr.norm DenseLinExpr.add DenseLinExpr.scale
+  simp
+
+theorem densePtrReductions_key {T : DenseTwoRootMap p} {E : DenseExpr p} {b1 b2 : DenseLinExpr p}
+    (h : (b1, b2) ∈ densePtrReductions T E) : denseTermKey b2 = denseTermKey b1 := by
+  unfold densePtrReductions at h
+  cases hL : denseLinearize E with
+  | none => rw [hL] at h; simp at h
+  | some L =>
+    rw [hL, List.mem_filterMap] at h
+    obtain ⟨v, _, hmatch⟩ := h
+    cases htm : T.map[v]? with
+    | none => rw [htm] at hmatch; simp at hmatch
+    | some kAδ =>
+      obtain ⟨k, A, δ⟩ := kAδ
+      rw [htm] at hmatch
+      simp only [Option.some.injEq] at hmatch
+      rw [show b1 = (densePtrBranchesOf k A δ (L.coeff v) (L.others v)).1 from
+            (congrArg Prod.fst hmatch).symm,
+          show b2 = (densePtrBranchesOf k A δ (L.coeff v) (L.others v)).2 from
+            (congrArg Prod.snd hmatch).symm]
+      exact densePtrBranchesOf_key k A δ (L.coeff v) (L.others v)
+
 theorem denseExprTwoRootNeq_sound {dcs : List (DenseExpr p)}
     (T : DenseTwoRootMap p) (hT : T.Sound dcs) (e e' : DenseExpr p)
     (h : denseExprTwoRootNeq T e e' = true) (denv : VarId → ZMod p)
     (hcon : ∀ c ∈ dcs, c.eval denv = 0) : e.eval denv ≠ e'.eval denv := by
   unfold denseExprTwoRootNeq at h
-  rw [List.any_eq_true] at h
+  rw [List.any_map, List.any_eq_true] at h
   obtain ⟨⟨a1, a2⟩, hred, hinner⟩ := h
-  rw [List.any_eq_true] at hinner
+  rw [Function.comp_apply, List.any_map, List.any_eq_true] at hinner
   obtain ⟨⟨b1, b2⟩, hred', hchk⟩ := hinner
-  simp only [Bool.and_eq_true] at hchk
-  obtain ⟨⟨⟨h11, h12⟩, h21⟩, h22⟩ := hchk
+  simp only [Function.comp_apply, denseRedKeysNeq, denseRedKey, Bool.and_eq_true, beq_iff_eq,
+    decide_eq_true_eq] at hchk
+  obtain ⟨⟨⟨_, hkeq⟩, h11, h12⟩, h21, h22⟩ := hchk
+  have hka : denseTermKey a2 = denseTermKey a1 := densePtrReductions_key hred
+  have hkb : denseTermKey b2 = denseTermKey b1 := densePtrReductions_key hred'
   have hev := densePtrReductions_sound T hT e a1 a2 hred denv hcon
   have hev' := densePtrReductions_sound T hT e' b1 b2 hred' denv hcon
   rcases hev with ha | ha <;> rcases hev' with hb | hb <;> rw [ha, hb]
-  · exact denseConstDiffNZ_sound a1 b1 h11 denv
-  · exact denseConstDiffNZ_sound a1 b2 h12 denv
-  · exact denseConstDiffNZ_sound a2 b1 h21 denv
-  · exact denseConstDiffNZ_sound a2 b2 h22 denv
+  · exact denseKeyNeq_sound a1 b1 hkeq h11 denv
+  · exact denseKeyNeq_sound a1 b2 (by rw [hkeq, ← hkb]) h12 denv
+  · exact denseKeyNeq_sound a2 b1 (by rw [hka, hkeq]) h21 denv
+  · exact denseKeyNeq_sound a2 b2 (by rw [hka, hkeq, ← hkb]) h22 denv
 
 /-- Some address slot's two interactions provably differ, so the addresses differ. -/
 theorem denseAddrTwoRootNeq_sound (reg : VarRegistry) (shape : MemoryBusShape)

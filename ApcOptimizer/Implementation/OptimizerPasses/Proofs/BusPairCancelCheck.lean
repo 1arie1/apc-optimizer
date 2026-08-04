@@ -292,7 +292,8 @@ theorem denseCheckCancel_sound (isInput : VarId → Bool)
     (hTnonzero : T.get.nonzero = DenseNonzeroWits.build d.algebraicConstraints)
     (M : Thunk (DenseEqConstraintMap p)) (hM : M.get.Sound d.algebraicConstraints)
     (domIdx : Std.HashMap VarId (List (DenseExpr p))) (candsOf : VarId → List (DenseExpr p))
-    (wits fwits : VarId → List (BusInteraction (DenseExpr p)))
+    (wits : VarId → List (BusInteraction (DenseExpr p)))
+    (fbasis : VarId → List (DenseLinExpr p × Nat))
     (A : List (BusInteraction (DenseExpr p))) (S : BusInteraction (DenseExpr p))
     (B : List (BusInteraction (DenseExpr p))) (R : BusInteraction (DenseExpr p))
     (C : List (BusInteraction (DenseExpr p)))
@@ -302,10 +303,12 @@ theorem denseCheckCancel_sound (isInput : VarId → Bool)
     (hdomIdx : ∀ v, ∀ c ∈ denseVarBucketLookup domIdx v, c ∈ d.algebraicConstraints)
     (hcands : ∀ x, ∀ c ∈ candsOf x, c ∈ d.algebraicConstraints)
     (hwits : ∀ v, ∀ bi ∈ wits v, bi ∈ A ++ B ++ C ++ checks)
-    (hfwits : ∀ v, ∀ bi ∈ fwits v, bi ∈ A ++ B ++ C ++ checks)
+    (hfb : ∀ (denv : VarId → ZMod p), (∀ bi ∈ A ++ B ++ C ++ checks,
+        (denseBIEval bi denv).multiplicity ≠ 0 → bs.accepts (denseBIEval bi denv)) →
+      ∀ v, ∀ LB ∈ fbasis v, (LB.1.eval denv).val < LB.2)
     (hmid : ∀ m0 ∈ B, denseMidRefuted ops shape T busId S m0 = true)
     (hshield : denseShieldOk ops shape T busId S A = true)
-    (h : denseCheckCancel ops deep bs facts M domIdx candsOf wits fwits busId shape slots bound S R checks
+    (h : denseCheckCancel ops deep bs facts M domIdx candsOf wits fbasis busId shape slots bound S R checks
       = true) :
     DensePassCorrect isInput d { d with busInteractions := A ++ B ++ C ++ checks } [] bs := by
   unfold denseCheckCancel at h
@@ -323,8 +326,8 @@ theorem denseCheckCancel_sound (isInput : VarId → Bool)
     (fun ck hck => denseEmitOk_sound ops bs facts busId shape slots R ck
       (List.all_eq_true.mp hemit ck hck) (of_decide_eq_true hRb) hRmEv)
     (fun denv hall hbus => denseRecvSlotsJustified_sound bound deep d.algebraicConstraints domIdx
-      candsOf bs facts (A ++ B ++ C ++ checks) wits fwits slots R hdeep hdomIdx hcands hwits hfwits
-      hjust denv hall hbus)
+      candsOf bs facts (A ++ B ++ C ++ checks) wits fbasis slots R hdeep hdomIdx hcands hwits
+      hjust denv (hfb denv hbus) hall hbus)
     hsplit
     (of_decide_eq_true hSb) (of_decide_eq_true hRb)
     (of_decide_eq_true hSm) (of_decide_eq_true hRm)

@@ -16,6 +16,11 @@ namespace ApcOptimizer.Dense
 
 variable {p : ℕ}
 
+/-- The distinct bus ids of an interaction list, in `List.dedup` order (last occurrence wins), built
+    without materializing one id per interaction. -/
+def denseBusIdsOf (bis : List (BusInteraction (DenseExpr p))) : List Nat :=
+  bis.foldr (fun bi acc => if acc.contains bi.busId then acc else bi.busId :: acc) []
+
 /-- Structural hash of a payload (order-sensitive). -/
 def densePayloadHash (pl : List (DenseExpr p)) : UInt64 :=
   pl.foldl (fun h e => mixHash h e.bHash) 7
@@ -25,21 +30,31 @@ def densePayloadHash (pl : List (DenseExpr p)) : UInt64 :=
 def denseAddrHash (shape : MemoryBusShape) (pl : List (DenseExpr p)) : UInt64 :=
   shape.addressFields.foldl (fun h slot => mixHash h ((pl[slot]?).elim 5 DenseExpr.bHash)) 7
 
+def denseRecvIndexGo {bs : BusSemantics p} (facts : BusFacts p bs) (aggressive : Bool)
+    (ops : DenseZModOps p) (arr : Array (BusInteraction (DenseExpr p))) :
+    Nat → Std.HashMap UInt64 (List Nat) → Std.HashMap UInt64 (List Nat)
+  | 0, m => m
+  | n + 1, m =>
+    denseRecvIndexGo facts aggressive ops arr n
+      (match arr[n]? with
+       | none => m
+       | some bi =>
+         match facts.memShape bi.busId with
+         | some shape =>
+           if decide (denseMultConst bi = some (denseGetPreviousMult ops shape)) then
+             let h := mixHash (hash bi.busId)
+               (if aggressive then denseAddrHash shape bi.payload else densePayloadHash bi.payload)
+             m.insert h (n :: m.getD h [])
+           else m
+         | none => m)
+
 /-- Ascending positions of the candidate receives (multiplicity `-shape.setNewMult`) on every
     memory-shaped bus, keyed by bus id mixed with the payload hash (`densePayloadHash`, or
     `denseAddrHash` when `aggressive`). One build serves the whole sweep. -/
 def denseRecvIndexAll {bs : BusSemantics p} (facts : BusFacts p bs) (aggressive : Bool)
     (ops : DenseZModOps p) (arr : Array (BusInteraction (DenseExpr p))) :
     Std.HashMap UInt64 (List Nat) :=
-  (arr.toList.zipIdx).foldr (fun bij m =>
-    match facts.memShape bij.1.busId with
-    | some shape =>
-      if decide (denseMultConst bij.1 = some (denseGetPreviousMult ops shape)) then
-        let h := mixHash (hash bij.1.busId)
-          (if aggressive then denseAddrHash shape bij.1.payload else densePayloadHash bij.1.payload)
-        m.insert h (bij.2 :: m.getD h [])
-      else m
-    | none => m) ∅
+  denseRecvIndexGo facts aggressive ops arr arr.size ∅
 
 /-- Does any position hold a send whose receive bucket is non-empty? A cheap over-approximation of
     "this invocation can accept a drop", short-circuiting at the first hit. It decides only whether
