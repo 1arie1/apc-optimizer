@@ -6667,3 +6667,91 @@ field answering one interaction at a time; that is `BusFacts.lean` + `OpenVmFact
 two dead ends recorded here (a pattern-keyed memo, and an `Array`-backed term buffer).
 
 **Worked: yes.**
+
+### 173. Runtime: hintCollapse rebuilt — one occurrence-code array replaces the witness scan, the bus-variable set and the bounds sweep (0.11–0.17x on the pass, sha256 total 0.96x)
+
+Full redesign of the reciprocal-witness collapse (`hintCollapseRedesign.md` has the design, the
+attribution and the rejected alternatives). `hintCollapse` is rank 10 of the corpus profile
+(2.38 s / 4.0 %, max 1.11 s on sha256 `apc_001`, nonzero in 125 of 202 APCs).
+
+WHAT THE MEASUREMENT SAID (throwaway `IO` probe in `denseRunCycleTimed`, on the pass's own input;
+ms summed over all cleanup invocations):
+
+| phase | sha256 `apc_001` | keccak | wasm-eth `apc_036` |
+|---|---:|---:|---:|
+| `denseBuild` (bounds map) | **340** | 54 | 41 |
+| `busVars` (`HashSet` of every bus variable) | 68 | 7 | 6 |
+| `cnt` (`vars.dedup` per constraint) | 213 | 18 | 31 |
+| `denseTryList` (scan + attempts) | 400 | 38 | 66 |
+| **pass total** | **1096** | 127 | 146 |
+
+The same probe counted what all that bought: on sha256 the whole 201 036-constraint system has
+**four** witness variables, in **one** constraint, in cycle 0 — and **zero** in the other nine
+invocations, each of which still built the bounds map, the bus-variable set and the per-constraint
+counts. The `perf` leaf classes agreed it was representation, not algorithm: in-pass `alloc/free`
+17.6 %, `list-ops` 16.7 %, `refcount` 15.2 %, with `DenseExpr.mentions` and `DenseExpr.varsAcc` the
+top pass-logic leaves.
+
+Two of the four phases were also *provably* redundant work. `denseOccursOnlyInTarget` — a
+full-system `mentions` walk per witness, ~23 ms each on sha256 — is implied by the two prefilters
+already in front of it: a variable in the deduped variable list of exactly one constraint *entry*
+and in no bus interaction has that entry as its only occurrence. And the per-constraint
+`E.vars.dedup` filter re-derived, 201 036 times, a fact that is global to the system.
+
+THE REBUILD (`HintCollapse.lean`; `denseOccursOnlyInTarget`, `denseWitnessesOf`, `denseTryOne`,
+`denseTryOneSq`, `denseTryList` are gone — the peel, both coefficient recognizers and the whole
+collapse transport are untouched, since they only ever run on candidate constraints):
+1. **One `VarId`-indexed occurrence-code array** (`denseHcScan`), `0` = unseen, `1` = disqualified
+   (in a bus interaction, or in ≥ 2 constraint entries), `2 + i` = in exactly entry `i`. Built by a
+   bus walk then a constraint walk, one array read and at most one write per occurrence — no `vars`
+   list, no `dedup`, no hashing. **Bus-first is the trick**: after it a `2 + i` code *is* a witness,
+   so the survivors are the four variables sha256 has, not the tens of thousands that occur in one
+   constraint plus a bus.
+2. **No candidate group → the pass returns there** (9 of 10 sha256 invocations): no bounds map, no
+   bus-variable set, no per-constraint work.
+3. **The bounds map is `denseAddAll` over the interactions that can bound a wanted coefficient
+   variable** — the rest pay no `denseBiPrepOf` and no `slotBound` call. Sound for the same reason
+   `denseBuild` is (`denseAddAll_soundAt` takes any interaction list), so the `want` marks are an
+   untrusted filter that can only lose bounds.
+4. **Freshness is one array read** (`st[i] ≠ 0` *is* `i ∈ d.occ`) instead of building the ~600 k-entry
+   occurrence list and scanning it.
+5. **The accept replaces at the known index** instead of a deep-equality `map` over every
+   constraint, and one peel feeds both shapes.
+
+PROOF SURFACE. Three facts about the code array carry the discovery layer — `denseHcScan_unique`
+(a `2 + i` code names the only entry containing the variable), `denseHcScan_bus` (it rules out every
+bus occurrence) and `denseHcScan_zero` (a `0` code rules out every occurrence) — proved from two
+one-line invariants: `1` is absorbing, and the set `{2 + m, 1}` is closed under every later mark.
+`hcSet_eq_map` turns the indexed replacement into the by-value one (the target is unique in the
+list, since a duplicate entry would have disqualified every witness), so `dense_collapse_bundle`,
+`denseCoeffsByteOK_sound`, `denseSqCoeffsOK_sound` and the reassignment frames apply unchanged.
+`Array.getD` unfolds to a `dite` on the bound, which `split` would case on instead of the mark's own
+tests — the proofs use `by_cases` plus `hc*_var` equation lemmas throughout.
+
+NUMBERS (this 20-core box, serial, interleaved, 3 reps; `profile` per-pass ms; sha256 one shot):
+sha256 `apc_001` **1114 → 188 (0.17x)**, run total 25 959 → 24 957 (0.96x); keccak `apc_001`
+132 → 18 (0.14x), 2512 → 2334 (0.93x); wasm-eth `apc_036` 149 → 16 (0.11x), 2487 → 2417 (0.97x);
+wasm-eth `apc_063` 151 → 16 (0.11x), 2520 → 2351 (0.93x); wasm-eth `apc_012` 143 → 17 (0.12x),
+2972 → 2825 (0.95x); openvm-eth `apc_006` 18 → 3 (0.17x), 337 → 323 (0.96x). No other pass moves
+outside noise.
+VERIFIED: `opt-export` **byte-identical** on 15 cases — openvm-eth `apc_006` / `apc_037` / `apc_071`
+/ `apc_100`, wasm-eth `apc_006` / `apc_012` / `apc_036` / `apc_063`, OpenVM keccak `apc_001`,
+sha256 `apc_001`, SP1 keccak `apc_001`, SP1 rsp `apc_001` / `apc_002` / `apc_003` / `apc_005`;
+`lake build` clean, no warnings; `check-proof-integrity` passes.
+
+RESIDUAL (sha256 `apc_001`, `IO` phase timers over 11 invocations, 178 ms): **`guardDegree`'s
+`withinDegreeB` ~103 ms** — the framework's per-pass degree walk (ideas.md R5), now 58 % of this
+pass — constraint sweep 44, bus sweep 28, the accept's `denseHcPick` + `List.set` over 201 036
+entries 24 (once per run), restricted bounds sweep 4. The pass's own work is ~75 ms against a former
+~1020, and the two sweeps are its information floor: the witness property is global.
+
+DEAD ENDS / NOT PURSUED, each sized: collapsing every candidate target per invocation (the pass
+fires ~1× per run, so it buys no runtime and changes what the other 26 cleanup passes see —
+an effectiveness argument); scanning constraints before the bus (see ideas.md); a dictionary-free
+`denseExtractLinear` (the generated C rebuilds the `ZMod.commRing` chain per recursive call, but the
+peel measured 0 ms — it is per-candidate, not per-system); fusing `denseHcPick` with the accept's
+`List.set` (read-then-decide needs two walks; ~10 ms once per run); a structural constraint
+prefilter in place of the counting walk (it cannot decide a global property, and products of two
+variables are common — thousands would pass, each then needing the ~23 ms global check).
+
+**Worked: yes.**
