@@ -811,12 +811,22 @@ increasing effort:
   pass. Worth re-checking for the same shape elsewhere: a per-candidate scan of the whole remainder
   whose failure the outer loop cannot learn from.
 - **(c) Per-pass necessary-condition gates**, cheaper than the pass's own discovery. The ≥ 75 %-no-op
-  passes are `degenRange` (96 %, 1057 ms net), `zeroRegister` (96 %, 1101), `flagUnify` (95 %, 895),
-  `digitFold` (91 %, 1256), `xorEqExtract` (77 %, 497), `subsumedRange` (100 %, 414), `zeroMultBus`
-  (72 %), `oneHotAnnihilate` (67 %) — **≈ 5.3 s of corpus pass time**. A shared *per-cycle* digest is
-  the wrong first step: the system changes between passes within a cycle, so a cycle-start digest is
-  stale from the second pass on. Per-pass gates first, over the prepared interaction array of R13(b),
-  which is what makes them cheap.
+  passes are `degenRange` (96 %, 1057 ms net), ~~`zeroRegister` (96 %, 1101)~~ **done (entry 178)**,
+  0.186x on the pass, `flagUnify` (95 %, 895), `digitFold` (91 %, 1256), `xorEqExtract` (77 %, 497),
+  `subsumedRange` (100 %, 414), `zeroMultBus` (72 %), `oneHotAnnihilate` (67 %) — **≈ 5.3 s of corpus
+  pass time**. A shared *per-cycle* digest is the wrong first step: the system changes between passes
+  within a cycle, so a cycle-start digest is stale from the second pass on. Per-pass gates first, over
+  the prepared interaction array of R13(b), which is what makes them cheap.
+  **Two findings from entry 178 that generalize across this whole list.** (i) *Audit what a filter
+  conjunct is tested against, not how it reads.* `zeroRegister`'s cheapest-looking check,
+  `c.vars.all (· ∈ d.occ)`, was 55 % of the pass, because `d.occ` is whole-system — and the conjunct was
+  *provably always true*, since the candidates come from interaction payloads. Grep every pass for
+  `d.occ` at the top of a body. (ii) *`BusFacts` closures depend only on the bus id, and each call
+  allocates a `ZMod` dictionary* — memoizing `facts.zeroCell` over the ≤ ~6 distinct bus ids, with the
+  pinned constants pre-wrapped as `DenseExpr.const`, removed another 23 %. Soundness of such a memo
+  ("every entry agrees with `facts`") is enough to make the first match usable, so no `Nodup` obligation
+  is needed; completeness is only needed to justify *skipping*. This is R13(b) done per-pass, and
+  `slotBoundImpl` (16.4 % of the dictionary chain) is the same shape one step larger.
 - **(d) The discarded final cycle.** `denseIterateToFixpoint` returns the *pre-cycle* state when
   `sizeKey` does not decrease, so the whole last cycle is computed and thrown away: sha256 `apc_001`
   **646 ms (2.7 % of wall)**, wasm-eth `apc_012` 101 ms (3.9 %), keccak 36 ms. sha256's last two
@@ -848,6 +858,18 @@ the bucket is needed (701 matches producing 0 adoptions means `denseFuPairData?`
 multiplicity/`slotBound`/`splitAt`/no-wrap prefix rejects *late*), or a bucket restricted to the joint
 offset variables the certificate actually queries, which makes the build proportional to the match
 rather than to the system — the entry-176 shape one level finer.
+
+### zeroRegister residual after entry 178 (the prepared bus table)  ·  *runtime*
+
+248 ms corpus-wide, and **71 % of what is left is not the pass**: stubbing the new body to `[]` still
+reads 78 ms of sha256 `apc_001`'s 114, i.e. the `ofAddConstraints` record plus the degree guard (R5). The
+pass's own two halves are 12 ms of `denseBusIds` + table build and 20 ms of the emit sweep, both linear in
+the interaction count with a small constant. Fusing them into a single sweep (threading the bus-id memo
+through the accumulator) is the only remaining idea and is worth ~11 ms of a 22 s run against a
+threaded-state invariant in the proof — **deliberately left as sub-bar**. Two output-changing options
+were also declined as effectiveness questions, not runtime ones: the emit filter cannot see earlier
+survivors, so two interactions pinning the same expression emit the constraint twice; and the
+`normalize.fold.isConstZero` test measured at ~0 ms, so a `const`/`var` fast path buys nothing.
 
 ### tupleRange residual after entry 175 (the single-pass scan)  ·  *runtime*
 

@@ -165,6 +165,25 @@ theorem DensePassCorrect.denseFilterBusEntailed (d : DenseConstraintSystem p) (b
 
 /-! ## The append-only pass builder -/
 
+/-- The system with `new` appended to its constraints. -/
+def denseAddedCS (d : DenseConstraintSystem p) (new : List (DenseExpr p)) :
+    DenseConstraintSystem p :=
+  { d with algebraicConstraints := d.algebraicConstraints ++ new }
+
+/-- `List.append` is strict in its first argument, so an append-only pass that emits nothing would
+    otherwise copy the whole constraint list on every no-op invocation. -/
+def denseAddedCSFast (d : DenseConstraintSystem p) (new : List (DenseExpr p)) :
+    DenseConstraintSystem p :=
+  match new with
+  | [] => d
+  | _ => { d with algebraicConstraints := d.algebraicConstraints ++ new }
+
+@[csimp] theorem denseAddedCS_eq_fast : @denseAddedCS = @denseAddedCSFast := by
+  funext q d new
+  cases new with
+  | nil => simp [denseAddedCS, denseAddedCSFast]
+  | cons a t => rfl
+
 /-- Build a pass appending system-entailed constraints: the obligations are variable containment
     (`hvars`) and entailment on admissible satisfying assignments (`hsound`). -/
 def DenseVerifiedPassW.ofAddConstraints
@@ -177,17 +196,20 @@ def DenseVerifiedPassW.ofAddConstraints
     DenseVerifiedPassW p :=
   DenseVerifiedPassW.of
     (fun bs facts d =>
-      { d with algebraicConstraints := d.algebraicConstraints ++ news bs facts d })
+      denseAddedCS d (news bs facts d))
     (fun _ _ _ => [])
     (fun reg bs facts d hcov => by
       refine ⟨fun e he => ?_, hcov.2⟩
+      unfold denseAddedCS at he
       rcases List.mem_append.1 he with h | h
       · exact hcov.1 e h
       · intro i hi
         exact DenseConstraintSystem.occ_valid hcov i (hvars bs facts d e h i hi))
     (fun _ _ _ _ _ => by intro x hx; simp at hx)
-    (fun reg bs facts d _ => DensePassCorrect.denseAddConstraints d bs (news bs facts d)
-      (hvars bs facts d) (hsound bs facts d))
+    (fun reg bs facts d _ => by
+      unfold denseAddedCS
+      exact DensePassCorrect.denseAddConstraints d bs (news bs facts d)
+        (hvars bs facts d) (hsound bs facts d))
 
 /-! ## Check-rule passes -/
 
