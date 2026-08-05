@@ -7118,7 +7118,13 @@ makes the bare-var pre-filter exact (no slot can be `some (.var x)` if no elemen
 
 NUMBERS (this 20-core box, serial, interleaved per case, whole local corpus of 303 APCs — OpenVM 202,
 SP1 101): **degenRange 1354 → 377 ms (0.278x), wall 46 781 → 45 930 (0.982x)**; OpenVM 1215 → 348
-(0.286x) with wall 0.980x, SP1 139 → 29 (0.209x). Per case: sha256 `apc_001` **562 → 181 ms** (total
+(0.286x) with wall 0.980x, SP1 139 → 29 (0.209x). Four independent reps agree — wall
+0.980 / 0.982 / 0.983 / 0.979x and pass 0.283 / 0.278 / 0.266 / 0.281x, and best-of-3 per case
+(0.980x wall, 0.256x pass) — which is what makes the corpus number readable at all: the *baseline*
+drifts 46 252–46 781 ms (±0.6 %) between reps, so only the per-case pairing the interleave gives you
+separates a 2 % effect from that. The win tracks pass weight and nothing pays for it: bucketed by
+baseline degenRange ms, wall is 0.979–0.981x (>= 20 ms, 8 cases), 0.974–0.986x (5–19), 0.974–0.985x
+(1–4) and **1.004–1.009x on the ~150 cases where the pass was already 0 ms**. Per case: sha256 `apc_001` **562 → 181 ms** (total
 21 507 → 21 182), wasm-eth `apc_012` 74 → 23, keccak `apc_001` 71 → 18, `apc_063` 54 → 17, `apc_036`
 53 → 20, `apc_037` 52 → 16, `apc_006` 49 → 13, SP1 keccak 34 → 9. No other pass moves outside
 interleave noise.
