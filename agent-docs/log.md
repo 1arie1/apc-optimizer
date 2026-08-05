@@ -7007,3 +7007,64 @@ restricted to the joint offset variables actually queried, which would make the 
 the match rather than to the system.
 
 **Worked: yes.**
+
+### 178. Runtime: zeroRegister drops its `occ` scan and memoizes `facts.zeroCell` per bus (0.14–0.19x on the pass)
+
+`denseZeroRegisterNew` did two whole-system things per invocation, and the pass is a no-op in **96 %**
+of them (R15(c): 1101 ms net of the guard, the second-largest entry on that list).
+
+- `let dVars := d.occ` — the occurrence list of the *entire* system — was built only so the filter could
+  test `c.vars.all (· ∈ dVars)`. **That conjunct is always true.** Every candidate is
+  `(bi.payload[slot]?).getD (const 0)` for some `bi ∈ d.busInteractions`, so its variables are in
+  `denseBIVars bi ⊆ d.occ` by construction. Sized by dropping the conjunct: sha256 `apc_001`
+  **613 → 277 ms, 55 % of the pass**.
+- `facts.zeroCell bi.busId` ran **once per interaction** (12 452 of them on sha256, ×10 invocations).
+  On OpenVM that is `zeroCellImpl`, whose `some ([(0, 1), (1, 0)], [2, 3, 4, 5])` carries `ZMod p`
+  numerals, so every call builds the `ZMod.commRing` dictionary chain — nextBottlenecks' §B4 already
+  attributed 2.4 % of *all* allocations to `zeroCellImpl` and 2.7 % to `denseCellZeroExprs`.
+  `decide (c ≠ 0)` on the multiplicity is the same trap. Sized by stubbing the collection: another
+  **~140 ms, 23 %**.
+
+THE CHANGE: `denseBusIds` collects the distinct bus ids in one `foldl` (≤ ~6 of them, so its `contains`
+stays trivial); `denseZeroCellTable` calls `facts.zeroCell` once per id and keeps only the buses that
+declare a cell, with the pinned address constants **pre-wrapped** as `DenseExpr.const` so the
+per-interaction test allocates nothing. An empty table short-circuits the pass. `denseZeroCellEmit` then
+does one allocation-free sweep — bus id (one `Nat` compare) → `constValue?` and a dictionary-free
+`zmodIsZero` → `denseAddrPinned` (`==` on `DenseExpr`, no `Option`/`const` built) → emit, with the
+survivor predicate fused into the slot fold and `foldl`-accumulated (one `reverse` of the tiny candidate
+list restores the order). `denseZeroPred` loses the occ conjunct.
+
+WHY IT IS VALUE-IDENTICAL: `denseZeroCellTable`'s **soundness** (every entry agrees with
+`facts.zeroCell`) makes whichever entry the sweep finds first carry the right shape — no `Nodup`
+obligation — and its **completeness** (`denseBusIds_mem`) rules out skipping a bus that declares a cell.
+`denseZeroCellEmit_slots` needs `keep (const 0) = false`, which is exactly `denseZeroPred_const_zero`, so
+dropping the out-of-range slot branch is value-preserving. `denseCollectZeroCells_eq` reduces the old
+collection to a `flatMap` and `List.filter_flatMap` finishes `denseZeroRegisterNew_eq_fast` (`@[csimp]`,
+verified live in the C: the slow body has no caller but its own `___boxed`). The vars obligation is now
+`denseCellZeroExprs_vars` + `mem_occ_of_bi`.
+
+**Companion, shared:** `DenseVerifiedPassW.ofAddConstraints` built
+`{d with algebraicConstraints := d.algebraicConstraints ++ news …}` unconditionally, so **every** no-op
+invocation of every append-only pass copied the whole constraint list (`List.append` is strict in its
+first argument). It now goes through `denseAddedCS` with a `@[csimp]` twin returning `d` when nothing is
+emitted — `List.append_nil` plus structure eta, no new obligation. Sized at ~65 ms of sha256's
+`zeroRegister` on its own.
+
+NUMBERS (this 20-core box, serial, interleaved, 2 reps): sha256 `apc_001` **622/628 → 115/111 ms** on the
+pass, total 22 244 → 21 357 (0.96x); wasm-eth `apc_012` 82/83 → 17/15; `apc_063` 65/74 → 14/9; keccak
+`apc_001` 62/73 → 8/11; SP1 keccak 18/19 → 2/3. **Whole local corpus, 303 APCs interleaved: zeroRegister
+1333 → 248 ms (0.186x), wall 48.4 → 47.0 s (0.970x)**; the companion also moves `oneHotAnnihilate`
+297 → 264 (0.889x) and `xorEqExtract` 919 → 858 (0.934x).
+VERIFIED: final `vars / constraints / bus` **identical on all 303 corpus APCs**; `opt-export`
+byte-identical on sha256 `apc_001`, wasm-eth `apc_012`, keccak `apc_001`, SP1 keccak `apc_001` and SP1
+rsp `apc_001`; `lake build` clean with no warnings; `check-proof-integrity` passes on the three standard
+axioms with no unused theorem.
+
+WHERE THE REMAINING 114 ms GOES — stubbing the new body to `[]` reads **78 ms on sha256, i.e. 71 % of
+what is left is the framework plus the degree guard (R5), not this pass**. The pass's own residual is 12 ms
+of table build and 20 ms of sweep; fusing the two sweeps into one (threading the memo through the
+accumulator) is worth ~11 ms of a 22 s run against a threaded-state invariant in the proof, so it was
+**deliberately left**. The lesson worth keeping: the conjunct that looked like the pass's *cheapest*
+check was its most expensive line, because the datum it tested against was whole-system.
+
+**Worked: yes.**
