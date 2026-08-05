@@ -520,32 +520,28 @@ per corpus**. Three things worth carrying forward:
 - **Where a twin already exists, edit only the twin**; the in-place edit costs proof work and buys
   no runtime.
 
-**R9e (new, found in entry 179; cheap, several passes).** A recognizer that *compares* an expression
-against a `DenseExpr.const` numeral pays the dictionary chain at its **entry**, not at the
-comparison: `denseRangeEq?___redArg`'s first two statements were `ZMod_commRing` +
-`Ring_toAddGroupWithOne`, *ahead* of the `[v, c]` payload-shape test that rejects most interactions —
-so the gate written first is not the gate that runs first, and this is invisible in the Lean source.
-The fix is mechanical and moves no proof: match the constructor as a tag (`| .const c =>`) and test
-the literal with `zmodIsOne`/`zmodIsZero`.
+~~**R9e. Recognizer numerals on the entry path.**~~ · **done (entry 180)**, and the residual is
+measured. A recognizer that *compares* an expression against a `DenseExpr.const` numeral pays the
+`ZMod.commRing` chain at its **entry**, ahead of the branch test that would have rejected the
+interaction — invisible in the Lean source, so read the C. Fixed with one `@[csimp]` twin per
+recognizer testing literals through `DenseExpr.isConstZero`/`isConstOne` (`Encoding.lean`, the common
+ancestor of both halves of the import graph; its two `_eq_decide` bridges are the whole proof
+surface). **xorEqExtract 0.61–0.66x, digitFold 0.68–0.74x, subsumedCheck 0.66–0.78x, splitBytePair
+0.55–0.74x; corpus wall ~0.983x.**
 
-**Comparison is R9e; construction is R9b — do not batch them.** A site that has to *build* a numeral
-(`denseComplExpr`'s `.add (.const 255) (.mul (.const (-1)) e)`) cannot be tag-matched out of it; it
-needs the primitive and therefore R9b's ~25 `…With_eq` bridge restatements. Scanning the first ~14
-lines of each `___redArg` body in the IR for `ZMod_commRing` mixes the two, so classify each hit
-before costing it. Still live, and comparison-shaped (i.e. actually R9e): `denseSubsumedCheckOf` /
-`denseSubsumedRangeCheck?` (SubsumedCheck), `denseIdentityPairAt` / `denseOrIdentityOperand` /
-`denseIdentitySubstF` (IdentitySubst), `denseAsBytePair` / `denseSplitBytePairF` (SplitBytePair),
-`densePairByteOps?` (DigitFold). Construction-shaped, i.e. **R9b, not this item**: `denseComplExpr`
-and its callers `denseIsByteCompl` / `denseSvCheckWith?` (ByteCheckPack).
+Measured and dropped — do not re-propose as stated: **`denseSubsumedRangeCheck?`** (flat, 0.993x:
+subsumedRange's 417 ms is not in its recognizer) and **`IdentitySubst`** (flat, 0.967–1.085x). The
+IdentitySubst result is the informative one: a variant that *also* hoisted the literal-`1`
+multiplicity gate ahead of the `facts.byteXorSpec` lookup measured **0.761x**, so there the cost is
+the *lookup ordering*, not the numeral — worth ~15 ms of corpus, which does not repay the
+`if`-past-`match` commutation proof the hoist needs. Two twin shapes, very different proof costs:
+structure-preserving (swap comparisons only) closes as a congruence with one `simp only`; hoisting a
+gate out of a nested match must commute `if` past `match` by hand — `grind` fails and `cases` on the
+scrutinee will not substitute under the twin's `if`.
 
-**Start with `SubsumedCheck.denseSubsumedCheckOf`: it is nearly a verbatim copy of the
-`denseBoolCheck?` that entry 179 fixed** — the same `payload.map constValue?` handed to
-`facts.rangeCheckAt` (constantly `none` on OpenVM, so the pattern is built and discarded), the same
-`bi.multiplicity = DenseExpr.const 1`, and the same `payload[valSlot]? = some (.var x)` emit
-condition, so `denseHasBareVar` transfers as a pre-filter unchanged. It is also the largest of the
-group (subsumedRange 418 ms of corpus; digitFold 583 but only `densePairByteOps?` is this shape,
-identitySubst 127, redundantByteDrop 360, splitBytePair 47), so the rest are worth batching behind
-it rather than one PR each.
+Still unconverted, and now known to be **not worth converting on this evidence**: the construction
+sites of R9b (below) and the `if (1 : ZMod p) ≠ 0` guard at the top of each pass transform
+(`denseSplitBytePairF`, `denseIdentitySubstF`, …) — once per invocation, not per interaction.
 
 ~~**R9b. What is left, and why it is expensive.**~~ · **retired as a dead end 2026-08-05: its targets
 do not execute.** Its `rootPairUnify` half was already **superseded by entry 170**, which rebuilt the
