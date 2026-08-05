@@ -7072,3 +7072,73 @@ accumulator) is worth ~11 ms of a 22 s run against a threaded-state invariant in
 check was its most expensive line, because the datum it tested against was whole-system.
 
 **Worked: yes.**
+
+### 179. Runtime: degenRange becomes one allocation-free sweep (0.28x on the pass)
+
+`degenRange` is the only `ofCheckRules` instance, and R15(c) had it at **96 % no-op invocations,
+1057 ms of corpus pass time net of the degree guard** — the largest entry left on that list. Three
+independent costs, each visible in the generated C before any profiling; attribution by stubbing the
+rule list on keccak `apc_001` (68–75 ms in the pass): rule0 ≈ 34 ms, rule1 ≈ 21 ms, framework +
+degree guard + unconditional list rebuild ≈ 19 ms.
+
+- **Each recognizer ran three times per interaction.** `denseGroupEmit` does `bis.filterMap r`, then
+  `bis.filter (r · |>.isNone)` — a second application of `r` on every interaction — and
+  `filterBus (recs.all …)` a third. Two rules ⇒ five recognizer applications per interaction.
+- **rule0 built a `ZMod` dictionary at function entry.** `denseRangeEq?` compares
+  `bi.multiplicity = DenseExpr.const 1` and `c = DenseExpr.const 0`, so `ZMod_commRing` +
+  `Ring_toAddGroupWithOne` were the *first two statements* of `denseRangeEq?___redArg`, ahead of the
+  `[v, c]` payload test — every interaction paid it, including the 5-slot memory ones, three times.
+- **rule1 materialized a pattern nobody reads.** `facts.rangeCheckAt` is a closure field, so
+  `payload.map constValue?` is a strict argument: one `List (Option (ZMod p))` per interaction, built
+  by `mapTR` and reversed, with a `constValueImpl` traversal per slot — then discarded, always on
+  OpenVM, where `rangeCheckAt` is constantly `none`.
+
+THE CHANGE, three `@[csimp]` twins, so **`Proofs/DegenRange.lean` is untouched** and no
+`DenseCheckRule` obligation moved. (i) `denseCheckRewriteFImpl` (`EntailedCheck.lean`) sweeps once:
+`denseFirstHit` returns the index and constraint of the first recognizer to fire, `denseScanHits`
+accumulates **only hits** (misses allocate nothing), and no hits ⇒ return `d` itself — which also
+drops the `algebraicConstraints ++ []` copy and the `filterBus` rebuild that every no-op invocation
+paid. Hits are regrouped by `denseRegroup`/`denseTakeHead`/`denseUnshift` over a list as long as the
+number of *hits*. (ii) `denseRangeEqImpl?` matches `[v, .const c]` / `.const m` as tags first and
+tests literals with `zmodIsOne`/`zmodIsZero`, with the `facts` assoc-list lookups moved after the
+cheaper `ZMod` tests; `denseBoolCImpl` does the same for `-1`. (iii) `denseBoolCheckImpl?` gates on
+literal-1 multiplicity and an allocation-free `denseHasBareVar` scan before building the pattern,
+which is then `denseConstPattern` (no `mapTR` reversal).
+
+WHY IT IS VALUE-IDENTICAL: `denseScanHits_eq` reduces the scan to
+`(bis.filterMap (denseFirstHit recs 0)).reverse ++ acc`; `denseUnshift_hits` is the induction that
+makes the regrouping work — the hits of `r :: rest` over `bis`, unshifted, are exactly the hits of
+`rest` over `bis.filter (r · |>.isNone)`, which is `denseGroupEmit`'s own recursion — and
+`denseTakeHead_hits` gives the head group as `bis.filterMap r`, both needing
+`denseFirstHit_succ` (numbering from `k+1` shifts every index by one). `denseFirstHit_isNone` shows
+the sweep's miss test *is* `recs.all`, so the survivor filter needs no second pass; the no-op branch
+then needs `List.filter_eq_self` plus `denseRegroup_nil` and structure eta. The recognizer twins are
+`zmodIsOne_eq`/`zmodIsZero_eq` rewrites plus case splits, and `denseHasBareVar_getElem?` is what
+makes the bare-var pre-filter exact (no slot can be `some (.var x)` if no element is).
+
+NUMBERS (this 20-core box, serial, interleaved per case, whole local corpus of 303 APCs — OpenVM 202,
+SP1 101): **degenRange 1354 → 377 ms (0.278x), wall 46 781 → 45 930 (0.982x)**; OpenVM 1215 → 348
+(0.286x) with wall 0.980x, SP1 139 → 29 (0.209x). Per case: sha256 `apc_001` **562 → 181 ms** (total
+21 507 → 21 182), wasm-eth `apc_012` 74 → 23, keccak `apc_001` 71 → 18, `apc_063` 54 → 17, `apc_036`
+53 → 20, `apc_037` 52 → 16, `apc_006` 49 → 13, SP1 keccak 34 → 9. No other pass moves outside
+interleave noise.
+VERIFIED: per-cycle `vars / bus / constraints` **identical on all 303 corpus APCs**; `opt-export`
+byte-identical on sha256 `apc_001`, keccak `apc_001`, wasm-eth `apc_012`, SP1 keccak `apc_001` and
+SP1 rsp `apc_001`; `lake build` clean with no warnings; `check-proof-integrity` passes on the three
+standard axioms with no unused theorem. All four twins verified live in the C (the slow bodies have
+no caller but their own `___boxed`, and `ofCheckRules` calls `denseCheckRewriteFImpl`).
+
+WHERE THE REMAINING 377 ms GOES: re-profiled on keccak, the pass's own frames fall from **302 to 41
+samples** (2.0 % → 0.3 % of the run) against a reported 24 ms, and the rules-stubbed floor was
+17–20 ms — so **~70 % of what is left is the framework plus the degree guard (R5)**, not this pass.
+Inside the 41 samples: `denseRangeEqImpl?` 29 %, `denseConstPattern` + `constValueImpl` 24 %,
+`denseScanHits` + `denseFirstHit` 12 %.
+
+Two lessons. **A recognizer's numerals are its entry cost, not its match cost:** anything comparing
+against `DenseExpr.const 0`/`1` derives the dictionary chain *before* the shape test that would have
+rejected the interaction, so the gate you wrote first is not the gate that runs first — check the C.
+And **R15(c)'s "necessary-condition gate" can be the sweep itself**: once the sweep is one
+allocation-free tag-check pass that returns the input on a miss, no cheaper necessary condition
+beats it, so the gate and the pass are the same code.
+
+**Worked: yes.**

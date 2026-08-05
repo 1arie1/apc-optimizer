@@ -212,8 +212,9 @@ and rebuilds both item lists on every invocation whether or not an expression ch
 profile-harness frame** (the per-cycle size line the profiler prints); the optimizer itself pays only
 the fixpoint's own `sizeKey`. The per-pass columns are unaffected (entry 164). Also: a pointer-only
 no-op probe reads 20.9 % where structural equality reads 42 %, because `normalize`/`constFold`/
-`degenRange`/`carryBranch`/`intervalForce`/`busPairCancel` rebuild their lists unconditionally — use
-structural equality with a pointer-identity shortcut.
+`carryBranch`/`intervalForce`/`busPairCancel` rebuild their lists unconditionally — use structural
+equality with a pointer-identity shortcut. (`degenRange` no longer does, entry 179: it returns the
+input object when its sweep recognizes nothing.)
 
 ### Open runtime ideas, priority order
 
@@ -519,6 +520,21 @@ per corpus**. Three things worth carrying forward:
 - **Where a twin already exists, edit only the twin**; the in-place edit costs proof work and buys
   no runtime.
 
+**R9e (new, found in entry 179; cheap, several passes).** A recognizer that compares an expression
+against a `DenseExpr.const` numeral pays the dictionary chain at its **entry**, not at the
+comparison: `denseRangeEq?___redArg`'s first two statements were `ZMod_commRing` +
+`Ring_toAddGroupWithOne`, *ahead* of the `[v, c]` payload-shape test that rejects most interactions —
+so the gate written first is not the gate that runs first. The fix is mechanical: match the
+constructor as a tag (`| .const c =>`) and test the literal with `zmodIsOne`/`zmodIsZero`. Scan the
+first ~14 lines of each `___redArg` body in the IR for `ZMod_commRing`; that finds, still live,
+`denseSubsumedCheckOf` / `denseSubsumedRangeCheck?` (SubsumedCheck), `denseIdentityPairAt` /
+`denseOrIdentityOperand` / `denseIdentitySubstF` (IdentitySubst), `denseIsByteCompl` /
+`denseSvCheckWith?` / `denseComplExpr` (ByteCheckPack), `denseAsBytePair` / `denseSplitBytePairF`
+(SplitBytePair) and `densePairByteOps?` / `denseSlotBoundAt` / `denseInteractionBound` (DigitFold) —
+every one of them a per-interaction recognizer. Corpus stakes are small per pass (subsumedRange 418
+ms, digitFold 583, identitySubst 127, redundantByteDrop 360, splitBytePair 47), so batch them rather
+than opening one PR each.
+
 **R9b. What is left, and why it is expensive.** Its `rootPairUnify` half is **superseded by entry
 170**, which rebuilt the pass (0.13–0.53×): the per-candidate chain builders are gone with the
 per-candidate work itself, and the surviving `⁻¹` is one call per distinct coefficient value.
@@ -811,10 +827,13 @@ increasing effort:
   pass. Worth re-checking for the same shape elsewhere: a per-candidate scan of the whole remainder
   whose failure the outer loop cannot learn from.
 - **(c) Per-pass necessary-condition gates**, cheaper than the pass's own discovery. The ≥ 75 %-no-op
-  passes are `degenRange` (96 %, 1057 ms net), ~~`zeroRegister` (96 %, 1101)~~ **done (entry 178)**,
+  passes are ~~`degenRange` (96 %, 1057)~~ **done (entry 179)**, 0.278x on the pass,
+  ~~`zeroRegister` (96 %, 1101)~~ **done (entry 178)**,
   0.186x on the pass, `flagUnify` (95 %, 895), `digitFold` (91 %, 1256), `xorEqExtract` (77 %, 497),
   `subsumedRange` (100 %, 414), `zeroMultBus` (72 %), `oneHotAnnihilate` (67 %) — **≈ 5.3 s of corpus
-  pass time**. A shared *per-cycle* digest is the wrong first step: the system changes between passes
+  pass time**. Entry 179 is the case where the gate and the pass turned out to be the same code: once
+  the sweep is one allocation-free tag-check pass that returns its input on a miss, no cheaper
+  necessary condition beats it. A shared *per-cycle* digest is the wrong first step: the system changes between passes
   within a cycle, so a cycle-start digest is stale from the second pass on. Per-pass gates first, over
   the prepared interaction array of R13(b), which is what makes them cheap.
   **Two findings from entry 178 that generalize across this whole list.** (i) *Audit what a filter
