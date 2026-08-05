@@ -520,20 +520,32 @@ per corpus**. Three things worth carrying forward:
 - **Where a twin already exists, edit only the twin**; the in-place edit costs proof work and buys
   no runtime.
 
-**R9e (new, found in entry 179; cheap, several passes).** A recognizer that compares an expression
+**R9e (new, found in entry 179; cheap, several passes).** A recognizer that *compares* an expression
 against a `DenseExpr.const` numeral pays the dictionary chain at its **entry**, not at the
 comparison: `denseRangeEq?___redArg`'s first two statements were `ZMod_commRing` +
 `Ring_toAddGroupWithOne`, *ahead* of the `[v, c]` payload-shape test that rejects most interactions —
-so the gate written first is not the gate that runs first. The fix is mechanical: match the
-constructor as a tag (`| .const c =>`) and test the literal with `zmodIsOne`/`zmodIsZero`. Scan the
-first ~14 lines of each `___redArg` body in the IR for `ZMod_commRing`; that finds, still live,
-`denseSubsumedCheckOf` / `denseSubsumedRangeCheck?` (SubsumedCheck), `denseIdentityPairAt` /
-`denseOrIdentityOperand` / `denseIdentitySubstF` (IdentitySubst), `denseIsByteCompl` /
-`denseSvCheckWith?` / `denseComplExpr` (ByteCheckPack), `denseAsBytePair` / `denseSplitBytePairF`
-(SplitBytePair) and `densePairByteOps?` / `denseSlotBoundAt` / `denseInteractionBound` (DigitFold) —
-every one of them a per-interaction recognizer. Corpus stakes are small per pass (subsumedRange 418
-ms, digitFold 583, identitySubst 127, redundantByteDrop 360, splitBytePair 47), so batch them rather
-than opening one PR each.
+so the gate written first is not the gate that runs first, and this is invisible in the Lean source.
+The fix is mechanical and moves no proof: match the constructor as a tag (`| .const c =>`) and test
+the literal with `zmodIsOne`/`zmodIsZero`.
+
+**Comparison is R9e; construction is R9b — do not batch them.** A site that has to *build* a numeral
+(`denseComplExpr`'s `.add (.const 255) (.mul (.const (-1)) e)`) cannot be tag-matched out of it; it
+needs the primitive and therefore R9b's ~25 `…With_eq` bridge restatements. Scanning the first ~14
+lines of each `___redArg` body in the IR for `ZMod_commRing` mixes the two, so classify each hit
+before costing it. Still live, and comparison-shaped (i.e. actually R9e): `denseSubsumedCheckOf` /
+`denseSubsumedRangeCheck?` (SubsumedCheck), `denseIdentityPairAt` / `denseOrIdentityOperand` /
+`denseIdentitySubstF` (IdentitySubst), `denseAsBytePair` / `denseSplitBytePairF` (SplitBytePair),
+`densePairByteOps?` (DigitFold). Construction-shaped, i.e. **R9b, not this item**: `denseComplExpr`
+and its callers `denseIsByteCompl` / `denseSvCheckWith?` (ByteCheckPack).
+
+**Start with `SubsumedCheck.denseSubsumedCheckOf`: it is nearly a verbatim copy of the
+`denseBoolCheck?` that entry 179 fixed** — the same `payload.map constValue?` handed to
+`facts.rangeCheckAt` (constantly `none` on OpenVM, so the pattern is built and discarded), the same
+`bi.multiplicity = DenseExpr.const 1`, and the same `payload[valSlot]? = some (.var x)` emit
+condition, so `denseHasBareVar` transfers as a pre-filter unchanged. It is also the largest of the
+group (subsumedRange 418 ms of corpus; digitFold 583 but only `densePairByteOps?` is this shape,
+identitySubst 127, redundantByteDrop 360, splitBytePair 47), so the rest are worth batching behind
+it rather than one PR each.
 
 **R9b. What is left, and why it is expensive.** Its `rootPairUnify` half is **superseded by entry
 170**, which rebuilt the pass (0.13–0.53×): the per-candidate chain builders are gone with the
