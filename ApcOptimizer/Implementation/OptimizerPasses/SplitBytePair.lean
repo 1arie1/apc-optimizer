@@ -24,6 +24,25 @@ def denseAsBytePair (bs : BusSemantics p) (facts : BusFacts p bs)
             ∧ r = DenseExpr.const 0 then some (bi.busId, spec, o1, o2) else none
     | none => none
 
+/-- Dictionary-free twin: same structure, literals tested without the `ZMod.commRing` chain that
+    `DenseExpr.const 0`/`1` put at this recognizer's entry. -/
+def denseAsBytePairImpl (bs : BusSemantics p) (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) :
+    Option (Nat × ByteXorSpec p × DenseExpr p × DenseExpr p) :=
+  match facts.byteXorSpec bi.busId with
+  | none => none
+  | some spec =>
+    match spec.decode bi.payload with
+    | some (op, o1, o2, r) =>
+        if bi.multiplicity.isConstOne = true ∧ op = DenseExpr.const spec.pairOp
+            ∧ r.isConstZero = true then some (bi.busId, spec, o1, o2) else none
+    | none => none
+
+@[csimp] theorem denseAsBytePair_eq_impl : @denseAsBytePair = @denseAsBytePairImpl := by
+  funext q bs facts bi
+  simp only [denseAsBytePair, denseAsBytePairImpl, DenseExpr.isConstOne_eq_decide,
+    DenseExpr.isConstZero_eq_decide, decide_eq_true_eq]
+
 /-- Split one interaction: a recognized packed pair becomes its two single-value checks (in
     decode order `a` then `b`); anything else passes through unchanged. -/
 def denseSplitOne (bs : BusSemantics p) (facts : BusFacts p bs)

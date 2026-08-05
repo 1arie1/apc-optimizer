@@ -26,6 +26,29 @@ def denseSubsumedCheckOf (bs : BusSemantics p) (facts : BusFacts p bs)
     else none
   | none => none
 
+/-- Dictionary-free twin: the literal-`1` gate runs first, so a non-unit multiplicity no longer
+    builds the `constValue?` pattern that `facts.rangeCheckAt` would discard. -/
+def denseSubsumedCheckOfImpl (bs : BusSemantics p) (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) : Option (VarId × Nat) :=
+  if bi.multiplicity.isConstOne then
+    match facts.rangeCheckAt bi.busId (bi.payload.map DenseExpr.constValue?) with
+    | some (valSlot, bound) =>
+      match bi.payload[valSlot]? with
+      | some (DenseExpr.var x) => some (x, bound)
+      | _ => none
+    | none => none
+  else none
+
+@[csimp] theorem denseSubsumedCheckOf_eq_impl :
+    @denseSubsumedCheckOf = @denseSubsumedCheckOfImpl := by
+  funext q bs facts bi
+  unfold denseSubsumedCheckOf denseSubsumedCheckOfImpl
+  rw [DenseExpr.isConstOne_eq_decide]
+  cases facts.rangeCheckAt bi.busId (bi.payload.map DenseExpr.constValue?) with
+  | none => simp
+  | some vb => obtain ⟨valSlot, bound⟩ := vb; by_cases hm : bi.multiplicity = DenseExpr.const 1 <;>
+      simp [hm]
+
 /-- Recognise a single-variable range check `[x, width]` (multiplicity `1`) on a `varRangeBus`
     bus whose width is a *satisfiable* constant (`width.val ≤ 17`): the checked variable and the
     bound `2 ^ width`. -/
