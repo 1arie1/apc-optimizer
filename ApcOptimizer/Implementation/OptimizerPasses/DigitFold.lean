@@ -429,6 +429,25 @@ def densePairByteOps? (bs : BusSemantics p) (facts : BusFacts p bs)
       then some (o1, o2) else none
     | none => none
 
+/-- Dictionary-free twin: same structure, literals tested without the `ZMod.commRing` chain that
+    `DenseExpr.const 0`/`1` put at this recognizer's entry. -/
+def densePairByteOpsImpl? (bs : BusSemantics p) (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) : Option (DenseExpr p × DenseExpr p) :=
+  match facts.byteXorSpec bi.busId with
+  | none => none
+  | some spec =>
+    match spec.decode bi.payload with
+    | some (op, o1, o2, _r) =>
+      if spec.bound = 256 ∧ op = DenseExpr.const spec.pairOp ∧ _r.isConstZero = true
+          ∧ bi.multiplicity.isConstOne = true
+      then some (o1, o2) else none
+    | none => none
+
+@[csimp] theorem densePairByteOps_eq_impl : @densePairByteOps? = @densePairByteOpsImpl? := by
+  funext q bs facts bi
+  simp only [densePairByteOps?, densePairByteOpsImpl?, DenseExpr.isConstOne_eq_decide,
+    DenseExpr.isConstZero_eq_decide, decide_eq_true_eq]
+
 /-! ## The fold plan: the ladder forms to solve and the keys they will query -/
 
 /-- One operand's contribution: its ladder form (in reverse scan order) and its variables, when

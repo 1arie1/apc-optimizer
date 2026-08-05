@@ -520,29 +520,52 @@ per corpus**. Three things worth carrying forward:
 - **Where a twin already exists, edit only the twin**; the in-place edit costs proof work and buys
   no runtime.
 
-**R9e (new, found in entry 179; cheap, several passes).** A recognizer that compares an expression
-against a `DenseExpr.const` numeral pays the dictionary chain at its **entry**, not at the
-comparison: `denseRangeEq?___redArg`'s first two statements were `ZMod_commRing` +
-`Ring_toAddGroupWithOne`, *ahead* of the `[v, c]` payload-shape test that rejects most interactions —
-so the gate written first is not the gate that runs first. The fix is mechanical: match the
-constructor as a tag (`| .const c =>`) and test the literal with `zmodIsOne`/`zmodIsZero`. Scan the
-first ~14 lines of each `___redArg` body in the IR for `ZMod_commRing`; that finds, still live,
-`denseSubsumedCheckOf` / `denseSubsumedRangeCheck?` (SubsumedCheck), `denseIdentityPairAt` /
-`denseOrIdentityOperand` / `denseIdentitySubstF` (IdentitySubst), `denseIsByteCompl` /
-`denseSvCheckWith?` / `denseComplExpr` (ByteCheckPack), `denseAsBytePair` / `denseSplitBytePairF`
-(SplitBytePair) and `densePairByteOps?` / `denseSlotBoundAt` / `denseInteractionBound` (DigitFold) —
-every one of them a per-interaction recognizer. Corpus stakes are small per pass (subsumedRange 418
-ms, digitFold 583, identitySubst 127, redundantByteDrop 360, splitBytePair 47), so batch them rather
-than opening one PR each.
+~~**R9e. Recognizer numerals on the entry path.**~~ · **done (entry 180)**, and the residual is
+measured. A recognizer that *compares* an expression against a `DenseExpr.const` numeral pays the
+`ZMod.commRing` chain at its **entry**, ahead of the branch test that would have rejected the
+interaction — invisible in the Lean source, so read the C. Fixed with one `@[csimp]` twin per
+recognizer testing literals through `DenseExpr.isConstZero`/`isConstOne` (`Encoding.lean`, the common
+ancestor of both halves of the import graph; its two `_eq_decide` bridges are the whole proof
+surface). **xorEqExtract 0.61–0.66x, digitFold 0.68–0.74x, subsumedCheck 0.66–0.78x, splitBytePair
+0.55–0.74x; corpus wall ~0.983x.**
 
-**R9b. What is left, and why it is expensive.** Its `rootPairUnify` half is **superseded by entry
-170**, which rebuilt the pass (0.13–0.53×): the per-candidate chain builders are gone with the
-per-candidate work itself, and the surviving `⁻¹` is one call per distinct coefficient value.
-Still open for `HintCollapse`, `SeqzCollapse`, `ByteCheckPack` and `BoxRewrite`: landing these means
-restating the affected `…With_eq` bridges to rewrite through `zmodZeroP_eq`/`zmodOneP_eq` rather than
-`rfl` — mechanical, but ~25 proof sites for a few percent. Note also `Affine.trySolve`/`trySolveUnit`
-and `denseScaledSlotBound` need the ring for `⁻¹`/`scale` regardless, so converting only their guards
-would not empty their entries.
+Measured and dropped — do not re-propose as stated: **`denseSubsumedRangeCheck?`** (flat, 0.993x:
+subsumedRange's 417 ms is not in its recognizer) and **`IdentitySubst`** (flat, 0.967–1.085x). The
+IdentitySubst result is the informative one: a variant that *also* hoisted the literal-`1`
+multiplicity gate ahead of the `facts.byteXorSpec` lookup measured **0.761x**, so there the cost is
+the *lookup ordering*, not the numeral — worth ~15 ms of corpus, which does not repay the
+`if`-past-`match` commutation proof the hoist needs. Two twin shapes, very different proof costs:
+structure-preserving (swap comparisons only) closes as a congruence with one `simp only`; hoisting a
+gate out of a nested match must commute `if` past `match` by hand — `grind` fails and `cases` on the
+scrutinee will not substitute under the twin's `if`.
+
+Still unconverted, and now known to be **not worth converting on this evidence**: the construction
+sites of R9b (below) and the `if (1 : ZMod p) ≠ 0` guard at the top of each pass transform
+(`denseSplitBytePairF`, `denseIdentitySubstF`, …) — once per invocation, not per interaction.
+
+~~**R9b. What is left, and why it is expensive.**~~ · **retired as a dead end 2026-08-05: its targets
+do not execute.** Its `rootPairUnify` half was already **superseded by entry 170**, which rebuilt the
+pass (0.13–0.53×). The remainder — convert the construction sites in `HintCollapse`, `SeqzCollapse`,
+`ByteCheckPack`, `BoxRewrite`, at ~25 `…With_eq` bridge restatements off `rfl` — was measured by
+attribution on sha256 `apc_001` (131 271 LBR samples, 21.3 s) and **every named construction site is
+cold**: `denseSumExpr` 0 frame appearances, `denseCoeffVar` 0, `denseExtractLinear` 0, `densePolyOf`
+0, `denseComplExpr` 0, `denseSeqzE*` 2. Not a naming artifact — `denseHintCollapse` itself appears
+1021 times, so the pass is sampled and its R9b functions simply never run. Whole-item ceiling
+**1.07 % of the run** charging *all* alloc+refcount inside those functions to the dictionary (a large
+over-count: they exist to allocate expression trees), **0.18 %** at the direct chain-walk leaves —
+either way consistent with R9's own measured `+0.4 %, not worth it`, and R9b's "a few percent" was
+never supported. Do not re-open it without a case where one of those symbols is hot.
+
+**What was actually hot there is R9e, not R9b.** The two groups carrying samples carry them in their
+*comparison* logic: `denseXorEq?` (4100 appearances; XorEqExtract 342 ms on sha256, 851 ms corpus)
+opens with `bi.multiplicity = DenseExpr.const 1` then `op = DenseExpr.const spec.xorOp` /
+`o1 = DenseExpr.const 0` / `o1 = DenseExpr.const 255` — the degenRange rule0 pattern exactly, so
+tag-matching fixes it with no proof movement. That makes **XorEqExtract the largest R9e target**,
+ahead of SubsumedCheck. Its size is genuinely open: ~7 % of the pass at the direct leaves, ~39 % at
+the generous ceiling, so size it (`@[implemented_by]`) before promising the ≥ 10 % per-pass clause.
+The one true R9b-shaped hot site left is `denseIsByteCompl`'s own `.const (-1)` — one function, 1–2
+bridges, not 25. Note also `Affine.trySolve`/`trySolveUnit` and `denseScaledSlotBound` need the ring
+for `⁻¹`/`scale` regardless, so converting only their guards would never empty their entries.
 
 **R9d (partly done, entry 170). The bound path is what is left of `rootPairUnify`** (sha256 918 ms:
 preparation 274, `denseVarBucket` build 125, ~900 bound queries 122, `substF` 259). A

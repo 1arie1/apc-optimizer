@@ -186,6 +186,28 @@ def DenseExpr.degree : DenseExpr p → Nat
   | .add a b => max a.degree b.degree
   | .mul a b => a.degree + b.degree
 
+/-! Mentioning `DenseExpr.const 0`/`1` anywhere in a function puts a `ZMod.commRing` chain at that
+function's *entry*, ahead of every branch test that would have rejected the input, so recognizers
+test literals through these instead. The `_eq_decide` bridges are their whole proof surface. -/
+
+/-- Is the dense expression the literal constant `0`? -/
+def DenseExpr.isConstZero : DenseExpr p → Bool
+  | .const n => zmodIsZero n
+  | _ => false
+
+/-- Is the dense expression the literal constant `1`? -/
+def DenseExpr.isConstOne : DenseExpr p → Bool
+  | .const n => zmodIsOne n
+  | _ => false
+
+theorem DenseExpr.isConstZero_eq_decide (e : DenseExpr p) :
+    e.isConstZero = decide (e = DenseExpr.const 0) := by
+  cases e <;> simp [DenseExpr.isConstZero]
+
+theorem DenseExpr.isConstOne_eq_decide (e : DenseExpr p) :
+    e.isConstOne = decide (e = DenseExpr.const 1) := by
+  cases e <;> simp [DenseExpr.isConstOne]
+
 /-- `eval` mentions `+`/`*`, so it derived the whole `CommRing` chain at *every node*. This twin
     routes both through the primitives; the `@[csimp]` below lives here, in the earliest dense
     module, so it fires for every pass. -/

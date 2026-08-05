@@ -7142,3 +7142,48 @@ allocation-free tag-check pass that returns the input on a miss, no cheaper nece
 beats it, so the gate and the pass are the same code.
 
 **Worked: yes.**
+
+### 180. Runtime: recognizer numerals off the entry path in four passes (xorEqExtract 0.64x, digitFold 0.70x)
+
+R9e, found while doing entry 179: a recognizer that compares an expression against a
+`DenseExpr.const` numeral pays the `ZMod.commRing` chain at its **entry**, ahead of the branch test
+that would have rejected the interaction, and this is invisible in the Lean source. Six functions in
+five passes still had it. The fix is one `@[csimp]` twin each testing literals with
+`DenseExpr.isConstZero`/`isConstOne` instead — `Proofs/*` untouched everywhere.
+
+`DenseExpr.isConstOne` is new and `isConstZero` moved from `Rewrite.lean` to `Encoding.lean`: the
+recognizers live on both sides of the import graph (`IdentitySubst` and `SubsumedCheck` never see
+`Rewrite`), and `Encoding.lean` — where `DenseExpr` itself is declared — is the common ancestor. The
+whole proof surface is the two `_eq_decide` bridges.
+
+LANDED, and what each measured (three interleaved corpus reps, 303 APCs): **xorEqExtract 0.61–0.66x**
+(852 → 548 ms), **digitFold 0.68–0.74x** (570 → 387), subsumedCheck 0.66–0.78x (77 → 51),
+splitBytePair 0.55–0.74x (47 → 33). Corpus wall **0.976 / 0.991 / 0.981x**, so ~0.983x; both VMs
+improve (OpenVM 0.975x, SP1 0.978x). sha256 `apc_001` 21 134 → 20 616 ms with xorEqExtract 340 → 251
+and digitFold 182 → 117.
+
+DROPPED, measured, do not retry as stated:
+- **`denseSubsumedRangeCheck?` — flat (0.993x).** subsumedRange's 417 ms is not in its recognizer, so
+  removing the chain there buys nothing; the twin was deleted rather than landed.
+- **`IdentitySubst` — flat (0.967 / 0.984 / 1.085x) once the twin kept the original structure.** The
+  interesting part: an earlier version that *also* hoisted the literal-`1` multiplicity gate ahead of
+  the `facts.byteXorSpec` lookup measured **0.761x**. So in this pass the numeral was not the cost —
+  the lookup ordering was — and it is worth ~15 ms of corpus, which does not repay the proof. The
+  hoist is what needs an `if`-past-`match` commutation argument; that is exactly the proof that
+  `grind` would not do and that made the structure-preserving twin the right shape for the two passes
+  where the numeral *was* the cost.
+
+THE PROOF LESSON. Two twin shapes, very different costs. Keeping the original's structure and
+swapping only the comparisons makes the equality a congruence: `simp only [defs, isConstOne_eq_decide,
+isConstZero_eq_decide, decide_eq_true_eq]` closes it outright. Hoisting a gate *out* of a nested match
+instead needs the `if`/`match` commutation by hand — `grind` failed on both attempts, and `cases` on
+the match scrutinee does not substitute under the twin's `if`. Reach for the hoist only where it is
+what pays (xorEqExtract and SubsumedCheck's own recognizer, both of which kept it).
+
+VERIFIED: per-cycle `vars / bus / constraints` identical on all 303 corpus APCs in every rep; `lake
+build` clean with no warnings; `check-proof-integrity` passes on the three standard axioms with no
+unused theorem. All six twins verified live and chain-free in the C — the `Impl` bodies carry no
+`ZMod_commRing` in their first 16 lines, and each slow body's only caller is its own dead wrapper.
+
+**Worked: yes** (xorEqExtract, digitFold, subsumedCheck, splitBytePair); **no** for subsumedRange and
+IdentitySubst, both dropped.

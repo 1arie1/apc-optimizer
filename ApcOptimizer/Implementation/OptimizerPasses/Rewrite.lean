@@ -34,20 +34,4 @@ theorem DenseConstraintSystem.filterBus_covered {reg : VarRegistry}
     (d.filterBus keep).CoveredBy reg :=
   ⟨fun e he => hc.1 e he, fun bi hbi => hc.2 bi (List.mem_of_mem_filter hbi)⟩
 
-/-! ## Small dense expression predicates -/
-
-def DenseExpr.isConstZeroImpl : DenseExpr p → Bool
-  | .const n => zmodIsZero n
-  | _ => false
-
-/-- Is the dense expression the literal constant `0`? -/
-def DenseExpr.isConstZero : DenseExpr p → Bool
-  | .const n => zmodIsZero n
-  | _ => false
-
-@[csimp] theorem DenseExpr_isConstZero_eq_impl :
-    @DenseExpr.isConstZero = @DenseExpr.isConstZeroImpl := by
-  funext q e
-  simp [DenseExpr.isConstZero, DenseExpr.isConstZeroImpl]
-
 end ApcOptimizer.Dense
