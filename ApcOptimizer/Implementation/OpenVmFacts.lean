@@ -407,6 +407,17 @@ theorem openVm_isStateful_of_memShape {p : ℕ} (busMap : Nat → Option OpenVmB
   | none => simp at h
   | some t => cases t <;> simp_all [OpenVmBusType.isStateful]
 
+/-- A bus with a declared timestamp slot (memory or execution bridge) is stateful. -/
+private theorem openVm_isStateful_of_memTsField {p : ℕ} (busMap : Nat → Option OpenVmBusType)
+    (busId slot : Nat) (h : memTsFieldOf busMap busId = some slot) :
+    (openVmBusSemantics p busMap).isStateful busId = true := by
+  show (match busMap busId with | some t => t.isStateful | none => false) = true
+  unfold memTsFieldOf at h
+  generalize busMap busId = o at h ⊢
+  cases o with
+  | none => simp at h
+  | some t => cases t <;> simp_all [OpenVmBusType.isStateful]
+
 /-- Every OpenVM shape uses `direction := .receiveThenSend`, so `setNewMult` reduces to `1`. -/
 private theorem memShapeOf_setNewMult_eq_one {p : ℕ} (busMap : Nat → Option OpenVmBusType)
     (busId : Nat) (shape : MemoryBusShape) (h : memShapeOf busMap busId = some shape) :
@@ -694,12 +705,36 @@ def openVmFacts (p : ℕ) [NeZero p]
       · rw [hb, hstateful]; simp
       · simp [hb]
     rwa [hlist] at hd
+  memTsField busId := (memTsFieldOf busMap busId).map (fun slot => (slot, 2 ^ 29))
+  memTsField_sound := by
+    intro msgs hadm busId slot bound hfact m hm hmne
+    rw [List.mem_filter] at hm
+    obtain ⟨hmem, hbusEq⟩ := hm
+    have hbusEq : m.busId = busId := by simpa using hbusEq
+    cases hof : memTsFieldOf busMap busId with
+    | none => rw [hof] at hfact; simp at hfact
+    | some tsField =>
+      rw [hof] at hfact
+      simp only [Option.map_some, Option.some.injEq, Prod.mk.injEq] at hfact
+      obtain ⟨rfl, rfl⟩ := hfact
+      -- the declared bus is stateful, so `m` survives the active∧stateful filter and the
+      -- TS_BOUND conjunct (`.2.1`) applies to it
+      have hstateful : (openVmBusSemantics p busMap).isStateful m.busId = true := by
+        rw [hbusEq]; exact openVm_isStateful_of_memTsField busMap busId _ hof
+      have hmfilt : m ∈ msgs.filter (fun m => decide (m.multiplicity ≠ 0) &&
+          (openVmBusSemantics p busMap).isStateful m.busId) := by
+        rw [List.mem_filter]
+        exact ⟨hmem, by rw [hstateful, decide_eq_true hmne]; rfl⟩
+      refine hadm.2.1 busId _ hof m ?_
+      rw [List.mem_filter]
+      exact ⟨hmfilt, decide_eq_true hbusEq⟩
   admissible_dropPair := by
     -- `openVmBusSemantics.admissible` is the per-declared-bus `admissibleMemoryBusM` conjunction
-    -- (`.1`) together with the `zeroRegisterReads` clause (`.2`).
+    -- (`.1`) together with the TS_BOUND clause (`.2.1`) and the `zeroRegisterReads` clause
+    -- (`.2.2`).
     intro busId shape hshape A B C S R hSbus hRbus hSm hRm hpay hadm_full
-    obtain ⟨hdisc, hzero⟩ := hadm_full
-    refine ⟨fun busId' shape' hshape' => ?_, ?_⟩
+    obtain ⟨hdisc, hts, hzero⟩ := hadm_full
+    refine ⟨fun busId' shape' hshape' => ?_, fun busId' tsField htf => ?_, ?_⟩
     · -- memory discipline conjunct
       by_cases hbb : busId' = busId
       · subst busId'
@@ -724,6 +759,14 @@ def openVmFacts (p : ℕ) [NeZero p]
             decide_eq_false hne, Bool.false_eq_true, if_false]
         rw [heq]
         exact hdisc busId' shape' hshape'
+    · -- TS_BOUND conjunct: `A ++ B ++ C`'s members are all members of the full list.
+      intro m hm
+      refine hts busId' tsField htf m ?_
+      rw [List.mem_filter] at hm ⊢
+      refine ⟨?_, hm.2⟩
+      have hmem := hm.1
+      simp only [List.mem_append, List.mem_cons] at hmem ⊢
+      tauto
     · -- `zeroRegisterReads` conjunct: `A ++ B ++ C`'s members are all members of the full list.
       intro m hm hbus h0 h1
       have hmem : m ∈ A ++ S :: B ++ R :: C := by
@@ -812,7 +855,7 @@ def openVmFacts (p : ℕ) [NeZero p]
         exact ⟨hm, by rw [hstateful, decide_eq_true hmne]; rfl⟩
       have h0 : m.payload[0]? = some 1 := haddr (0, 1) (by simp)
       have h1 : m.payload[1]? = some 0 := haddr (1, 0) (by simp)
-      have hz := hadm.2 m hmfilt hmemBus h0 h1
+      have hz := hadm.2.2 m hmfilt hmemBus h0 h1
       -- `slot ∈ [2,3,4,5]`; match it to the corresponding zero component and cancel with `hget`.
       simp only [List.mem_cons, List.not_mem_nil, or_false] at hslot
       rcases hslot with rfl | rfl | rfl | rfl

@@ -97,35 +97,3 @@ theorem cascade_forced {k : ℕ} {T : Type*} [LinearOrder T]
       rw [hts i j hij] at h
       exact hmono.lt_iff_lt.mp h)
     hinj hnone
-
-/-- Payload consumption form (order-free consecutive-copying): if the matching
-    additionally carries full payload equality, then access `0`'s receive is the group's unique
-    entry and every interior receive copies the previous send's payload. -/
-theorem cascade_payload_forced {k : ℕ} {T α : Type*} [LinearOrder T]
-    (sendTs prevTs : Fin k → T) (sendPay recvPay : Fin k → α)
-    (hmono : StrictMono sendTs)
-    (hlt : ∀ i, prevTs i < sendTs i)
-    (μ : Fin k → Option (Fin k))
-    (hmatch : ∀ i j, μ i = some j → prevTs i = sendTs j ∧ recvPay i = sendPay j)
-    (hinj : ∀ i i' j, μ i = some j → μ i' = some j → i = i')
-    (hnone : ∀ i i', μ i = none → μ i' = none → i = i') :
-    (∀ i : Fin k, μ i = none ↔ i.val = 0) ∧
-    (∀ i : Fin k, 0 < i.val →
-      recvPay i = sendPay ⟨i.val - 1, Nat.lt_of_le_of_lt (Nat.sub_le i.val 1) i.isLt⟩) := by
-  have hforced := cascade_forced sendTs prevTs hmono hlt μ
-    (fun i j h => (hmatch i j h).1) hinj hnone
-  constructor
-  · intro i
-    constructor
-    · intro hn
-      by_contra h0
-      have hf := hforced i
-      rw [if_pos (Nat.pos_of_ne_zero h0), hn] at hf
-      exact absurd hf (by simp)
-    · intro h0
-      have hf := hforced i
-      rwa [if_neg (by omega)] at hf
-  · intro i h
-    have hf := hforced i
-    rw [if_pos h] at hf
-    exact (hmatch i _ hf).2

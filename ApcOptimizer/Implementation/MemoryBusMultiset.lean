@@ -9,8 +9,10 @@ Consequences of `admissibleMemoryBusM` (`ApcOptimizer/MemoryBus.lean`, the order
 replacement for the positional `admissibleMemoryBus`). `admissibleMemoryBusM_copies` is the
 consumption form: presenting one address group as `k` accesses with strictly increasing send
 timestamps and the per-access LessThan bound, every interior receive is forced to copy the
-previous send's payload (via `cascade_forced`). The canonical-order section then recovers the
-positional discipline as a theorem (`interleaveAccesses_admissibleMemoryBus_of_M`). -/
+previous send's payload (via `cascade_forced`). The TS_BOUND section derives those timestamp
+hypotheses from syntax plus the `tsBounded` rely (`admissibleMemoryBusM_copies_of_ts`). The
+canonical-order section then recovers the positional discipline as a theorem
+(`interleaveAccesses_admissibleMemoryBus_of_M`). -/
 
 variable {p : ℕ}
 
@@ -201,6 +203,121 @@ theorem admissibleMemoryBusM_copies {k : ℕ} (shape : MemoryBusShape)
     exact hspec
   · rw [dif_neg hex] at hf
     exact absurd hf (by simp)
+
+/-! ## Timestamp arithmetic under TS_BOUND
+
+The pass-facing bridge: powdr send timestamps are `base + offset` (a shared base expression,
+distinct `Nat` constant offsets), and the TS_BOUND rely (`tsBounded`, `ApcOptimizer/MemoryBus.lean`)
+bounds every declared ts-slot *value* below `B ≤ 2^29`. With `2^30 < p` the field cannot wrap
+between two such bounded values, so the values order by the offsets (`val_lt_of_offset_lt`);
+the per-access LessThan gadget lifts to `ℕ` by a no-wrap sum argument (`val_eq_of_no_wrap`,
+`val_lt_of_lessThan_gadget`). `admissibleMemoryBusM_copies_of_ts` packages both into the
+consumption form. -/
+
+/-- Two values sharing a base order by their `Nat` offsets: the earlier one is `< B ≤ 2^29`,
+    their difference is `k2 - k1 (mod p)` with `0 < k2 - k1 < B`, and `2^30 < p` leaves no room
+    to wrap. -/
+theorem val_lt_of_offset_lt (hp : 2^30 < p) (b : ZMod p) (k1 k2 B : ℕ)
+    (hk : k1 < k2) (hB : B ≤ 2^29) (hd : k2 - k1 < B)
+    (h1 : (b + (k1 : ZMod p)).val < B) :
+    (b + (k1 : ZMod p)).val < (b + (k2 : ZMod p)).val := by
+  have h30 : (2 : ℕ)^30 = 1073741824 := by decide
+  have h29 : (2 : ℕ)^29 = 536870912 := by decide
+  haveI : NeZero p := ⟨by omega⟩
+  have hsplit : b + (k2 : ZMod p) = (b + (k1 : ZMod p)) + ((k2 - k1 : ℕ) : ZMod p) := by
+    have hk2 : k1 + (k2 - k1) = k2 := by omega
+    calc b + (k2 : ZMod p) = b + ((k1 + (k2 - k1) : ℕ) : ZMod p) := by rw [hk2]
+      _ = (b + (k1 : ZMod p)) + ((k2 - k1 : ℕ) : ZMod p) := by
+          rw [Nat.cast_add, add_assoc]
+  have hdval : ((k2 - k1 : ℕ) : ZMod p).val = k2 - k1 := by
+    rw [ZMod.val_natCast, Nat.mod_eq_of_lt (by omega)]
+  have hval : (b + (k2 : ZMod p)).val = ((b + (k1 : ZMod p)).val + (k2 - k1)) % p := by
+    rw [hsplit, ZMod.val_add, hdval]
+  rw [hval, Nat.mod_eq_of_lt (by omega)]
+  omega
+
+/-- Per-term bounds bound the terms' natural sum. Terms are `(coefficient, bound, value)`. -/
+theorem gadgetTerms_val_sum_le (terms : List (ℕ × ℕ × ZMod p))
+    (hbnd : ∀ t ∈ terms, t.2.2.val < t.2.1) :
+    (terms.map fun t => t.1 * t.2.2.val).sum ≤ (terms.map fun t => t.1 * (t.2.1 - 1)).sum := by
+  induction terms with
+  | nil => simp
+  | cons t rest ih =>
+    simp only [List.map_cons, List.sum_cons]
+    have h1 : t.2.2.val < t.2.1 := hbnd t (by simp)
+    have h2 := ih fun s hs => hbnd s (List.mem_cons_of_mem t hs)
+    have h3 : t.1 * t.2.2.val ≤ t.1 * (t.2.1 - 1) := Nat.mul_le_mul_left _ (by omega)
+    omega
+
+/-- Over `ZMod p` the terms' sum equals the cast of their natural (`.val`-wise) sum. -/
+theorem gadgetTerms_sum_cast [NeZero p] (terms : List (ℕ × ℕ × ZMod p)) :
+    (terms.map fun t => (t.1 : ZMod p) * t.2.2).sum
+      = (((terms.map fun t => t.1 * t.2.2.val).sum : ℕ) : ZMod p) := by
+  induction terms with
+  | nil => simp
+  | cons t rest ih =>
+    simp only [List.map_cons, List.sum_cons, ih, Nat.cast_add, Nat.cast_mul]
+    congr 1
+    rw [ZMod.natCast_val, ZMod.cast_id]
+
+/-- No-wrap lift of a linear decomposition: if `a = c0 + x + Σ coeffᵢ·valueᵢ` over `ZMod p` and
+    the natural total stays below `p`, the equation holds in `ℕ` exactly. -/
+theorem val_eq_of_no_wrap (a x : ZMod p) (c0 : ℕ) (terms : List (ℕ × ℕ × ZMod p))
+    (heq : a = (c0 : ZMod p) + x + (terms.map fun t => (t.1 : ZMod p) * t.2.2).sum)
+    (htot : c0 + x.val + (terms.map fun t => t.1 * t.2.2.val).sum < p) :
+    a.val = c0 + x.val + (terms.map fun t => t.1 * t.2.2.val).sum := by
+  haveI : NeZero p := ⟨by omega⟩
+  have hcast : a
+      = (((c0 + x.val + (terms.map fun t => t.1 * t.2.2.val).sum : ℕ)) : ZMod p) := by
+    rw [heq, gadgetTerms_sum_cast, Nat.cast_add, Nat.cast_add, ZMod.natCast_val, ZMod.cast_id]
+  rw [hcast, ZMod.val_natCast, Nat.mod_eq_of_lt htot]
+
+/-- The LessThan gadget, lifted: `a = c0 + x + Σ coeffᵢ·limbᵢ` with `c0 ≥ 1`, range-checked limbs
+    (`limbᵢ.val < boundᵢ`), `x.val < B`, and a syntactic no-wrap certificate
+    `c0 + B + Σ coeffᵢ·(boundᵢ - 1) ≤ p` force `x.val < a.val`. -/
+theorem val_lt_of_lessThan_gadget (a x : ZMod p) (c0 B : ℕ) (hc0 : 1 ≤ c0)
+    (terms : List (ℕ × ℕ × ZMod p))
+    (heq : a = (c0 : ZMod p) + x + (terms.map fun t => (t.1 : ZMod p) * t.2.2).sum)
+    (hbnd : ∀ t ∈ terms, t.2.2.val < t.2.1)
+    (hx : x.val < B)
+    (htot : c0 + B + (terms.map fun t => t.1 * (t.2.1 - 1)).sum ≤ p) :
+    x.val < a.val := by
+  have hs := gadgetTerms_val_sum_le terms hbnd
+  have h := val_eq_of_no_wrap a x c0 terms heq (by omega)
+  omega
+
+/-- Packaged consumption from syntax + TS_BOUND (the bridge a pass calls): fiber presentations,
+    send ts-slot elements `b + off i` with strictly increasing offsets of spread `< B ≤ 2^29`,
+    the TS_BOUND value bound on the sends, and the per-access LessThan conclusion
+    (`tsSlotVal recv < tsSlotVal send`, from `val_lt_of_lessThan_gadget`) force every interior
+    receive to copy the previous send's payload. -/
+theorem admissibleMemoryBusM_copies_of_ts {k : ℕ} (shape : MemoryBusShape)
+    (M : Multiset (BusInteraction (ZMod p))) (addr : List (Option (ZMod p)))
+    (hp : 2^30 < p) (hM : admissibleMemoryBusM shape M)
+    (send recv : Fin k → BusInteraction (ZMod p))
+    (hsend : sendsAt shape addr M = Multiset.map send ↑(List.finRange k))
+    (hrecv : recvsAt shape addr M = Multiset.map recv ↑(List.finRange k))
+    (tsField B : ℕ) (hB : B ≤ 2^29) (b : ZMod p) (off : Fin k → ℕ)
+    (hoff : StrictMono off)
+    (hspread : ∀ i j : Fin k, i < j → off j - off i < B)
+    (hts : ∀ i, (send i).payload[tsField]? = some (b + (off i : ZMod p)))
+    (hbs : ∀ i, tsSlotVal tsField (send i) < B)
+    (hlt : ∀ i, tsSlotVal tsField (recv i) < tsSlotVal tsField (send i)) :
+    ∀ i : Fin k, 0 < i.val →
+      (recv i).payload
+        = (send ⟨i.val - 1, Nat.lt_of_le_of_lt (Nat.sub_le i.val 1) i.isLt⟩).payload := by
+  have hsv : ∀ i, tsSlotVal tsField (send i) = (b + (off i : ZMod p)).val := by
+    intro i
+    unfold tsSlotVal
+    rw [hts i]
+    rfl
+  refine admissibleMemoryBusM_copies shape M addr hM send recv hsend hrecv
+    (tsSlotVal tsField) (fun m m' h => by unfold tsSlotVal; rw [h]) ?_ hlt
+  intro i j hij
+  dsimp only
+  rw [hsv i, hsv j]
+  exact val_lt_of_offset_lt hp b (off i) (off j) B (hoff hij) hB (hspread i j hij)
+    ((hsv i) ▸ hbs i)
 
 /-! ## The canonical order witnesses the positional discipline
 

@@ -29,6 +29,10 @@ set_option autoImplicit false
     canonical access order (`Implementation/MemoryBusMultiset.lean`,
     `interleaveAccesses_admissibleMemoryBus_of_M`).
 
+    A separate per-message rely, `tsBounded` (TS_BOUND), bounds the value of a declared timestamp
+    payload slot; combined with the order-free discipline it lets a pass recover timestamp *order*
+    from the bounded values without trusting the list order.
+
     [1] https://link.springer.com/article/10.1007/BF01185212
 -/
 
@@ -107,3 +111,20 @@ theorem admissibleMemoryBusM_perm (shape : MemoryBusShape)
     admissibleMemoryBusM shape (L : Multiset (BusInteraction (ZMod p))) ↔
       admissibleMemoryBusM shape (L' : Multiset (BusInteraction (ZMod p))) := by
   rw [Multiset.coe_eq_coe.mpr h]
+
+/-- The `Nat` value of a message's declared timestamp slot (`0` if the payload is too short to
+    have one). -/
+def tsSlotVal (tsField : Nat) (m : BusInteraction (ZMod p)) : Nat :=
+  ((m.payload[tsField]?).getD 0).val
+
+/-- TS_BOUND: every message in `msgs` carries a timestamp-slot value below `bound`. Justified by
+    the VM's global timestamp argument — e.g. OpenVM keeps all timestamps below `2^29` across the
+    whole trace. Per-message, hence trivially preserved by dropping messages and invariant under
+    reordering (`tsBounded_perm`). -/
+def tsBounded (tsField bound : Nat) (msgs : List (BusInteraction (ZMod p))) : Prop :=
+  ∀ m ∈ msgs, tsSlotVal tsField m < bound
+
+/-- The timestamp bound is invariant under reordering the interaction list. -/
+theorem tsBounded_perm (tsField bound : Nat) {L L' : List (BusInteraction (ZMod p))}
+    (h : L.Perm L') : tsBounded tsField bound L ↔ tsBounded tsField bound L' :=
+  forall_congr' fun _ => imp_congr h.mem_iff Iff.rfl

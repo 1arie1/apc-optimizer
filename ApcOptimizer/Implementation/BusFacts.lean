@@ -136,6 +136,18 @@ structure BusFacts (p : ℕ) (bs : BusSemantics p) where
         admissibleMemoryBusM shape
           (↑((msgs.filter (fun m => m.busId = busId)).filter
             (fun m => decide (m.multiplicity ≠ 0))) : Multiset (BusInteraction (ZMod p)))
+  /-- Declared timestamp slot of a memory-shaped bus:
+      `memTsField busId = some (slot, bound)` asserts TS_BOUND — every active message on `busId`
+      carries `payload[slot].val < bound` (see `tsBounded`; justified by the VM's global
+      timestamp argument). -/
+  memTsField : (busId : Nat) → Option (Nat × Nat)
+  memTsField_sound :
+    ∀ (msgs : List (BusInteraction (ZMod p))),
+      bs.admissible (msgs.filter
+        (fun m => decide (m.multiplicity ≠ 0) && bs.isStateful m.busId)) →
+      ∀ (busId slot bound : Nat), memTsField busId = some (slot, bound) →
+        ∀ m ∈ msgs.filter (fun m => m.busId = busId), m.multiplicity ≠ 0 →
+          tsSlotVal slot m < bound
   /-- Reverse bridge for pair cancellation (completeness): dropping an equal-payload
       `setNew`/`getPrevious` pair from a declared bus preserves `admissible` — the pair
       contributes the same payload to both fibers of `admissibleMemoryBusM` at its address, so
@@ -254,6 +266,8 @@ def BusFacts.trivial (bs : BusSemantics p) [DecidablePred bs.accepts] : BusFacts
   memShape _ := none
   memShape_stateful := by intro _ _ h; exact absurd h (by simp)
   admissible_sound := by intro _ _ _ _ h; exact absurd h (by simp)
+  memTsField _ := none
+  memTsField_sound := by intro _ _ _ _ _ h; exact absurd h (by simp)
   admissible_dropPair := by intro _ _ h; exact absurd h (by simp)
   varRangeBus _ := false
   varRangeBus_sound := by intro _ h; exact absurd h (by simp)
