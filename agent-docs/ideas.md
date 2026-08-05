@@ -547,14 +547,29 @@ group (subsumedRange 418 ms of corpus; digitFold 583 but only `densePairByteOps?
 identitySubst 127, redundantByteDrop 360, splitBytePair 47), so the rest are worth batching behind
 it rather than one PR each.
 
-**R9b. What is left, and why it is expensive.** Its `rootPairUnify` half is **superseded by entry
-170**, which rebuilt the pass (0.13–0.53×): the per-candidate chain builders are gone with the
-per-candidate work itself, and the surviving `⁻¹` is one call per distinct coefficient value.
-Still open for `HintCollapse`, `SeqzCollapse`, `ByteCheckPack` and `BoxRewrite`: landing these means
-restating the affected `…With_eq` bridges to rewrite through `zmodZeroP_eq`/`zmodOneP_eq` rather than
-`rfl` — mechanical, but ~25 proof sites for a few percent. Note also `Affine.trySolve`/`trySolveUnit`
-and `denseScaledSlotBound` need the ring for `⁻¹`/`scale` regardless, so converting only their guards
-would not empty their entries.
+~~**R9b. What is left, and why it is expensive.**~~ · **retired as a dead end 2026-08-05: its targets
+do not execute.** Its `rootPairUnify` half was already **superseded by entry 170**, which rebuilt the
+pass (0.13–0.53×). The remainder — convert the construction sites in `HintCollapse`, `SeqzCollapse`,
+`ByteCheckPack`, `BoxRewrite`, at ~25 `…With_eq` bridge restatements off `rfl` — was measured by
+attribution on sha256 `apc_001` (131 271 LBR samples, 21.3 s) and **every named construction site is
+cold**: `denseSumExpr` 0 frame appearances, `denseCoeffVar` 0, `denseExtractLinear` 0, `densePolyOf`
+0, `denseComplExpr` 0, `denseSeqzE*` 2. Not a naming artifact — `denseHintCollapse` itself appears
+1021 times, so the pass is sampled and its R9b functions simply never run. Whole-item ceiling
+**1.07 % of the run** charging *all* alloc+refcount inside those functions to the dictionary (a large
+over-count: they exist to allocate expression trees), **0.18 %** at the direct chain-walk leaves —
+either way consistent with R9's own measured `+0.4 %, not worth it`, and R9b's "a few percent" was
+never supported. Do not re-open it without a case where one of those symbols is hot.
+
+**What was actually hot there is R9e, not R9b.** The two groups carrying samples carry them in their
+*comparison* logic: `denseXorEq?` (4100 appearances; XorEqExtract 342 ms on sha256, 851 ms corpus)
+opens with `bi.multiplicity = DenseExpr.const 1` then `op = DenseExpr.const spec.xorOp` /
+`o1 = DenseExpr.const 0` / `o1 = DenseExpr.const 255` — the degenRange rule0 pattern exactly, so
+tag-matching fixes it with no proof movement. That makes **XorEqExtract the largest R9e target**,
+ahead of SubsumedCheck. Its size is genuinely open: ~7 % of the pass at the direct leaves, ~39 % at
+the generous ceiling, so size it (`@[implemented_by]`) before promising the ≥ 10 % per-pass clause.
+The one true R9b-shaped hot site left is `denseIsByteCompl`'s own `.const (-1)` — one function, 1–2
+bridges, not 25. Note also `Affine.trySolve`/`trySolveUnit` and `denseScaledSlotBound` need the ring
+for `⁻¹`/`scale` regardless, so converting only their guards would never empty their entries.
 
 **R9d (partly done, entry 170). The bound path is what is left of `rootPairUnify`** (sha256 918 ms:
 preparation 274, `denseVarBucket` build 125, ~900 bound queries 122, `substF` 259). A
