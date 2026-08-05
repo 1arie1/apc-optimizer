@@ -652,6 +652,8 @@ def sp1Facts (p : ℕ) [NeZero p]
         · rw [hget] at hz; exact Option.some.inj hz.2.2.1
         · rw [hget] at hz; exact Option.some.inj hz.2.2.2
       · exact absurd hfact (by simp)
+    -- No timestamp-slot fact for SP1 (`memTsField` stays `none` from `BusFacts.trivial`): its
+    -- clock is two payload fields, not a single bounded slot (see `Sp1Semantics.lean`).
     memShape := memShapeOf busMap
     memShape_stateful := fun busId shape hshape =>
       sp1_isStateful_of_memShape busMap busId shape hshape

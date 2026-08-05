@@ -177,6 +177,15 @@ def memShapeOf (busMap : BusMap) (busId : Nat) : Option MemoryBusShape :=
   | some .executionBridge => some { addressFields := [], direction := .receiveThenSend }
   | _ => none
 
+/-- The payload slot carrying the timestamp on a declared memory-shaped bus: slot 6 on the memory
+    bus (`(address_space, pointer, data… (4 limbs), timestamp)`) and slot 1 on the execution
+    bridge (`(pc, timestamp)`). -/
+def memTsFieldOf (busMap : BusMap) (busId : Nat) : Option Nat :=
+  match busMap busId with
+  | some .memory => some 6
+  | some .executionBridge => some 1
+  | _ => none
+
 /-- The OpenVM bus semantics for a given bus map (default: the hard-coded default bus map). -/
 def openVmBusSemantics (p : ℕ) (busMap : BusMap := defaultBusMap) :
     BusSemantics p where
@@ -186,10 +195,15 @@ def openVmBusSemantics (p : ℕ) (busMap : BusMap := defaultBusMap) :
     | none => false
   accepts := accepts busMap
   maintainsInvariants := maintainsInvariants busMap
+  -- Three conjuncts: the order-free memory discipline per declared bus; the timestamp bound
+  -- (TS_BOUND — OpenVM's global timestamp argument keeps every timestamp below `2^29` across
+  -- the whole trace); and the x0-returns-zero rely.
   admissible msgs :=
     (∀ (busId : Nat) (shape : MemoryBusShape), memShapeOf busMap busId = some shape →
       admissibleMemoryBusM shape
         (↑(msgs.filter (fun m => m.busId = busId)) : Multiset (BusInteraction (ZMod p))))
+    ∧ (∀ (busId tsField : Nat), memTsFieldOf busMap busId = some tsField →
+        tsBounded tsField (2 ^ 29) (msgs.filter (fun m => m.busId = busId)))
     ∧ x0ReturnsZero busMap msgs
 
 /-- Auditor sanity: the whole OpenVM rely (`openVmBusSemantics.admissible`) is order-free — it is
@@ -199,9 +213,11 @@ theorem openVmAdmissible_perm (busMap : BusMap)
     (openVmBusSemantics p busMap).admissible msgs ↔
       (openVmBusSemantics p busMap).admissible msgs' := by
   unfold openVmBusSemantics x0ReturnsZero
-  refine and_congr ?_ ?_
+  refine and_congr ?_ (and_congr ?_ ?_)
   · refine forall_congr' fun busId => forall_congr' fun shape => imp_congr Iff.rfl ?_
     exact admissibleMemoryBusM_perm shape (h.filter _)
+  · refine forall_congr' fun busId => forall_congr' fun tsField => imp_congr Iff.rfl ?_
+    exact tsBounded_perm tsField (2 ^ 29) (h.filter _)
   · exact forall_congr' fun m => imp_congr h.mem_iff Iff.rfl
 
 /-- OpenVM's proving-backend degree bound (powdr's `DEFAULT_DEGREE_BOUND`), used when the optimizer

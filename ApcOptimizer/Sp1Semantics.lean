@@ -179,6 +179,10 @@ def sp1BusSemantics (p : ℕ) (busMap : BusMap := defaultBusMap) :
   -- (`direction := .sendThenReceive`); on the *execution bridge* it is `1` (`.receiveThenSend`,
   -- which sends the next CPU state). Either way `admissibleMemoryBusM` bounds, per evaluated
   -- address, the excess of the `getPrevious` payload multiset over the `setNew` one.
+  -- No TS_BOUND (`tsBounded`) conjunct is declared for SP1: its clock is *two* payload fields
+  -- (`clk… (2 fields)` on both memory and the execution bridge — see the payload docstrings
+  -- above), not a single bounded timestamp slot, so timestamp-order reasoning stays unavailable
+  -- for SP1 until a single-slot encoding of its clock is established.
   admissible msgs :=
     (∀ (busId : Nat) (shape : MemoryBusShape), memShapeOf busMap busId = some shape →
       admissibleMemoryBusM shape
