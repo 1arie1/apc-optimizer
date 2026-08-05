@@ -7052,9 +7052,13 @@ emitted — `List.append_nil` plus structure eta, no new obligation. Sized at ~6
 
 NUMBERS (this 20-core box, serial, interleaved, 2 reps): sha256 `apc_001` **622/628 → 115/111 ms** on the
 pass, total 22 244 → 21 357 (0.96x); wasm-eth `apc_012` 82/83 → 17/15; `apc_063` 65/74 → 14/9; keccak
-`apc_001` 62/73 → 8/11; SP1 keccak 18/19 → 2/3. **Whole local corpus, 303 APCs interleaved: zeroRegister
-1333 → 248 ms (0.186x), wall 48.4 → 47.0 s (0.970x)**; the companion also moves `oneHotAnnihilate`
-297 → 264 (0.889x) and `xorEqExtract` 919 → 858 (0.934x).
+`apc_001` 62/73 → 8/11; SP1 keccak 18/19 → 2/3. **Whole local corpus, 303 APCs interleaved (OpenVM 202, SP1
+101): zeroRegister 1333 → 248 ms (0.186x), wall 48.4 → 47.0 s (0.970x)**; the companion also moves
+`oneHotAnnihilate` 297 → 264 (0.889x) and `xorEqExtract` 919 → 858 (0.934x). Both VMs improve — OpenVM
+zeroRegister 1244 → 230 ms with wall 44.4 → 43.1 s (0.970x), SP1 89 → 18 ms (0.20x) with wall
+4.01 → 3.93 s (0.982x), since `Sp1Facts` has its own `zeroCellImpl`; SP1's only substantial case is
+keccak `apc_001` (19 → 3 ms on the pass) and the 100 `rsp` cases hold 0–5 ms each, so only their
+aggregate means anything.
 VERIFIED: final `vars / constraints / bus` **identical on all 303 corpus APCs**; `opt-export`
 byte-identical on sha256 `apc_001`, wasm-eth `apc_012`, keccak `apc_001`, SP1 keccak `apc_001` and SP1
 rsp `apc_001`; `lake build` clean with no warnings; `check-proof-integrity` passes on the three standard
