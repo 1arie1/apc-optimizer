@@ -14,6 +14,12 @@ matching verified optimizer with the given degree bound, and serializes the resu
 cursor — **required** (a missing one yields `{"error": ...}`), advanced past the fresh ids assigned
 to new columns so powdr reseeds its allocator directly.
 
+An optional `entry_pc` (equivalently a `block` descriptor, as in `ApcWithBusMap`) states the pc at
+which the block is entered. Supplying it declares the execution bridge's entry record (ENTRY_KEY,
+`ApcOptimizer/MemoryBus.lean`), which is what lets the optimizer chain the block's CPU states — and
+with them every instruction's memory timestamps onto one base. Omitting it assumes nothing and
+costs effectiveness.
+
 On any parse error the function returns a `{"error": "..."}` object rather than a machine, so the
 Rust side can surface a clear message instead of an opaque deserialization failure. The function
 never throws across the FFI boundary.
