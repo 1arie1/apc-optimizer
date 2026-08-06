@@ -148,6 +148,19 @@ structure BusFacts (p : ℕ) (bs : BusSemantics p) where
       ∀ (busId slot bound : Nat), memTsField busId = some (slot, bound) →
         ∀ m ∈ msgs.filter (fun m => m.busId = busId), m.multiplicity ≠ 0 →
           tsSlotVal slot m < bound
+  /-- Declared entry key of a chain-shaped bus: `memEntryKey busId = some (slot, key)` asserts
+      ENTRY_KEY — the record entering the block from outside on `busId` carries `key` in payload
+      slot `slot` (see `entryKeyed`; for an execution bridge, the block's entry pc). -/
+  memEntryKey : (busId : Nat) → Option (Nat × ZMod p)
+  memEntryKey_sound :
+    ∀ (msgs : List (BusInteraction (ZMod p))),
+      bs.admissible (msgs.filter
+        (fun m => decide (m.multiplicity ≠ 0) && bs.isStateful m.busId)) →
+      ∀ (busId slot : Nat) (key : ZMod p) (shape : MemoryBusShape),
+        memShape busId = some shape → memEntryKey busId = some (slot, key) →
+        entryKeyed shape slot key
+          (↑((msgs.filter (fun m => m.busId = busId)).filter
+            (fun m => decide (m.multiplicity ≠ 0))) : Multiset (BusInteraction (ZMod p)))
   /-- Reverse bridge for pair cancellation (completeness): dropping an equal-payload
       `setNew`/`getPrevious` pair from a declared bus preserves `admissible` — the pair
       contributes the same payload to both fibers of `admissibleMemoryBusM` at its address, so
@@ -268,6 +281,8 @@ def BusFacts.trivial (bs : BusSemantics p) [DecidablePred bs.accepts] : BusFacts
   admissible_sound := by intro _ _ _ _ h; exact absurd h (by simp)
   memTsField _ := none
   memTsField_sound := by intro _ _ _ _ _ h; exact absurd h (by simp)
+  memEntryKey _ := none
+  memEntryKey_sound := by intro _ _ _ _ _ _ _ h; exact absurd h (by simp)
   admissible_dropPair := by intro _ _ h; exact absurd h (by simp)
   varRangeBus _ := false
   varRangeBus_sound := by intro _ h; exact absurd h (by simp)

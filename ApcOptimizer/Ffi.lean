@@ -44,17 +44,18 @@ private def errorJson (msg : String) : String :=
 private def runOpenVm (b : DegreeBound) (input : String) : String :=
   match parseJsonSystem (p := babyBear) input with
   | .error err => errorJson err
-  | .ok (_, _, none) => errorJson "missing required field `next_free_id`"
-  | .ok (cs, busMap, some base) =>
-    let (optimized, ds) := openVmOptimizer busMap.toBusMap b cs
+  | .ok (_, _, none, _) => errorJson "missing required field `next_free_id`"
+  | .ok (cs, busMap, some base, entryPc?) =>
+    let (optimized, ds) :=
+      openVmOptimizer busMap.toBusMap (entryPc?.map (fun n => (n : ZMod babyBear))) b cs
     ApcOptimizer.Serialize.serializeResult optimized ds base
 
 /-- Parse a powdr SP1 export, run `sp1Optimizer` with degree bound `b`, and serialize. -/
 private def runSp1 (b : DegreeBound) (input : String) : String :=
   match parseJsonSystemSp1 (p := koalaBear) input with
   | .error err => errorJson err
-  | .ok (_, _, none) => errorJson "missing required field `next_free_id`"
-  | .ok (cs, busMap, some base) =>
+  | .ok (_, _, none, _) => errorJson "missing required field `next_free_id`"
+  | .ok (cs, busMap, some base, _) =>
     let (optimized, ds) := sp1Optimizer busMap.toBusMap b cs
     ApcOptimizer.Serialize.serializeResult optimized ds base
 
