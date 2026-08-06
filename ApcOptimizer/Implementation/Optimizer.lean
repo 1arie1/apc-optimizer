@@ -26,6 +26,7 @@ import ApcOptimizer.Implementation.OptimizerPasses.DenseUmbrella
 import ApcOptimizer.Implementation.OptimizerPasses.HashedDedup
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DomainBatch
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.FlagFold
+import ApcOptimizer.Implementation.OptimizerPasses.Proofs.ExecChain
 
 set_option autoImplicit false
 
@@ -83,6 +84,7 @@ def cleanupPasses (b : DegreeBound) : List (String × DenseVerifiedPassW p) :=
     ("zeroMultBus", denseZeroMultBusDropPass),
     ("tautoBus", denseTautoBusDropPass),
     ("domainFold", denseDomainFoldPassV pw),
+    ("execChain", denseExecChainPass),
     ("busUnify", denseBusUnifyPass),
     ("busPairCancel", denseBusPairCancelPass pw false),
     ("bytePack", denseByteCheckPackPass),

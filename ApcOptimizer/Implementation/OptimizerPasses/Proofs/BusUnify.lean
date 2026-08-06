@@ -671,7 +671,7 @@ private theorem denseKey_eval_base_eq (L L' : DenseLinExpr p)
   ring
 
 theorem denseBUOffs_length {tsField : Nat} {key0 : List (VarId × ZMod p)} :
-    ∀ {sends : List (BusInteraction (DenseExpr p))} {offs : List Nat},
+    ∀ {sends : List (BusInteraction (DenseExpr p))} {offs : List (ZMod p)},
       denseBUOffs tsField key0 sends = some offs → offs.length = sends.length
   | [], offs, h => by
       simp only [denseBUOffs, Option.some.injEq] at h
@@ -692,12 +692,12 @@ theorem denseBUOffs_length {tsField : Nat} {key0 : List (VarId × ZMod p)} :
               · simp at h
 
 theorem denseBUOffs_spec {tsField : Nat} {key0 : List (VarId × ZMod p)} :
-    ∀ {sends : List (BusInteraction (DenseExpr p))} {offs : List Nat},
+    ∀ {sends : List (BusInteraction (DenseExpr p))} {offs : List (ZMod p)},
       denseBUOffs tsField key0 sends = some offs →
-      ∀ (i : Nat) (S : BusInteraction (DenseExpr p)) (o : Nat),
+      ∀ (i : Nat) (S : BusInteraction (DenseExpr p)) (o : ZMod p),
         sends[i]? = some S → offs[i]? = some o →
         ∃ e L, S.payload[tsField]? = some e ∧ denseLinearize e = some L ∧
-          denseTermKey L = key0 ∧ o = L.const.val
+          denseTermKey L = key0 ∧ o = L.const
   | [], offs, h => by
       intro i S o hS
       simp at hS
@@ -727,6 +727,25 @@ theorem denseBUOffs_spec {tsField : Nat} {key0 : List (VarId × ZMod p)} :
                     simp only [List.getElem?_cons_succ] at hS ho
                     exact denseBUOffs_spec hrec j S o hS ho
               · simp at h
+
+/-- The step check read index-wise: consecutive offsets differ by a value in `[1, B)`. -/
+theorem denseBUStepsOk_spec {B : Nat} :
+    ∀ {offs : List (ZMod p)}, denseBUStepsOk B offs = true →
+      ∀ (i : Nat) (hi : i + 1 < offs.length),
+        1 ≤ ((offs[i + 1]'hi) - (offs[i]'(by omega))).val ∧
+          ((offs[i + 1]'hi) - (offs[i]'(by omega))).val < B
+  | [], _, i, hi => by simp at hi
+  | [_], _, i, hi => by simp at hi
+  | c :: c' :: rest, h, i, hi => by
+      simp only [denseBUStepsOk, Bool.and_eq_true, decide_eq_true_eq] at h
+      obtain ⟨⟨h1, h2⟩, hrec⟩ := h
+      cases i with
+      | zero => exact ⟨h1, h2⟩
+      | succ j =>
+          have hj : j + 1 < (c' :: rest).length := by
+            simp only [List.length_cons] at hi ⊢
+            omega
+          exact denseBUStepsOk_spec hrec j hj
 
 /-- The range-check witness scan is sound: a hit bounds the variable's value under any
     satisfying assignment. -/
@@ -877,11 +896,11 @@ theorem denseBUGadgetOk_sound (bs : BusSemantics p) (facts : BusFacts p bs)
     heq hbnd' hx htot'
 /-! ## Assembling the group -/
 
-private theorem denseBU_one_ne_zero (hp : 2 ^ 30 < p) : (1 : ZMod p) ≠ 0 := by
+theorem denseBU_one_ne_zero (hp : 2 ^ 30 < p) : (1 : ZMod p) ≠ 0 := by
   haveI : Fact (1 < p) := ⟨by omega⟩
   exact one_ne_zero
 
-private theorem denseBU_negSet_ne (hp : 2 ^ 30 < p) (shape : MemoryBusShape) :
+theorem denseBU_negSet_ne (hp : 2 ^ 30 < p) (shape : MemoryBusShape) :
     -shape.setNewMult ≠ (shape.setNewMult : ZMod p) := by
   haveI : NeZero p := ⟨by omega⟩
   have h2 : ((2 : ℕ) : ZMod p) ≠ 0 := by
@@ -903,7 +922,7 @@ private theorem denseBU_negSet_ne (hp : 2 ^ 30 < p) (shape : MemoryBusShape) :
       _ = 0 := by ring
 
 /-- The list-to-`Fin`-presentation bridge. -/
-private theorem denseBU_coe_map_fin {α β : Type _} {n : ℕ} (l : List α) (hn : l.length = n)
+theorem denseBU_coe_map_fin {α β : Type _} {n : ℕ} (l : List α) (hn : l.length = n)
     (f : α → β) :
     (↑(l.map f) : Multiset β)
       = Multiset.map (fun i : Fin n => f (l[i.val]'(hn ▸ i.isLt))) ↑(List.finRange n) := by
@@ -1033,38 +1052,11 @@ theorem denseBUGroupPairs?_sound (bs : BusSemantics p) (facts : BusFacts p bs)
   cases hoffs : denseBUOffs tsField (denseTermKey L0) sends with
   | none => simp [denseBUSendTsOk, hS0, hL0, hoffs] at htsok
   | some offs =>
-  cases ho0 : offs.head? with
-  | none => simp [denseBUSendTsOk, hS0, hL0, hoffs, ho0] at htsok
-  | some o0 =>
-  simp only [denseBUSendTsOk, hS0, hL0, hoffs, ho0, Bool.and_eq_true, decide_eq_true_eq] at htsok
-  obtain ⟨hchain, hbound⟩ := htsok
-  have hchain' : List.Pairwise (· < ·) offs := hchain.pairwise
+  simp only [denseBUSendTsOk, hS0, hL0, hoffs] at htsok
+  have hstepspec := denseBUStepsOk_spec htsok
   have hofflen : offs.length = sends.length := denseBUOffs_length hoffs
   have hoffb0 : ∀ i : Nat, i < sends.length → i < offs.length :=
     fun i hi => Nat.lt_of_lt_of_eq hi hofflen.symm
-  have hboundall : ∀ o ∈ offs, o < o0 + B := by
-    intro o ho
-    have := List.all_eq_true.mp hbound o ho
-    exact of_decide_eq_true this
-  have h00 : offs[0]? = some o0 := by rw [← List.head?_eq_getElem?]; exact ho0
-  have hBpos : 0 < B := by
-    have := hboundall o0 (List.mem_of_getElem? h00)
-    omega
-  have hpwlt : ∀ i j (hi : i < offs.length) (hj : j < offs.length), i < j →
-      offs[i] < offs[j] := by
-    rw [List.pairwise_iff_getElem] at hchain'
-    exact fun i j hi hj hij => hchain' i j hi hj hij
-  have ho0le : ∀ i (hi : i < offs.length), o0 ≤ offs[i] := by
-    intro i hi
-    have h0lt : 0 < offs.length := by omega
-    have h0 : offs[0]'h0lt = o0 := by
-      have := List.getElem?_eq_some_iff.mp h00
-      exact this.choose_spec
-    cases i with
-    | zero => omega
-    | succ j =>
-        have := hpwlt 0 (j + 1) h0lt hi (by omega)
-        omega
   -- indexing
   set k := sends.length with hk
   have hklen' : recvs.length = k := hklen.symm
@@ -1082,20 +1074,16 @@ theorem denseBUGroupPairs?_sound (bs : BusSemantics p) (facts : BusFacts p bs)
     rw [hsends, denseBU_coe_map_fin sends rfl (fun bi => denseBIEval bi denv)]
   have hrecvP : recvsAt shape A M = Multiset.map recv ↑(List.finRange k) := by
     rw [hrecvs, denseBU_coe_map_fin recvs hklen' (fun bi => denseBIEval bi denv)]
-  set off : Fin k → ℕ := fun i => offs[i.val]'(hoffb0 i.val i.isLt) with hofff
-  have hoff : StrictMono off := by
-    intro i j hij
-    exact hpwlt i.val j.val (hoffb0 i.val i.isLt) (hoffb0 j.val j.isLt) hij
-  have hspread : ∀ i j : Fin k, i < j → off j - off i < B := by
-    intro i j _
-    have h1 := ho0le i.val (hoffb0 i.val i.isLt)
-    have h2 := hboundall (offs[j.val]'(hoffb0 j.val j.isLt)) (List.getElem_mem _)
-    show offs[j.val]'(hoffb0 j.val j.isLt) - offs[i.val]'(hoffb0 i.val i.isLt) < B
-    omega
+  set off : Fin k → ZMod p := fun i => offs[i.val]'(hoffb0 i.val i.isLt) with hofff
+  have hstep : ∀ (i : ℕ) (hi : i + 1 < k),
+      1 ≤ (off ⟨i + 1, hi⟩ - off ⟨i, Nat.lt_of_succ_lt hi⟩).val ∧
+        (off ⟨i + 1, hi⟩ - off ⟨i, Nat.lt_of_succ_lt hi⟩).val < B := by
+    intro i hi
+    exact hstepspec i (by omega)
   -- offsets certificate per send
   have hoffspec := denseBUOffs_spec hoffs
   set b : ZMod p := L0.eval denv - L0.const with hb
-  have hts : ∀ i : Fin k, (send i).payload[tsField]? = some (b + (off i : ZMod p)) := by
+  have hts : ∀ i : Fin k, (send i).payload[tsField]? = some (b + off i) := by
     intro i
     obtain ⟨e, L, hpay, hlin, hkey, ho⟩ := hoffspec i.val (sends[i.val]'i.isLt)
       (offs[i.val]'(hoffb0 i.val i.isLt))
@@ -1111,9 +1099,8 @@ theorem denseBUGroupPairs?_sound (bs : BusSemantics p) (facts : BusFacts p bs)
     have hbase : L.eval denv - L.const = b := by
       rw [hb]
       exact denseKey_eval_base_eq L L0 hkey denv
-    have hcast : ((off i : ℕ) : ZMod p) = L.const := by
+    have hcast : off i = L.const := by
       simp only [hofff, ho]
-      rw [ZMod.natCast_val, ZMod.cast_id]
     rw [hcast]
     linear_combination hbase
   have hbs : ∀ i : Fin k, tsSlotVal tsField (send i) < B :=
@@ -1131,8 +1118,8 @@ theorem denseBUGroupPairs?_sound (bs : BusSemantics p) (facts : BusFacts p bs)
     exact denseBUGadgetOk_sound bs facts d tsField B _ _ hok denv hsat
       (hrecv_ts (recvs[i.val]'(hrecb i)) (List.getElem_mem _))
   -- the copies
-  have hcopies := admissibleMemoryBusM_copies_of_ts shape M A hp30 hM send recv hsendP hrecvP
-    tsField B hB29 b off hoff hspread hts hbs hlt
+  have hcopies := admissibleMemoryBusM_copies_of_steps shape M A hp30 hM send recv hsendP hrecvP
+    tsField B hB29 b off hts hbs hstep hlt
   -- read off the emitted equalities
   intro c hc
   unfold denseBUGroupEqs at hc

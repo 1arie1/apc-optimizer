@@ -304,17 +304,26 @@ def denseBUTsLin (tsField : Nat) (bi : BusInteraction (DenseExpr p)) : Option (D
   | none => none
 
 /-- The send offsets: every send's ts slot linearizes with canonical term key `key0` (the shared
-    base), and the offset is the constant's `Nat` value. -/
+    base), leaving its constant. -/
 def denseBUOffs (tsField : Nat) (key0 : List (VarId × ZMod p)) :
-    List (BusInteraction (DenseExpr p)) → Option (List Nat)
+    List (BusInteraction (DenseExpr p)) → Option (List (ZMod p))
   | [] => some []
   | S :: rest =>
     match denseBUTsLin tsField S, denseBUOffs tsField key0 rest with
     | some L, some offs =>
-      if denseTermKey L = key0 then some (L.const.val :: offs) else none
+      if denseTermKey L = key0 then some (L.const :: offs) else none
     | _, _ => none
 
-/-- The group sends share one ts base with strictly increasing offsets of spread `< B`. -/
+/-- Consecutive offsets step by a constant in `[1, B)`. Under TS_BOUND that orders the sends'
+    timestamp *values* (`val_lt_of_step`) wherever the shared base sits — the base a pass finds is
+    whichever instruction's clock survived substitution, so the offsets themselves are signed. -/
+def denseBUStepsOk (B : Nat) : List (ZMod p) → Bool
+  | [] => true
+  | [_] => true
+  | c :: c' :: rest =>
+    decide (1 ≤ (c' - c).val) && decide ((c' - c).val < B) && denseBUStepsOk B (c' :: rest)
+
+/-- The group sends share one ts base and step through it in increasing order. -/
 def denseBUSendTsOk (tsField B : Nat) (sends : List (BusInteraction (DenseExpr p))) : Bool :=
   match sends.head? with
   | none => false
@@ -324,11 +333,7 @@ def denseBUSendTsOk (tsField B : Nat) (sends : List (BusInteraction (DenseExpr p
     | some L0 =>
       match denseBUOffs tsField (denseTermKey L0) sends with
       | none => false
-      | some offs =>
-        match offs.head? with
-        | none => false
-        | some o0 =>
-          decide (List.IsChain (· < ·) offs) && offs.all (fun o => decide (o < o0 + B))
+      | some offs => denseBUStepsOk B offs
 
 /-- An active single-variable range check `[x, width]` on a `varRangeBus` witnessing
     `(denv x).val < 2 ^ width.val`; returns that bound. -/
