@@ -29,7 +29,7 @@ variable {p : ℕ}
 /-! ## Small value-level helpers -/
 
 /-- A dense constant-folded expression evaluates to its recognized constant. -/
-private theorem denseConstValueEval (e : DenseExpr p) (c : ZMod p) (h : e.constValue? = some c)
+theorem denseConstValueEval (e : DenseExpr p) (c : ZMod p) (h : e.constValue? = some c)
     (denv : VarId → ZMod p) : e.eval denv = c := by
   rw [← DenseExpr.fold_eval e denv]
   grind [DenseExpr.constValue?, DenseExpr.eval]
@@ -661,7 +661,7 @@ private theorem denseLin_eval_norm (a : DenseLinExpr p) (denv : VarId → ZMod p
   rw [← DenseLinExpr.norm_eval a denv]; rfl
 
 /-- Forms with equal canonical keys share their variable part. -/
-private theorem denseKey_eval_base_eq (L L' : DenseLinExpr p)
+theorem denseKey_eval_base_eq (L L' : DenseLinExpr p)
     (h : denseTermKey L = denseTermKey L') (denv : VarId → ZMod p) :
     L.eval denv - L.const = L'.eval denv - L'.const := by
   have hsum : (L.norm.terms.map (fun t => t.2 * denv t.1)).sum

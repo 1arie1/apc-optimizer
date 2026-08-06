@@ -117,6 +117,13 @@ deriving DecidableEq
 instance : Hashable (DenseAddrKey p) :=
   ⟨fun k => k.exprs.foldl (fun h e => mixHash h e.bHash) 7⟩
 
+/-- Every slot folded to a constant, so the key identifies the evaluated address; the sweep
+    (`BusSweep.lean`) meets such a message only against the window at its own key. -/
+def DenseAddrKey.allConst (k : DenseAddrKey p) : Bool :=
+  k.exprs.all fun e => match e with
+    | .const _ => true
+    | _ => false
+
 /-! ## Prepared address records
 
 One record per memory-bus interaction, built once per invocation. `cval` / `lin` / `reds` are the
@@ -144,6 +151,7 @@ structure DenseBUPre (p : ℕ) where
   mult : Option (ZMod p)
   slots : List (Option (DenseBUSlot p))
   key : Option (DenseAddrKey p)
+  allConst : Bool
 
 def denseBUSlotPrep (T : DenseTwoRootMap p) (e : DenseExpr p) : DenseBUSlot p :=
   let lin := denseLinearize e
@@ -166,7 +174,8 @@ def denseBUOfSlots (bi : BusInteraction (DenseExpr p))
     | _, _ => none) (some [])).map DenseAddrKey.mk
   { mult := denseMultConst bi
     slots := slots
-    key := key }
+    key := key
+    allConst := match key with | some k => k.allConst | none => false }
 
 def denseBUPrep (shape : MemoryBusShape) (T : DenseTwoRootMap p)
     (bi : BusInteraction (DenseExpr p)) : DenseBUPre p :=
