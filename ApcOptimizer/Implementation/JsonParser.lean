@@ -179,14 +179,19 @@ private def internSystem (cs : Circuit p) : Circuit p :=
       { bi with multiplicity := internExpr m bi.multiplicity,
                 payload := bi.payload.map (internExpr m) }) }
 
-/-- The entry pc of the block an export describes (`block.blocks[0].start_pc`), if present. It is
-    what designates the execution bridge's entry record (`memEntryKeyOf`, ENTRY_KEY); absent, that
-    rely is not assumed and `execChain` stays inert. -/
+/-- The pc at which the exported block is entered: a top-level `entry_pc`, else the block
+    descriptor's `block.blocks[0].start_pc` (powdr's `ApcWithBusMap` carries the latter; its FFI
+    export carries neither unless the caller adds `entry_pc`). It designates the execution bridge's
+    entry record (`memEntryKeyOf`, ENTRY_KEY); absent, that rely is not assumed and `execChain`
+    stays inert. -/
 private def parseEntryPc (json : Lean.Json) : Option Nat :=
-  match (json.getObjVal? "block").toOption.bind (fun b => (b.getObjVal? "blocks").toOption) with
-  | some (Lean.Json.arr blocks) =>
-    blocks[0]?.bind (fun b0 => ((b0.getObjVal? "start_pc").toOption.bind (·.getNat?.toOption)))
-  | _ => none
+  match (json.getObjVal? "entry_pc").toOption.bind (·.getNat?.toOption) with
+  | some pc => some pc
+  | none =>
+    match (json.getObjVal? "block").toOption.bind (fun b => (b.getObjVal? "blocks").toOption) with
+    | some (Lean.Json.arr blocks) =>
+      blocks[0]?.bind (fun b0 => ((b0.getObjVal? "start_pc").toOption.bind (·.getNat?.toOption)))
+    | _ => none
 
 /-- Parse the bus-map-agnostic part of a powdr export: the top-level JSON (so callers pull
     `bus_map` with the right per-VM parser), the constraint system under `machine`, the
