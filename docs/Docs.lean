@@ -235,7 +235,9 @@ With the data structures in place, we can define a prescribed witness generation
 - If it is a powdr-ID variable, it is reused from the input assignment.
 - If it is a derived variable, the optimizer must have emitted a computation method for it. The witness generation algorithm evaluates this method under the input assignment to compute the output variable's value.
 
-```anchor witgen
+For this to be well-defined, the derivations must _cover_ the output variables:
+
+```anchor methodForCover
 /-- The `ComputationMethod` witness generation uses for `v`. If `v` appears
     multiple times, the last derivation is returned; `none` if `v` has no
     derivation. -/
@@ -257,25 +259,22 @@ def Derivations.cover (ds : Derivations p)
     match v.powdrId? with
     | some _ => v ∈ inputVars
     | none => ∃ cm, ds.methodFor v = some cm ∧ ∀ x ∈ cm.vars, x ∈ inputVars
+```
 
-/-- Witness generation: reconstruct an output assignment from an input
-    assignment. Every powdr-ID (input) variable passes through unchanged; every
-    other variable is computed by the method `ds` records for it, read from the
-    input variables. This is what powdr runs to fill the optimized circuit's
-    variables from an input trace. -/
-def Derivations.witgen (ds : Derivations p)
-    (inputAssignment : Variable → ZMod p) (v: Variable) : ZMod p :=
-  match v.powdrId? with
-  -- Note that by `Derivations.cover`, if `v` appears in the output circuit,
-  -- it must also exist in the input circuit, so this case is always
-  -- well-defined.
+Witness generation generates an assignment as described above. It is only defined on the output circuit's variables, and it is guaranteed to be well-defined by the `cover` property.
+
+```anchor witgen
+/-- Witness generation on a variable `ds` covers. Every powdr-ID (input)
+    variable passes through unchanged; every other variable is computed by the
+    method `ds` records for it. -/
+def Derivations.witgen (ds : Derivations p) {inputVars outputVars : List Variable}
+    (h : ds.cover inputVars outputVars) (inputAssignment : Variable → ZMod p)
+    (v : Variable) (hv : v ∈ outputVars) : ZMod p :=
+  match hp : v.powdrId? with
+  -- Well-defined: by the `some` branch of `Derivations.cover`, a powdr-ID
+  -- variable of the output circuit also exists in the input circuit.
   | some _ => inputAssignment v
-  | none =>
-    match Derivations.methodFor ds v with
-    | some cm => cm.eval inputAssignment
-    -- Note that by `Derivations.cover`, if `v` appears in the output
-    -- circuit, this case is impossible.
-    | none => inputAssignment v
+  | none => ((ds.methodFor v).get (ds.methodFor_isSome h hv hp)).eval inputAssignment
 ```
 
 ## The full completeness property
@@ -296,7 +295,7 @@ def Circuit.isCompleteReplacementOf
 
   -- The optimized circuit variables can be derived from the original circuit
   -- variables, and the return derivations.
-  ds.cover originalCircuit.vars optimizedCircuit.vars ∧
+  ∃ hcover : ds.cover originalCircuit.vars optimizedCircuit.vars,
 
   -- For any admissible satisfying assignment of the original circuit, the
   -- optimized circuit is also satisfied and admissible, with equal side
@@ -304,7 +303,9 @@ def Circuit.isCompleteReplacementOf
   ∀ assignment,
     originalCircuit.admissible busSemantics assignment →
     originalCircuit.satisfies busSemantics assignment →
-    let assignment' := Derivations.witgen ds assignment
+    ∀ assignment' : Variable → ZMod p,
+    (∀ v (hv : v ∈ optimizedCircuit.vars),
+      assignment' v = ds.witgen hcover assignment v hv) →
     optimizedCircuit.satisfies busSemantics assignment' ∧
       optimizedCircuit.admissible busSemantics assignment' ∧
       originalCircuit.sideEffects busSemantics assignment =

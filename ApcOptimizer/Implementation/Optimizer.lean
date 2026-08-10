@@ -198,6 +198,27 @@ def optimizerWithBusFacts {bs : BusSemantics p} (b : DegreeBound) (facts : BusFa
   let r := pipeline b cs bs facts
   (r.out, r.derivs.forOutput cs.vars r.out.vars)
 
+/-! ## `witgen`'s two branches
+
+So the completeness proof never unfolds the spec's `Derivations.witgen`. -/
+
+/-- On an input variable, `witgen` passes the input assignment through. -/
+theorem Derivations.witgen_powdrId {ds : Derivations p} {inputVars outputVars : List Variable}
+    (h : ds.cover inputVars outputVars) (inputAssignment : Variable → ZMod p) {v : Variable}
+    {w : Nat} (hv : v ∈ outputVars) (hp : v.powdrId? = some w) :
+    ds.witgen h inputAssignment v hv = inputAssignment v := by
+  unfold Derivations.witgen; split <;> simp_all
+
+/-- On a derived variable, `witgen` evaluates the method `ds` records for it. -/
+theorem Derivations.witgen_methodFor {ds : Derivations p} {inputVars outputVars : List Variable}
+    (h : ds.cover inputVars outputVars) (inputAssignment : Variable → ZMod p) {v : Variable}
+    {cm : ComputationMethod p} (hv : v ∈ outputVars) (hp : v.powdrId? = none)
+    (hm : ds.methodFor v = some cm) :
+    ds.witgen h inputAssignment v hv = cm.eval inputAssignment := by
+  have hg : ∀ hs : (ds.methodFor v).isSome, (ds.methodFor v).get hs = cm :=
+    fun hs => Option.get_of_mem hs (Option.mem_def.mpr hm)
+  unfold Derivations.witgen; split <;> simp_all
+
 /-! ## Evaluation depends only on a system's variables
 
 Two assignments agreeing on `cs.vars` are interchangeable for `satisfies`/`admissible`/`sideEffects`.
@@ -337,40 +358,42 @@ theorem optimizerWithBusFacts_correct {bs : BusSemantics p} (b : DegreeBound) (f
       (optimizerWithBusFacts b facts cs).1.isCompleteReplacementOf cs bs (optimizerWithBusFacts b facts cs).2 := by
   refine ⟨(pipeline b cs bs facts).correct.toSound, ?_⟩
   intro hpow
-  refine ⟨?_, ?_, ?_⟩
-  · -- `forOutput` records only no-ID variables occurring in the output.
-    intro d hd
-    change d ∈ (pipeline b cs bs facts).derivs.forOutput cs.vars
-      (pipeline b cs bs facts).out.vars at hd
-    change d.1 ∈ (pipeline b cs bs facts).out.vars
-    rw [Derivations.forOutput_eq, List.mem_map] at hd
-    obtain ⟨v, hv, rfl⟩ := hd
-    exact List.mem_of_mem_filter (List.mem_eraseDups.mp hv)
-  · -- Every output variable is either reused from the input or has a safe method.
+  -- Phrase the goal in `pipeline` terms up front: the coverage proof is one of its components, so
+  -- `refine` would otherwise have to bridge the `optimizerWithBusFacts` projections by `whnf`.
+  simp only [optimizerWithBusFacts]
+  -- `PassCorrect` components (`Basic.lean`): no new powdr-ID column, and real-trace completeness.
+  have hS := (pipeline b cs bs facts).correct.2.2.1
+  have hcomp := (pipeline b cs bs facts).correct.2.2.2
+  -- Every output variable is either reused from the input or has a safe method.
+  have hcover : ((pipeline b cs bs facts).derivs.forOutput cs.vars
+      (pipeline b cs bs facts).out.vars).cover cs.vars (pipeline b cs bs facts).out.vars := by
     intro v hv
     cases hpw : v.powdrId? with
-    | some w =>
-        obtain ⟨_himpl, _hinv, hS, _hcomp⟩ := (pipeline b cs bs facts).correct
-        exact hS v hv (by simp [hpw])
+    | some w => exact hS v hv (by simp [hpw])
     | none =>
         exact ⟨(pipeline b cs bs facts).derivs.safeMethod cs.vars v,
           Derivations.forOutput_methodFor hv hpw,
           Derivations.safeMethod_vars _ _ _⟩
-  intro env hadm hsat
-  obtain ⟨_himpl, _hinv, hS, hcomp⟩ := (pipeline b cs bs facts).correct
+  refine ⟨?_, hcover, ?_⟩
+  · -- `forOutput` records only no-ID variables occurring in the output.
+    intro d hd
+    rw [Derivations.forOutput_eq, List.mem_map] at hd
+    obtain ⟨v, hv, rfl⟩ := hd
+    exact List.mem_of_mem_filter (List.mem_eraseDups.mp hv)
+  intro env hadm hsat f hf
   obtain ⟨env', hsat', hadm', hse, hA, hR⟩ := hcomp env hadm hsat
   have hrec : (pipeline b cs bs facts).out.reconstructs cs.vars
       (pipeline b cs bs facts).derivs env' := by
     have hrec0 : cs.reconstructs cs.vars [] env :=
       fun u hu hunone => absurd (hpow u hu) (by simp [hunone])
     simpa using hR cs.vars (fun v hv _ => hv) [] hrec0
-  have hagree : ∀ v ∈ (pipeline b cs bs facts).out.vars,
-      Derivations.witgen ((pipeline b cs bs facts).derivs.forOutput cs.vars
-        (pipeline b cs bs facts).out.vars) env v = env' v := by
+  have hagree : ∀ v ∈ (pipeline b cs bs facts).out.vars, f v = env' v := by
     intro v hv
+    -- Case first, rewrite second: `witgen`'s implicit `outputVars` is the pipeline output, so a
+    -- goal mentioning the application makes `cases` reduce it — i.e. run the optimizer in `whnf`.
     cases hpw : v.powdrId? with
     | some w =>
-        simp only [Derivations.witgen, hpw]
+        rw [hf v hv, Derivations.witgen_powdrId hcover env hv hpw]
         exact (hA v (by simp [hpw])).symm
     | none =>
         obtain ⟨cm, hm, hxpow, hxinput, heq⟩ := hrec v hv hpw
@@ -380,18 +403,11 @@ theorem optimizerWithBusFacts_correct {bs : BusSemantics p} (b : DegreeBound) (f
           (ds := (pipeline b cs bs facts).derivs) (inputVars := cs.vars)
           (outputVars := (pipeline b cs bs facts).out.vars) hv hpw
         rw [hsafe] at hm'
-        simp only [Derivations.witgen, hpw, hm']
-        rw [← heq]
+        rw [hf v hv, Derivations.witgen_methodFor hcover env hv hpw hm', ← heq]
         exact ComputationMethod.eval_congr cm env env' (fun x hx => (hA x (hxpow x hx)).symm)
-  refine ⟨(Circuit.satisfies_congr hagree).mpr hsat',
-    (Circuit.admissible_congr hagree).mpr hadm', ?_⟩
-  · have hse' : cs.sideEffects bs env
-          = (pipeline b cs bs facts).out.sideEffects bs (Derivations.witgen
-              ((pipeline b cs bs facts).derivs.forOutput cs.vars
-                (pipeline b cs bs facts).out.vars) env) := by
-        rw [Circuit.sideEffects_congr hagree]
-        exact hse
-    simpa only [optimizerWithBusFacts] using hse'
+  exact ⟨(Circuit.satisfies_congr hagree).mpr hsat',
+    (Circuit.admissible_congr hagree).mpr hadm',
+    hse.trans (Circuit.sideEffects_congr hagree).symm⟩
 
 /-- The fact-aware optimizer never pushes a within-bound circuit past the zkVM's degree
     bound (every pass is degree-guarded). -/

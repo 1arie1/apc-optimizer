@@ -188,7 +188,7 @@ def Circuit.sideEffects (circuit : Circuit p) (busSemantics : BusSemantics p)
 
 --------- Derived variables ---------
 
--- ANCHOR: witgen
+-- ANCHOR: methodForCover
 /-- The `ComputationMethod` witness generation uses for `v`. If `v` appears
     multiple times, the last derivation is returned; `none` if `v` has no
     derivation. -/
@@ -210,25 +210,31 @@ def Derivations.cover (ds : Derivations p)
     match v.powdrId? with
     | some _ => v ∈ inputVars
     | none => ∃ cm, ds.methodFor v = some cm ∧ ∀ x ∈ cm.vars, x ∈ inputVars
+-- ANCHOR_END: methodForCover
 
-/-- Witness generation: reconstruct an output assignment from an input
-    assignment. Every powdr-ID (input) variable passes through unchanged; every
-    other variable is computed by the method `ds` records for it, read from the
-    input variables. This is what powdr runs to fill the optimized circuit's
-    variables from an input trace. -/
-def Derivations.witgen (ds : Derivations p)
-    (inputAssignment : Variable → ZMod p) (v: Variable) : ZMod p :=
-  match v.powdrId? with
-  -- Note that by `Derivations.cover`, if `v` appears in the output circuit,
-  -- it must also exist in the input circuit, so this case is always
-  -- well-defined.
+omit [Fact p.Prime] in
+/- Support lemma, does not require audit. -/
+theorem Derivations.methodFor_isSome (ds : Derivations p)
+    {inputVars outputVars : List Variable} (h : ds.cover inputVars outputVars)
+    {v : Variable} (hv : v ∈ outputVars) (hp : v.powdrId? = none) :
+    (ds.methodFor v).isSome := by
+  have hc := h v hv
+  simp only [hp] at hc
+  obtain ⟨cm, hcm, -⟩ := hc
+  simp [hcm]
+
+-- ANCHOR: witgen
+/-- Witness generation on a variable `ds` covers. Every powdr-ID (input)
+    variable passes through unchanged; every other variable is computed by the
+    method `ds` records for it. -/
+def Derivations.witgen (ds : Derivations p) {inputVars outputVars : List Variable}
+    (h : ds.cover inputVars outputVars) (inputAssignment : Variable → ZMod p)
+    (v : Variable) (hv : v ∈ outputVars) : ZMod p :=
+  match hp : v.powdrId? with
+  -- Well-defined: by the `some` branch of `Derivations.cover`, a powdr-ID
+  -- variable of the output circuit also exists in the input circuit.
   | some _ => inputAssignment v
-  | none =>
-    match Derivations.methodFor ds v with
-    | some cm => cm.eval inputAssignment
-    -- Note that by `Derivations.cover`, if `v` appears in the output
-    -- circuit, this case is impossible.
-    | none => inputAssignment v
+  | none => ((ds.methodFor v).get (ds.methodFor_isSome h hv hp)).eval inputAssignment
 -- ANCHOR_END: witgen
 
 --------- Circuit implications ---------
@@ -295,7 +301,7 @@ def Circuit.isCompleteReplacementOf
 
   -- The optimized circuit variables can be derived from the original circuit
   -- variables, and the return derivations.
-  ds.cover originalCircuit.vars optimizedCircuit.vars ∧
+  ∃ hcover : ds.cover originalCircuit.vars optimizedCircuit.vars,
 
   -- For any admissible satisfying assignment of the original circuit, the
   -- optimized circuit is also satisfied and admissible, with equal side
@@ -303,7 +309,9 @@ def Circuit.isCompleteReplacementOf
   ∀ assignment,
     originalCircuit.admissible busSemantics assignment →
     originalCircuit.satisfies busSemantics assignment →
-    let assignment' := Derivations.witgen ds assignment
+    ∀ assignment' : Variable → ZMod p,
+    (∀ v (hv : v ∈ optimizedCircuit.vars),
+      assignment' v = ds.witgen hcover assignment v hv) →
     optimizedCircuit.satisfies busSemantics assignment' ∧
       optimizedCircuit.admissible busSemantics assignment' ∧
       originalCircuit.sideEffects busSemantics assignment =
