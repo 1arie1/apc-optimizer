@@ -1,8 +1,8 @@
-import ApcOptimizer.Spec
+import ApcOptimizer.MemoryBus
 
 set_option autoImplicit false
 
-/-! # Interface-encoding equivalence: the abstract and concrete notions
+/-! # Interface-encoding metatheory: the audited definitions
 
 A standalone metatheory justifying the *interface encoding* of the memory bus used by an
 external SMT equivalence verifier. The encoding replaces all memory semantics by a
@@ -12,11 +12,12 @@ Semantically, a memory receive is a *nondeterministic input* — nothing in a si
 constrains its data beyond the invariants `BusSemantics.accepts` grants (e.g. byte-ness) —
 and the matching says the two circuits exchange identical traffic with that environment.
 
-The main theorem (`Transfer.lean`, `concreteEquiv_of_abstractEquiv`): equivalence in this
-abstract semantics (`AbstractEquiv`) implies equivalence in the concrete semantics
-(`ConcreteEquiv` — `Circuit.satisfies` plus equal `Circuit.sideEffects`, with admissibility
-transported). `Closure.lean` then justifies the observable itself: identical traffic means
-identical closed compositions with every memory environment.
+This file holds the definitions; the theorems are stated in
+`ApcOptimizer/InterfaceEncoding.lean` (with proof machinery under
+`ApcOptimizer/Implementation/InterfaceEncoding/`, which needs no audit): abstract
+equivalence implies concrete equivalence, and the closure semantics below grounds the
+observable — identical traffic means identical closed compositions with every memory
+environment.
 
 Two deliberate divergences from `ApcOptimizer/Spec.lean`:
 * `ConcreteEquiv` is symmetric with an *existential* witness in both directions, unlike
@@ -33,6 +34,8 @@ Two deliberate divergences from `ApcOptimizer/Spec.lean`:
 namespace ApcOptimizer.Interface
 
 variable {p : ℕ}
+
+/-! ## The interface data and match -/
 
 /-- The evaluated messages of the circuit's *active stateful* interactions — syntactically
     the list `Circuit.admissible` judges (`admissible_def`). This is the interface data: the
@@ -59,11 +62,13 @@ def InterfaceMatch (bs : BusSemantics p) (A B : Circuit p)
     messages, pointwise equal — the Lean shadow of the verifier's alignment (`kept_pairs`),
     which pairs interactions uniformly and is used identically in both proof directions.
     Presentation-stronger than `InterfaceMatch`, which keeps only the induced multiset
-    equality (`interfaceMatch_of_paired`). -/
+    equality (`abstractEquiv_of_paired`). -/
 def PairedMatch (bs : BusSemantics p) (A B : Circuit p)
     (a b : Variable → ZMod p) : Prop :=
   ∃ e : Fin (activeStateful A bs a).length ≃ Fin (activeStateful B bs b).length,
     ∀ i, (activeStateful A bs a).get i = (activeStateful B bs b).get (e i)
+
+/-! ## Abstract and concrete equivalence -/
 
 /-- Equivalence in the abstract semantics: every satisfying run of either circuit is matched
     by a satisfying run of the other with identical interface traffic. Receives are
@@ -109,5 +114,50 @@ def AdmissiblePermInvariant (bs : BusSemantics p) : Prop :=
 def GuaranteesStatefulInvariants (circuit : Circuit p) (bs : BusSemantics p) : Prop :=
   ∀ a, circuit.satisfies bs a →
     ∀ m ∈ activeStateful circuit bs a, bs.maintainsInvariants m
+
+/-! ## Closure semantics: memory environments
+
+The observable above is justified semantically in `ApcOptimizer/InterfaceEncoding.lean`: the
+audited window-atomicity rely says exactly "the traffic admits an environment"
+(`admissibleMemoryBusM_of_closes` / `exists_closes_of_admissible`); under any closing
+environment the nondeterministic receive payloads are a *function* of the environment and
+the send history (`closes_recv_determined`); and interface-matched runs close with the same
+environments (`interfaceMatch_closes_iff`). Together: no memory environment can observe a
+difference between interface-matched runs, or supply data distinguishing them. -/
+
+/-- A memory environment for one memory-shaped bus, as seen through a block's window: per
+    evaluated address, the record entering the block from outside (consumed by the entry
+    receive) and the record the block leaves behind (its exit send). `Option`-valued per
+    address — window atomicity is structural in the type. The execution bridge is the
+    single-cell case (`addressFields = []`). -/
+structure MemEnv (p : ℕ) where
+  /-- The record the environment supplies at an address, if any. -/
+  entry : List (Option (ZMod p)) → Option (List (ZMod p))
+  /-- The record the environment consumes at an address, if any. -/
+  exit : List (Option (ZMod p)) → Option (List (ZMod p))
+
+/-- The entry record at an address, as a multiset (`0` or a singleton). -/
+def MemEnv.entryMS (E : MemEnv p) (addr : List (Option (ZMod p))) :
+    Multiset (List (ZMod p)) :=
+  (E.entry addr).elim 0 (fun P => {P})
+
+/-- The exit record at an address, as a multiset (`0` or a singleton). -/
+def MemEnv.exitMS (E : MemEnv p) (addr : List (Option (ZMod p))) :
+    Multiset (List (ZMod p)) :=
+  (E.exit addr).elim 0 (fun P => {P})
+
+/-- Traffic `M` closes with environment `E`: per address, consumption balances production —
+    every received record is a sent record or the environment's entry record, and every sent
+    record is received or left to the environment. -/
+def Closes (shape : MemoryBusShape) (E : MemEnv p)
+    (M : Multiset (BusInteraction (ZMod p))) : Prop :=
+  ∀ addr : List (Option (ZMod p)),
+    (recvsAt shape addr M).map BusInteraction.payload + E.exitMS addr
+      = (sendsAt shape addr M).map BusInteraction.payload + E.entryMS addr
+
+/-- The traffic a run places on one bus — a projection of the interface data. -/
+def busTraffic (circuit : Circuit p) (bs : BusSemantics p) (busId : Nat)
+    (a : Variable → ZMod p) : Multiset (BusInteraction (ZMod p)) :=
+  ↑((activeStateful circuit bs a).filter (fun m => m.busId = busId))
 
 end ApcOptimizer.Interface

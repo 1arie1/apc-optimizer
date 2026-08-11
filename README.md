@@ -38,12 +38,14 @@ equivalence verifier: if two circuits exchange identical traffic on the stateful
 (a 1:1 matching with per-pair equal messages), equivalence in the abstract semantics — where
 memory receives are nondeterministic inputs constrained only by the invariants `accepts`
 grants — implies equivalence in the concrete semantics, and no memory environment can
-distinguish the two circuits. The audited-by-reading surface is the *definitions* in
-[`Equiv.lean`](./ApcOptimizer/InterfaceEncoding/Equiv.lean) (the equivalence notions and their two documented divergences from
-`Spec.lean`) and [`Closure.lean`](./ApcOptimizer/InterfaceEncoding/Closure.lean) (memory environments and closure); the theorems —
-`concreteEquiv_of_abstractEquiv` and the end-to-end
-`openVm_concreteEquiv_of_interfaceVerified` in [`Transfer.lean`](./ApcOptimizer/InterfaceEncoding/Transfer.lean), memory determinism
-(`closes_recv_determined`) and `interfaceMatch_closes_iff` in `Closure.lean` — are checked by
+distinguish the two circuits. The audited surface mirrors the optimizer's: the
+*definitions* in [`InterfaceEncoding/Spec.lean`](./ApcOptimizer/InterfaceEncoding/Spec.lean) (the equivalence notions, their two
+documented divergences from `Spec.lean`, and the closure semantics) and the theorem
+*statements* in [`InterfaceEncoding.lean`](./ApcOptimizer/InterfaceEncoding.lean) —
+`concreteEquiv_of_abstractEquiv`, the end-to-end
+`openVm_concreteEquiv_of_interfaceVerified`, memory determinism
+(`closes_recv_determined`), and `interfaceMatch_closes_iff`; the proof machinery under
+[`Implementation/InterfaceEncoding/`](./ApcOptimizer/Implementation/InterfaceEncoding) needs no audit. All proofs are checked by
 `lake build` and rest on the same three standard axioms (asserted in CI). The matching
 hypothesis itself (which interactions pair up) is *not* discharged here — it is what the
 verifier's alignment analysis certifies and its SMT run assumes per instance.
