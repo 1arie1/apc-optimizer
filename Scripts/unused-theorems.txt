@@ -27,3 +27,12 @@ ApcOptimizer.Dense.get_spawn
 ApcOptimizer.Dense.denseNrmGo_const
 ApcOptimizer.Dense.denseNrmGo_var
 
+# `ApcOptimizer/VmSpec.lean` is a standalone multi-chip correctness definition, not yet wired
+# into the `Optimizer.lean` pipeline the roots above are seeded from — so nothing in it can be
+# reachable from those roots regardless of internal use. These two justify a design choice in
+# `CanEffect` (that it needn't existentially permute a chip type's realized instances, since
+# `VmSat` doesn't see their order) rather than being dead code; revisit once this file is wired
+# into (or itself seeds) the correctness roots.
+VmSat.of_perm
+VmSat.perm_iff
+
