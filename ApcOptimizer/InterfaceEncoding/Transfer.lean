@@ -124,6 +124,47 @@ theorem abstractEquiv_of_under {bs : BusSemantics p} {A B : Circuit p}
       have ⟨hz, hacc⟩ := accepts_of_mem_activeStateful hsat hm
       hI m hz hacc
 
+/-! ## The fixed-pairing certificate form -/
+
+/-- Lists related by an index bijection with pointwise-equal entries are permutations. -/
+theorem perm_of_get_equiv {α : Type _} {l₁ l₂ : List α}
+    (e : Fin l₁.length ≃ Fin l₂.length)
+    (h : ∀ i, l₁.get i = l₂.get (e i)) : l₁.Perm l₂ := by
+  have h₁ : l₁ = (List.finRange l₁.length).map (l₂.get ∘ ⇑e) := by
+    rw [← List.ofFn_eq_map,
+      show l₂.get ∘ ⇑e = l₁.get from funext fun i => (h i).symm, List.ofFn_get]
+  have h₂ : l₂ = (List.finRange l₂.length).map l₂.get := by
+    rw [← List.ofFn_eq_map, List.ofFn_get]
+  have hstep : ((List.finRange l₁.length).map ⇑e).Perm (List.finRange l₂.length) := by
+    refine (List.perm_ext_iff_of_nodup
+      ((List.nodup_finRange _).map e.injective) (List.nodup_finRange _)).mpr fun j => ?_
+    exact ⟨fun _ => List.mem_finRange j,
+      fun _ => List.mem_map.mpr ⟨e.symm j, List.mem_finRange _, e.apply_symm_apply j⟩⟩
+  have hmain := hstep.map l₂.get
+  rw [List.map_map, ← h₂] at hmain
+  exact h₁.symm ▸ hmain
+
+theorem interfaceMatch_of_paired {bs : BusSemantics p} {A B : Circuit p}
+    {a b : Variable → ZMod p} (h : PairedMatch bs A B a b) : InterfaceMatch bs A B a b := by
+  obtain ⟨e, he⟩ := h
+  exact perm_of_get_equiv e he
+
+/-- What the verifier certifies — one fixed alignment, its per-pair equalities read in both
+    proof directions — implies the (weaker) abstract equivalence the transfer theorem
+    consumes: `AbstractEquiv` keeps only each witness's message-multiset equality, and the
+    two clauses' pairings need not cohere. -/
+theorem abstractEquiv_of_paired {bs : BusSemantics p} {A B : Circuit p}
+    (h₁ : ∀ a, A.satisfies bs a → ∃ b, B.satisfies bs b ∧ PairedMatch bs A B a b)
+    (h₂ : ∀ b, B.satisfies bs b → ∃ a, A.satisfies bs a ∧ PairedMatch bs A B a b) :
+    AbstractEquiv bs A B := by
+  constructor
+  · intro a ha
+    obtain ⟨b, hb, hp⟩ := h₁ a ha
+    exact ⟨b, hb, interfaceMatch_of_paired hp⟩
+  · intro b hb
+    obtain ⟨a, ha, hp⟩ := h₂ b hb
+    exact ⟨a, ha, interfaceMatch_of_paired hp⟩
+
 /-! ## Bridges to the Spec vocabulary -/
 
 /-- Concrete equivalence yields the Spec's soundness direction. The invariants clause is a

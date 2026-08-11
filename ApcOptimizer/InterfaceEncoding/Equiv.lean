@@ -55,6 +55,16 @@ def InterfaceMatch (bs : BusSemantics p) (A B : Circuit p)
     (a b : Variable → ZMod p) : Prop :=
   (activeStateful A bs a).Perm (activeStateful B bs b)
 
+/-- The certificate form of a match: one fixed bijective pairing of the two runs' interface
+    messages, pointwise equal — the Lean shadow of the verifier's alignment (`kept_pairs`),
+    which pairs interactions uniformly and is used identically in both proof directions.
+    Presentation-stronger than `InterfaceMatch`, which keeps only the induced multiset
+    equality (`interfaceMatch_of_paired`). -/
+def PairedMatch (bs : BusSemantics p) (A B : Circuit p)
+    (a b : Variable → ZMod p) : Prop :=
+  ∃ e : Fin (activeStateful A bs a).length ≃ Fin (activeStateful B bs b).length,
+    ∀ i, (activeStateful A bs a).get i = (activeStateful B bs b).get (e i)
+
 /-- Equivalence in the abstract semantics: every satisfying run of either circuit is matched
     by a satisfying run of the other with identical interface traffic. Receives are
     nondeterministic inputs here — a "run" is any satisfying assignment, so the ∃-side must
