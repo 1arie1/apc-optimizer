@@ -29,9 +29,14 @@ The story in four steps:
    payloads are a function of the environment and the send history
    (`closes_recv_determined`); and interface-matched runs close with the same environments
    (`interfaceMatch_closes_iff`) — identical traffic means identical closed compositions.
-4. Bridges to the Spec vocabulary: `isSoundReplacementOf_of_concreteEquiv` and
-   `statefulInvariants_of_abstractEquiv` (the invariants clause itself is underivable from
-   interface data — see `Spec.lean`'s module docstring).
+4. Bridges to the Spec vocabulary: `isSoundReplacementOf_of_concreteEquiv`, and the exact
+   decomposition of the invariants clause — the stateful fragment transports
+   (`statefulInvariants_of_abstractEquiv`), the stateless fragment is a per-circuit
+   obligation, and together they assemble the full clause
+   (`guaranteesInvariants_of_fragments`). For OpenVM the stateless fragment is *exactly*
+   the multiplicity value (`openVm_stateless_maintainsInvariants_iff`), so the only check
+   interface equivalence leaves open is the lookup-multiplicity discipline
+   (`openVm_guaranteesInvariants_of_multOne`).
 
 Not discharged here: the matching hypothesis itself — which interactions pair up is what
 the external alignment analysis certifies and its SMT run assumes per instance. -/
@@ -123,6 +128,24 @@ theorem statefulInvariants_of_abstractEquiv {bs : BusSemantics p} {A B : Circuit
   obtain ⟨bi, hbi, rfl⟩ := exists_interaction_of_mem_activeStateful hmA
   exact hA a hasat bi hbi hz
 
+/-- The two fragments assemble the full Spec invariants clause — transported stateful
+    (`statefulInvariants_of_abstractEquiv`) plus circuit-local stateless. Nothing falls in
+    the gap: every active message is one or the other. -/
+theorem guaranteesInvariants_of_fragments {bs : BusSemantics p} {circuit : Circuit p}
+    (hstateful : GuaranteesStatefulInvariants circuit bs)
+    (hstateless : GuaranteesStatelessInvariants circuit bs) :
+    circuit.guaranteesInvariants bs := by
+  intro a hsat bi hbi
+  show (bi.eval a).multiplicity ≠ 0 → bs.maintainsInvariants (bi.eval a)
+  intro hz
+  cases hs : bs.isStateful (bi.eval a).busId with
+  | true =>
+    refine hstateful a hsat (bi.eval a)
+      (List.mem_filter.mpr ⟨List.mem_map.mpr ⟨bi, hbi, rfl⟩, ?_⟩)
+    rw [Bool.and_eq_true]
+    exact ⟨decide_eq_true hz, hs⟩
+  | false => exact hstateless a hsat bi hbi hs hz
+
 /-! ## OpenVM and SP1 instances -/
 
 theorem openVm_admissiblePermInvariant (busMap : OpenVM.BusMap)
@@ -147,6 +170,49 @@ theorem openVm_recvBytes_of_accepts (busMap : OpenVM.BusMap)
     (m : BusInteraction (ZMod p)) (hacc : OpenVM.accepts busMap m) :
     RecvBytes busMap m :=
   openVm_accepts_memory_recv_bytes busMap m hacc
+
+/-- OpenVM's stateless invariant is EXACTLY the multiplicity value: on a known stateless
+    bus, `maintainsInvariants` says `multiplicity = 1` and nothing else — payload
+    correctness is `accepts`' business and holds in each circuit independently. So the only
+    check the interface transport leaves open for the full invariants clause is the
+    lookup-multiplicity discipline. -/
+theorem openVm_stateless_maintainsInvariants_iff {busMap : OpenVM.BusMap}
+    {m : BusInteraction (ZMod p)} {t : OpenVM.OpenVmBusType}
+    (hbus : busMap m.busId = some t) (hs : t.isStateful = false) :
+    OpenVM.maintainsInvariants busMap m ↔ m.multiplicity = 1 := by
+  unfold OpenVM.maintainsInvariants
+  rw [hbus]
+  cases t
+  all_goals first
+    | exact Iff.rfl
+    | simp [OpenVM.OpenVmBusType.isStateful] at hs
+
+/-- For OpenVM, the transported stateful fragment plus the multiplicity discipline on
+    stateless buses assemble the full invariants clause — the multiplicity value is the ONLY
+    missing check (`openVm_stateless_maintainsInvariants_iff`). Unknown buses need no
+    hypothesis: an active message on one is already rejected by `accepts`. -/
+theorem openVm_guaranteesInvariants_of_multOne (busMap : OpenVM.BusMap)
+    (entryPc : Option (ZMod p)) {circuit : Circuit p}
+    (hstateful : GuaranteesStatefulInvariants circuit
+      (OpenVM.openVmBusSemantics p busMap entryPc))
+    (hmult : ∀ a, circuit.satisfies (OpenVM.openVmBusSemantics p busMap entryPc) a →
+      ∀ bi ∈ circuit.busInteractions,
+        (OpenVM.openVmBusSemantics p busMap entryPc).isStateful (bi.eval a).busId = false →
+        (bi.eval a).multiplicity ≠ 0 → (bi.eval a).multiplicity = 1) :
+    circuit.guaranteesInvariants (OpenVM.openVmBusSemantics p busMap entryPc) := by
+  refine guaranteesInvariants_of_fragments hstateful ?_
+  intro a hsat bi hbi hs hz
+  have hacc : OpenVM.accepts busMap (bi.eval a) := hsat.2 bi hbi hz
+  obtain ⟨t, hbus⟩ := openVm_busMap_isSome_of_accepts hacc
+  have hts : t.isStateful = false := by
+    have hs' : (match busMap (bi.eval a).busId with
+        | some u => u.isStateful
+        | none => false) = false := hs
+    rw [hbus] at hs'
+    exact hs'
+  show OpenVM.maintainsInvariants busMap (bi.eval a)
+  rw [openVm_stateless_maintainsInvariants_iff hbus hts]
+  exact hmult a hsat bi hbi hs hz
 
 /-- END-TO-END, OpenVM: what the interface-encoded VC certifies (`AbstractEquivUnder` the
     recv-byte premise, under the OpenVM bus semantics) implies concrete equivalence. -/

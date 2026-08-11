@@ -46,9 +46,12 @@ documented divergences from `Spec.lean`, and the closure semantics) and the theo
 `openVm_concreteEquiv_of_interfaceVerified`, memory determinism
 (`closes_recv_determined`), and `interfaceMatch_closes_iff`; the proof machinery under
 [`Implementation/InterfaceEncoding/`](./ApcOptimizer/Implementation/InterfaceEncoding) needs no audit. All proofs are checked by
-`lake build` and rest on the same three standard axioms (asserted in CI). The matching
-hypothesis itself (which interactions pair up) is *not* discharged here — it is what the
-verifier's alignment analysis certifies and its SMT run assumes per instance.
+`lake build` and rest on the same three standard axioms (asserted in CI). Two things are
+*not* discharged here: the matching hypothesis itself (which interactions pair up — what
+the verifier's alignment analysis certifies and its SMT run assumes per instance), and the
+stateless-bus multiplicity discipline, which no interface data can carry and which is
+provably the *only* residue of the Spec's invariants clause
+(`openVm_guaranteesInvariants_of_multOne`).
 
 ## Usage
 

@@ -124,6 +124,18 @@ def GuaranteesStatefulInvariants (circuit : Circuit p) (bs : BusSemantics p) : P
   ∀ a, circuit.satisfies bs a →
     ∀ m ∈ activeStateful circuit bs a, bs.maintainsInvariants m
 
+/-- The stateless fragment of `Circuit.guaranteesInvariants`: every active message on a
+    stateless bus maintains the invariants. Interface data cannot supply this fragment — the
+    match carries no stateless messages — so it is a per-circuit obligation. The two
+    fragments assemble the full clause with nothing in the gap
+    (`guaranteesInvariants_of_fragments`); for OpenVM this fragment's whole content is the
+    multiplicity value (`openVm_stateless_maintainsInvariants_iff`). -/
+def GuaranteesStatelessInvariants (circuit : Circuit p) (bs : BusSemantics p) : Prop :=
+  ∀ a, circuit.satisfies bs a →
+    ∀ bi ∈ circuit.busInteractions,
+      bs.isStateful (bi.eval a).busId = false →
+      (bi.eval a).multiplicity ≠ 0 → bs.maintainsInvariants (bi.eval a)
+
 /-! ## Closure semantics: memory environments
 
 The observable above is justified semantically in `ApcOptimizer/InterfaceEncoding.lean`: the

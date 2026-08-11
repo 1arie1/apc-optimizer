@@ -136,6 +136,16 @@ theorem interfaceMatch_of_aligned {bs : BusSemantics p} {A B : Circuit p}
     (f := fun bi : BusInteraction (Expression p) => bi.eval a)
     (g := fun bi : BusInteraction (Expression p) => bi.eval b) σ h).filter _
 
+/-- An accepted message names a known bus (`accepts` rejects unknown ones). -/
+theorem openVm_busMap_isSome_of_accepts {busMap : OpenVM.BusMap}
+    {m : BusInteraction (ZMod p)} (hacc : OpenVM.accepts busMap m) :
+    ∃ t, busMap m.busId = some t := by
+  unfold OpenVM.accepts at hacc
+  split at hacc
+  all_goals first
+    | exact hacc.elim
+    | exact ⟨_, by assumption⟩
+
 /-- OpenVM's `accepts` grants the recv-byte invariant (`RecvBytes` in
     `ApcOptimizer/InterfaceEncoding.lean`, stated unfolded here). -/
 theorem openVm_accepts_memory_recv_bytes (busMap : OpenVM.BusMap)
