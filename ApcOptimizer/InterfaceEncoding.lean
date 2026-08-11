@@ -18,9 +18,9 @@ The story in four steps:
    (`concreteEquiv_of_abstractEquiv`), because an `InterfaceMatch` is a permutation of the
    interface data, which determines side effects and transports the order-free bus rely.
 2. What the verifier actually certifies is stronger on two counts, both harmless: its
-   alignment is one *fixed* pairing used in both proof directions
-   (`abstractEquiv_of_paired`), and its reference-side premises restrict the ∀-side by
-   invariants `accepts` already grants (`abstractEquiv_of_under`,
+   alignment is one *circuit-level* pairing, fixed before any assignment and used in both
+   proof directions (`abstractEquivUnder_of_aligned`), and its reference-side premises
+   restrict the ∀-side by invariants `accepts` already grants (`abstractEquiv_of_under`,
    `openVm_recvBytes_of_accepts`). The end-to-end OpenVM root is
    `openVm_concreteEquiv_of_interfaceVerified`.
 3. The observable is the whole memory behavior: the window-atomicity rely says exactly
@@ -76,21 +76,28 @@ theorem abstractEquiv_of_under {bs : BusSemantics p} {A B : Circuit p}
       have ⟨hz, hacc⟩ := accepts_of_mem_activeStateful hsat hm
       hI m hz hacc
 
-/-- What the verifier certifies — one fixed alignment, its per-pair equalities read in both
-    proof directions — implies the (weaker) abstract equivalence the transfer theorem
-    consumes: `AbstractEquiv` keeps only each witness's message-multiset equality, and the
-    two clauses' pairings need not cohere. -/
-theorem abstractEquiv_of_paired {bs : BusSemantics p} {A B : Circuit p}
-    (h₁ : ∀ a, A.satisfies bs a → ∃ b, B.satisfies bs b ∧ PairedMatch bs A B a b)
-    (h₂ : ∀ b, B.satisfies bs b → ∃ a, A.satisfies bs a ∧ PairedMatch bs A B a b) :
-    AbstractEquiv bs A B := by
+/-- What the verifier certifies — ONE circuit-level alignment `σ` of the syntactic stateful
+    interactions, fixed before any assignment is chosen, whose per-pair equalities are read
+    with the SAME `σ` in both proof directions and under the premise restriction — implies
+    the (weaker) `AbstractEquivUnder` the transfer pipeline consumes, which keeps only each
+    witness's message-multiset equality. (A pairing quantified per assignment would carry no
+    more information than `InterfaceMatch` itself; the certificate's strength is `σ`'s
+    uniformity, which this theorem is free to forget.) -/
+theorem abstractEquivUnder_of_aligned {bs : BusSemantics p}
+    {I : BusInteraction (ZMod p) → Prop} {A B : Circuit p}
+    (σ : Fin (statefulInteractions A bs).length ≃ Fin (statefulInteractions B bs).length)
+    (h₁ : ∀ a, A.satisfies bs a → (∀ m ∈ activeStateful A bs a, I m) →
+      ∃ b, B.satisfies bs b ∧ AlignedMatch bs A B σ a b)
+    (h₂ : ∀ b, B.satisfies bs b → (∀ m ∈ activeStateful B bs b, I m) →
+      ∃ a, A.satisfies bs a ∧ AlignedMatch bs A B σ a b) :
+    AbstractEquivUnder bs I A B := by
   constructor
-  · intro a ha
-    obtain ⟨b, hb, hp⟩ := h₁ a ha
-    exact ⟨b, hb, interfaceMatch_of_paired hp⟩
-  · intro b hb
-    obtain ⟨a, ha, hp⟩ := h₂ b hb
-    exact ⟨a, ha, interfaceMatch_of_paired hp⟩
+  · intro a ha hIa
+    obtain ⟨b, hb, hal⟩ := h₁ a ha hIa
+    exact ⟨b, hb, interfaceMatch_of_aligned hal⟩
+  · intro b hb hIb
+    obtain ⟨a, ha, hal⟩ := h₂ b hb hIb
+    exact ⟨a, ha, interfaceMatch_of_aligned hal⟩
 
 /-! ## Bridges to the Spec vocabulary -/
 

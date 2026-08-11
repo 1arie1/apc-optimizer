@@ -87,28 +87,54 @@ theorem exists_interaction_of_mem_activeStateful {circuit : Circuit p} {bs : Bus
   obtain ⟨bi, hbi, rfl⟩ := List.mem_map.mp hmem
   exact ⟨bi, hbi, rfl⟩
 
-/-- Lists related by an index bijection with pointwise-equal entries are permutations. -/
-theorem perm_of_get_equiv {α : Type _} {l₁ l₂ : List α}
-    (e : Fin l₁.length ≃ Fin l₂.length)
-    (h : ∀ i, l₁.get i = l₂.get (e i)) : l₁.Perm l₂ := by
-  have h₁ : l₁ = (List.finRange l₁.length).map (l₂.get ∘ ⇑e) := by
-    rw [← List.ofFn_eq_map,
-      show l₂.get ∘ ⇑e = l₁.get from funext fun i => (h i).symm, List.ofFn_get]
-  have h₂ : l₂ = (List.finRange l₂.length).map l₂.get := by
-    rw [← List.ofFn_eq_map, List.ofFn_get]
-  have hstep : ((List.finRange l₁.length).map ⇑e).Perm (List.finRange l₂.length) := by
-    refine (List.perm_ext_iff_of_nodup
-      ((List.nodup_finRange _).map e.injective) (List.nodup_finRange _)).mpr fun j => ?_
-    exact ⟨fun _ => List.mem_finRange j,
-      fun _ => List.mem_map.mpr ⟨e.symm j, List.mem_finRange _, e.apply_symm_apply j⟩⟩
-  have hmain := hstep.map l₂.get
-  rw [List.map_map, ← h₂] at hmain
-  exact h₁.symm ▸ hmain
+/-- Reindexing an `ofFn` list by a bijection permutes it. -/
+theorem perm_ofFn_comp_equiv {γ : Type _} {m n : ℕ} (e : Fin m ≃ Fin n) (F : Fin n → γ) :
+    (List.ofFn (F ∘ ⇑e)).Perm (List.ofFn F) := by
+  rw [List.ofFn_eq_map, List.ofFn_eq_map, ← List.map_map]
+  refine List.Perm.map F ?_
+  refine (List.perm_ext_iff_of_nodup
+    ((List.nodup_finRange _).map e.injective) (List.nodup_finRange _)).mpr fun j => ?_
+  exact ⟨fun _ => List.mem_finRange j,
+    fun _ => List.mem_map.mpr ⟨e.symm j, List.mem_finRange _, e.apply_symm_apply j⟩⟩
 
-theorem interfaceMatch_of_paired {bs : BusSemantics p} {A B : Circuit p}
-    {a b : Variable → ZMod p} (h : PairedMatch bs A B a b) : InterfaceMatch bs A B a b := by
-  obtain ⟨e, he⟩ := h
-  exact perm_of_get_equiv e he
+/-- Two mapped lists whose entries agree pointwise along an index bijection are
+    permutations. -/
+theorem perm_map_of_get_equiv {α β γ : Type _} {l₁ : List α} {l₂ : List β}
+    {f : α → γ} {g : β → γ} (e : Fin l₁.length ≃ Fin l₂.length)
+    (h : ∀ i, f (l₁.get i) = g (l₂.get (e i))) : (l₁.map f).Perm (l₂.map g) := by
+  have h₁ : l₁.map f = List.ofFn ((g ∘ l₂.get) ∘ ⇑e) := by
+    conv_lhs => rw [← List.ofFn_get l₁]
+    rw [List.map_ofFn]
+    exact congrArg _ (funext fun i => h i)
+  have h₂ : l₂.map g = List.ofFn (g ∘ l₂.get) := by
+    conv_lhs => rw [← List.ofFn_get l₂]
+    rw [List.map_ofFn]
+  rw [h₁, h₂]
+  exact perm_ofFn_comp_equiv e (g ∘ l₂.get)
+
+/-- The interface data is the evaluation of the syntactic stateful sublist, filtered to the
+    active messages. -/
+theorem activeStateful_eq_statefulEval (circuit : Circuit p) (bs : BusSemantics p)
+    (a : Variable → ZMod p) :
+    activeStateful circuit bs a
+      = ((statefulInteractions circuit bs).map (fun bi => bi.eval a)).filter
+          (fun m => decide (m.multiplicity ≠ 0)) := by
+  unfold activeStateful statefulInteractions
+  rw [List.filter_map, List.filter_map, List.filter_filter]
+  exact congrArg _ (List.filter_congr fun bi _ => rfl)
+
+/-- A circuit-level alignment induces the per-run interface match: the aligned evaluations
+    are permutations, and activity coincides per pair (the messages are equal, multiplicity
+    included), so the active filters stay matched. -/
+theorem interfaceMatch_of_aligned {bs : BusSemantics p} {A B : Circuit p}
+    {σ : Fin (statefulInteractions A bs).length ≃ Fin (statefulInteractions B bs).length}
+    {a b : Variable → ZMod p} (h : AlignedMatch bs A B σ a b) :
+    InterfaceMatch bs A B a b := by
+  unfold InterfaceMatch
+  rw [activeStateful_eq_statefulEval, activeStateful_eq_statefulEval]
+  exact (perm_map_of_get_equiv
+    (f := fun bi : BusInteraction (Expression p) => bi.eval a)
+    (g := fun bi : BusInteraction (Expression p) => bi.eval b) σ h).filter _
 
 /-- OpenVM's `accepts` grants the recv-byte invariant (`RecvBytes` in
     `ApcOptimizer/InterfaceEncoding.lean`, stated unfolded here). -/

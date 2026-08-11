@@ -58,15 +58,24 @@ def InterfaceMatch (bs : BusSemantics p) (A B : Circuit p)
     (a b : Variable → ZMod p) : Prop :=
   (activeStateful A bs a).Perm (activeStateful B bs b)
 
-/-- The certificate form of a match: one fixed bijective pairing of the two runs' interface
-    messages, pointwise equal — the Lean shadow of the verifier's alignment (`kept_pairs`),
-    which pairs interactions uniformly and is used identically in both proof directions.
-    Presentation-stronger than `InterfaceMatch`, which keeps only the induced multiset
-    equality (`abstractEquiv_of_paired`). -/
-def PairedMatch (bs : BusSemantics p) (A B : Circuit p)
+/-- The stateful interactions of a circuit, *syntactically*: statefulness is a property of
+    the data-level `busId`, so this sublist is independent of the assignment. -/
+def statefulInteractions (circuit : Circuit p) (bs : BusSemantics p) :
+    List (BusInteraction (Expression p)) :=
+  circuit.busInteractions.filter (fun bi => bs.isStateful bi.busId)
+
+/-- Per-pair equality along a *circuit-level* alignment: `σ` pairs the two circuits'
+    syntactic stateful interactions — one bijection, fixed before any assignment is chosen,
+    the Lean shadow of the verifier's `kept_pairs` — and the two runs make every pair
+    evaluate to the same message (multiplicity and payload). A per-assignment pairing would
+    be no stronger than `InterfaceMatch` itself; the certificate's strength is that the SAME
+    `σ` serves every assignment and both proof directions
+    (`abstractEquivUnder_of_aligned`). -/
+def AlignedMatch (bs : BusSemantics p) (A B : Circuit p)
+    (σ : Fin (statefulInteractions A bs).length ≃ Fin (statefulInteractions B bs).length)
     (a b : Variable → ZMod p) : Prop :=
-  ∃ e : Fin (activeStateful A bs a).length ≃ Fin (activeStateful B bs b).length,
-    ∀ i, (activeStateful A bs a).get i = (activeStateful B bs b).get (e i)
+  ∀ i, ((statefulInteractions A bs).get i).eval a
+    = ((statefulInteractions B bs).get (σ i)).eval b
 
 /-! ## Abstract and concrete equivalence -/
 
