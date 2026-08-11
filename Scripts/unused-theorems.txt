@@ -22,6 +22,9 @@ ApcOptimizer.Interface.concreteEquiv_of_abstractEquiv
 ApcOptimizer.Interface.isSoundReplacementOf_of_concreteEquiv
 ApcOptimizer.Interface.statefulInvariants_of_abstractEquiv
 ApcOptimizer.Interface.sp1_admissiblePermInvariant
+ApcOptimizer.Interface.closes_recv_determined
+ApcOptimizer.Interface.interfaceMatch_closes_iff
+ApcOptimizer.Interface.exists_closes_of_admissible
 
 # Theorems the closure cannot see are used, so they must be listed by hand. The only class so far:
 # a `rfl`-lemma named in a `simp only`/`rw` list whose rewrite step collapses to `Eq.refl`, leaving

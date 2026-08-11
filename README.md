@@ -30,6 +30,24 @@ The theorem is proven against the spec and the OpenVM semantics above. For the g
 - **PC lookups are pinned.** [`ApcOptimizer/OpenVmSemantics.lean`](./ApcOptimizer/OpenVmSemantics.lean) checks only the arity of a PC lookup, not the program table. We assume that constraints like `opcode = 0x5b` have already been added to the input circuit, pinning the lookup table values.
 - **Every memory writer in the deployed system is byte-range-checked.** `violates` in [`ApcOptimizer/OpenVmSemantics.lean`](./ApcOptimizer/OpenVmSemantics.lean) treats a memory *receive* (multiplicity `-1`) from the register / main-memory address spaces (1 and 2) with a non-byte data limb as conflicting, so the optimizer may assume received memory words are bytes. This is justified only if *every* chip sending into these address spaces — including the initial-memory boundary — maintains the byte-range invariant that `breaksInvariant` demands of the circuits optimized here (which is OpenVM's memory discipline).
 
+### The interface-encoding metatheory (standalone)
+
+[`ApcOptimizer/InterfaceEncoding/`](./ApcOptimizer/InterfaceEncoding) is a standalone metatheory — not consumed by the optimizer
+correctness proof — justifying the *interface memory encoding* used by an external SMT
+equivalence verifier: if two circuits exchange identical traffic on the stateful buses
+(a 1:1 matching with per-pair equal messages), equivalence in the abstract semantics — where
+memory receives are nondeterministic inputs constrained only by the invariants `accepts`
+grants — implies equivalence in the concrete semantics, and no memory environment can
+distinguish the two circuits. The audited-by-reading surface is the *definitions* in
+[`Equiv.lean`](./ApcOptimizer/InterfaceEncoding/Equiv.lean) (the equivalence notions and their two documented divergences from
+`Spec.lean`) and [`Closure.lean`](./ApcOptimizer/InterfaceEncoding/Closure.lean) (memory environments and closure); the theorems —
+`concreteEquiv_of_abstractEquiv` and the end-to-end
+`openVm_concreteEquiv_of_interfaceVerified` in [`Transfer.lean`](./ApcOptimizer/InterfaceEncoding/Transfer.lean), memory determinism
+(`closes_recv_determined`) and `interfaceMatch_closes_iff` in `Closure.lean` — are checked by
+`lake build` and rest on the same three standard axioms (asserted in CI). The matching
+hypothesis itself (which interactions pair up) is *not* discharged here — it is what the
+verifier's alignment analysis certifies and its SMT run assumes per instance.
+
 ## Usage
 
 The `apc-optimizer` executable runs the optimizer on powdr `SymbolicMachine` exports (`ApcWithBusMap` JSON, plain or gzipped) — from which it also reads the block's entry pc, declaring ENTRY_KEY (see the assumptions above; a caller that has only `{machine, bus_map, next_free_id}`, as powdr's FFI path does, can pass it as a top-level `entry_pc`) — and reports effectiveness — the factor by which each of three size measures shrinks, `before / after`, in priority order: distinct variables, then bus interactions, then algebraic constraints:

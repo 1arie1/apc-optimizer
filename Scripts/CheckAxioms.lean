@@ -13,3 +13,4 @@ import ApcOptimizer.InterfaceEncoding
 #print axioms ApcOptimizer.OpenVM.openVmOptimizer_maintainsCorrectness
 -- The interface-encoding metatheory's end-to-end roots (`ApcOptimizer/InterfaceEncoding/`).
 #print axioms ApcOptimizer.Interface.openVm_concreteEquiv_of_interfaceVerified
+#print axioms ApcOptimizer.Interface.closes_recv_determined
