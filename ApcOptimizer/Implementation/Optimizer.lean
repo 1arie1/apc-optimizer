@@ -202,54 +202,6 @@ def optimizerWithBusFacts {bs : BusSemantics p} (b : DegreeBound) (facts : BusFa
   let r := pipeline b cs bs facts
   (r.out, r.derivs.forOutput cs.vars r.out.vars)
 
-/-! ## Evaluation depends only on a system's variables
-
-Two assignments agreeing on `cs.vars` are interchangeable for `satisfies`/`admissible`/`sideEffects`.
-The completeness proof below uses these to swap the abstract per-pass witness for `witgen`'s output. -/
-
-theorem Circuit.busEval_congr {cs : Circuit p} {f g : Variable → ZMod p}
-    (h : ∀ x ∈ cs.vars, f x = g x) {bi : BusInteraction (Expression p)}
-    (hbi : bi ∈ cs.busInteractions) : bi.eval f = bi.eval g :=
-  BusInteraction.eval_congr bi f g (fun x hx => by
-    simp only [BusInteraction.vars, List.mem_append, List.mem_flatMap] at hx
-    rcases hx with hx | ⟨e, he, hx⟩
-    · exact h x (Circuit.mem_vars_of_mult hbi hx)
-    · exact h x (Circuit.mem_vars_of_payload hbi he hx))
-
-theorem Circuit.satisfies_congr {cs : Circuit p} {bs : BusSemantics p}
-    {f g : Variable → ZMod p} (h : ∀ x ∈ cs.vars, f x = g x) :
-    cs.satisfies bs f ↔ cs.satisfies bs g := by
-  have imp : ∀ e1 e2 : Variable → ZMod p, (∀ x ∈ cs.vars, e1 x = e2 x) →
-      cs.satisfies bs e1 → cs.satisfies bs e2 := by
-    intro e1 e2 hh hsat
-    refine ⟨fun c hc => ?_, fun bi hbi => ?_⟩
-    · rw [← Expression.eval_congr c e1 e2
-        (fun x hx => hh x (Circuit.mem_vars_of_constraint hc hx))]
-      exact hsat.1 c hc
-    · have hbe : bi.eval e1 = bi.eval e2 := Circuit.busEval_congr hh hbi
-      show (bi.eval e2).multiplicity ≠ 0 → bs.accepts (bi.eval e2)
-      rw [← hbe]
-      exact hsat.2 bi hbi
-  exact ⟨imp f g h, imp g f (fun x hx => (h x hx).symm)⟩
-
-theorem Circuit.admissible_congr {cs : Circuit p} {bs : BusSemantics p}
-    {f g : Variable → ZMod p} (h : ∀ x ∈ cs.vars, f x = g x) :
-    cs.admissible bs f ↔ cs.admissible bs g := by
-  have hmap : (cs.busInteractions.map (fun bi => bi.eval f))
-      = (cs.busInteractions.map (fun bi => bi.eval g)) :=
-    List.map_congr_left (fun bi hbi => Circuit.busEval_congr h hbi)
-  unfold Circuit.admissible
-  rw [hmap]
-
-theorem Circuit.sideEffects_congr {cs : Circuit p} {bs : BusSemantics p}
-    {f g : Variable → ZMod p} (h : ∀ x ∈ cs.vars, f x = g x) :
-    cs.sideEffects bs f = cs.sideEffects bs g := by
-  have hmap : cs.busInteractions.map (fun bi => bi.eval f)
-      = cs.busInteractions.map (fun bi => bi.eval g) :=
-    List.map_congr_left (fun bi hbi => Circuit.busEval_congr h hbi)
-  unfold Circuit.sideEffects
-  rw [hmap]
-
 theorem Derivations.methodFor_map_same (vs : List Variable)
     (f : Variable → ComputationMethod p) (v : Variable) :
     Derivations.methodFor (vs.map (fun u => (u, f u))) v =

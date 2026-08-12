@@ -1,4 +1,5 @@
 import ApcOptimizer.Spec
+import ApcOptimizer.Implementation.EvalCongr
 import ApcOptimizer.Implementation.Variable
 
 set_option autoImplicit false
@@ -161,29 +162,6 @@ structure PassResult {p : ℕ} (cs : Circuit p) (bs : BusSemantics p) where
   out : Circuit p
   derivs : Derivations p
   correct : PassCorrect cs out derivs bs
-
-/-! ## Variable-set membership -/
-
-/-- A variable of `cs.vars` occurs in some constraint, multiplicity, or payload expression. -/
-theorem Circuit.mem_vars {cs : Circuit p} {x : Variable} :
-    x ∈ cs.vars ↔
-      (∃ c ∈ cs.algebraicConstraints, x ∈ c.vars) ∨
-      (∃ bi ∈ cs.busInteractions, x ∈ bi.multiplicity.vars ∨ ∃ e ∈ bi.payload, x ∈ e.vars) := by
-  simp only [Circuit.vars, List.mem_append, List.mem_flatMap]
-
-theorem Circuit.mem_vars_of_constraint {cs : Circuit p} {c : Expression p}
-    {x : Variable} (hc : c ∈ cs.algebraicConstraints) (hx : x ∈ c.vars) : x ∈ cs.vars :=
-  Circuit.mem_vars.2 (Or.inl ⟨c, hc, hx⟩)
-
-theorem Circuit.mem_vars_of_mult {cs : Circuit p}
-    {bi : BusInteraction (Expression p)} {x : Variable} (hbi : bi ∈ cs.busInteractions)
-    (hx : x ∈ bi.multiplicity.vars) : x ∈ cs.vars :=
-  Circuit.mem_vars.2 (Or.inr ⟨bi, hbi, Or.inl hx⟩)
-
-theorem Circuit.mem_vars_of_payload {cs : Circuit p}
-    {bi : BusInteraction (Expression p)} {e : Expression p} {x : Variable}
-    (hbi : bi ∈ cs.busInteractions) (he : e ∈ bi.payload) (hx : x ∈ e.vars) : x ∈ cs.vars :=
-  Circuit.mem_vars.2 (Or.inr ⟨bi, hbi, Or.inr ⟨e, he, hx⟩⟩)
 
 /-! ## Decidable degree-bound check
 

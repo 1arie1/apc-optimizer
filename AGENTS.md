@@ -32,6 +32,10 @@ construction — a wrong fact would not compile), and `ApcOptimizer/Utils/` is t
   master theorem, for all bus facts) plus its instances `simpleOptimizer_maintainsCorrectness`, the
   OpenVM `openVmOptimizer` (`openVmOptimizer_maintainsCorrectness`) and the SP1 `sp1Optimizer`
   (`sp1Optimizer_maintainsCorrectness`).
+- `ApcOptimizer/InterfaceEncoding/Spec.lean`, `ApcOptimizer/InterfaceEncoding.lean` — the standalone
+  interface-encoding metatheory (audited definitions and theorem statements; not consumed by the
+  optimizer correctness proof). Its proof machinery is `ApcOptimizer/Implementation/InterfaceEncoding/`
+  (no audit); its own roots are listed in `Scripts/unused-theorems.txt`.
 - `ApcOptimizer/Implementation/OptimizerPasses/Basic.lean`, `Pass.lean`, `FactPass.lean` — the framework: a
   pass bundles its own correctness proof, so a pass cannot be written without discharging it.
 - `ApcOptimizer/Implementation/OptimizerPasses/*.lean` — one file per optimization pass (runtime

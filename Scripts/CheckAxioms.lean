@@ -1,4 +1,5 @@
 import ApcOptimizer.Optimizer
+import ApcOptimizer.InterfaceEncoding
 
 /-! CI helper: print the axiom dependencies of the top-level correctness theorems.
     `Scripts/check-proof-integrity.sh` asserts the output mentions no forbidden axiom
@@ -10,3 +11,6 @@ import ApcOptimizer.Optimizer
 -- Its two instances: the fact-free optimizer, and the concrete OpenVM optimizer the CLI runs.
 #print axioms simpleOptimizer_maintainsCorrectness
 #print axioms ApcOptimizer.OpenVM.openVmOptimizer_maintainsCorrectness
+-- The interface-encoding metatheory's end-to-end roots (`ApcOptimizer/InterfaceEncoding/`).
+#print axioms ApcOptimizer.Interface.openVm_concreteEquiv_of_interfaceVerified
+#print axioms ApcOptimizer.Interface.closes_recv_determined

@@ -4,41 +4,11 @@ import Mathlib.Algebra.Field.ZMod
 
 set_option autoImplicit false
 
-/-! # Shared finite-domain lemmas and bounds: the `eval_congr` family (evaluation depends only on
-the variables read) and the enumeration/probe helpers. -/
+/-! # Shared finite-domain lemmas and bounds: `ComputationMethod.eval_congr` and the
+enumeration/probe helpers. The `Expression`/`BusInteraction`/`Circuit` `eval_congr` family is in
+`Implementation/EvalCongr.lean`. -/
 
 variable {p : ℕ}
-
-/-! ## Evaluation depends only on an expression's variables -/
-
-theorem Expression.eval_congr (e : Expression p) (env1 env2 : Variable → ZMod p)
-    (h : ∀ x ∈ e.vars, env1 x = env2 x) : e.eval env1 = e.eval env2 := by
-  induction e with
-  | const n => rfl
-  | var x => exact h x (by simp [Expression.vars])
-  | add a b iha ihb =>
-      simp only [Expression.eval]
-      rw [iha (fun x hx => h x (by simp [Expression.vars, hx])),
-          ihb (fun x hx => h x (by simp [Expression.vars, hx]))]
-  | mul a b iha ihb =>
-      simp only [Expression.eval]
-      rw [iha (fun x hx => h x (by simp [Expression.vars, hx])),
-          ihb (fun x hx => h x (by simp [Expression.vars, hx]))]
-
-theorem BusInteraction.eval_congr (bi : BusInteraction (Expression p))
-    (env1 env2 : Variable → ZMod p) (h : ∀ x ∈ bi.vars, env1 x = env2 x) :
-    bi.eval env1 = bi.eval env2 := by
-  have hmult : bi.multiplicity.eval env1 = bi.multiplicity.eval env2 :=
-    bi.multiplicity.eval_congr env1 env2
-      (fun x hx => h x (by simp [BusInteraction.vars, hx]))
-  have hpay : bi.payload.map (fun e => e.eval env1) = bi.payload.map (fun e => e.eval env2) := by
-    apply List.map_congr_left
-    intro e he
-    exact e.eval_congr env1 env2
-      (fun x hx => h x (by
-        simp only [BusInteraction.vars, List.mem_append, List.mem_flatMap]
-        exact Or.inr ⟨e, he, hx⟩))
-  simp only [BusInteraction.eval, hmult, hpay]
 
 /-- A computation method reads only its variables; consumed by the master-theorem completeness
     proof (`Implementation/Optimizer.lean`). -/
