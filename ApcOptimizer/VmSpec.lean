@@ -59,6 +59,9 @@ structure VmEffect (p : ℕ) where
     -/
 structure Host (p : ℕ) where
   chips : List (HostChip p)
+  /-- The VM's trace budget: the most guest-chip instances a satisfying assignment may realize,
+      in total across all types (see `VmAssignment.withinBudget`). -/
+  maxInstances : ℕ
   /-- The `chips` index that is the input chip type. -/
   inputChip : Fin chips.length
   /-- Map from an input chip instance's effects to its contribution to the input stream. -/
@@ -126,12 +129,25 @@ def VmAssignment.satisfiesHost {vm : Vm p} (a : VmAssignment p vm) : Prop :=
 def VmAssignment.balances {vm : Vm p} (a : VmAssignment p vm) : Prop :=
   ∀ message : BusMessage p, a.netBus message = 0
 
+/-- The assignment fits the VM's trace budget.
+
+    Balance alone is weaker than it looks, because multiplicities live in `ZMod p`: `p` instances
+    that each send the *same* message net to zero, so no host chip has to receive it and a lookup
+    table never gets to object. Bounding how many instances a witness may realize is what closes
+    that off — see `Host.forcesAccepts` in `VmSpecConnection.lean`, which is unprovable without
+    it. The bound is on instance counts alone, not on instances × bus interactions, so that it is
+    fixed by the `Host` and therefore identical for the two guest-chip lists an equivalence
+    compares; converting it into a bound on *messages* is the connecting theorem's job. -/
+def VmAssignment.withinBudget {vm : Vm p} (a : VmAssignment p vm) : Prop :=
+  (∑ t : Fin vm.guestChips.length, (a.guestAssignments t).length) ≤ vm.host.maxInstances
+
 -- ANCHOR: vmSat
 /-- Whether a VM assignment is satisfying: every realized instance behaves (its own algebraic
     constraints, or, for a host-chip instance, its type's legality), every host-chip type that
-    opts into `singleton` stays a singleton, and every bus balances. -/
+    opts into `singleton` stays a singleton, every bus balances, and the whole thing fits the
+    VM's trace budget. -/
 def VmSat (vm: Vm p) (a : VmAssignment p vm) : Prop :=
-  a.satisfiesGuest ∧ a.satisfiesHost ∧ a.balances
+  a.satisfiesGuest ∧ a.satisfiesHost ∧ a.balances ∧ a.withinBudget
 -- ANCHOR_END: vmSat
 
 /-- The effects of a satisfying VM assignment: the input stream its input-chip instances pulled,
@@ -150,7 +166,7 @@ theorem VmSat.of_perm {vm : Vm p} {a a' : VmAssignment p vm}
     (hguest : ∀ t, (a'.guestAssignments t).Perm (a.guestAssignments t))
     (hhost : ∀ t, (a'.hostAssignment t).Perm (a.hostAssignment t))
     (hsat : VmSat vm a) : VmSat vm a' := by
-  obtain ⟨h1, ⟨h2, h3⟩, h4⟩ := hsat
+  obtain ⟨h1, ⟨h2, h3⟩, h4, h5⟩ := hsat
   have hnet : a'.netBus = a.netBus := by
     funext message
     show (∑ t : Fin vm.guestChips.length,
@@ -166,7 +182,8 @@ theorem VmSat.of_perm {vm : Vm p} {a a' : VmAssignment p vm}
   exact ⟨fun t asg hasg => h1 t asg ((hguest t).mem_iff.mp hasg),
     ⟨fun t effect hcontrib => h2 t effect ((hhost t).mem_iff.mp hcontrib),
       fun t hsingle => (hhost t).length_eq ▸ h3 t hsingle⟩,
-    fun message => (congrFun hnet message).trans (h4 message)⟩
+    ⟨fun message => (congrFun hnet message).trans (h4 message),
+      (Finset.sum_congr rfl (fun t _ => (hguest t).length_eq)).trans_le h5⟩⟩
 
 omit [Fact p.Prime] in
 /-- VM-satisfiability is assignment-order-independent (bidirectional). -/

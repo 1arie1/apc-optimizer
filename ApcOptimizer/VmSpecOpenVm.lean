@@ -185,9 +185,14 @@ noncomputable def outputArrayOf (memBusId : Nat) (contribution : BusState p) : V
 /-- A concrete OpenVM `Host`: `defaultBusMap`'s four stateless lookup tables (default bus ids),
     memory initialization (all-zero) and finalization, the output chip, and an input chip that
     peeks registers `ptrReg`/`countReg` — all sharing `memBusId` for the (single) memory bus.
+    `maxInstances` is the VM's trace budget (see `VmAssignment.withinBudget`); it has to be small
+    enough that a chip's lookups cannot wrap `ZMod p`, which is a hypothesis of the connecting
+    theorem rather than something this definition can check on its own.
     Pair with a `List (Circuit p)` of guest chips to get a `Vm p`, or feed straight into
     `CanEffect`/`vmEquivalent`. -/
-noncomputable def openVmHost (ptrReg countReg : Nat) (memBusId : Nat := 1) : Host p where
+noncomputable def openVmHost (maxInstances : ℕ) (ptrReg countReg : Nat) (memBusId : Nat := 1) :
+    Host p where
+  maxInstances := maxInstances
   chips :=
     [ pcLookupHostChip, bitwiseLookupHostChip, variableRangeCheckerHostChip,
       tupleRangeCheckerHostChip, memoryInitHostChip memBusId,

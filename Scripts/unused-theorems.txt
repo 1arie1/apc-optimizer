@@ -36,3 +36,37 @@ ApcOptimizer.Dense.denseNrmGo_var
 VmSat.of_perm
 VmSat.perm_iff
 
+# Same situation for `ApcOptimizer/VmSpecConnection.lean`, which proves the soundness half of the
+# bridge from `Spec.lean`'s per-chip `isSoundReplacementOf` to `VmSpec.lean`'s `VmEquivalent`.
+# `canEffect_of_isSoundReplacementOf` is that file's own root and the rest are genuinely used in
+# its proof; none of it can be reachable from the roots above until the VM-level statement is
+# wired into (or itself seeds) the correctness roots.
+netBus_apply
+hostLegal_of_satisfiesHost
+allEffects_eq_sideEffects
+exists_active_of_allEffects_ne_zero
+exists_instance_of_guestNet_ne_zero
+soundWitness_spec
+head_congr
+effects_eq_of_io
+canEffect_of_isSoundReplacementOf
+countAt_le_length
+sum_eq_countP
+multsAt_zero_or_one
+allEffects_eq_countAt
+countAt_ne_zero
+guestNet_eq_guestCount
+guestCount_le
+guestNet_ne_zero_of_active
+forcesAccepts_of_sinksAreTables
+exists_instance_of_hostNet_ne_zero
+
+# `ApcOptimizer/VmSpecOpenVmConnection.lean` discharges the connecting theorem's host-side
+# conditions for `openVmHost`. Same story: its own root is `openVmHost_forcesAccepts`, and the
+# rest feed its proof.
+ApcOptimizer.OpenVM.exists_of_busStateOf_ne_zero
+ApcOptimizer.OpenVM.OutputRead.interactions_busId
+ApcOptimizer.OpenVM.InputRead.interactions_busId
+ApcOptimizer.OpenVM.openVmHost_sinksAreTables
+ApcOptimizer.OpenVM.openVmHost_forcesAccepts
+

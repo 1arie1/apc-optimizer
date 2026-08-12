@@ -372,13 +372,170 @@ condition (`addressSpace.val = 1 ∨ = 2`), but it is deliberately *not* reused 
 "OpenVM byte-range-checks writes to this space", which is a different claim that merely happens
 to hold of the same two spaces.
 
+## The connecting theorem, soundness half (`ApcOptimizer/VmSpecConnection.lean`, new file)
+
+Proved: `canEffect_of_isSoundReplacementOf` — if every chip of `G'` is a
+`Circuit.isSoundReplacementOf` the corresponding chip of `G`, then `CanEffect host G' e →
+CanEffect host G e`. Depends only on Lean's three standard axioms. This is the `←` half of
+`VmEquivalent`; completeness is not attempted (see the gap list below for why it is harder).
+
+**The witness construction.** Given a satisfying `a'` for the optimized VM: keep the host's
+*stateful* chips (memory init/finalize, input, output) byte-for-byte; replace each guest
+instance's assignment by the one soundness promises (`soundWitness`, a `Classical.choose` behind
+a `dite`, same pattern as `inputChunkOf`); let the host's *lookup* chips absorb whatever
+stateless imbalance that leaves. Effect preservation is then free — `getInputChunk`/`getOutput`
+read only the input/output chip contributions, which never moved.
+
+**Two vocabulary gaps, each filled by one condition on the `Host`:**
+
+1. `Circuit.satisfies` demands `BusSemantics.accepts` on every active message;
+   `VmAssignment.satisfiesGuest` demands only the algebraic constraints. Without recovering
+   `accepts` the per-chip hypotheses cannot be invoked at all. → `Host.forcesAccepts`.
+2. `Circuit.sideEffects` — what a sound replacement preserves — covers only *stateful* buses,
+   while `VmAssignment.netBus` sums over all of them. So a legal optimization (dropping a
+   redundant range check) can unbalance a lookup bus, and the host's lookup chips must be
+   rebuilt. → `Host.absorbsStateless`.
+
+Nice consequence worth remembering: the balance-over-*all*-buses decision is what *creates* gap
+2, and also what makes gap 1 closable in principle — a guest send on a lookup bus has nowhere to
+go but a chip that only receives table entries.
+
+**`Host.forcesAccepts` is FALSE for `openVmHost` as `VmSat` currently stands.** This is the main
+finding, and it is not a proof-engineering obstacle but a real hole in the definition.
+Multiplicities live in `ZMod p` and `VmSat` puts **no bound on realized instance counts**, so:
+realize `p` instances of one guest chip, each sending the *same* unaccepted lookup message. Their
+net multiplicity is `p = 0`, no host chip needs to receive it, and `VmSat` holds anyway — with
+every other chip at the zero `BusState` (the three `singleton` chips take a single zero
+contribution; the output chip takes the empty `OutputRead`, whose `interactions` list is `[]`).
+So an arbitrarily bogus lookup survives.
+
+Fixing this means bounding realized instance counts below `p` inside `VmSat` — an audited-surface
+change to `VmSpec.lean`, deliberately **not** made unilaterally. Note the single-circuit spec
+never had to confront this: it assumes `BusSemantics.accepts` outright rather than deriving it
+from balance, so the wraparound question never arises there. Deriving acceptance is strictly more
+honest, and this is the bill for it.
+
+`Host.absorbsStateless`, by contrast, does look dischargeable for `openVmHost` (not yet done):
+`δ`'s side condition forces it onto stateless buses whose payloads `accepts` admits, which for
+`defaultBusMap` means exactly the four lookup buses (an unknown bus id is stateless but `accepts`
+is `False` there, so it is excluded); each lookup chip can absorb its own bus's slice by
+appending one instance, since `lookupTableHostChip` constrains *which* payloads carry a nonzero
+net, not what that net is, and is not `singleton`.
+
+**Mechanical notes.** `Spec.lean`'s imports do not bring in `ring`/`linear_combination`, so this
+file imports `Mathlib.Tactic.LinearCombination` (as `OptimizerPasses/DegenRange.lean` already
+does). Reindexing `Fin G.length → Fin G'.length` uses `Fintype.sum_equiv (finCongr hlen.symm)`;
+`(finCongr h) t = Fin.cast h t` holds by `rfl`, which keeps the `show` steps working.
+`HostLegal`/`hostNet`/`guestNet` restate pieces of `VmSpec.lean` over the host assignment alone
+so the conditions can be stated without a `Vm` in scope — each is defeq to its `VmSpec.lean`
+counterpart (`hostLegal_of_satisfiesHost` and `netBus_apply` are both proved by `id`/`rfl`).
+All nine theorems went into `Scripts/unused-theorems.txt`'s `[ignore]`, same rationale as the
+`VmSpec.lean` entries.
+
+## Reading the manuscript's `bus_int.tex` — what it settled, and one gap it has
+
+Up to this point the Lean work had only used `vm.tex`. Reading `bus_int.tex` and `main.tex`
+settled three open questions and turned up one problem in the manuscript itself.
+
+**Settled — binary multiplicities.** `eq:legal:stateless:mult` is exactly the missing per-chip
+assumption: `ConAlg ⟹ [⋀ᵢ (idᵢ ∈ IdStateless) ⟹ (mᵢ ∈ {0,+1})]`. Note it is conditioned on
+`ConAlg` — the algebraic constraints *alone*. That matters: conditioning on `Circuit.satisfies`
+would be circular, because `satisfies` bundles the `accepts` obligation being derived.
+
+**Settled — the vocabulary map.** `ConAlg` = `VmAssignment.satisfiesGuest`;
+`ConAlgPlus` (= `ConAlg` + `eq:stateless_as_pred`) = `Circuit.satisfies`. `Host.forcesAccepts` is
+the arrow between them, i.e. the manuscript's stateless induction.
+
+**Settled — `absorbsStateless` was never a gap.** The manuscript already says a table sink "can
+balance *any* legal interactions with its bus… It is only on B that equivalence must hold during
+optimization." That is the justification for `Circuit.sideEffects` being stateful-only, and
+`Host.absorbsStateless` is its formal counterpart. The earlier framing of this as an impedance
+mismatch was wrong; it is deliberate architecture.
+
+**Gap found — the stateless induction wraps.** The manuscript argues with `mᵢ > 0` / `mᵢ < 0`,
+and `main.tex` says inequalities use "the canonical embedding in ℤ". But balancing is an equation
+in `ZMod p`. Each multiplicity being `0`/`1` in ℤ does not make the *sum over instances* an
+ℤ-sum: `p` instances sending the same bogus payload total `0` in the field and `p` in ℤ, so no
+sink is obliged to receive it and `eq:stateless_as_pred` fails. The manuscript needs a side
+condition bounding the number of active stateless interactions below `p`. Invisible in prose that
+reasons about integers; unavoidable once the sum is literally `∑` in `ZMod p`.
+
+## `VmSat` gained a trace budget; `forcesAccepts` is now proved
+
+Acting on the above.
+
+**Audited surface (`VmSpec.lean`).** `Host` gained `maxInstances : ℕ`, and `VmSat` a fourth
+conjunct `VmAssignment.withinBudget`: `(∑ t, (a.guestAssignments t).length) ≤ host.maxInstances`.
+
+Two design points, both load-bearing:
+- The bound *must* live in `VmSat`, not in a theorem hypothesis. `CanEffect` existentially
+  quantifies the witness, so a theorem is handed an arbitrary one; a bound stated outside has
+  nothing to attach to.
+- It bounds **instances**, not instances × bus-interactions. The tempting single-line version
+  (`∑ t, instances t * (G.get t).busInteractions.length < p` in `VmSat`) does not survive the
+  soundness transfer: you would hold it for `G'` and need it for `G`, and nothing obliges the
+  optimizer to *reduce* interaction counts. Keeping the budget on the shared `Host` makes it
+  identical on both sides, and instance counts are preserved exactly by the soundness
+  construction (the new lists are `map`s). The instances × interactions arithmetic moves to the
+  connecting theorem, where both `G` and `G'` are in scope: `L * host.maxInstances < p` with
+  `∀ t, (G.get t).busInteractions.length ≤ L`.
+
+**Per-chip well-formedness (`VmSpecConnection.lean`).** `Circuit.legalGuest` bundles
+`statelessSendOnly` (the manuscript's `eq:legal:stateless:mult`) and `statefulAccepts`. Both are
+conditioned on the algebraic constraints alone. Required of `G'`, not just `G` — soundness starts
+from the *optimized* VM's assignment, so that is where `forcesAccepts` gets applied; and `G'` is
+what actually runs, so OpenVM would reject a multiplicity-2 lookup from it anyway.
+
+`statefulAccepts` is assumed, standing in for the manuscript's `eq:legal:recv_byte`, which needs
+its own balancing argument (only bytes are received because only bytes are sent). Not attempted.
+
+**The counting chain.** `Circuit.multsAt` (the list `allEffects` sums) → `Circuit.countAt`
+(`countP` of its nonzeros) → `guestCount` (the ℕ-valued analogue of `guestNet`). Then
+`allEffects_eq_countAt` (a `0`/`1` list sums to its count of nonzeros — note the `cons` case
+needs a split on `(1 : ZMod p) = 0`, true in `ZMod 1`), `guestCount_le`, and
+`guestNet_ne_zero_of_active`: an active stateless message leaves a genuinely nonzero guest net.
+
+**`Host.forcesAccepts` is derived, not assumed.** It was replaced as an *assumption* by the much
+weaker `Host.sinksAreTables` ("any stateless message a host chip leaves nonzero is accepted" — no
+mention of guests), and `forcesAccepts_of_sinksAreTables` supplies the balancing argument. This is
+`bus_int.tex`'s stateless induction, formalized.
+
+## Discharged for `openVmHost`
+
+`ApcOptimizer/VmSpecOpenVmConnection.lean` (new) proves `openVmHost_sinksAreTables` and hence
+`openVmHost_forcesAccepts`. The condition that was **false** two sections ago is now a theorem.
+
+The proof is a `fin_cases` over the eight host chips: the four lookup chips restate their bus's
+case of `OpenVM.accepts` (after `rcases`-ing the payload to the right arity, both sides are
+literally the same proposition — `exact id` closes each), and the four memory-bus chips pin
+`m.1 = memBusId`, which contradicts `isStateful m.1 = false`. For the output/input chips that
+needs `exists_of_busStateOf_ne_zero` plus the fact that every interaction of an
+`OutputRead`/`InputRead` sits on the memory bus.
+
+**Still open: `Host.absorbsStateless` for `openVmHost`.** It looks true and the shape is clear —
+append to each of the four lookup chips one instance carrying `δ` restricted to that chip's bus
+(they are not `singleton`, so appending is free; their legality predicate constrains *which*
+payloads may carry a nonzero net, not what it is). Two pieces of work: showing `δ`'s support lies
+in `{2,3,6,7}` (from `isStateful m.1 = false` plus `∃ mult ≠ 0, accepts …`, since an unknown bus
+id is stateless but `accepts` is `False` there — needs inverting `defaultBusMap`, i.e. an 8-deep
+`rcases` on the bus id), and computing `hostNet` across the modified eight-chip assignment.
+
 ## Next step on resume
 
-No known open design gaps in the current shape. Candidates for what's next: (a) instantiate a
-concrete `Vm` for OpenVM (payload-layout decoding for `inputChunk`/`outputArray`, concrete
-`HostChip`s for the OpenVM bus map), or (b) the connecting theorem sketched in `vmEquivalent`'s
-docstring — per-chip `refines` (matched up between `guestChips` and `guestChips'`) implies
-`vmEquivalent`.
+In rough priority order:
+
+1. **`Host.absorbsStateless` for `openVmHost`** — the last hypothesis of
+   `canEffect_of_isSoundReplacementOf` not discharged for a concrete host. Shape and remaining
+   work described in the section above.
+2. **Record the wraparound side condition in the manuscript**, on `eq:stateless_as_pred`. The
+   Lean now has the honest version (`VmAssignment.withinBudget` plus `L * maxInstances < p`); the
+   prose does not.
+3. **Derive `Circuit.statefulAccepts`** rather than assuming it — the manuscript's
+   `eq:legal:recv_byte` from `eq:legal:stateful:send_byte` plus balancing.
+4. **The completeness half** (`CanEffect host G e → CanEffect host G' e`). Its blocker is
+   unchanged: `Circuit.isCompleteReplacementOf` is gated on `Circuit.admissible`, a list-order
+   property (`admissibleMemoryBus`) that order-blind `VmSat` cannot supply. Either it becomes an
+   explicit "real trace" hypothesis, or `MemoryBus.lean` changes.
 
 ## Full current content of `ApcOptimizer/VmSpec.lean`
 
@@ -444,6 +601,9 @@ structure VmEffect (p : ℕ) where
     -/
 structure Host (p : ℕ) where
   chips : List (HostChip p)
+  /-- The VM's trace budget: the most guest-chip instances a satisfying assignment may realize,
+      in total across all types (see `VmAssignment.withinBudget`). -/
+  maxInstances : ℕ
   /-- The `chips` index that is the input chip type. -/
   inputChip : Fin chips.length
   /-- Map from an input chip instance's effects to its contribution to the input stream. -/
@@ -511,12 +671,25 @@ def VmAssignment.satisfiesHost {vm : Vm p} (a : VmAssignment p vm) : Prop :=
 def VmAssignment.balances {vm : Vm p} (a : VmAssignment p vm) : Prop :=
   ∀ message : BusMessage p, a.netBus message = 0
 
+/-- The assignment fits the VM's trace budget.
+
+    Balance alone is weaker than it looks, because multiplicities live in `ZMod p`: `p` instances
+    that each send the *same* message net to zero, so no host chip has to receive it and a lookup
+    table never gets to object. Bounding how many instances a witness may realize is what closes
+    that off — see `Host.forcesAccepts` in `VmSpecConnection.lean`, which is unprovable without
+    it. The bound is on instance counts alone, not on instances × bus interactions, so that it is
+    fixed by the `Host` and therefore identical for the two guest-chip lists an equivalence
+    compares; converting it into a bound on *messages* is the connecting theorem's job. -/
+def VmAssignment.withinBudget {vm : Vm p} (a : VmAssignment p vm) : Prop :=
+  (∑ t : Fin vm.guestChips.length, (a.guestAssignments t).length) ≤ vm.host.maxInstances
+
 -- ANCHOR: vmSat
 /-- Whether a VM assignment is satisfying: every realized instance behaves (its own algebraic
     constraints, or, for a host-chip instance, its type's legality), every host-chip type that
-    opts into `singleton` stays a singleton, and every bus balances. -/
+    opts into `singleton` stays a singleton, every bus balances, and the whole thing fits the
+    VM's trace budget. -/
 def VmSat (vm: Vm p) (a : VmAssignment p vm) : Prop :=
-  a.satisfiesGuest ∧ a.satisfiesHost ∧ a.balances
+  a.satisfiesGuest ∧ a.satisfiesHost ∧ a.balances ∧ a.withinBudget
 -- ANCHOR_END: vmSat
 
 /-- The effects of a satisfying VM assignment: the input stream its input-chip instances pulled,
@@ -535,7 +708,7 @@ theorem VmSat.of_perm {vm : Vm p} {a a' : VmAssignment p vm}
     (hguest : ∀ t, (a'.guestAssignments t).Perm (a.guestAssignments t))
     (hhost : ∀ t, (a'.hostAssignment t).Perm (a.hostAssignment t))
     (hsat : VmSat vm a) : VmSat vm a' := by
-  obtain ⟨h1, ⟨h2, h3⟩, h4⟩ := hsat
+  obtain ⟨h1, ⟨h2, h3⟩, h4, h5⟩ := hsat
   have hnet : a'.netBus = a.netBus := by
     funext message
     show (∑ t : Fin vm.guestChips.length,
@@ -551,7 +724,8 @@ theorem VmSat.of_perm {vm : Vm p} {a a' : VmAssignment p vm}
   exact ⟨fun t asg hasg => h1 t asg ((hguest t).mem_iff.mp hasg),
     ⟨fun t effect hcontrib => h2 t effect ((hhost t).mem_iff.mp hcontrib),
       fun t hsingle => (hhost t).length_eq ▸ h3 t hsingle⟩,
-    fun message => (congrFun hnet message).trans (h4 message)⟩
+    ⟨fun message => (congrFun hnet message).trans (h4 message),
+      (Finset.sum_congr rfl (fun t _ => (hguest t).length_eq)).trans_le h5⟩⟩
 
 omit [Fact p.Prime] in
 /-- VM-satisfiability is assignment-order-independent (bidirectional). -/
