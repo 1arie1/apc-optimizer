@@ -7347,3 +7347,47 @@ everywhere, which is the floor for the shared engine shape without cross-pass pr
 (`denseBUTable`/`denseBUWits` are rebuilt per pass — a separate, pass-independent idea).
 
 **Worked: yes.**
+### 184. SP1 under the order-free rely: TS_BOUND on `clk_low`, ENTRY_KEY by pc low limb, expression-limb gadgets (rsp 1.84x → 3.87x, sp1:keccak 1.70x → 5.04x)
+
+**Idea.** The order-free rework left SP1 with no declared timestamp slot ("still open: SP1" in
+PR #288), regressing every SP1 suite: the timestamp-group `busUnify`/`busSweep` engines need
+`facts.memTsField`, and SP1's clock is the two-limb pair `(clk_high, clk_low)` split at bit 24 —
+no single bounded slot. The shared-base principle closes the gap: within one APC block every
+stateful interaction's `clk_high` is a *single shared expression* (instruction chips pass it
+through untouched; a block needing a `StateBumpChip` carry is never formed as an APC), so in-block
+order is carried by `clk_low` alone, and TS_BOUND on that slot is sound with a *local* bound —
+`2^24` on memory (true limbs of real access timestamps), `2^25` on the exec bridge (the final sent
+state may be the pre-bump carry state, over by less than one instruction's clock increment, which
+SP1's own `is_clk` booleanity argument caps at `2^24`).
+
+**How.** Three layers, measured cumulatively on `Benchmarks/SP1`:
+1. `memTsFieldOf` + the `tsBounded` conjunct in `sp1BusSemantics.admissible` (audited), with the
+   `BusFacts.memTsField` instance — necessary but alone moved nothing: SP1 groups still died.
+2. Gadget certification learns two SP1 range-check shapes. Limb bounds via `facts.slotBound`
+   (SP1 checks are 4-slot byte-bus messages `[6, x, 16, 0]` / `[3, 0, b, c]`, which the two-slot
+   `varRangeBus` scan misses), and one synthetic *expression* limb (`denseBUGadgetX`): powdr
+   eliminates SP1's `diff_high` column and byte-checks its solved expression
+   `(send_ts − recv_ts − 1 − diff_low)·2⁻¹⁶`, so the LessThan certificate subtracts `k·LX` (`k`
+   from the shared variable's coefficient ratio) and certifies the remainder — still nothing,
+   because without the exec-bridge chain every instruction keeps its own clk base and no address
+   group shares a ts base.
+3. ENTRY_KEY for SP1 (`memEntryKeyOf`, audited): the pc rides as limbs `[pc mod 2^16, …]` in
+   slots 2–4, so the chain designation is slot 2 with the entry pc's low limb, threaded through
+   `sp1Facts`/`sp1Optimizer`/FFI/CLI. With it `execChain` fires, gauss unifies the clk bases, and
+   the whole cascade lands: rsp variables 1.838x → **3.868x** (main 3.922x, powdr 3.980x),
+   sp1:keccak 1.704x → **5.042x** (main 5.163x, powdr 4.809x, so now ahead of powdr), OpenVM
+   keccak unchanged at 13.618x.
+
+**Perf.** The first cut of the expression-limb fallback scanned all interactions per failed
+gadget and all interactions again per remainder term — sp1:keccak went **>600 s**. Fixed by
+`DenseBUIdx`, a per-invocation candidate-position index (variable ↦ bound-witness positions;
+variable ↦ `(position, slot)` expression-limb candidates), consulted then *re-verified on the
+single indexed interaction* — untrusted by construction, a wrong entry is a miss, never
+unsoundness. sp1:keccak **>600 s → 2.7 s** (busUnify 2.0 s of it), rsp sweep ~2 s for 100 cases,
+effectiveness byte-identical before/after the index.
+
+**Residue.** Not the abstract two-limb wraparound story: the honest SP1 assumptions are the two
+bounds above plus the entry-pc designation, each documented at its audited definition. The
+remaining rsp gap to main (3.868x vs 3.922x, 46 losses) and the sp1:keccak constraints gap
+(38.4x vs main 41.9x) are unexamined; sp1:keccak runtime (2.7 s vs main's 0.7 s) shares the
+branch's known busUnify runtime item.
