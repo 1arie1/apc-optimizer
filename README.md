@@ -43,15 +43,18 @@ distinguish the two circuits. The audited surface mirrors the optimizer's: the
 documented divergences from `Spec.lean`, and the closure semantics) and the theorem
 *statements* in [`InterfaceEncoding.lean`](./ApcOptimizer/InterfaceEncoding.lean) —
 `concreteEquiv_of_abstractEquiv`, the end-to-end
-`openVm_concreteEquiv_of_interfaceVerified`, memory determinism
+`openVm_concreteEquiv_of_interfaceVerified` and its landing in Spec vocabulary
+(`openVm_isSoundReplacementOf_of_concreteEquiv`), memory determinism
 (`closes_recv_determined`), and `interfaceMatch_closes_iff`; the proof machinery under
 [`Implementation/InterfaceEncoding/`](./ApcOptimizer/Implementation/InterfaceEncoding) needs no audit. All proofs are checked by
 `lake build` and rest on the same three standard axioms (asserted in CI). Two things are
 *not* discharged here: the matching hypothesis itself (which interactions pair up — what
 the verifier's alignment analysis certifies and its SMT run assumes per instance), and the
-stateless-bus multiplicity discipline, which no interface data can carry and which is
-provably the *only* residue of the Spec's invariants clause
-(`openVm_guaranteesInvariants_of_multOne`).
+multiplicity discipline — every active interaction sent once, or received once on a stateful
+bus — which no equivalence notion can carry and which is provably the *only* residue of the
+Spec's invariants clause (`MultiplicityDiscipline`, checked per interaction on the optimized
+circuit alone; on stateless buses it is the whole content of the clause,
+`openVm_stateless_maintainsInvariants_iff`).
 
 ## Usage
 

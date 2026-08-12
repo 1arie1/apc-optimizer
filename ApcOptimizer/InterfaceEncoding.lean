@@ -1,5 +1,6 @@
 import ApcOptimizer.Sp1Semantics
 import ApcOptimizer.Implementation.InterfaceEncoding.Transfer
+import ApcOptimizer.Implementation.InterfaceEncoding.Invariants
 import ApcOptimizer.Implementation.InterfaceEncoding.Closure
 import ApcOptimizer.Implementation.MemoryBusMultiset
 
@@ -33,10 +34,13 @@ The story in four steps:
    decomposition of the invariants clause — the stateful fragment transports
    (`statefulInvariants_of_abstractEquiv`), the stateless fragment is a per-circuit
    obligation, and together they assemble the full clause
-   (`guaranteesInvariants_of_fragments`). For OpenVM the stateless fragment is *exactly*
-   the multiplicity value (`openVm_stateless_maintainsInvariants_iff`), so the only check
+   (`guaranteesInvariants_of_fragments`). For OpenVM the stateless fragment is *exactly* the
+   multiplicity value (`openVm_stateless_maintainsInvariants_iff`), so the only check
    interface equivalence leaves open is the lookup-multiplicity discipline
-   (`openVm_guaranteesInvariants_of_multOne`).
+   (`openVm_guaranteesInvariants_of_multOne`). Concrete equivalence is the bridge every
+   technique passes through: for OpenVM it needs no interface data of its own, only the
+   syntactic multiplicity discipline on the optimized circuit, and it lands directly on the
+   Spec's soundness notion (`openVm_isSoundReplacementOf_of_concreteEquiv`).
 
 Not discharged here: the matching hypothesis itself — which interactions pair up is what
 the external alignment analysis certifies and its SMT run assumes per instance. -/
@@ -224,6 +228,30 @@ theorem openVm_concreteEquiv_of_interfaceVerified
   concreteEquiv_of_abstractEquiv (openVm_admissiblePermInvariant busMap entryPc)
     (abstractEquiv_of_under
       (fun m _ hacc => openVm_recvBytes_of_accepts busMap m hacc) h)
+
+/-- CONCRETE EQUIVALENCE IS THE BRIDGE, OpenVM: `isSoundReplacementOf_of_concreteEquiv` with
+    its invariants hypothesis discharged from `ConcreteEquiv` plus one syntactic side
+    condition on `B` — the multiplicity discipline. Nothing is assumed about `A` beyond the
+    `guaranteesInvariants` it has by construction, which is the antecedent of the clause
+    being proved.
+
+    The side condition is what `ConcreteEquiv` structurally cannot see: `Circuit.sideEffects`
+    records the *net* multiplicity per tuple, so it neither pins down an individual
+    multiplicity nor notices a send whose contribution is canceled. Once every active
+    interaction is sent once or received once, both leaks close — a canceled send is canceled
+    by a *receive* of the identical tuple, whose data `accepts` already forces to be bytes,
+    and an uncanceled one is matched by an active message of `A` on the same tuple.
+
+    `hlen` rules out the degenerate cancellation by field wrap-around (`p` sends of one tuple
+    summing to zero); any real circuit has far fewer interactions than the field size. -/
+theorem openVm_isSoundReplacementOf_of_concreteEquiv
+    (busMap : OpenVM.BusMap) (entryPc : Option (ZMod p)) {A B : Circuit p}
+    (h : ConcreteEquiv (OpenVM.openVmBusSemantics p busMap entryPc) A B)
+    (hdisc : MultiplicityDiscipline B (OpenVM.openVmBusSemantics p busMap entryPc))
+    (hlen : B.busInteractions.length < p) :
+    B.isSoundReplacementOf A (OpenVM.openVmBusSemantics p busMap entryPc) :=
+  isSoundReplacementOf_of_concreteEquiv h
+    (fun hA => openVm_guaranteesInvariants_of_concreteEquiv busMap entryPc h hA hdisc hlen)
 
 /-! ## Closure semantics: the observable is the whole memory behavior -/
 
