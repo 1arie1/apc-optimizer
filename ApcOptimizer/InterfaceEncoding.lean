@@ -40,7 +40,11 @@ The story in four steps:
    (`openVm_guaranteesInvariants_of_multOne`). Concrete equivalence is the bridge every
    technique passes through: for OpenVM it needs no interface data of its own, only the
    syntactic multiplicity discipline on the optimized circuit, and it lands directly on the
-   Spec's soundness notion (`openVm_isSoundReplacementOf_of_concreteEquiv`).
+   Spec's soundness notion (`openVm_isSoundReplacementOf_of_concreteEquiv`). The Spec's
+   *completeness* notion is out of reach of any equivalence — its witness is pinned to
+   `Derivations.witgen` — so it is reached by keeping the witness instead of forgetting it
+   (`ReplacesWithVia`, `replacesWith_of_via`,
+   `isCompleteReplacementOf_of_replacesWithVia`).
 
 Not discharged here: the matching hypothesis itself — which interactions pair up is what
 the external alignment analysis certifies and its SMT run assumes per instance. -/
@@ -119,6 +123,33 @@ theorem isSoundReplacementOf_of_concreteEquiv {bs : BusSemantics p} {A B : Circu
   refine ⟨fun b hsat => ?_, hinv⟩
   obtain ⟨a, hasat, heff, _⟩ := h.2 b hsat
   exact ⟨a, hasat, heff⟩
+
+/-- Forgetting the witness map: a witnessed replacement is a replacement. `ConcreteEquiv`
+    is the forgetful image of the witnessed notion — which is why it lands the Spec's
+    soundness direction but not its completeness. -/
+theorem replacesWith_of_via {bs : BusSemantics p} {X Y : Circuit p}
+    {w : (Variable → ZMod p) → (Variable → ZMod p)} (h : ReplacesWithVia bs X Y w) :
+    ReplacesWith bs X Y :=
+  fun x hx => ⟨w x, h x hx⟩
+
+/-- Concrete replacement *along `Derivations.witgen ds`* yields the Spec's completeness
+    direction. The two remaining conjuncts are bookkeeping about `ds` alone — no unused
+    derivations, and every output variable reachable from the input ones — which no
+    equivalence between circuits could state, let alone prove.
+
+    Keeping the witness is exactly what makes this possible: the Spec pins the run
+    reproducing `assignment` to `witgen ds assignment`, so an existential replacement is
+    not enough (`ReplacesWithVia`). The hypothesis is also slightly stronger than needed —
+    it covers every satisfying run of `A`, while completeness asks only about admissible
+    ones — and only the forward half of the admissibility clause is used. -/
+theorem isCompleteReplacementOf_of_replacesWithVia {bs : BusSemantics p} {A B : Circuit p}
+    {ds : Derivations p} (h : ReplacesWithVia bs A B (Derivations.witgen ds))
+    (hused : ∀ derivation ∈ ds, derivation.1 ∈ B.vars)
+    (hcover : ds.cover A.vars B.vars) :
+    B.isCompleteReplacementOf A bs ds := by
+  refine fun _ => ⟨hused, hcover, fun assignment hadm hsat => ?_⟩
+  obtain ⟨hsat', heff, hadm'⟩ := h assignment hsat
+  exact ⟨hsat', hadm'.mp hadm, heff⟩
 
 /-- The stateful fragment of the invariants clause *does* transport: a matched stateful
     message of `B` is a stateful message of `A`'s matching run. -/

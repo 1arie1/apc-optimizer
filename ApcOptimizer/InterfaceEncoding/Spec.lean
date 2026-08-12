@@ -23,6 +23,9 @@ Two deliberate divergences from `ApcOptimizer/Spec.lean`:
 * `ConcreteEquiv` is symmetric with an *existential* witness in both directions, unlike
   `Circuit.isCompleteReplacementOf`, whose witness is pinned to `Derivations.witgen` — this
   theory serves an external equivalence verifier, not the optimizer's witness generator.
+  The divergence is bridged by keeping the witness rather than weakening the Spec:
+  `ReplacesWithVia` is the same relation along a *given* witness map, it forgets down to
+  `ReplacesWith`, and along `Derivations.witgen ds` it lands `isCompleteReplacementOf`.
 * `ConcreteEquiv` carries no `guaranteesInvariants` clause: interface data says nothing
   about *stateless* interactions, whose `maintainsInvariants` (multiplicity pinned to `1`)
   does not follow from `accepts` — an accepted lookup message sent with multiplicity `2`
@@ -118,6 +121,21 @@ def ReplacesWith (bs : BusSemantics p) (X Y : Circuit p) : Prop :=
 /-- Equivalence in the concrete semantics: mutual replacement. -/
 def ConcreteEquiv (bs : BusSemantics p) (A B : Circuit p) : Prop :=
   ReplacesWith bs A B ∧ ReplacesWith bs B A
+
+/-- `ReplacesWith` with the existential witness replaced by a *given* witness map `w`:
+    the run reproducing `x` is `w x`, named rather than merely known to exist. Forgetting
+    `w` gives `ReplacesWith` (`replacesWith_of_via`), so `ConcreteEquiv` is the forgetful
+    image of this notion.
+
+    This is what the Spec's completeness needs and no equivalence can supply: its witness
+    is pinned to `Derivations.witgen ds`, which keeps every powdr-ID variable at the input
+    value and computes the rest from recorded methods, whereas `ReplacesWith` is invariant
+    under swapping in any other witness (`isCompleteReplacementOf_of_replacesWithVia`). -/
+def ReplacesWithVia (bs : BusSemantics p) (X Y : Circuit p)
+    (w : (Variable → ZMod p) → (Variable → ZMod p)) : Prop :=
+  ∀ x, X.satisfies bs x → Y.satisfies bs (w x) ∧
+    X.sideEffects bs x = Y.sideEffects bs (w x) ∧
+    (X.admissible bs x ↔ Y.admissible bs (w x))
 
 /-- The bus rely is order-free. `BusSemantics.admissible` is an opaque field, so this is a
     hypothesis of the transfer theorems; both VM semantics discharge it
