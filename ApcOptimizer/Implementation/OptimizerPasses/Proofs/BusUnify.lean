@@ -1,6 +1,7 @@
 import ApcOptimizer.Implementation.OptimizerPasses.BusUnify
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.EntailedCheck
 import ApcOptimizer.Implementation.OptimizerPasses.Proofs.AddrDiseq
+import ApcOptimizer.Implementation.OptimizerPasses.Proofs.DomainTable
 import ApcOptimizer.Implementation.MemoryBusDrop
 import ApcOptimizer.Implementation.MemoryBusMultiset
 
@@ -787,6 +788,89 @@ theorem denseBUVarBound_sound (bs : BusSemantics p) (facts : BusFacts p bs)
         · exact ih hrest h
       · exact ih hrest h
 
+/-- The per-interaction slot scan is sound: a hit bounds the variable's value under any
+    satisfying assignment, via `facts.slotBound_sound` on the evaluated message. -/
+theorem denseBUSlotScanAt_sound (bs : BusSemantics p) (facts : BusFacts p bs)
+    (d : DenseConstraintSystem p) (bi : BusInteraction (DenseExpr p))
+    (hbi : bi ∈ d.busInteractions) (c : ZMod p) (hmc : denseMultConst bi = some c)
+    (hcne : c ≠ 0) (pat : List (Option (ZMod p)))
+    (hpat : pat = bi.payload.map DenseExpr.constValue?) (v : VarId)
+    (denv : VarId → ZMod p) (hsat : d.satisfies bs denv) :
+    ∀ (slots : List Nat) (w : Nat),
+      denseBUSlotScanAt bs facts bi c pat v slots = some w → (denv v).val < w
+  | [], w, h => by simp [denseBUSlotScanAt] at h
+  | slot :: rest, w, h => by
+      rw [denseBUSlotScanAt] at h
+      split at h
+      · rename_i v' hslot
+        split at h
+        · rename_i hv'
+          split at h
+          · rename_i w' hsb
+            obtain rfl : w' = w := Option.some.inj h
+            subst hv'
+            have hmev : (denseBIEval bi denv).multiplicity = c :=
+              denseConstValueEval bi.multiplicity c hmc denv
+            have hacc : bs.accepts (denseBIEval bi denv) :=
+              hsat.2 bi hbi (by rw [hmev]; exact hcne)
+            have hmatch : Matches (denseBIEval bi denv).payload pat := by
+              rw [hpat]
+              exact denseMatches_evalPattern bi.payload denv
+            have hsb' : facts.slotBound (denseBIEval bi denv).busId
+                (denseBIEval bi denv).multiplicity pat slot = some w' := by
+              rw [hmev]; exact hsb
+            have hget : (denseBIEval bi denv).payload[slot]? = some (denv v') := by
+              show (bi.payload.map (fun e => e.eval denv))[slot]? = some (denv v')
+              rw [List.getElem?_map, hslot]
+              rfl
+            exact facts.slotBound_sound (denseBIEval bi denv) pat slot w' (denv v')
+              hsb' hmatch hacc hget
+          · exact denseBUSlotScanAt_sound bs facts d bi hbi c hmc hcne pat hpat v denv hsat
+              rest w h
+        · exact denseBUSlotScanAt_sound bs facts d bi hbi c hmc hcne pat hpat v denv hsat
+            rest w h
+      · exact denseBUSlotScanAt_sound bs facts d bi hbi c hmc hcne pat hpat v denv hsat
+          rest w h
+
+/-- The `facts.slotBound` scan is sound: a hit bounds the variable's value under any
+    satisfying assignment. -/
+theorem denseBUSlotScan_sound (bs : BusSemantics p) (facts : BusFacts p bs)
+    (d : DenseConstraintSystem p) (allBis : List (BusInteraction (DenseExpr p)))
+    (hall : ∀ bi ∈ allBis, bi ∈ d.busInteractions)
+    (v : VarId) (w : Nat) (h : denseBUSlotScan bs facts allBis v = some w)
+    (denv : VarId → ZMod p) (hsat : d.satisfies bs denv) : (denv v).val < w := by
+  induction allBis with
+  | nil => simp [denseBUSlotScan] at h
+  | cons bi rest ih =>
+      have hrest : ∀ b ∈ rest, b ∈ d.busInteractions :=
+        fun b hb => hall b (List.mem_cons_of_mem _ hb)
+      rw [denseBUSlotScan] at h
+      split at h
+      · rename_i c hmc
+        split at h
+        · rename_i hcne
+          split at h
+          · rename_i w' hscan
+            obtain rfl : w' = w := Option.some.inj h
+            exact denseBUSlotScanAt_sound bs facts d bi (hall bi (List.mem_cons_self ..)) c hmc
+              (by simpa using hcne) _ rfl v denv hsat _ w' hscan
+          · exact ih hrest h
+        · exact ih hrest h
+      · exact ih hrest h
+
+/-- Either range-check scan bounds the variable soundly. -/
+theorem denseBUAnyBound_sound (bs : BusSemantics p) (facts : BusFacts p bs)
+    (d : DenseConstraintSystem p) (allBis : List (BusInteraction (DenseExpr p)))
+    (hall : ∀ bi ∈ allBis, bi ∈ d.busInteractions)
+    (v : VarId) (w : Nat) (h : denseBUAnyBound bs facts allBis v = some w)
+    (denv : VarId → ZMod p) (hsat : d.satisfies bs denv) : (denv v).val < w := by
+  rw [denseBUAnyBound] at h
+  split at h
+  · rename_i w' hvb
+    obtain rfl : w' = w := Option.some.inj h
+    exact denseBUVarBound_sound bs facts d allBis hall v w' hvb denv hsat
+  · exact denseBUSlotScan_sound bs facts d allBis hall v w h denv hsat
+
 /-- The per-term certificates: the certified pairs are the terms, each with a sound bound. -/
 theorem denseBUTermCerts_sound (bs : BusSemantics p) (facts : BusFacts p bs)
     (d : DenseConstraintSystem p) (allBis : List (BusInteraction (DenseExpr p)))
@@ -801,7 +885,7 @@ theorem denseBUTermCerts_sound (bs : BusSemantics p) (facts : BusFacts p bs)
       rw [← h]
       exact ⟨rfl, by intro denv _ c hc; simp at hc⟩
   | (v, coeff) :: rest, certs, h => by
-      cases hw : denseBUVarBound bs facts allBis v with
+      cases hw : denseBUAnyBound bs facts allBis v with
       | none => simp [denseBUTermCerts, hw] at h
       | some w =>
           cases hrec : denseBUTermCerts bs facts allBis rest with
@@ -813,8 +897,163 @@ theorem denseBUTermCerts_sound (bs : BusSemantics p) (facts : BusFacts p bs)
               refine ⟨by simp [hcorr], ?_⟩
               intro denv hsat c hc
               rcases List.mem_cons.mp hc with rfl | hc'
-              · exact denseBUVarBound_sound bs facts d allBis hall v w hw denv hsat
+              · exact denseBUAnyBound_sound bs facts d allBis hall v w hw denv hsat
               · exact hbnd denv hsat c hc'
+
+/-- The variable-limb certificate is sound: with `N` evaluating to `a − x` and `x` bounded
+    (TS_BOUND), `x.val < a.val`. -/
+theorem denseBUGadgetCore_sound (bs : BusSemantics p) (facts : BusFacts p bs)
+    (d : DenseConstraintSystem p) (B : Nat) (N : DenseLinExpr p)
+    (h : denseBUGadgetCore bs facts d.busInteractions B N = true)
+    (denv : VarId → ZMod p) (hsat : d.satisfies bs denv)
+    (a x : ZMod p) (hax : N.eval denv = a - x) (hx : x.val < B) : x.val < a.val := by
+  cases hcerts : denseBUTermCerts bs facts d.busInteractions N.terms with
+  | none => simp [denseBUGadgetCore, hcerts] at h
+  | some certs =>
+  simp only [denseBUGadgetCore, hcerts, Bool.and_eq_true, decide_eq_true_eq] at h
+  obtain ⟨hc0, htot⟩ := h
+  haveI : NeZero p := ⟨by omega⟩
+  obtain ⟨hcorr, hbnd⟩ := denseBUTermCerts_sound bs facts d d.busInteractions
+    (fun _ hb => hb) N.terms certs hcerts
+  set triples : List (ℕ × ℕ × ZMod p) :=
+    certs.map (fun c => (c.2.1.val, c.2.2, denv c.1)) with htriples
+  have hterm_sum : (triples.map fun t => (t.1 : ZMod p) * t.2.2).sum
+      = (N.terms.map (fun t => t.2 * denv t.1)).sum := by
+    rw [htriples, List.map_map, ← hcorr, List.map_map]
+    refine congrArg _ (List.map_congr_left fun c _ => ?_)
+    simp only [Function.comp_apply]
+    rw [ZMod.natCast_val, ZMod.cast_id]
+  have heq : a = ((N.const.val : ℕ) : ZMod p) + x
+      + (triples.map fun t => (t.1 : ZMod p) * t.2.2).sum := by
+    have hNv : N.eval denv = N.const + (N.terms.map (fun t => t.2 * denv t.1)).sum := rfl
+    rw [hterm_sum, ZMod.natCast_val, ZMod.cast_id]
+    have hcomb := hax.symm.trans hNv
+    linear_combination hcomb
+  have hbnd' : ∀ t ∈ triples, t.2.2.val < t.2.1 := by
+    intro t ht
+    rw [htriples] at ht
+    obtain ⟨c, hc, rfl⟩ := List.mem_map.mp ht
+    exact hbnd denv hsat c hc
+  have htot' : N.const.val + B + (triples.map fun t => t.1 * (t.2.1 - 1)).sum ≤ p := by
+    rw [htriples, List.map_map]
+    exact htot
+  exact val_lt_of_lessThan_gadget a x N.const.val B hc0 triples heq hbnd' hx htot'
+
+/-- The remainder check is sound: with a synthetic limb value `X < bX` for `LX` and `N`
+    evaluating to `a − x`, `x.val < a.val`. -/
+theorem denseBUGadgetXRem_sound (bs : BusSemantics p) (facts : BusFacts p bs)
+    (d : DenseConstraintSystem p) (B : Nat) (N LX : DenseLinExpr p) (k : ZMod p) (bX : Nat)
+    (h : denseBUGadgetXRem bs facts d.busInteractions B N LX k bX = true)
+    (denv : VarId → ZMod p) (hsat : d.satisfies bs denv)
+    (X : ZMod p) (hX : LX.eval denv = X) (hXb : X.val < bX)
+    (a x : ZMod p) (hax : N.eval denv = a - x) (hx : x.val < B) : x.val < a.val := by
+  cases hcerts : denseBUTermCerts bs facts d.busInteractions
+      ((N.add (LX.scale (-k))).norm).terms with
+  | none => simp [denseBUGadgetXRem, hcerts] at h
+  | some certs =>
+  simp only [denseBUGadgetXRem, hcerts, Bool.and_eq_true, decide_eq_true_eq] at h
+  obtain ⟨hc0, htot⟩ := h
+  set Rem := (N.add (LX.scale (-k))).norm with hRem
+  haveI : NeZero p := ⟨by omega⟩
+  obtain ⟨hcorr, hbnd⟩ := denseBUTermCerts_sound bs facts d d.busInteractions
+    (fun _ hb => hb) Rem.terms certs hcerts
+  set triples : List (ℕ × ℕ × ZMod p) :=
+    (k.val, bX, X) :: certs.map (fun c => (c.2.1.val, c.2.2, denv c.1)) with htriples
+  have hterm_sum : ((certs.map (fun c => (c.2.1.val, c.2.2, denv c.1))).map
+        fun t => ((t.1 : ℕ) : ZMod p) * t.2.2).sum
+      = (Rem.terms.map (fun t => t.2 * denv t.1)).sum := by
+    rw [List.map_map, ← hcorr, List.map_map]
+    refine congrArg _ (List.map_congr_left fun c _ => ?_)
+    simp only [Function.comp_apply]
+    rw [ZMod.natCast_val, ZMod.cast_id]
+  have heq : a = ((Rem.const.val : ℕ) : ZMod p) + x
+      + (triples.map fun t => (t.1 : ZMod p) * t.2.2).sum := by
+    have hRe : Rem.eval denv = N.eval denv - k * LX.eval denv := by
+      rw [hRem, DenseLinExpr.norm_eval, DenseLinExpr.add_eval, DenseLinExpr.scale_eval]
+      ring
+    have hRv : Rem.eval denv = Rem.const + (Rem.terms.map (fun t => t.2 * denv t.1)).sum := rfl
+    rw [htriples]
+    simp only [List.map_cons, List.sum_cons]
+    rw [hterm_sum, ZMod.natCast_val, ZMod.cast_id, ZMod.natCast_val, ZMod.cast_id]
+    have hcomb := hRe.symm.trans hRv
+    rw [hax, hX] at hcomb
+    linear_combination hcomb
+  have hbnd' : ∀ t ∈ triples, t.2.2.val < t.2.1 := by
+    intro t ht
+    rw [htriples] at ht
+    rcases List.mem_cons.mp ht with rfl | ht'
+    · exact hXb
+    · obtain ⟨c, hc, rfl⟩ := List.mem_map.mp ht'
+      exact hbnd denv hsat c hc
+  have htot' : Rem.const.val + B + (triples.map fun t => t.1 * (t.2.1 - 1)).sum ≤ p := by
+    rw [htriples]
+    simp only [List.map_cons, List.sum_cons, List.map_map]
+    rw [← Nat.add_assoc]
+    exact htot
+  exact val_lt_of_lessThan_gadget a x Rem.const.val B hc0 triples heq hbnd' hx htot'
+
+/-- One synthetic-limb candidate is sound: the slot's declared bound applies to its evaluated
+    expression (`facts.slotBound_sound`), and the remainder check finishes the gadget. -/
+theorem denseBUGadgetXSlot_sound (bs : BusSemantics p) (facts : BusFacts p bs)
+    (d : DenseConstraintSystem p) (B : Nat) (N : DenseLinExpr p)
+    (bi : BusInteraction (DenseExpr p)) (hbi : bi ∈ d.busInteractions)
+    (c : ZMod p) (hmc : denseMultConst bi = some c) (hcne : c ≠ 0) (slot : Nat)
+    (h : denseBUGadgetXSlot bs facts d.busInteractions B N bi c slot = true)
+    (denv : VarId → ZMod p) (hsat : d.satisfies bs denv)
+    (a x : ZMod p) (hax : N.eval denv = a - x) (hx : x.val < B) : x.val < a.val := by
+  rw [denseBUGadgetXSlot] at h
+  split at h
+  case _ bX hsb =>
+    split at h
+    case _ eX hpx =>
+      split at h
+      case _ LX hlin =>
+        split at h
+        case _ t0 hfind =>
+          have hmev : (denseBIEval bi denv).multiplicity = c :=
+            denseConstValueEval bi.multiplicity c hmc denv
+          have hacc : bs.accepts (denseBIEval bi denv) :=
+            hsat.2 bi hbi (by rw [hmev]; exact hcne)
+          have hmatch : Matches (denseBIEval bi denv).payload
+              (bi.payload.map DenseExpr.constValue?) :=
+            denseMatches_evalPattern bi.payload denv
+          have hsb' : facts.slotBound (denseBIEval bi denv).busId
+              (denseBIEval bi denv).multiplicity (bi.payload.map DenseExpr.constValue?) slot
+              = some bX := by
+            rw [hmev]; exact hsb
+          have hget : (denseBIEval bi denv).payload[slot]? = some (eX.eval denv) := by
+            show (bi.payload.map (fun e => e.eval denv))[slot]? = some (eX.eval denv)
+            rw [List.getElem?_map, hpx]
+            rfl
+          have hXb : (eX.eval denv).val < bX :=
+            facts.slotBound_sound (denseBIEval bi denv) (bi.payload.map DenseExpr.constValue?)
+              slot bX (eX.eval denv) hsb' hmatch hacc hget
+          exact denseBUGadgetXRem_sound bs facts d B N LX (t0.2 * (LX.coeff t0.1)⁻¹) bX h
+            denv hsat (eX.eval denv) (denseLinearize_eval eX LX hlin denv).symm hXb a x hax hx
+        case _ => exact absurd h (by simp)
+      case _ => exact absurd h (by simp)
+    case _ => exact absurd h (by simp)
+  case _ => exact absurd h (by simp)
+
+/-- The expression-limb fallback is sound. -/
+theorem denseBUGadgetX_sound (bs : BusSemantics p) (facts : BusFacts p bs)
+    (d : DenseConstraintSystem p) (B : Nat) (N : DenseLinExpr p)
+    (h : denseBUGadgetX bs facts d.busInteractions B N = true)
+    (denv : VarId → ZMod p) (hsat : d.satisfies bs denv)
+    (a x : ZMod p) (hax : N.eval denv = a - x) (hx : x.val < B) : x.val < a.val := by
+  rw [denseBUGadgetX, List.any_eq_true] at h
+  obtain ⟨bi, hbi, hb⟩ := h
+  revert hb
+  split
+  case _ c hmc =>
+    intro hb
+    rw [Bool.and_eq_true, decide_eq_true_eq] at hb
+    obtain ⟨hcne, hb⟩ := hb
+    rw [List.any_eq_true] at hb
+    obtain ⟨slot, _, hslot⟩ := hb
+    exact denseBUGadgetXSlot_sound bs facts d B N bi hbi c hmc hcne slot hslot
+      denv hsat a x hax hx
+  case _ => intro hb; exact absurd hb (by simp)
 
 /-- The solved LessThan gadget forces the receive's ts-slot value below its own send's,
     given the receive-side TS_BOUND (`hx`). -/
@@ -831,12 +1070,7 @@ theorem denseBUGadgetOk_sound (bs : BusSemantics p) (facts : BusFacts p bs)
   cases hLR : denseBUTsLin tsField R with
   | none => simp [denseBUGadgetOk, hLS, hLR] at h
   | some LR =>
-  cases hcerts : denseBUTermCerts bs facts d.busInteractions
-      ((LS.add (LR.scale (-1))).norm).terms with
-  | none => simp [denseBUGadgetOk, hLS, hLR, hcerts] at h
-  | some certs =>
-  simp only [denseBUGadgetOk, hLS, hLR, hcerts, Bool.and_eq_true, decide_eq_true_eq] at h
-  obtain ⟨hc0, htot⟩ := h
+  simp only [denseBUGadgetOk, hLS, hLR, Bool.or_eq_true] at h
   set N := (LS.add (LR.scale (-1))).norm with hN
   -- payload slots
   unfold denseBUTsLin at hLS hLR
@@ -848,11 +1082,6 @@ theorem denseBUGadgetOk_sound (bs : BusSemantics p) (facts : BusFacts p bs)
   | some eR =>
   rw [hpS] at hLS
   rw [hpR] at hLR
-  -- the p-facts
-  haveI : NeZero p := ⟨by omega⟩
-  -- term certificates
-  obtain ⟨hcorr, hbnd⟩ := denseBUTermCerts_sound bs facts d d.busInteractions
-    (fun _ hb => hb) N.terms certs hcerts
   -- evaluated ts values
   have hvS : tsSlotVal tsField (denseBIEval S denv) = (eS.eval denv).val := by
     show (((S.payload.map (fun e : DenseExpr p => e.eval denv))[tsField]?).getD 0).val = _
@@ -864,36 +1093,15 @@ theorem denseBUGadgetOk_sound (bs : BusSemantics p) (facts : BusFacts p bs)
     rfl
   rw [hvS, hvR]
   rw [hvR] at hx
-  -- the triples for `val_lt_of_lessThan_gadget`
-  set triples : List (ℕ × ℕ × ZMod p) :=
-    certs.map (fun c => (c.2.1.val, c.2.2, denv c.1)) with htriples
-  have hterm_sum : (triples.map fun t => (t.1 : ZMod p) * t.2.2).sum
-      = (N.terms.map (fun t => t.2 * denv t.1)).sum := by
-    rw [htriples, List.map_map, ← hcorr, List.map_map]
-    refine congrArg _ (List.map_congr_left fun c _ => ?_)
-    simp only [Function.comp_apply]
-    rw [ZMod.natCast_val, ZMod.cast_id]
-  have heq : eS.eval denv
-      = ((N.const.val : ℕ) : ZMod p) + eR.eval denv
-        + (triples.map fun t => (t.1 : ZMod p) * t.2.2).sum := by
-    have hNe : N.eval denv = LS.eval denv - LR.eval denv := by
-      rw [hN, DenseLinExpr.norm_eval, DenseLinExpr.add_eval, DenseLinExpr.scale_eval]
-      ring
-    have hNv : N.eval denv = N.const + (N.terms.map (fun t => t.2 * denv t.1)).sum := rfl
-    rw [hterm_sum, ZMod.natCast_val, ZMod.cast_id,
+  have hax : N.eval denv = eS.eval denv - eR.eval denv := by
+    rw [hN, DenseLinExpr.norm_eval, DenseLinExpr.add_eval, DenseLinExpr.scale_eval,
       denseLinearize_eval eS LS hLS denv, denseLinearize_eval eR LR hLR denv]
-    have hcomb := hNe.symm.trans hNv
-    linear_combination hcomb
-  have hbnd' : ∀ t ∈ triples, t.2.2.val < t.2.1 := by
-    intro t ht
-    rw [htriples] at ht
-    obtain ⟨c, hc, rfl⟩ := List.mem_map.mp ht
-    exact hbnd denv hsat c hc
-  have htot' : N.const.val + B + (triples.map fun t => t.1 * (t.2.1 - 1)).sum ≤ p := by
-    rw [htriples, List.map_map]
-    exact htot
-  exact val_lt_of_lessThan_gadget (eS.eval denv) (eR.eval denv) N.const.val B hc0 triples
-    heq hbnd' hx htot'
+    ring
+  rcases h with h | h
+  · exact denseBUGadgetCore_sound bs facts d B N h denv hsat
+      (eS.eval denv) (eR.eval denv) hax hx
+  · exact denseBUGadgetX_sound bs facts d B N h denv hsat
+      (eS.eval denv) (eR.eval denv) hax hx
 /-! ## Assembling the group -/
 
 theorem denseBU_one_ne_zero (hp : 2 ^ 30 < p) : (1 : ZMod p) ≠ 0 := by

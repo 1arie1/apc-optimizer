@@ -412,6 +412,17 @@ theorem sp1_isStateful_of_memShape {p : ℕ} (busMap : BusMap)
   | none => simp at h
   | some t => cases t <;> simp_all [Sp1BusType.isStateful]
 
+/-- A bus with a declared low-clock-limb slot (memory or execution bridge) is stateful. -/
+private theorem sp1_isStateful_of_memTsField {p : ℕ} (busMap : Nat → Option Sp1BusType)
+    (busId slot bound : Nat) (h : memTsFieldOf busMap busId = some (slot, bound)) :
+    (sp1BusSemantics p busMap).isStateful busId = true := by
+  show (match busMap busId with | some t => t.isStateful | none => false) = true
+  unfold memTsFieldOf at h
+  generalize busMap busId = o at h ⊢
+  cases o with
+  | none => simp at h
+  | some t => cases t <;> simp_all [Sp1BusType.isStateful]
+
 /-- The SP1 memory bus uses `direction := .sendThenReceive`, so its `setNewMult` reduces to `-1`
     (the reverse of OpenVM; the execution bridge instead uses `1`). -/
 private theorem memShapeOf_memory_setNewMult {p : ℕ} (busMap : BusMap)
@@ -644,7 +655,7 @@ def sp1Facts (p : ℕ) [NeZero p]
         have h2 : m.payload[2]? = some 0 := haddr (2, 0) (by simp)
         have h3 : m.payload[3]? = some 0 := haddr (3, 0) (by simp)
         have h4 : m.payload[4]? = some 0 := haddr (4, 0) (by simp)
-        have hz := hadm.2 m hmfilt hmemBus h2 h3 h4
+        have hz := hadm.2.2 m hmfilt hmemBus h2 h3 h4
         simp only [List.mem_cons, List.not_mem_nil, or_false] at hslot
         rcases hslot with rfl | rfl | rfl | rfl
         · rw [hget] at hz; exact Option.some.inj hz.1
@@ -652,9 +663,28 @@ def sp1Facts (p : ℕ) [NeZero p]
         · rw [hget] at hz; exact Option.some.inj hz.2.2.1
         · rw [hget] at hz; exact Option.some.inj hz.2.2.2
       · exact absurd hfact (by simp)
-    -- No timestamp-slot fact for SP1 (`memTsField` stays `none` from `BusFacts.trivial`): its
-    -- clock is two payload fields, not a single bounded slot (see `Sp1Semantics.lean`). The SP1
-    -- rely declares no entry key either, so `memEntryKey` claims nothing.
+    -- The low-clock-limb slot with its per-bus bound (see `memTsFieldOf` in `Sp1Semantics.lean`
+    -- for why bounding `clk_low` alone recovers timestamp order within an APC block).
+    memTsField := memTsFieldOf busMap
+    memTsField_sound := by
+      intro msgs hadm busId slot bound hfact m hm hmne
+      rw [List.mem_filter] at hm
+      obtain ⟨hmem, hbusEq⟩ := hm
+      have hbusEq : m.busId = busId := by simpa using hbusEq
+      -- the declared bus is stateful, so `m` survives the active∧stateful filter and the
+      -- TS_BOUND conjunct (`.2.1`) applies to it
+      have hstateful : (sp1BusSemantics p busMap).isStateful m.busId = true := by
+        rw [hbusEq]; exact sp1_isStateful_of_memTsField busMap busId slot bound hfact
+      have hmfilt : m ∈ msgs.filter (fun m => decide (m.multiplicity ≠ 0) &&
+          (sp1BusSemantics p busMap).isStateful m.busId) := by
+        rw [List.mem_filter]
+        exact ⟨hmem, by rw [hstateful, decide_eq_true hmne]; rfl⟩
+      refine hadm.2.1 busId slot bound hfact m ?_
+      rw [List.mem_filter]
+      exact ⟨hmfilt, decide_eq_true hbusEq⟩
+    -- The SP1 rely declares no entry key, so `memEntryKey` claims nothing. (The chain entry is
+    -- the block's entry pc, but SP1's pc is *three* payload slots — the single-slot ENTRY_KEY
+    -- form doesn't fit it yet.)
     memEntryKey := fun _ => none
     memEntryKey_sound := by intro _ _ _ _ _ _ _ h; exact absurd h (by simp)
     memShape := memShapeOf busMap
@@ -678,8 +708,8 @@ def sp1Facts (p : ℕ) [NeZero p]
       rwa [hlist] at hd
     admissible_dropPair := by
       intro busId shape hshape A B C S R hSbus hRbus hSm hRm hpay hadm_full
-      obtain ⟨hdisc, hzero⟩ := hadm_full
-      refine ⟨fun busId' shape' hshape' => ?_, ?_⟩
+      obtain ⟨hdisc, hts, hzero⟩ := hadm_full
+      refine ⟨fun busId' shape' hshape' => ?_, fun busId' slot bound htf => ?_, ?_⟩
       · by_cases hbb : busId' = busId
         · subst busId'
           obtain rfl : shape = shape' := Option.some.inj (hshape.symm.trans hshape')
@@ -702,6 +732,14 @@ def sp1Facts (p : ℕ) [NeZero p]
               decide_eq_false hne, Bool.false_eq_true, if_false]
           rw [heq]
           exact hdisc busId' shape' hshape'
+      · -- TS_BOUND conjunct: `A ++ B ++ C`'s members are all members of the full list.
+        intro m hm
+        refine hts busId' slot bound htf m ?_
+        rw [List.mem_filter] at hm ⊢
+        refine ⟨?_, hm.2⟩
+        have hmem := hm.1
+        simp only [List.mem_append, List.mem_cons] at hmem ⊢
+        tauto
       · intro m hm hbus hp2 hp3 hp4
         have hmem : m ∈ A ++ S :: B ++ R :: C := by
           rcases List.mem_append.mp hm with hAB | hC

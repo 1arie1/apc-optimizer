@@ -357,31 +357,130 @@ def denseBUVarBound (bs : BusSemantics p) (facts : BusFacts p bs) :
       else denseBUVarBound bs facts rest v
     | _, _ => denseBUVarBound bs facts rest v
 
+/-- The first slot among `slots` holding exactly `.var v` where `facts.slotBound` (at constant
+    multiplicity `c` and the interaction's constant-slot pattern `pat`) declares a bound. -/
+def denseBUSlotScanAt (bs : BusSemantics p) (facts : BusFacts p bs)
+    (bi : BusInteraction (DenseExpr p)) (c : ZMod p) (pat : List (Option (ZMod p))) (v : VarId) :
+    (slots : List Nat) → Option Nat
+  | [] => none
+  | slot :: rest =>
+    match bi.payload[slot]? with
+    | some (DenseExpr.var v') =>
+      if v' = v then
+        match facts.slotBound bi.busId c pat slot with
+        | some w => some w
+        | none => denseBUSlotScanAt bs facts bi c pat v rest
+      else denseBUSlotScanAt bs facts bi c pat v rest
+    | _ => denseBUSlotScanAt bs facts bi c pat v rest
+
+/-- A range-check witness through the generic `facts.slotBound`: an active interaction (constant
+    nonzero multiplicity) carrying exactly `.var v` in a slot the fact bounds at the interaction's
+    constant-slot pattern — e.g. SP1's byte-bus operands (`< 256`) and op-6 `Range` results
+    (`< 2^w`), which are 4-slot messages `denseBUVarBound`'s two-slot `varRangeBus` shape misses. -/
+def denseBUSlotScan (bs : BusSemantics p) (facts : BusFacts p bs) :
+    List (BusInteraction (DenseExpr p)) → VarId → Option Nat
+  | [], _ => none
+  | bi :: rest, v =>
+    match denseMultConst bi with
+    | some c =>
+      if decide (c ≠ 0) then
+        match denseBUSlotScanAt bs facts bi c (bi.payload.map DenseExpr.constValue?) v
+            (List.range bi.payload.length) with
+        | some w => some w
+        | none => denseBUSlotScan bs facts rest v
+      else denseBUSlotScan bs facts rest v
+    | none => denseBUSlotScan bs facts rest v
+
+/-- A witnessed bound for `v`, from either range-check shape: the two-slot `varRangeBus` scan
+    first, then the generic `facts.slotBound` scan. -/
+def denseBUAnyBound (bs : BusSemantics p) (facts : BusFacts p bs)
+    (allBis : List (BusInteraction (DenseExpr p))) (v : VarId) : Option Nat :=
+  match denseBUVarBound bs facts allBis v with
+  | some w => some w
+  | none => denseBUSlotScan bs facts allBis v
+
 /-- Per-term range certificates for a gadget's limb terms: each variable's witnessed bound. -/
 def denseBUTermCerts (bs : BusSemantics p) (facts : BusFacts p bs)
     (allBis : List (BusInteraction (DenseExpr p))) :
     List (VarId × ZMod p) → Option (List (VarId × ZMod p × Nat))
   | [] => some []
   | (v, coeff) :: rest =>
-    match denseBUVarBound bs facts allBis v, denseBUTermCerts bs facts allBis rest with
+    match denseBUAnyBound bs facts allBis v, denseBUTermCerts bs facts allBis rest with
     | some w, some cs => some ((v, coeff, w) :: cs)
     | _, _ => none
 
+/-- The variable-limb LessThan certificate on the normalized ts difference `N`
+    (`send_ts − recv_ts`): `N = c₀ + Σ coeffᵢ · limbᵢ` with `c₀ ≥ 1`, every limb a range-checked
+    variable, and the no-wrap certificate `c₀ + B + Σ coeffᵢ·(boundᵢ − 1) ≤ p`
+    (consumed via `val_lt_of_lessThan_gadget`). -/
+def denseBUGadgetCore (bs : BusSemantics p) (facts : BusFacts p bs)
+    (allBis : List (BusInteraction (DenseExpr p))) (B : Nat) (N : DenseLinExpr p) : Bool :=
+  match denseBUTermCerts bs facts allBis N.terms with
+  | some certs =>
+    decide (1 ≤ N.const.val) &&
+      decide (N.const.val + B + (certs.map (fun c => c.2.1.val * (c.2.2 - 1))).sum ≤ p)
+  | none => false
+
+/-- The remainder check of `denseBUGadgetXSlot` at synthetic-limb coefficient `k`: subtracting
+    `k·LX` from `N` leaves `c₀ + Σ coeffᵢ · limbᵢ` with `c₀ ≥ 1` and variable limbs, the no-wrap
+    total now also carrying the synthetic limb's `k·(bX − 1)`. -/
+def denseBUGadgetXRem (bs : BusSemantics p) (facts : BusFacts p bs)
+    (allBis : List (BusInteraction (DenseExpr p))) (B : Nat) (N LX : DenseLinExpr p)
+    (k : ZMod p) (bX : Nat) : Bool :=
+  match denseBUTermCerts bs facts allBis ((N.add (LX.scale (-k))).norm).terms with
+  | some certs =>
+    decide (1 ≤ ((N.add (LX.scale (-k))).norm).const.val) &&
+      decide (((N.add (LX.scale (-k))).norm).const.val + B + k.val * (bX - 1)
+        + (certs.map (fun c => c.2.1.val * (c.2.2 - 1))).sum ≤ p)
+  | none => false
+
+/-- One synthetic expression limb for the LessThan certificate: slot `slot` of the active
+    interaction `bi` is declared bounded by `facts.slotBound`, its expression linearizes to `LX`,
+    and `denseBUGadgetXRem` certifies the remainder after subtracting `k·LX` — `k` fixed by the
+    first shared variable's coefficient ratio. This recognizes range checks applied to solved
+    *expressions* rather than witness columns — e.g. SP1's inlined u8 limb
+    `(send_ts − recv_ts − 1 − diff_low)·2⁻¹⁶`, where powdr eliminated the `diff_high` column and
+    byte-checks its defining expression instead. -/
+def denseBUGadgetXSlot (bs : BusSemantics p) (facts : BusFacts p bs)
+    (allBis : List (BusInteraction (DenseExpr p))) (B : Nat) (N : DenseLinExpr p)
+    (bi : BusInteraction (DenseExpr p)) (c : ZMod p) (slot : Nat) : Bool :=
+  match facts.slotBound bi.busId c (bi.payload.map DenseExpr.constValue?) slot with
+  | some bX =>
+    match bi.payload[slot]? with
+    | some eX =>
+      match denseLinearize eX with
+      | some LX =>
+        match N.terms.find? (fun t => !zmodIsZero (LX.coeff t.1)) with
+        | some t0 => denseBUGadgetXRem bs facts allBis B N LX (t0.2 * (LX.coeff t0.1)⁻¹) bX
+        | none => false
+      | none => false
+    | none => false
+  | none => false
+
+/-- The expression-limb fallback of the LessThan certificate: some active interaction carries a
+    bounded slot expression that completes the gadget (`denseBUGadgetXSlot`). Only tried when the
+    variable-limb path failed. -/
+def denseBUGadgetX (bs : BusSemantics p) (facts : BusFacts p bs)
+    (allBis : List (BusInteraction (DenseExpr p))) (B : Nat) (N : DenseLinExpr p) : Bool :=
+  allBis.any (fun bi =>
+    match denseMultConst bi with
+    | some c =>
+      decide (c ≠ 0) &&
+        (List.range bi.payload.length).any (denseBUGadgetXSlot bs facts allBis B N bi c)
+    | none => false)
+
 /-- The solved LessThan gadget between a receive's and its own send's ts slots:
     `send_ts − recv_ts` normalizes to `c₀ + Σ coeffᵢ · limbᵢ` with `c₀ ≥ 1`, every limb
-    range-checked, and the no-wrap certificate `c₀ + B + Σ coeffᵢ·(boundᵢ − 1) ≤ p`
-    (consumed via `val_lt_of_lessThan_gadget`). -/
+    range-checked — either a checked variable (`denseBUGadgetCore`) or, failing that, one checked
+    slot *expression* plus checked variables (`denseBUGadgetX`) — and the no-wrap certificate
+    `c₀ + B + Σ coeffᵢ·(boundᵢ − 1) ≤ p` (consumed via `val_lt_of_lessThan_gadget`). -/
 def denseBUGadgetOk (bs : BusSemantics p) (facts : BusFacts p bs)
     (allBis : List (BusInteraction (DenseExpr p))) (tsField B : Nat)
     (S R : BusInteraction (DenseExpr p)) : Bool :=
   match denseBUTsLin tsField S, denseBUTsLin tsField R with
   | some LS, some LR =>
-    let N := (LS.add (LR.scale (-1))).norm
-    match denseBUTermCerts bs facts allBis N.terms with
-    | some certs =>
-      decide (1 ≤ N.const.val) &&
-        decide (N.const.val + B + (certs.map (fun c => c.2.1.val * (c.2.2 - 1))).sum ≤ p)
-    | none => false
+    denseBUGadgetCore bs facts allBis B ((LS.add (LR.scale (-1))).norm) ||
+      denseBUGadgetX bs facts allBis B ((LS.add (LR.scale (-1))).norm)
   | _, _ => false
 
 /-! ## The group verifier -/
