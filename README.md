@@ -44,9 +44,9 @@ documented divergences from `Spec.lean`, and the closure semantics) and the theo
 *statements* in [`InterfaceEncoding.lean`](./ApcOptimizer/InterfaceEncoding.lean) —
 `concreteEquiv_of_abstractEquiv`, the end-to-end
 `openVm_concreteEquiv_of_interfaceVerified` and its landing in Spec vocabulary
-(`openVm_isSoundReplacementOf_of_concreteEquiv`, and
-`isCompleteReplacementOf_of_replacesWithVia` for the completeness direction), memory
-determinism
+(`openVm_isSoundReplacementOf_of_concreteEquiv`, and — for completeness, whose witness the
+Spec pins to `Derivations.witgen` — `isCompleteReplacementOf_of_replacesWithVia` and
+`isCompleteReplacementOf_of_replacesWith_of_agrees`), memory determinism
 (`closes_recv_determined`), and `interfaceMatch_closes_iff`; the proof machinery under
 [`Implementation/InterfaceEncoding/`](./ApcOptimizer/Implementation/InterfaceEncoding) needs no audit. All proofs are checked by
 `lake build` and rest on the same three standard axioms (asserted in CI). Two things are

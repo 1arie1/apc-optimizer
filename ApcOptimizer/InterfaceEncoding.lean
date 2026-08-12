@@ -1,4 +1,5 @@
 import ApcOptimizer.Sp1Semantics
+import ApcOptimizer.Implementation.EvalCongr
 import ApcOptimizer.Implementation.InterfaceEncoding.Transfer
 import ApcOptimizer.Implementation.InterfaceEncoding.Invariants
 import ApcOptimizer.Implementation.InterfaceEncoding.Closure
@@ -44,7 +45,10 @@ The story in four steps:
    *completeness* notion is out of reach of any equivalence — its witness is pinned to
    `Derivations.witgen` — so it is reached by keeping the witness instead of forgetting it
    (`ReplacesWithVia`, `replacesWith_of_via`,
-   `isCompleteReplacementOf_of_replacesWithVia`).
+   `isCompleteReplacementOf_of_replacesWithVia`). Concrete equivalence still reaches it
+   under one extra hypothesis, the honest content of "a witness exists": that witness
+   generation *reproduces* the equivalence's witness on the optimized circuit's variables,
+   which is all its semantics reads (`isCompleteReplacementOf_of_replacesWith_of_agrees`).
 
 Not discharged here: the matching hypothesis itself — which interactions pair up is what
 the external alignment analysis certifies and its SMT run assumes per instance. -/
@@ -150,6 +154,44 @@ theorem isCompleteReplacementOf_of_replacesWithVia {bs : BusSemantics p} {A B : 
   refine fun _ => ⟨hused, hcover, fun assignment hadm hsat => ?_⟩
   obtain ⟨hsat', heff, hadm'⟩ := h assignment hsat
   exact ⟨hsat', hadm'.mp hadm, heff⟩
+
+/-- A replacement whose witness the map `w` *reproduces* is a witnessed replacement. Since
+    everything `B` says — `satisfies`, `admissible`, `sideEffects` — reads only `B.vars`,
+    `w` need only agree with the witness there, not equal it.
+
+    This is how concrete replacement reaches the Spec's completeness after all: the
+    equivalence supplies the witness's *existence*, `w` supplies its *computation*, and the
+    hypothesis is exactly that the two agree on the optimized circuit's variables. Take `h`
+    to be `ConcreteEquiv`'s first component and `w` to be `Derivations.witgen ds`, and
+    `isCompleteReplacementOf_of_replacesWithVia` finishes the job
+    (`isCompleteReplacementOf_of_replacesWith_of_agrees`). -/
+theorem replacesWithVia_of_replacesWith_of_agrees {bs : BusSemantics p} {A B : Circuit p}
+    {w : (Variable → ZMod p) → (Variable → ZMod p)} (h : ReplacesWith bs A B)
+    (hagrees : ∀ a b, A.satisfies bs a → B.satisfies bs b →
+      A.sideEffects bs a = B.sideEffects bs b → (A.admissible bs a ↔ B.admissible bs b) →
+      ∀ v ∈ B.vars, w a v = b v) :
+    ReplacesWithVia bs A B w := by
+  intro a ha
+  obtain ⟨b, hb, heff, hadm⟩ := h a ha
+  have hv : ∀ v ∈ B.vars, w a v = b v := hagrees a b ha hb heff hadm
+  exact ⟨(Circuit.satisfies_congr hv).mpr hb,
+    heff.trans (Circuit.sideEffects_congr hv).symm,
+    hadm.trans (Circuit.admissible_congr hv).symm⟩
+
+/-- END-TO-END: concrete replacement plus "witness generation computes the witness" yields
+    the Spec's completeness. The agreement hypothesis is the honest content of *assuming a
+    witness exists*: the existential is already in `h`, and what `ds` must add is that
+    `witgen` lands on it — on `B.vars`, where alone it matters. -/
+theorem isCompleteReplacementOf_of_replacesWith_of_agrees {bs : BusSemantics p}
+    {A B : Circuit p} {ds : Derivations p} (h : ReplacesWith bs A B)
+    (hagrees : ∀ a b, A.satisfies bs a → B.satisfies bs b →
+      A.sideEffects bs a = B.sideEffects bs b → (A.admissible bs a ↔ B.admissible bs b) →
+      ∀ v ∈ B.vars, Derivations.witgen ds a v = b v)
+    (hused : ∀ derivation ∈ ds, derivation.1 ∈ B.vars)
+    (hcover : ds.cover A.vars B.vars) :
+    B.isCompleteReplacementOf A bs ds :=
+  isCompleteReplacementOf_of_replacesWithVia
+    (replacesWithVia_of_replacesWith_of_agrees h hagrees) hused hcover
 
 /-- The stateful fragment of the invariants clause *does* transport: a matched stateful
     message of `B` is a stateful message of `A`'s matching run. -/
