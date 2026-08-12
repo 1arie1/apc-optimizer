@@ -61,8 +61,8 @@ private def runSp1 (b : DegreeBound) (input : String) : String :=
   match parseJsonSystemSp1 (p := koalaBear) input with
   | .error err => errorJson err
   | .ok (_, _, none, _) => errorJson "missing required field `next_free_id`"
-  | .ok (cs, busMap, some base, _) =>
-    let (optimized, ds) := sp1Optimizer busMap.toBusMap b cs
+  | .ok (cs, busMap, some base, entryPc?) =>
+    let (optimized, ds) := sp1Optimizer busMap.toBusMap entryPc? b cs
     ApcOptimizer.Serialize.serializeResult optimized ds base
 
 /-- Parse a powdr export, run the verified optimizer for the requested VM with the given degree

@@ -39,10 +39,13 @@ end ApcOptimizer.OpenVM
 
 namespace ApcOptimizer.SP1
 
-/-- Optimizer specialized for the SP1 semantics. -/
-def sp1Optimizer (busMap : BusMap := defaultBusMap) (b : DegreeBound := defaultDegreeBound) :
+/-- Optimizer specialized for the SP1 semantics. `entryPc` is the block's entry pc when the
+    caller knows it (powdr's `block.blocks[0].start_pc`), which declares the execution bridge's
+    entry record (ENTRY_KEY, see `memEntryKeyOf`); `none` assumes nothing. -/
+def sp1Optimizer (busMap : BusMap := defaultBusMap) (entryPc : Option Nat := none)
+    (b : DegreeBound := defaultDegreeBound) :
     Optimizer koalaBear :=
-  optimizerWithBusFacts b (sp1Facts koalaBear busMap)
+  optimizerWithBusFacts b (sp1Facts koalaBear busMap entryPc)
 
 end ApcOptimizer.SP1
 
@@ -74,10 +77,11 @@ end ApcOptimizer.OpenVM
 
 namespace ApcOptimizer.SP1
 
-theorem sp1Optimizer_maintainsCorrectness (busMap : BusMap) (b : DegreeBound) :
-    Optimizer.isCorrect (sp1Optimizer busMap b)
-      (sp1BusSemantics koalaBear busMap) b :=
-  optimizerWithBusFacts_maintainsCorrectness (sp1BusSemantics koalaBear busMap) b
-    (sp1Facts koalaBear busMap)
+theorem sp1Optimizer_maintainsCorrectness (busMap : BusMap) (entryPc : Option Nat)
+    (b : DegreeBound) :
+    Optimizer.isCorrect (sp1Optimizer busMap entryPc b)
+      (sp1BusSemantics koalaBear busMap entryPc) b :=
+  optimizerWithBusFacts_maintainsCorrectness (sp1BusSemantics koalaBear busMap entryPc) b
+    (sp1Facts koalaBear busMap entryPc)
 
 end ApcOptimizer.SP1

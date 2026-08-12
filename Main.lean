@@ -237,7 +237,7 @@ def openVmBackend : VmBackend babyBear OpenVmBusType where
 /-- The SP1 backend: KoalaBear field, SP1 bus semantics, `sp1Optimizer`. -/
 def sp1Backend : VmBackend ApcOptimizer.SP1.koalaBear ApcOptimizer.SP1.Sp1BusType where
   parse := parseSp1
-  optimize := fun bm _ => ApcOptimizer.SP1.sp1Optimizer bm
+  optimize := fun bm epc => ApcOptimizer.SP1.sp1Optimizer bm epc
   degreeBound := ApcOptimizer.SP1.defaultDegreeBound
 
 /-- Whether a token names the SP1 VM (`sp1`); anything else defaults to OpenVM. -/
@@ -377,10 +377,10 @@ def profileRun {p : ℕ} (b : DegreeBound) (fileName : String) (cs : Circuit p)
 /-- `profile [vm] <file>`: per-pass optimizer timing for the selected VM. -/
 def cmdProfile (vm fileName : String) (verbose : Bool := false) : IO Unit := do
   if isSp1 vm then
-    let (cs, busMap, _) ← parseFileWith parseSp1 fileName
+    let (cs, busMap, entryPc?) ← parseFileWith parseSp1 fileName
     profileRun ApcOptimizer.SP1.defaultDegreeBound fileName cs
-      (ApcOptimizer.SP1.sp1BusSemantics ApcOptimizer.SP1.koalaBear busMap)
-      (ApcOptimizer.SP1.sp1Facts ApcOptimizer.SP1.koalaBear busMap) verbose
+      (ApcOptimizer.SP1.sp1BusSemantics ApcOptimizer.SP1.koalaBear busMap entryPc?)
+      (ApcOptimizer.SP1.sp1Facts ApcOptimizer.SP1.koalaBear busMap entryPc?) verbose
   else
     let (cs, busMap, entryPc?) ← parseFileWith parseOpenVm fileName
     let entryPc := entryPc?.map (fun n => (n : ZMod babyBear))

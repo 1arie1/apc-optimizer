@@ -194,8 +194,23 @@ def memTsFieldOf (busMap : BusMap) (busId : Nat) : Option (Nat × Nat) :=
   | some .executionBridge => some (1, 2 ^ 25)
   | _ => none
 
-/-- The SP1 bus semantics for a given bus map (default: the hard-coded default bus map). -/
-def sp1BusSemantics (p : ℕ) (busMap : BusMap := defaultBusMap) :
+/-- The entry-record designation on a chain-shaped bus (ENTRY_KEY, `ApcOptimizer/MemoryBus.lean`):
+    the execution bridge's record entering the block from outside carries the block's entry pc,
+    since the block is entered at its first instruction. SP1 carries the pc as *limbs*
+    `[pc mod 2^16, pc / 2^16, …]` in payload slots 2–4, so the designation is on slot 2 with the
+    entry pc's low limb — weaker than the full pc, but enough to separate the entry record from
+    the block's interior records, whose pcs step by 4. `none` — hence no assumption — where the
+    optimizer was not told the block's entry pc, and on every other bus. -/
+def memEntryKeyOf (busMap : BusMap) (entryPc : Option Nat) (busId : Nat) :
+    Option (Nat × ZMod p) :=
+  match busMap busId, entryPc with
+  | some .executionBridge, some pc => some (2, ((pc % 2 ^ 16 : Nat) : ZMod p))
+  | _, _ => none
+
+/-- The SP1 bus semantics for a given bus map (default: the hard-coded default bus map) and, if
+    the optimizer was told it, the block's entry pc (see `memEntryKeyOf`). -/
+def sp1BusSemantics (p : ℕ) (busMap : BusMap := defaultBusMap)
+    (entryPc : Option Nat := none) :
     BusSemantics p where
   isStateful busId :=
     match busMap busId with
@@ -203,33 +218,42 @@ def sp1BusSemantics (p : ℕ) (busMap : BusMap := defaultBusMap) :
     | none => false
   accepts := accepts busMap
   maintainsInvariants := maintainsInvariants busMap
-  -- Three conjuncts: the order-free memory discipline per declared bus (on SP1 *memory* the
+  -- Four conjuncts: the order-free memory discipline per declared bus (on SP1 *memory* the
   -- `setNew` multiplicity is `-1`, `direction := .sendThenReceive`; on the *execution bridge* it
   -- is `1`, `.receiveThenSend` — either way `admissibleMemoryBusM` bounds, per evaluated address,
   -- the excess of the `getPrevious` payload multiset over the `setNew` one); the low-clock-limb
   -- bound (TS_BOUND on `clk_low` — sound within one APC block because `clk_high` is a single
-  -- shared expression there, see `memTsFieldOf`); and the x0-returns-zero rely.
+  -- shared expression there, see `memTsFieldOf`); the entry-record designation on the chain bus
+  -- (ENTRY_KEY, vacuous unless the block's entry pc was supplied); and the x0-returns-zero rely.
   admissible msgs :=
     (∀ (busId : Nat) (shape : MemoryBusShape), memShapeOf busMap busId = some shape →
       admissibleMemoryBusM shape
         (↑(msgs.filter (fun m => m.busId = busId)) : Multiset (BusInteraction (ZMod p))))
     ∧ (∀ (busId slot bound : Nat), memTsFieldOf busMap busId = some (slot, bound) →
         tsBounded slot bound (msgs.filter (fun m => m.busId = busId)))
+    ∧ (∀ (busId slot : Nat) (key : ZMod p) (shape : MemoryBusShape),
+        memShapeOf busMap busId = some shape →
+        memEntryKeyOf busMap entryPc busId = some (slot, key) →
+        entryKeyed shape slot key
+          (↑(msgs.filter (fun m => m.busId = busId)) : Multiset (BusInteraction (ZMod p))))
     ∧ x0ReturnsZero busMap msgs
 
 /-- Auditor sanity: the whole SP1 rely (`sp1BusSemantics.admissible`) is order-free — it is
     invariant under reordering the interaction list. -/
-theorem sp1Admissible_perm (busMap : BusMap)
+theorem sp1Admissible_perm (busMap : BusMap) (entryPc : Option Nat)
     {msgs msgs' : List (BusInteraction (ZMod p))} (h : msgs.Perm msgs') :
-    (sp1BusSemantics p busMap).admissible msgs ↔
-      (sp1BusSemantics p busMap).admissible msgs' := by
+    (sp1BusSemantics p busMap entryPc).admissible msgs ↔
+      (sp1BusSemantics p busMap entryPc).admissible msgs' := by
   unfold sp1BusSemantics x0ReturnsZero
-  refine and_congr ?_ (and_congr ?_ ?_)
+  refine and_congr ?_ (and_congr ?_ (and_congr ?_ ?_))
   · refine forall_congr' fun busId => forall_congr' fun shape => imp_congr Iff.rfl ?_
     exact admissibleMemoryBusM_perm shape (h.filter _)
   · refine forall_congr' fun busId => forall_congr' fun slot => forall_congr' fun bound =>
       imp_congr Iff.rfl ?_
     exact tsBounded_perm slot bound (h.filter _)
+  · refine forall_congr' fun busId => forall_congr' fun slot => forall_congr' fun key =>
+      forall_congr' fun shape => imp_congr Iff.rfl (imp_congr Iff.rfl ?_)
+    exact entryKeyed_perm shape slot key (h.filter _)
   · exact forall_congr' fun m => imp_congr h.mem_iff Iff.rfl
 
 /-- SP1's proving-backend degree bound (powdr's `DEFAULT_DEGREE_BOUND` for SP1), used when the
