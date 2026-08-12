@@ -100,7 +100,16 @@ def AbstractEquivUnder (bs : BusSemantics p) (I : BusInteraction (ZMod p) → Pr
 
 /-- One direction of concrete replacement, with an existential witness: every satisfying run
     of `X` is reproduced by a satisfying run of `Y` with equal side effects, and the two runs
-    are admissible together or not at all. -/
+    are admissible together or not at all.
+
+    Only `X.admissible → Y.admissible` is consumed downstream — the Spec bridge
+    `isSoundReplacementOf_of_concreteEquiv` drops the clause outright, and
+    `Circuit.isCompleteReplacementOf` asks for no more than that direction. The converse is
+    kept because it is free (an `InterfaceMatch` is a permutation and the rely is order-free,
+    `AdmissiblePermInvariant`) and it is not implied by the rest of the clause:
+    `Circuit.sideEffects` is a *net* multiplicity per tuple, so it cannot see a canceling
+    send/receive pair that changes admissibility. It makes the witness a simulation of the
+    source run rather than merely a more-admissible one. -/
 def ReplacesWith (bs : BusSemantics p) (X Y : Circuit p) : Prop :=
   ∀ x, X.satisfies bs x → ∃ y, Y.satisfies bs y ∧
     X.sideEffects bs x = Y.sideEffects bs y ∧
@@ -135,6 +144,19 @@ def GuaranteesStatelessInvariants (circuit : Circuit p) (bs : BusSemantics p) : 
     ∀ bi ∈ circuit.busInteractions,
       bs.isStateful (bi.eval a).busId = false →
       (bi.eval a).multiplicity ≠ 0 → bs.maintainsInvariants (bi.eval a)
+
+/-- The multiplicity discipline: every active interaction is *sent once* (`1`) or — only on a
+    stateful bus — *received once* (`-1`). A per-interaction check on the circuit alone,
+    needing no reference circuit and no matching: multiplicities are flags or constants, so
+    it is read off the syntax. It is what `ConcreteEquiv` cannot see, because
+    `Circuit.sideEffects` records only the *net* multiplicity per tuple
+    (`openVm_isSoundReplacementOf_of_concreteEquiv`). -/
+def MultiplicityDiscipline (circuit : Circuit p) (bs : BusSemantics p) : Prop :=
+  ∀ a, circuit.satisfies bs a →
+    ∀ bi ∈ circuit.busInteractions,
+      (bi.eval a).multiplicity ≠ 0 →
+        (bi.eval a).multiplicity = 1 ∨
+          (bs.isStateful (bi.eval a).busId = true ∧ (bi.eval a).multiplicity = -1)
 
 /-! ## Closure semantics: memory environments
 
