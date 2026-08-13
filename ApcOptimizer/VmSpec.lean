@@ -1,4 +1,5 @@
 import ApcOptimizer.Spec
+import Mathlib.Algebra.BigOperators.Fin
 
 set_option autoImplicit false
 
@@ -31,9 +32,8 @@ variable {p : ℕ} [Fact p.Prime]
     chip, ...). It is defined only by the effects it can have and by how many
     instances it can have. There is no explicit circuit. -/
 structure HostChip (p : ℕ) where
-  /-- Whether this `BusState` is a valid effect for an instance of this host-chip type. -/
-  canEffect : BusState p → Prop
-  -- TODO: call this accepts A *semantic* representation of possible effects
+  /-- Whether this `BusState` can be produced by this host-chip type. -/
+  canProduce : BusState p → Prop
   /-- Must a satisfying assignment instantiate this chip just once? E.g. mem-init. -/
   singleton : Prop := False
 
@@ -92,9 +92,6 @@ def Circuit.allEffects (circuit : Circuit p) (assignment : ChipAssignment p) :
     ((circuit.busInteractions.map (fun bi => bi.eval assignment)).filter
       (fun m => decide ((m.busId, m.payload) = message))).map (fun m => m.multiplicity) |>.sum
 
-abbrev HostAssignment (p : ℕ) (host : Host p) := (t : Fin host.chips.length) → List (BusState p)
--- TODO: getter for instantiation counts?
-
 /-- An assignment to a VM: for each guest-chip *type*, however many algebraic assignments the
     witness chooses to realize (the trip count is not fixed by `guestChips` itself — see the
     module docstring); likewise, for each host-chip type, however many bus contributions it
@@ -102,7 +99,7 @@ abbrev HostAssignment (p : ℕ) (host : Host p) := (t : Fin host.chips.length) �
     opts in — see `VmSat`). -/
 structure VmAssignment (p : ℕ) (vm : Vm p) where
   guestAssignments : Fin (vm.guestChips.length) → List (ChipAssignment p)
-  hostAssignment : HostAssignment p vm.host
+  hostAssignment : Fin (vm.host.chips.length) → List (BusState p)
 
 /-- The net multiplicity contributed to every bus message, summed over host and guest. -/
 def VmAssignment.netBus {vm : Vm p} (a : VmAssignment p vm) : BusState p :=
@@ -123,7 +120,7 @@ def VmAssignment.satisfiesGuest {vm : Vm p}
     instance. -/
 def VmAssignment.satisfiesHost {vm : Vm p} (a : VmAssignment p vm) : Prop :=
   (∀ t : Fin vm.host.chips.length, ∀ effect ∈ a.hostAssignment t,
-    (vm.host.chips.get t).canEffect effect) ∧
+    (vm.host.chips.get t).canProduce effect) ∧
   (∀ t : Fin vm.host.chips.length,
     (vm.host.chips.get t).singleton → (a.hostAssignment t).length = 1)
 
@@ -133,13 +130,7 @@ def VmAssignment.balances {vm : Vm p} (a : VmAssignment p vm) : Prop :=
 
 /-- The assignment fits the VM's trace budget.
 
-    Balance alone is weaker than it looks, because multiplicities live in `ZMod p`: `p` instances
-    that each send the *same* message net to zero, so no host chip has to receive it and a lookup
-    table never gets to object. Bounding how many instances a witness may realize is what closes
-    that off — see `Host.forcesAccepts` in `VmSpecConnection.lean`, which is unprovable without
-    it. The bound is on instance counts alone, not on instances × bus interactions, so that it is
-    fixed by the `Host` and therefore identical for the two guest-chip lists an equivalence
-    compares; converting it into a bound on *messages* is the connecting theorem's job. -/
+    This is needed to prevent overflow, e.g., in multiplicities. -/
 def VmAssignment.withinBudget {vm : Vm p} (a : VmAssignment p vm) : Prop :=
   (∑ t : Fin vm.guestChips.length, (a.guestAssignments t).length) ≤ vm.host.maxInstances
 
@@ -196,15 +187,12 @@ theorem VmSat.perm_iff {vm : Vm p} {a a' : VmAssignment p vm}
   ⟨fun h => VmSat.of_perm (fun t => (hguest t).symm) (fun t => (hhost t).symm) h,
     fun h => VmSat.of_perm hguest hhost h⟩
 
--- TODO: more validation theorems?
 -- TODO: prove that host chip list and guest chip lists are *sets*
 
 -- ANCHOR: canEffect
 /-- Whether `guestChips`, run against `host`, can produce effect `e`. -/
--- TODO: combine host and guest into vm
--- TODO: alternative name?
-def CanEffect (host : Host p) (guestChips : List (Circuit p)) (e : VmEffect p) : Prop :=
-  let vm : Vm p := { host := host, guestChips := guestChips }
+def CanProduce (vm : Vm p) (e : VmEffect p) : Prop :=
+  let vm : Vm p := { host := vm.host, guestChips := vm.guestChips }
   ∃ (a : VmAssignment p vm) (h : VmSat vm a), a.effects h = e
 -- ANCHOR_END: canEffect
 
@@ -215,6 +203,112 @@ def CanEffect (host : Host p) (guestChips : List (Circuit p)) (e : VmEffect p) :
     This is the multi-chip analogue of `Circuit.isSoundReplacementOf` /
     `Circuit.isCompleteReplacementOf`. -/
 def VmEquivalent (host : Host p) (guestChips guestChips' : List (Circuit p)) : Prop :=
-  ∀ e : VmEffect p, CanEffect host guestChips e ↔ CanEffect host guestChips' e
+  ∀ e : VmEffect p, CanProduce ⟨host, guestChips⟩  e ↔ CanProduce ⟨host, guestChips'⟩ e
 -- ANCHOR_END: vmEquivalent
--- TODO: degree at the chipset level?
+
+--------- The guest-chip list is a set ---------
+
+omit [Fact p.Prime] in
+/-- Regrouping a sum over `Fin m` by the fibres of `φ` changes nothing. -/
+theorem sum_fiber {M : Type} [AddCommMonoid M] {n m : ℕ} (φ : Fin m → Fin n) (X : Fin m → M) :
+    (∑ s : Fin n, ∑ t : Fin m, if φ t = s then X t else 0) = ∑ t : Fin m, X t := by
+  rw [Finset.sum_comm]
+  exact Finset.sum_congr rfl (fun t _ => by simp)
+
+omit [Fact p.Prime] in
+/-- If every chip of `guestChips'` also occurs in `guestChips`, then `guestChips` can produce
+    every effect `guestChips'` can.
+
+    Each chip type of `guestChips'` is assigned a home in `guestChips` carrying the same circuit,
+    and the instances of everything mapped to one home are pooled into that home's instance list.
+    Pooling is invisible to `VmSat`: the balance sums regroup by fibre (`sum_fiber`), the
+    algebraic constraints are per-instance and the two homes carry the same circuit, and
+    `VmAssignment.withinBudget` survives because pooling moves instances around without creating
+    any. -/
+theorem canProduce_of_subset {host : Host p} {G G' : List (Circuit p)}
+    (hsub : ∀ c ∈ G', c ∈ G) {e : VmEffect p} (h : CanProduce ⟨host, G'⟩ e) :
+    CanProduce ⟨host, G⟩ e := by
+  obtain ⟨a', hsat', rfl⟩ := h
+  have hex : ∀ t : Fin G'.length, ∃ s : Fin G.length, G.get s = G'.get t := fun t =>
+    List.mem_iff_get.mp (hsub _ (List.get_mem G' t))
+  choose φ hφ using hex
+  set gA : (s : Fin G.length) → List (ChipAssignment p) := fun s =>
+    (List.ofFn fun t : Fin G'.length => if φ t = s then a'.guestAssignments t else []).flatten
+    with hgA
+  have hmem : ∀ (s : Fin G.length) (asg : ChipAssignment p), asg ∈ gA s →
+      ∃ t : Fin G'.length, φ t = s ∧ asg ∈ a'.guestAssignments t := by
+    intro s asg hasg
+    rw [hgA] at hasg
+    obtain ⟨l, hl, hin⟩ := List.mem_flatten.mp hasg
+    obtain ⟨t, rfl⟩ := List.mem_ofFn.mp hl
+    by_cases ht : φ t = s
+    · exact ⟨t, ht, by simpa [ht] using hin⟩
+    · simp [ht] at hin
+  have hguest : ∀ s : Fin G.length, ∀ asg ∈ gA s,
+      ∀ c ∈ (G.get s).algebraicConstraints, c.eval asg = 0 := by
+    intro s asg hasg
+    obtain ⟨t, ht, hin⟩ := hmem s asg hasg
+    subst ht
+    rw [hφ t]
+    exact hsat'.1 t asg hin
+  have hnet : ∀ m : BusMessage p,
+      (∑ s : Fin G.length, ((gA s).map fun asg => (G.get s).allEffects asg m).sum)
+        = ∑ t : Fin G'.length,
+            ((a'.guestAssignments t).map fun asg => (G'.get t).allEffects asg m).sum := by
+    intro m
+    have hs : ∀ s : Fin G.length,
+        ((gA s).map fun asg => (G.get s).allEffects asg m).sum
+          = ∑ t : Fin G'.length, if φ t = s then
+              ((a'.guestAssignments t).map fun asg => (G'.get t).allEffects asg m).sum else 0 := by
+      intro s
+      rw [hgA]
+      simp only [List.map_flatten, List.sum_flatten, List.map_ofFn, List.sum_ofFn]
+      refine Finset.sum_congr rfl (fun t _ => ?_)
+      by_cases ht : φ t = s
+      · simp only [Function.comp_apply, if_pos ht]
+        rw [← ht, hφ t]
+      · simp [ht]
+    rw [Finset.sum_congr rfl (fun s _ => hs s)]
+    exact sum_fiber φ _
+  have hlensum : (∑ s : Fin G.length, (gA s).length)
+      = ∑ t : Fin G'.length, (a'.guestAssignments t).length := by
+    have hs : ∀ s : Fin G.length, (gA s).length
+        = ∑ t : Fin G'.length, if φ t = s then (a'.guestAssignments t).length else 0 := by
+      intro s
+      rw [hgA]
+      simp only [List.length_flatten, List.map_ofFn, List.sum_ofFn]
+      refine Finset.sum_congr rfl (fun t _ => ?_)
+      by_cases ht : φ t = s <;> simp [ht]
+    rw [Finset.sum_congr rfl (fun s _ => hs s)]
+    exact sum_fiber φ _
+  refine ⟨⟨gA, a'.hostAssignment⟩, ⟨hguest, hsat'.2.1, ⟨fun m => ?_, ?_⟩⟩, rfl⟩
+  · show (∑ s : Fin G.length, ((gA s).map fun asg => (G.get s).allEffects asg m).sum) +
+      (∑ t : Fin host.chips.length, ((a'.hostAssignment t).map fun c => c m).sum) = 0
+    rw [hnet]
+    exact hsat'.2.2.1 m
+  · show (∑ s : Fin G.length, (gA s).length) ≤ host.maxInstances
+    rw [hlensum]
+    exact hsat'.2.2.2
+
+omit [Fact p.Prime] in
+/-- **The guest-chip list is a set.** Only *which* circuits occur matters: neither their order
+    nor how many times each is repeated changes what the VM can produce. -/
+theorem canProduce_congr_of_mem {host : Host p} {G G' : List (Circuit p)}
+    (hmem : {c : Circuit p | c ∈ G} = {c | c ∈ G'}) (e : VmEffect p) :
+    CanProduce ⟨host, G⟩ e ↔ CanProduce ⟨host, G'⟩ e :=
+  ⟨canProduce_of_subset (fun c hc => (Set.ext_iff.mp hmem c).mp hc),
+    canProduce_of_subset (fun c hc => (Set.ext_iff.mp hmem c).mpr hc)⟩
+
+omit [Fact p.Prime] in
+/-- Two guest-chip lists with the same elements are `VmEquivalent` — reordering them, repeating a
+    chip, or dropping a repeat is never an observable change. -/
+theorem vmEquivalent_of_mem {host : Host p} {G G' : List (Circuit p)}
+    (hmem : {c : Circuit p | c ∈ G} = {c | c ∈ G'}) : VmEquivalent host G G' :=
+  canProduce_congr_of_mem hmem
+
+omit [Fact p.Prime] in
+/-- Permuting the guest-chip list is not observable. -/
+theorem vmEquivalent_of_perm {host : Host p} {G G' : List (Circuit p)} (hperm : G.Perm G') :
+    VmEquivalent host G G' :=
+  vmEquivalent_of_mem (Set.ext fun _ => hperm.mem_iff)
+-- TODO: add degree constraints?

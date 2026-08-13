@@ -7,7 +7,7 @@ set_option autoImplicit false
 /-! Connecting `Spec.lean`'s per-chip replacement conditions to `VmSpec.lean`'s VM-level
     `VmEquivalent`. This file proves the **soundness** half: if every guest chip is replaced by a
     `Circuit.isSoundReplacementOf`, then every effect the optimized VM can produce, the original
-    VM can produce too (`canEffect_of_isSoundReplacementOf`).
+    VM can produce too (`canProduce_of_isSoundReplacementOf`).
 
     Two vocabularies have to be bridged:
 
@@ -43,10 +43,14 @@ variable {p : ℕ}
 
 --------- Host assignments in isolation ---------
 
+/-- The host side of a `VmAssignment`, on its own, so that the `Host` conditions below can be
+    stated without a `Vm` in scope. -/
+abbrev HostAssignment (p : ℕ) (host : Host p) := Fin host.chips.length → List (BusState p)
+
 /-- `VmAssignment.satisfiesHost` as a predicate on the host assignment alone (it never reads the
     guest side), so that `Host.absorbsStateless` can be stated without a `Vm` in scope. -/
 def HostLegal {host : Host p} (hA : HostAssignment p host) : Prop :=
-  (∀ t : Fin host.chips.length, ∀ effect ∈ hA t, (host.chips.get t).canEffect effect) ∧
+  (∀ t : Fin host.chips.length, ∀ effect ∈ hA t, (host.chips.get t).canProduce effect) ∧
   (∀ t : Fin host.chips.length, (host.chips.get t).singleton → (hA t).length = 1)
 
 /-- The net multiplicity the host chips contribute to every message. -/
@@ -407,7 +411,7 @@ theorem effects_eq_of_io {host : Host p} {G G' : List (Circuit p)}
     The witness keeps the host's stateful chips — memory, input, output — exactly as they were,
     replaces each guest instance's assignment by the one `Circuit.isSoundReplacementOf` promises,
     and lets `Host.absorbsStateless` rebuild the lookup chips around the difference. -/
-theorem canEffect_of_isSoundReplacementOf
+theorem canProduce_of_isSoundReplacementOf
     {host : Host p} {bs : BusSemantics p} {G G' : List (Circuit p)} {L : ℕ}
     (hlen : G'.length = G.length)
     (hAccepts : host.forcesAccepts bs) (hAbsorbs : host.absorbsStateless bs)
@@ -416,7 +420,7 @@ theorem canEffect_of_isSoundReplacementOf
     (hBudget : L * host.maxInstances < p)
     (hSound : ∀ t : Fin G.length,
       (G'.get (Fin.cast hlen.symm t)).isSoundReplacementOf (G.get t) bs)
-    {e : VmEffect p} (h : CanEffect host G' e) : CanEffect host G e := by
+    {e : VmEffect p} (h : CanProduce ⟨host, G'⟩ e) : CanProduce ⟨host, G⟩ e := by
   obtain ⟨a', hsat', rfl⟩ := h
   -- Reindex `G`'s chip types into `G'`'s.
   set ι : Fin G.length → Fin G'.length := Fin.cast hlen.symm with hι

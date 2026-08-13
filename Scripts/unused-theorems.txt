@@ -29,16 +29,22 @@ ApcOptimizer.Dense.denseNrmGo_var
 
 # `ApcOptimizer/VmSpec.lean` is a standalone multi-chip correctness definition, not yet wired
 # into the `Optimizer.lean` pipeline the roots above are seeded from — so nothing in it can be
-# reachable from those roots regardless of internal use. These two justify a design choice in
-# `CanEffect` (that it needn't existentially permute a chip type's realized instances, since
-# `VmSat` doesn't see their order) rather than being dead code; revisit once this file is wired
-# into (or itself seeds) the correctness roots.
+# reachable from those roots regardless of internal use. The `VmSat.*_perm` pair justifies a
+# design choice in `CanProduce` (that it needn't existentially permute a chip type's realized
+# instances, since `VmSat` doesn't see their order); the rest establish that the guest-chip list
+# is used as a *set*. None are dead code; revisit once this file is wired into (or itself seeds)
+# the correctness roots.
 VmSat.of_perm
 VmSat.perm_iff
+sum_fiber
+canProduce_of_subset
+canProduce_congr_of_mem
+vmEquivalent_of_mem
+vmEquivalent_of_perm
 
 # Same situation for `ApcOptimizer/VmSpecConnection.lean`, which proves the soundness half of the
 # bridge from `Spec.lean`'s per-chip `isSoundReplacementOf` to `VmSpec.lean`'s `VmEquivalent`.
-# `canEffect_of_isSoundReplacementOf` is that file's own root and the rest are genuinely used in
+# `canProduce_of_isSoundReplacementOf` is that file's own root and the rest are genuinely used in
 # its proof; none of it can be reachable from the roots above until the VM-level statement is
 # wired into (or itself seeds) the correctness roots.
 netBus_apply
@@ -49,7 +55,7 @@ exists_instance_of_guestNet_ne_zero
 soundWitness_spec
 head_congr
 effects_eq_of_io
-canEffect_of_isSoundReplacementOf
+canProduce_of_isSoundReplacementOf
 countAt_le_length
 sum_eq_countP
 multsAt_zero_or_one

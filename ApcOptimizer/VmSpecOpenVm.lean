@@ -38,7 +38,7 @@ def busStateOf (messages : List (BusInteraction (ZMod p))) : BusState p :=
 /-- A stateless lookup-table host chip for bus `busId`: legal to touch a payload only if it is
     actually in the table, described by `accept`; illegal to touch any other bus. -/
 def lookupTableHostChip (busId : Nat) (accept : List (ZMod p) → Prop) : HostChip p where
-  canEffect contribution :=
+  canProduce contribution :=
     ∀ message : BusMessage p, contribution message ≠ 0 → message.1 = busId ∧ accept message.2
 
 /-- The PC-lookup host chip (OpenVM's instruction-fetch table, default bus `2`). As faithful as
@@ -78,7 +78,7 @@ def tupleRangeCheckerHostChip (busId : Nat := 7) (size1 : Nat := 256) (size2 : N
     else. Memory starts zeroed everywhere; the program's actual inputs enter through
     `inputHostChip`, which overwrites those zeros, not through initialization. -/
 def memoryInitHostChip (memBusId : Nat := 1) : HostChip p where
-  canEffect contribution :=
+  canProduce contribution :=
     ∀ message : BusMessage p, contribution message ≠ 0 →
       message.1 = memBusId ∧ contribution message = 1 ∧
       ∃ f : MemoryPayload p, memoryPayload? message.2 = some f ∧
@@ -92,7 +92,7 @@ def memoryInitHostChip (memBusId : Nat := 1) : HostChip p where
     and that read *is* observable, so letting this chip absorb AS-3 too would
     let a VM discard its own output. -/
 def memoryFinalizeHostChip (memBusId : Nat := 1) : HostChip p where
-  canEffect contribution :=
+  canProduce contribution :=
     ∀ message : BusMessage p, contribution message ≠ 0 →
       message.1 = memBusId ∧ contribution message = -1 ∧
       ∃ f : MemoryPayload p, memoryPayload? message.2 = some f ∧
@@ -119,7 +119,7 @@ def OutputRead.interactions (r : OutputRead p) (memBusId : Nat) :
     to an `OutputRead` witness (not just "any final word") so `outputArrayOf` can recover the
     array. -/
 def outputHostChip (memBusId : Nat := 1) : HostChip p where
-  canEffect contribution := ∃ r : OutputRead p, contribution = busStateOf (r.interactions memBusId)
+  canProduce contribution := ∃ r : OutputRead p, contribution = busStateOf (r.interactions memBusId)
   singleton := True
 
 /-- A witness that an input-chip instance's contribution is a legal read: which pointer and
@@ -160,7 +160,7 @@ def InputRead.interactions (r : InputRead p) (ptrReg countReg memBusId : Nat) :
     (`singleton` stays `False`), matching that the input chip may be invoked repeatedly to pull
     further chunks off the input stream. -/
 def inputHostChip (ptrReg countReg : Nat) (memBusId : Nat := 1) : HostChip p where
-  canEffect contribution :=
+  canProduce contribution :=
     ∃ r : InputRead p, contribution = busStateOf (r.interactions ptrReg countReg memBusId)
   singleton := False
 
