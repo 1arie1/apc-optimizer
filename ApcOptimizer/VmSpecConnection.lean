@@ -414,6 +414,8 @@ theorem effects_eq_of_io {host : Host p} {G G' : List (Circuit p)}
 theorem canProduce_of_isSoundReplacementOf
     {host : Host p} {bs : BusSemantics p} {G G' : List (Circuit p)} {L : ℕ}
     (hlen : G'.length = G.length)
+    -- TODO: `hAccepts`, `hAbsorbs`, and `hLegal'` are all suspicious.
+    -- `hlegal` seems most structurally acceptable, but its contents must be checked.
     (hAccepts : host.forcesAccepts bs) (hAbsorbs : host.absorbsStateless bs)
     (hLegal' : ∀ t : Fin G'.length, (G'.get t).legalGuest bs)
     (hSize' : ∀ t : Fin G'.length, (G'.get t).busInteractions.length ≤ L)
