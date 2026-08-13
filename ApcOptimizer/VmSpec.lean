@@ -33,6 +33,7 @@ variable {p : ℕ} [Fact p.Prime]
 structure HostChip (p : ℕ) where
   /-- Whether this `BusState` is a valid effect for an instance of this host-chip type. -/
   canEffect : BusState p → Prop
+  -- TODO: call this accepts A *semantic* representation of possible effects
   /-- Must a satisfying assignment instantiate this chip just once? E.g. mem-init. -/
   singleton : Prop := False
 
@@ -92,6 +93,7 @@ def Circuit.allEffects (circuit : Circuit p) (assignment : ChipAssignment p) :
       (fun m => decide ((m.busId, m.payload) = message))).map (fun m => m.multiplicity) |>.sum
 
 abbrev HostAssignment (p : ℕ) (host : Host p) := (t : Fin host.chips.length) → List (BusState p)
+-- TODO: getter for instantiation counts?
 
 /-- An assignment to a VM: for each guest-chip *type*, however many algebraic assignments the
     witness chooses to realize (the trip count is not fixed by `guestChips` itself — see the
@@ -194,8 +196,13 @@ theorem VmSat.perm_iff {vm : Vm p} {a a' : VmAssignment p vm}
   ⟨fun h => VmSat.of_perm (fun t => (hguest t).symm) (fun t => (hhost t).symm) h,
     fun h => VmSat.of_perm hguest hhost h⟩
 
+-- TODO: more validation theorems?
+-- TODO: prove that host chip list and guest chip lists are *sets*
+
 -- ANCHOR: canEffect
 /-- Whether `guestChips`, run against `host`, can produce effect `e`. -/
+-- TODO: combine host and guest into vm
+-- TODO: alternative name?
 def CanEffect (host : Host p) (guestChips : List (Circuit p)) (e : VmEffect p) : Prop :=
   let vm : Vm p := { host := host, guestChips := guestChips }
   ∃ (a : VmAssignment p vm) (h : VmSat vm a), a.effects h = e
@@ -210,3 +217,4 @@ def CanEffect (host : Host p) (guestChips : List (Circuit p)) (e : VmEffect p) :
 def VmEquivalent (host : Host p) (guestChips guestChips' : List (Circuit p)) : Prop :=
   ∀ e : VmEffect p, CanEffect host guestChips e ↔ CanEffect host guestChips' e
 -- ANCHOR_END: vmEquivalent
+-- TODO: degree at the chipset level?
