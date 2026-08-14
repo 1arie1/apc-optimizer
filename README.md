@@ -47,7 +47,14 @@ documented divergences from `Spec.lean`, and the closure semantics) and the theo
 (`openVm_isSoundReplacementOf_of_concreteEquiv`, and — for completeness, whose witness the
 Spec pins to `Derivations.witgen` — `isCompleteReplacementOf_of_replacesWithVia` and
 `isCompleteReplacementOf_of_replacesWith_of_agrees`), memory determinism
-(`closes_recv_determined`), and `interfaceMatch_closes_iff`; the proof machinery under
+(`closes_recv_determined`), and `interfaceMatch_closes_iff`. The matching need not be exact:
+an alignment that *cancels* an internally-matched send/receive pair — what `busUnify` does,
+and what the verifier's internal pairs certify — is covered by the same chain over
+`InterfaceMatchUpTo` (`concreteEquivUpTo_of_abstractEquivUpTo`,
+`openVm_concreteEquivUpTo_of_interfaceVerified`), at the cost of the admissibility clause
+becoming one-way (`MonoPair`, `AdmissibleDropInvariant`) — which no consumer needed, and
+which the closure statement shows is an artifact of the rely rather than of the memory
+behavior (`interfaceMatchUpTo_closes_iff` is still an `↔`). The proof machinery under
 [`Implementation/InterfaceEncoding/`](./ApcOptimizer/Implementation/InterfaceEncoding) needs no audit. All proofs are checked by
 `lake build` and rest on the same three standard axioms (asserted in CI). Two things are
 *not* discharged here: the matching hypothesis itself (which interactions pair up — what

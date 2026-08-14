@@ -3,6 +3,7 @@ import ApcOptimizer.Implementation.EvalCongr
 import ApcOptimizer.Implementation.InterfaceEncoding.Transfer
 import ApcOptimizer.Implementation.InterfaceEncoding.Invariants
 import ApcOptimizer.Implementation.InterfaceEncoding.Closure
+import ApcOptimizer.Implementation.InterfaceEncoding.InternalPairs
 import ApcOptimizer.Implementation.MemoryBusMultiset
 
 set_option autoImplicit false
@@ -49,6 +50,20 @@ The story in four steps:
    under one extra hypothesis, the honest content of "a witness exists": that witness
    generation *reproduces* the equivalence's witness on the optimized circuit's variables,
    which is all its semantics reads (`isCompleteReplacementOf_of_replacesWith_of_agrees`).
+
+5. The match need not be exact. An optimizer that *cancels* an internally-matched
+   send/receive pair (`busUnify`; the verifier's internal pairs) leaves the two circuits with
+   different traffic, so the chain is redone over `InterfaceMatchUpTo`
+   (`concreteEquivUpTo_of_abstractEquivUpTo`, and the OpenVM root
+   `openVm_concreteEquivUpTo_of_interfaceVerified`). Everything survives with one loss: the
+   admissibility clause degrades from `↔` to a one-way implication (`MonoPair`), running from
+   the traffic-richer circuit to the optimized one, because a dropped message's ∀-style rely
+   conjuncts cannot be reinstated (`AdmissibleDropInvariant`). No consumer wanted more —
+   soundness never mentions admissibility (`isSoundReplacementOf_of_witnessedBy`) and
+   completeness used only `.mp` (`isCompleteReplacementOf_of_replacesWithMono_of_agrees`).
+   The loss is an artifact of those conjuncts, not of the memory behavior: the closure
+   statement is still a full `↔` (`interfaceMatchUpTo_closes_iff`), i.e. the dropped traffic
+   is traffic no environment ever saw.
 
 Not discharged here: the matching hypothesis itself — which interactions pair up is what
 the external alignment analysis certifies and its SMT run assumes per instance. -/
@@ -116,6 +131,66 @@ theorem abstractEquivUnder_of_aligned {bs : BusSemantics p}
     obtain ⟨a, ha, hal⟩ := h₂ b hb hIb
     exact ⟨a, ha, interfaceMatch_of_aligned hal⟩
 
+/-! ## Removal-tolerant transfer: dropping internal pairs
+
+The match above is exact, so it covers only optimizations that *rearrange* stateful traffic.
+Cancelling an internally-matched send/receive pair — what powdr's `busUnify` does, and what
+the verifier's *internal pairs* certify — leaves the two circuits with different traffic, and
+the whole chain has to be re-established over `InterfaceMatchUpTo`. It survives, with exactly
+one loss: the admissibility clause degrades from `↔` to a one-way implication running from
+the traffic-richer circuit to the optimized one (`MonoPair`), and no consumer wanted more. -/
+
+/-- An exact match is the empty-removal case. -/
+theorem interfaceMatchUpTo_of_interfaceMatch {bs : BusSemantics p} {A B : Circuit p}
+    {a b : Variable → ZMod p} (h : InterfaceMatch bs A B a b) :
+    InterfaceMatchUpTo bs A B a b :=
+  ⟨[], ⟨[], by simp⟩, by simpa using h⟩
+
+theorem abstractEquivUpTo_of_abstractEquiv {bs : BusSemantics p} {A B : Circuit p}
+    (h : AbstractEquiv bs A B) : AbstractEquivUpTo bs A B :=
+  ⟨fun a ha => (h.1 a ha).imp fun _ hb => ⟨hb.1, interfaceMatchUpTo_of_interfaceMatch hb.2⟩,
+    fun b hb => (h.2 b hb).imp fun _ ha => ⟨ha.1, interfaceMatchUpTo_of_interfaceMatch ha.2⟩⟩
+
+/-- Restricting the ∀-side by an invariant `accepts` already grants loses nothing here
+    either — the argument is about the premise channel, not about the match. -/
+theorem abstractEquivUpTo_of_under {bs : BusSemantics p} {A B : Circuit p}
+    {I : BusInteraction (ZMod p) → Prop}
+    (hI : ∀ m : BusInteraction (ZMod p), m.multiplicity ≠ 0 → bs.accepts m → I m)
+    (h : AbstractEquivUnderUpTo bs I A B) : AbstractEquivUpTo bs A B := by
+  constructor
+  · intro a hsat
+    exact h.1 a hsat fun m hm =>
+      have ⟨hz, hacc⟩ := accepts_of_mem_activeStateful hsat hm
+      hI m hz hacc
+  · intro b hsat
+    exact h.2 b hsat fun m hm =>
+      have ⟨hz, hacc⟩ := accepts_of_mem_activeStateful hsat hm
+      hI m hz hacc
+
+/-- MAIN TRANSFER THEOREM, removal-tolerant: a match up to internal pairs still gives mutual
+    coverage with equal side effects, and carries the rely from `A` to `B`.
+
+    Two hypotheses on the rely instead of one. `AdmissiblePermInvariant` moves it across the
+    permutation as before; `AdmissibleDropInvariant` then discards the cancelling traffic.
+    That second step is where the `↔` is lost, and only there. -/
+theorem concreteEquivUpTo_of_abstractEquivUpTo {bs : BusSemantics p}
+    (hperm : AdmissiblePermInvariant bs) (hdrop : AdmissibleDropInvariant bs)
+    {A B : Circuit p} (h : AbstractEquivUpTo bs A B) : ConcreteEquivUpTo bs A B := by
+  have hpair : ∀ a b, InterfaceMatchUpTo bs A B a b → MonoPair bs A B a b := by
+    intro a b hm
+    refine ⟨sideEffects_eq_of_interfaceMatchUpTo hm, fun hadm => ?_⟩
+    obtain ⟨D, hD, hmperm⟩ := hm
+    rw [admissible_def] at hadm ⊢
+    exact hdrop hD ((hperm hmperm).mp hadm)
+  exact ⟨fun a ha => (h.1 a ha).imp fun b hb => ⟨hb.1, hpair a b hb.2⟩,
+    fun b hb => (h.2 b hb).imp fun a ha => ⟨ha.1, hpair a b ha.2⟩⟩
+
+/-- The exact-match conclusion refines the removal-tolerant one. -/
+theorem concreteEquivUpTo_of_concreteEquiv {bs : BusSemantics p} {A B : Circuit p}
+    (h : ConcreteEquiv bs A B) : ConcreteEquivUpTo bs A B :=
+  ⟨fun a ha => (h.1 a ha).imp fun _ hb => ⟨hb.1, hb.2.1, hb.2.2.mp⟩,
+    fun b hb => (h.2 b hb).imp fun _ ha => ⟨ha.1, ha.2.1.symm, ha.2.2.mpr⟩⟩
+
 /-! ## Bridges to the Spec vocabulary -/
 
 /-- Concrete equivalence yields the Spec's soundness direction. The invariants clause is a
@@ -127,6 +202,24 @@ theorem isSoundReplacementOf_of_concreteEquiv {bs : BusSemantics p} {A B : Circu
   refine ⟨fun b hsat => ?_, hinv⟩
   obtain ⟨a, hasat, heff, _⟩ := h.2 b hsat
   exact ⟨a, hasat, heff⟩
+
+/-- The Spec's soundness direction needs no admissibility clause at all — only that every run
+    of `B` is covered by a run of `A` with equal side effects. So the removal-tolerant
+    coverage lands it unchanged, and `isSoundReplacementOf_of_concreteEquiv` is its
+    exact-match instance. -/
+theorem isSoundReplacementOf_of_witnessedBy {bs : BusSemantics p} {A B : Circuit p}
+    (h : WitnessedBy bs A B)
+    (hinv : A.guaranteesInvariants bs → B.guaranteesInvariants bs) :
+    B.isSoundReplacementOf A bs := by
+  refine ⟨fun b hsat => ?_, hinv⟩
+  obtain ⟨a, hasat, heff, -⟩ := h b hsat
+  exact ⟨a, hasat, heff.symm⟩
+
+theorem isSoundReplacementOf_of_concreteEquivUpTo {bs : BusSemantics p} {A B : Circuit p}
+    (h : ConcreteEquivUpTo bs A B)
+    (hinv : A.guaranteesInvariants bs → B.guaranteesInvariants bs) :
+    B.isSoundReplacementOf A bs :=
+  isSoundReplacementOf_of_witnessedBy h.2 hinv
 
 /-- Forgetting the witness map: a witnessed replacement is a replacement. `ConcreteEquiv`
     is the forgetful image of the witnessed notion — which is why it lands the Spec's
@@ -193,17 +286,67 @@ theorem isCompleteReplacementOf_of_replacesWith_of_agrees {bs : BusSemantics p}
   isCompleteReplacementOf_of_replacesWithVia
     (replacesWithVia_of_replacesWith_of_agrees h hagrees) hused hcover
 
+/-! ### Completeness under removals
+
+The same three theorems over `MonoPair`. Only `.mp` of the admissibility `↔` was ever used,
+so nothing is lost — the completeness route survives a removal-tolerant match intact. -/
+
+theorem replacesWithMono_of_viaMono {bs : BusSemantics p} {X Y : Circuit p}
+    {w : (Variable → ZMod p) → (Variable → ZMod p)} (h : ReplacesWithViaMono bs X Y w) :
+    ReplacesWithMono bs X Y :=
+  fun x hx => ⟨w x, h x hx⟩
+
+theorem isCompleteReplacementOf_of_replacesWithViaMono {bs : BusSemantics p}
+    {A B : Circuit p} {ds : Derivations p}
+    (h : ReplacesWithViaMono bs A B (Derivations.witgen ds))
+    (hused : ∀ derivation ∈ ds, derivation.1 ∈ B.vars)
+    (hcover : ds.cover A.vars B.vars) :
+    B.isCompleteReplacementOf A bs ds := by
+  refine fun _ => ⟨hused, hcover, fun assignment hadm hsat => ?_⟩
+  obtain ⟨hsat', heff, hadm'⟩ := h assignment hsat
+  exact ⟨hsat', hadm' hadm, heff⟩
+
+theorem replacesWithViaMono_of_replacesWithMono_of_agrees {bs : BusSemantics p}
+    {A B : Circuit p} {w : (Variable → ZMod p) → (Variable → ZMod p)}
+    (h : ReplacesWithMono bs A B)
+    (hagrees : ∀ a b, A.satisfies bs a → B.satisfies bs b → MonoPair bs A B a b →
+      ∀ v ∈ B.vars, w a v = b v) :
+    ReplacesWithViaMono bs A B w := by
+  intro a ha
+  obtain ⟨b, hb, heff, hadm⟩ := h a ha
+  have hv : ∀ v ∈ B.vars, w a v = b v := hagrees a b ha hb ⟨heff, hadm⟩
+  exact ⟨(Circuit.satisfies_congr hv).mpr hb,
+    heff.trans (Circuit.sideEffects_congr hv).symm,
+    fun hA => (Circuit.admissible_congr hv).mpr (hadm hA)⟩
+
+/-- END-TO-END under removals: removal-tolerant replacement plus "witness generation computes
+    the witness" still yields the Spec's completeness. -/
+theorem isCompleteReplacementOf_of_replacesWithMono_of_agrees {bs : BusSemantics p}
+    {A B : Circuit p} {ds : Derivations p} (h : ReplacesWithMono bs A B)
+    (hagrees : ∀ a b, A.satisfies bs a → B.satisfies bs b → MonoPair bs A B a b →
+      ∀ v ∈ B.vars, Derivations.witgen ds a v = b v)
+    (hused : ∀ derivation ∈ ds, derivation.1 ∈ B.vars)
+    (hcover : ds.cover A.vars B.vars) :
+    B.isCompleteReplacementOf A bs ds :=
+  isCompleteReplacementOf_of_replacesWithViaMono
+    (replacesWithViaMono_of_replacesWithMono_of_agrees h hagrees) hused hcover
+
 /-- The stateful fragment of the invariants clause *does* transport: a matched stateful
     message of `B` is a stateful message of `A`'s matching run. -/
-theorem statefulInvariants_of_abstractEquiv {bs : BusSemantics p} {A B : Circuit p}
-    (h : AbstractEquiv bs A B) (hA : A.guaranteesInvariants bs) :
+theorem statefulInvariants_of_abstractEquivUpTo {bs : BusSemantics p} {A B : Circuit p}
+    (h : AbstractEquivUpTo bs A B) (hA : A.guaranteesInvariants bs) :
     GuaranteesStatefulInvariants B bs := by
   intro b hbsat m hm
-  obtain ⟨a, hasat, hmatch⟩ := h.2 b hbsat
-  have hmA : m ∈ activeStateful A bs a := hmatch.mem_iff.mpr hm
+  obtain ⟨a, hasat, D, -, hmatch⟩ := h.2 b hbsat
+  have hmA : m ∈ activeStateful A bs a := hmatch.mem_iff.mpr (List.mem_append_left D hm)
   have hz : m.multiplicity ≠ 0 := (accepts_of_mem_activeStateful hasat hmA).1
   obtain ⟨bi, hbi, rfl⟩ := exists_interaction_of_mem_activeStateful hmA
   exact hA a hasat bi hbi hz
+
+theorem statefulInvariants_of_abstractEquiv {bs : BusSemantics p} {A B : Circuit p}
+    (h : AbstractEquiv bs A B) (hA : A.guaranteesInvariants bs) :
+    GuaranteesStatefulInvariants B bs :=
+  statefulInvariants_of_abstractEquivUpTo (abstractEquivUpTo_of_abstractEquiv h) hA
 
 /-- The two fragments assemble the full Spec invariants clause — transported stateful
     (`statefulInvariants_of_abstractEquiv`) plus circuit-local stateless. Nothing falls in
@@ -233,6 +376,17 @@ theorem openVm_admissiblePermInvariant (busMap : OpenVM.BusMap)
 theorem sp1_admissiblePermInvariant (busMap : SP1.BusMap) :
     AdmissiblePermInvariant (SP1.sp1BusSemantics p busMap) :=
   fun _ _ h => SP1.sp1Admissible_perm busMap h
+
+/-- Dropping internal pairs preserves the OpenVM rely. The memory discipline and the entry
+    designation are untouched (the excess is unchanged); the timestamp bound and
+    `x0ReturnsZero` survive because they are per-message and the traffic only shrinks. -/
+theorem openVm_admissibleDropInvariant (busMap : OpenVM.BusMap) (entryPc : Option (ZMod p)) :
+    AdmissibleDropInvariant (OpenVM.openVmBusSemantics p busMap entryPc) :=
+  openVmAdmissible_drop busMap entryPc
+
+theorem sp1_admissibleDropInvariant (busMap : SP1.BusMap) :
+    AdmissibleDropInvariant (SP1.sp1BusSemantics p busMap) :=
+  sp1Admissible_drop busMap
 
 /-- The verifier's premise-side invariant for OpenVM: an active memory receive into a
     byte-checked address space carries byte data limbs. -/
@@ -317,14 +471,36 @@ theorem openVm_concreteEquiv_of_interfaceVerified
 
     `hlen` rules out the degenerate cancellation by field wrap-around (`p` sends of one tuple
     summing to zero); any real circuit has far fewer interactions than the field size. -/
+theorem openVm_isSoundReplacementOf_of_concreteEquivUpTo
+    (busMap : OpenVM.BusMap) (entryPc : Option (ZMod p)) {A B : Circuit p}
+    (h : ConcreteEquivUpTo (OpenVM.openVmBusSemantics p busMap entryPc) A B)
+    (hdisc : MultiplicityDiscipline B (OpenVM.openVmBusSemantics p busMap entryPc))
+    (hlen : B.busInteractions.length < p) :
+    B.isSoundReplacementOf A (OpenVM.openVmBusSemantics p busMap entryPc) :=
+  isSoundReplacementOf_of_concreteEquivUpTo h
+    (fun hA => openVm_guaranteesInvariants_of_concreteEquiv busMap entryPc h.2 hA hdisc hlen)
+
 theorem openVm_isSoundReplacementOf_of_concreteEquiv
     (busMap : OpenVM.BusMap) (entryPc : Option (ZMod p)) {A B : Circuit p}
     (h : ConcreteEquiv (OpenVM.openVmBusSemantics p busMap entryPc) A B)
     (hdisc : MultiplicityDiscipline B (OpenVM.openVmBusSemantics p busMap entryPc))
     (hlen : B.busInteractions.length < p) :
     B.isSoundReplacementOf A (OpenVM.openVmBusSemantics p busMap entryPc) :=
-  isSoundReplacementOf_of_concreteEquiv h
-    (fun hA => openVm_guaranteesInvariants_of_concreteEquiv busMap entryPc h hA hdisc hlen)
+  openVm_isSoundReplacementOf_of_concreteEquivUpTo busMap entryPc
+    (concreteEquivUpTo_of_concreteEquiv h) hdisc hlen
+
+/-- END-TO-END, OpenVM, removal-tolerant: what the interface-encoded VC certifies when the
+    alignment is allowed to drop internally-matched pairs. Both rely hypotheses are
+    discharged from the OpenVM semantics. -/
+theorem openVm_concreteEquivUpTo_of_interfaceVerified
+    (busMap : OpenVM.BusMap) (entryPc : Option (ZMod p)) {A B : Circuit p}
+    (h : AbstractEquivUnderUpTo (OpenVM.openVmBusSemantics p busMap entryPc)
+      (RecvBytes busMap) A B) :
+    ConcreteEquivUpTo (OpenVM.openVmBusSemantics p busMap entryPc) A B :=
+  concreteEquivUpTo_of_abstractEquivUpTo (openVm_admissiblePermInvariant busMap entryPc)
+    (openVm_admissibleDropInvariant busMap entryPc)
+    (abstractEquivUpTo_of_under
+      (fun m _ hacc => openVm_recvBytes_of_accepts busMap m hacc) h)
 
 /-! ## Closure semantics: the observable is the whole memory behavior -/
 
@@ -388,5 +564,20 @@ theorem interfaceMatch_closes_iff {bs : BusSemantics p} {A B : Circuit p}
     (shape : MemoryBusShape) (busId : Nat) (E : MemEnv p) :
     Closes shape E (busTraffic A bs busId a) ↔ Closes shape E (busTraffic B bs busId b) := by
   rw [busTraffic_eq_of_interfaceMatch h busId]
+
+/-- Dropping internal pairs is invisible to the environment too, and here the statement is a
+    full `↔` — closure is an exact balance, and a cancelling pair adds the same payload to
+    both of its sides. The semantic reading of the removal: `B` computes with the same
+    memory environments as `A`, and the traffic it dropped is traffic no environment ever
+    saw. Contrast the rely (`AdmissibleDropInvariant`), which only survives one way — the
+    asymmetry is an artifact of the rely's per-message conjuncts, not of the memory
+    behavior. -/
+theorem interfaceMatchUpTo_closes_iff {bs : BusSemantics p} {A B : Circuit p}
+    {a b : Variable → ZMod p} (h : InterfaceMatchUpTo bs A B a b)
+    (shape : MemoryBusShape) (busId : Nat) (E : MemEnv p) :
+    Closes shape E (busTraffic A bs busId a) ↔ Closes shape E (busTraffic B bs busId b) := by
+  obtain ⟨D, hD, heq⟩ := busTraffic_add_of_interfaceMatchUpTo h busId
+  rw [heq]
+  exact closes_add_iff hD
 
 end ApcOptimizer.Interface

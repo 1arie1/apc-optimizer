@@ -113,7 +113,7 @@ theorem exists_recv_or_sideEffects_ne_zero {circuit : Circuit p} {bs : BusSemant
     reference circuit on the same tuple. -/
 theorem openVm_guaranteesInvariants_of_concreteEquiv (busMap : OpenVM.BusMap)
     (entryPc : Option (ZMod p)) {A B : Circuit p}
-    (h : ConcreteEquiv (OpenVM.openVmBusSemantics p busMap entryPc) A B)
+    (h : WitnessedBy (OpenVM.openVmBusSemantics p busMap entryPc) A B)
     (hA : A.guaranteesInvariants (OpenVM.openVmBusSemantics p busMap entryPc))
     (hdisc : MultiplicityDiscipline B (OpenVM.openVmBusSemantics p busMap entryPc))
     (hlen : B.busInteractions.length < p) :
@@ -166,10 +166,10 @@ theorem openVm_guaranteesInvariants_of_concreteEquiv (busMap : OpenVM.BusMap)
           have hpay : (bi'.eval b).payload = (bi.eval b).payload := congrArg Prod.snd hk
           exact openVm_accepts_memory_recv_bytes busMap _ (hbsat.2 bi' hbi' (hnegz _ hneg'))
             (hbid ▸ hbus) hneg' f (hpay ▸ hmp) hchk d hd
-        · obtain ⟨a, hasat, heff, -⟩ := h.2 b hbsat
+        · obtain ⟨a, hasat, heff, -⟩ := h b hbsat
           have hne' : A.sideEffects (OpenVM.openVmBusSemantics p busMap entryPc) a
               ((bi.eval b).busId, (bi.eval b).payload) ≠ 0 := by
-            rw [← congrFun heff]; exact hne
+            rw [congrFun heff]; exact hne
           obtain ⟨bi', hbi', hz', hk⟩ := exists_active_of_sideEffects_ne_zero hne'
           have hinv := hA a hasat bi' hbi' hz'
           have hbid : (bi'.eval a).busId = (bi.eval b).busId := congrArg Prod.fst hk

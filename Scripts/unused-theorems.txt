@@ -33,6 +33,13 @@ ApcOptimizer.Interface.closes_recv_determined
 ApcOptimizer.Interface.interfaceMatch_closes_iff
 ApcOptimizer.Interface.exists_closes_of_admissible
 
+# Its removal-tolerant layer (matching up to internally-balanced pairs).
+ApcOptimizer.Interface.openVm_concreteEquivUpTo_of_interfaceVerified
+ApcOptimizer.Interface.isCompleteReplacementOf_of_replacesWithMono_of_agrees
+ApcOptimizer.Interface.replacesWithMono_of_viaMono
+ApcOptimizer.Interface.sp1_admissibleDropInvariant
+ApcOptimizer.Interface.interfaceMatchUpTo_closes_iff
+
 # Theorems the closure cannot see are used, so they must be listed by hand. The only class so far:
 # a `rfl`-lemma named in a `simp only`/`rw` list whose rewrite step collapses to `Eq.refl`, leaving
 # no reference to the lemma in the resulting proof term.
