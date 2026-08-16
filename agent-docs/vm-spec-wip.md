@@ -19,11 +19,38 @@ VmSat(G, a)`. Equivalence: `∀e, CanEffect(G,e) ↔ CanEffect(G',e)`.
 
 ## Status
 
-File: `ApcOptimizer/VmSpec.lean` (new, **uncommitted** — see `git status`; also uncommitted:
-one import line added to `ApcOptimizer.lean`). Builds clean (`lake build` passes end to end,
-zero warnings). Definitions only, no theorems — explicit scope decision, to get the shape
-reviewed before investing in proofs. Full current file content is reproduced verbatim at the
-bottom of this doc in case the working-tree copy doesn't make it across machines.
+Everything lives in `ApcOptimizer/VmSpec/`, with `ApcOptimizer/VmSpec.lean` as the aggregator
+(`ApcOptimizer.lean` imports only that). Builds clean (`lake build`, zero warnings) and
+`Scripts/check-proof-integrity.sh` passes; the soundness theorems rest on the three standard
+axioms. Layout:
+
+| file | contents | audited? |
+| --- | --- | --- |
+| `Basic.lean` | `HostChip`, `Host`, `Vm`, `VmAssignment`, `VmSat`, `CanProduce`, `VmSoundReplacement`/`VmCompleteReplacement`/`VmEquivalent` — the spec, definitions only | yes |
+| `Legal.lean` | `Circuit.legalGuest` — what a VM requires of a guest chip (a *hypothesis*, so the risk is vacuity) | yes |
+| `OpenVm.lean` | `openVmHost` and its nine host chips, plus `Circuit.advancesClock` | yes |
+| `Theorems.lean` | the VM-level theorems; statements only, each proved by one-line delegation | yes |
+| `Audit/OpenVmLegalAudit.lean` | real OpenVM circuit shapes checked against the audited hypotheses | yes (audits the audit surface) |
+| `Audit/SendOnlyPolarity.lean` | decidable syntactic checker for two of `legalGuest`'s clauses | yes (audits the audit surface) |
+| `Audit/LegalityPreservation.lean` | formal counterexample: soundness does not imply `PreservesLegality` | yes (audits the audit surface) |
+| `Implementation/Rank.lean` | `RankModel` — the ordering the induction descends on; deliberately not a `Host` field | no |
+| `Implementation/Counting.lean` | the honest ℕ counts (`countAt`, `uniformAt`) that keep balancing from wrapping `ZMod p` | no |
+| `Implementation/Realizes.lean` | `Host.realizes`, `Host.pinsRanks`, `forcesAccepts_of_hostSound` | no |
+| `Implementation/Connection.lean` | `soundWitness`, `vmSoundReplacement_cons`, and the assembly | no |
+| `Implementation/OpenVmConnection.lean` | every host-side condition discharged for `openVmHost` | no |
+| `Implementation/Chain.lean` | `VmChain.Chain` — balanced arcs on a `ZMod p` clock, and the walk that orders them | no |
+| `Implementation/OpenVmChain.lean` | that walk applied to the execution bridge: `openVmHost_pinsRanks` | no |
+| `Implementation/Validation.lean` | sanity theorems: instance order is invisible, the guest-chip list is a *set*, `VmSoundReplacement` is a preorder | no |
+
+The audit boundary is the directory: everything directly under `VmSpec/` is audited, nothing under
+`VmSpec/Implementation/` is — mirroring `AGENTS.md`'s rule for `ApcOptimizer/Implementation/`. There
+is no leak: every hypothesis of `openVm_vmSoundReplacement` is expressed in audited terms.
+
+Full current content of `Basic.lean` is reproduced verbatim at the bottom of this doc in case the
+working-tree copy doesn't make it across machines.
+
+The sections below are a chronological log and mostly predate the folder split, so they name files
+by their old paths (`VmSpec.lean`, `VmSpecConnection.lean`, …); the table above is the map.
 
 ## Design decisions made so far, with rationale
 
@@ -426,11 +453,10 @@ net, not what that net is, and is not `singleton`.
 file imports `Mathlib.Tactic.LinearCombination` (as `OptimizerPasses/DegenRange.lean` already
 does). Reindexing `Fin G.length → Fin G'.length` uses `Fintype.sum_equiv (finCongr hlen.symm)`;
 `(finCongr h) t = Fin.cast h t` holds by `rfl`, which keeps the `show` steps working.
-`HostLegal`/`hostNet`/`guestNet` restate pieces of `VmSpec.lean` over the host assignment alone
-so the conditions can be stated without a `Vm` in scope — each is defeq to its `VmSpec.lean`
-counterpart (`hostLegal_of_satisfiesHost` and `netBus_apply` are both proved by `id`/`rfl`).
-All nine theorems went into `Scripts/unused-theorems.txt`'s `[ignore]`, same rationale as the
-`VmSpec.lean` entries.
+The `Host` conditions have to be stated without a `Vm` in scope, so they quantify over a bare
+`HostAssignment` (see the simplification-pass section below, which moved that vocabulary into
+`VmSpec.lean`). All the theorems went into `Scripts/unused-theorems.txt`'s `[ignore]`, same
+rationale as the `VmSpec.lean` entries.
 
 ## Reading the manuscript's `bus_int.tex` — what it settled, and one gap it has
 
@@ -546,24 +572,709 @@ chip types, which simply get an empty instance list).
 
 Needed `import Mathlib.Algebra.BigOperators.Fin` in `VmSpec.lean` for `List.sum_ofFn`.
 
+## Auditing the soundness theorem's hypotheses — one was wrong
+
+Review of `canProduce_of_isSoundReplacementOf`'s hypotheses, and what came of each.
+
+**`hAccepts` was already discharged** for OpenVM. Kept, but the theorem now takes the more
+primitive `Host.sinksAreTables` and derives `forcesAccepts` internally, so the signature shows the
+condition that actually has to be checked.
+
+**`hAbsorbs` is necessary, not eliminable.** Counterexample: a host with no lookup sinks. Let `G`
+contain a chip with a range check and `G'` be the same chip without it — legal under
+`isSoundReplacementOf`, since `sideEffects` is stateful-only. `G'` has satisfying assignments but
+`G`'s range-check message has nothing to balance against, so `CanProduce ⟨host, G⟩` is empty and
+the theorem is false without it.
+
+**`hLegal'` split into a legitimate half and a wrong one.**
+
+`statelessSendOnly` is fine — the manuscript's `eq:legal:stateless:mult`, of the acceptable
+"algebraic constraints imply X" shape, and not transportable across `isSoundReplacementOf`.
+
+`statefulAccepts` was **false for realistic chips**. OpenVM's memory `accepts` constrains
+*receives* (a received byte-checked word must be byte-valued), and a chip that reads memory does
+not constrain the value it finds there. Assuming it per-chip would have made the theorem vacuous
+on real input. It is exactly why the manuscript *derives* `eq:legal:recv_byte` from balancing.
+
+### What replaced it
+
+Per chip, both of the accepted shape: `Circuit.statefulPolarity` (stateful multiplicities are
+`0`/`±1`, `eq:legal:stateful:mult`) and `Circuit.statefulSendsMaintain` (what a chip *sends*
+maintains the bus invariants, `eq:legal:stateful:send_byte`). The receive side is now **derived**
+(`maintains_of_stateful_active`): if nothing carrying a payload maintained the invariants then no
+guest sent it and no host chip touched it, leaving a pile of receives that cannot balance. Same
+shape as the stateless induction, with `v = -1` instead of `v = 1` — so the counting machinery was
+generalized from "sums of `0`/`1`" to "sums of `0`/`v`" (`sum_eq_countP_mul`,
+`guestNet_ne_zero_of_uniform`), and the trace budget is what rules out `p` receives summing away.
+
+Linking the two is `BusSemantics.statefulAcceptsOfMaintains` — acceptance on a stateful bus
+depends only on the payload and follows from the invariants any carrier of it maintains. Proved
+for `openVmBusSemantics`.
+
+## Legality moved onto the `Host`
+
+`Host` gained a `legalGuest : Circuit p → Prop` field and `VmSat` a `Vm.guestsLegal` conjunct.
+The predicates themselves live in their own file, `ApcOptimizer/VmSpecLegal.lean`, because both
+`VmSpecOpenVm.lean` (which instantiates the field) and `VmSpecConnection.lean` (which consumes
+them) need them.
+
+The payoff is not cosmetic: soundness now needs legality only of the chips the optimizer was
+**given**. A run of the optimized chips already witnesses their own legality through `VmSat`, so
+`hLegal' : ∀ t, (G'.get t).legalGuest bs` — an assumption about the optimizer's *output* — is
+gone. An optimizer that emits an illegal chip makes `CanProduce` empty for its output, which
+`VmCompleteReplacement` reports as a failure instead of assuming it away.
+
+## `VmEquivalent` split
+
+`VmSoundReplacement` (the optimized chips can produce nothing new) and `VmCompleteReplacement`
+(they lose nothing), with `VmEquivalent` their conjunction and `vmEquivalent_iff` recovering the
+old `↔` form.
+
+## OpenVM-specific soundness
+
+`openVm_canProduce_of_isSoundReplacementOf` states soundness for `openVmHost` with every host-side
+condition discharged except two: `Host.statefulChipsMaintain` and `Host.absorbsStateless`. Also
+proved along the way: `openVmBusSemantics_statefulAcceptsOfMaintains`, and
+`openVmHost_legalGuest_unpack` (which is `id`, since the field is *defined* as
+`Circuit.legalGuest`).
+
+To make `statefulChipsMaintain` provable the host chips were strengthened: memory finalization and
+the input chip's old-word reads now require byte-valued data, and `OutputRead`/`InputRead` carry
+byte constraints. That is the manuscript's `eq:legal:recv_byte` asserted of the host's own fixed
+furniture — inspectable once, and not an assumption about anything the optimizer produces.
+`InputRead` additionally asks `ptr`/`count` to be bytes, which is *not* faithful: this draft
+stores a whole word in one limb, where real OpenVM spreads a 32-bit register over four byte
+limbs. Modelling that properly would remove the constraint.
+
+## Simplification pass — algebraic satisfiability, and a named assignment vocabulary
+
+Four duplications were collapsed; nothing about what is proved changed.
+
+**`Circuit.satisfiesAlgebraic`** (`Spec.lean`) is the algebraic half of `Circuit.satisfies`, now
+factored out of it. The predicate `∀ c ∈ algebraicConstraints, c.eval asg = 0` was written out
+five times — once in `Circuit.satisfies`, once in `VmAssignment.satisfiesGuest`, and once in each
+of the three legality clauses. Putting it in `Spec.lean` rather than `VmSpec.lean` is what makes
+the two vocabularies literally the same predicate instead of two defeq ones. It cost exactly one
+edit in the implementation tree: `OptimizerPasses/Bridge.lean`'s `decodeCS_satisfies` needed
+`Circuit.satisfiesAlgebraic` added to a `simp only` list.
+
+**`GuestAssignment` / `HostAssignment`** (`VmSpec.lean`) name the two halves of a `VmAssignment`,
+with `.net`, `.satisfiesAlgebraic`/`.legal`, and `.instanceCount` on them. `VmSpecConnection.lean`
+had been restating `HostLegal`/`hostNet`/`guestNet` locally, because the `Host` conditions must be
+stated without a `Vm` in scope; now they use the real definitions, and the defeq bridges
+(`hostLegal_of_satisfiesHost`) are gone. `VmAssignment.satisfiesGuest`/`satisfiesHost`/
+`withinBudget` became one-line projections.
+
+**`Circuit.algebraicallyForces`** (`VmSpecLegal.lean`) is the shape every legality clause shares:
+"the chip's algebraic constraints force `P` on every message it writes to a bus of this
+statefulness". The three clauses are now one-liners differing only in the statefulness bit and
+`P`, which is exactly what an auditor wants to compare.
+
+**`exists_instance_of_sum_ne_zero`** replaces the two identical `exists_instance_of_*Net_ne_zero`
+proofs, which now derive from it in one line each.
+
+**`Host.realizes bs`** (`VmSpecConnection.lean`) bundles the five host-side hypotheses —
+`legalGuest` unpacking, `sinksAreTables`, `statefulChipsMaintain`, `statefulAcceptsOfMaintains`,
+`absorbsStateless` — into one structure. They all say the same kind of thing: `Spec.lean` treats
+`accepts`/`maintainsInvariants` as opaque per-message predicates, and these are what makes a
+concrete VM's chips implement them. Since no field mentions a guest circuit, `Host.realizes` is
+checkable once per VM and reusable across every optimizer run, which is what
+`openVmHost_realizes` does: it discharges three of the five for `openVmHost` and takes the other
+two as arguments, leaving `openVm_vmSoundReplacement_of_isSoundReplacementOf` a one-liner.
+
+The internal lemmas (`maintains_of_stateful_active`, `forcesAccepts_of_hostSound`) deliberately
+still take the individual fields rather than the bundle, so which condition carries which step of
+the argument stays visible in their signatures.
+
+## Both `openVmHost` conditions discharged — the OpenVM soundness theorem is VM-assumption-free
+
+`openVmHost_statefulChipsMaintain` and `openVmHost_absorbsStateless` are proved, so
+`openVmHost_realizes` now takes no arguments and
+`openVm_vmSoundReplacement_of_isSoundReplacementOf` assumes **nothing about the VM** — only about
+the optimization (`hlen`, `hLegal` on the input chips, `hSize'`/`hBudget`, `hSound`).
+
+**`statefulChipsMaintain`** is the eight-way split that was predicted. The four lookup chips pin
+their bus id to a stateless bus, so they cannot touch a stateful message at all — vacuous. The
+four memory chips each supply a witness through `memory_maintains` (multiplicity `1` satisfies the
+polarity clause; the byte clause is the hypothesis), and the byte facts come from the predicates
+`VmSpecOpenVm.lean` states: all-zero words for initialization, the chip's own byte requirement for
+finalization, and `OutputRead.interactions_data`/`InputRead.interactions_data` for the pinned
+input/output witnesses. The one wrinkle: `InputRead`'s old-word payload is
+`[2, ptr+i] ++ old.toList ++ [0]`, and `memoryPayload?` will not reduce until `old.toList` is a
+syntactic cons chain, so the proof destructures the 4-vector by length first.
+
+**`absorbsStateless`** goes as sketched. `defaultBusMap_stateless` inverts the bus map — a legal
+`δ` is stateless *and* `accepts`-supported, and `accepts` is `False` on an unknown bus, so `δ`'s
+support lands in `{2,3,6,7}`. Each lookup chip then absorbs its own slice,
+`fun m => if m.1 = b then δ m else 0`, in one appended instance: legal because the chip's
+predicate is exactly `OpenVM.accepts`'s case for that bus (the same equivalence
+`openVmHost_sinksAreTables` uses, read in the other direction) and because no lookup chip is
+`HostChip.singleton`. The net works out because the four bus ids are distinct, so at a message
+with `δ m ≠ 0` exactly one indicator fires. Memory, input and output chips are untouched, which is
+what makes the input/output preservation clauses `rfl`.
+
+## Registers are four byte limbs now — the last unfaithful constraint is gone
+
+`InputRead` used to store a whole register in one limb and ask `isByte` of it, which conflated a
+32-bit register with a byte and silently capped an input chunk at 255 words. Fixed on the audited
+surface (`VmSpecOpenVm.lean`):
+
+* new `wordValue : Vector (ZMod p) 4 → ZMod p`, little-endian base-256 — how OpenVM spreads a
+  32-bit value across `MemoryPayload.data`;
+* `InputRead.ptr`/`count : ZMod p` became `ptrLimbs`/`countLimbs : Vector (ZMod p) 4`, with
+  `InputRead.ptr`/`InputRead.count` now *derived* as `wordValue` of the limbs, so every use site
+  reads the same;
+* `ptrIsByte`/`countIsByte` (the unfaithful pair) became `ptrLimbsAreBytes`/`countLimbsAreBytes`,
+  which is the ordinary memory-word discipline every other access already carries;
+* `InputRead.interactions` peeks `[1, reg] ++ limbs.toList ++ [0]` instead of putting the whole
+  value in the low limb.
+
+`bytesLen`/`oldWordsLen` are now against `(wordValue countLimbs).val`, so a chunk may be up to
+`2^32-1` words rather than 255.
+
+On the connection side this made the register payloads the same shape as the overwritten-cell
+payloads, so `memoryPayload?_word` (the data limbs of `[as, ptr] ++ w.toList ++ [ts]` are exactly
+`w`'s entries) now covers all three, and `InputRead.interactions_data` shrank accordingly.
+
+Still a modelling choice, not a distortion: a *datum* (an input byte, an output word) occupies one
+word's low limb with the rest zeroed, rather than four data being packed per word. And
+`OutputRead.wordsAreBytes` is unchanged — AS 3 is not byte-checked by `maintainsInvariants`, so
+that field is a deliberate restriction of this draft's output model, not something OpenVM forces.
+
+## Split into a folder; one substitution at a time
+
+Two structural changes, both user-requested.
+
+**Folder.** The five `VmSpec*.lean` files became the eight-file `ApcOptimizer/VmSpec/` above. Two
+splits were more than filing: the spec-validation theorems came out of `VmSpec.lean` into
+`Validation.lean`, leaving `Basic.lean` as definitions only; and the old `VmSpecConnection.lean`
+(574 lines) split three ways along its actual seams — counting/anti-wraparound, what a host must
+be, and the replacement argument itself.
+
+**One substitution at a time.** The old `vmSoundReplacement_of_isSoundReplacementOf` replaced the
+whole list in one go, with `Fin.cast`/`Fintype.sum_equiv` reindexing throughout. Now:
+
+* `vmSoundReplacement_cons` — replace the *head* chip, leave the rest of the VM alone. Sums split
+  by `Fin.sum_univ_succ` (`guestNet_cons`, `guestInstanceCount_cons`), and the tail terms are
+  literally unchanged, so the reindexing is gone.
+* `vmSoundReplacement_append` — the induction. `S` accumulates the chips already replaced, rotated
+  to the *back* of the list, so the next chip to replace is always at the head:
+  `VmSoundReplacement host (T ++ S) (S ++ T')`, peeling `T = c :: U`. One `vmSoundReplacement_cons`
+  step, one rotation, recurse. This is where `Validation.lean`'s "the guest-chip list is a set"
+  becomes load-bearing rather than decorative — the rotation is free precisely because of it, via
+  `VmSoundReplacement.of_perm`, and `VmSoundReplacement.trans` chains the steps.
+* `vmSoundReplacement_of_forall₂` — the headline, now stated with
+  `List.Forall₂ (fun c c' => c'.isSoundReplacementOf c bs) G G'` instead of a length equation plus
+  an index cast.
+
+**One hypothesis got stronger, deliberately.** The old theorem needed the interaction-count bound
+`L` only on `G'`, because `Host.forcesAccepts` was applied once, to the optimized list. The
+intermediate lists of the induction mix chips from both, so the bound is now
+`∀ c ∈ G ++ G', c.busInteractions.length ≤ L`. In practice this is *weaker* to check: the optimizer
+only removes interactions, so bounding the input bounds the output. But it is a real change to the
+statement.
+
+`Host.forcesAccepts`, `maintains_of_stateful_active` and `guestCount_le`/`guestNet_ne_zero_of_uniform`
+took the size bound as `∀ t : Fin G.length, (G.get t)…`; they now take `∀ c ∈ G, …` throughout.
+
+**Not done: moving `Spec.lean` out of the audited surface.** The suggestion was that the chip-level
+spec and the bus semantics no longer need auditing. Not yet, and the criterion is precise: there is
+still no theorem connecting `openVmOptimizer` to `VmSoundReplacement`, so `refines` /
+`isSoundReplacementOf` remain the statement an auditor actually reads. Once such a theorem exists,
+`refines`, `isSoundReplacementOf`, `isCompleteReplacementOf`, `admissible` and `guaranteesInvariants`
+do become internal — but `OpenVmSemantics.lean` does *not*, because `openVmBusSemantics` still
+appears in the VM-level statement itself, inside `openVmHost`'s chip predicates and inside the
+`legalGuest` hypothesis on the input. So the eventual split of `Spec.lean` is datatypes (audited)
+vs. the chip-level relation (internal), not "all of it becomes internal".
+
+## AUDIT: `Circuit.legalGuest` is too strong for OpenVM
+
+Checked the three legality clauses against OpenVM and against a real powdr export
+(`Benchmarks/OpenVM/openvm-eth/apc_001_pc0x4ecc54.json.gz`).
+
+**Clauses 1 and 2 hold, and are genuinely algebraically forced.** In the export the lookup and
+memory multiplicities are `is_valid`-style sums of opcode flags, and the export carries both
+`opcode_add_flag*(opcode_add_flag-1)` and `(Σ flags)*((Σ flags)-1)` as algebraic constraints. So
+`statelessSendOnly` (0/1 on lookups) and `statefulPolarity` (0/±1 on memory and the execution
+bridge) are met by `Circuit.satisfiesAlgebraic` alone, as the definition demands.
+
+**Clause 3, `statefulSendsMaintain`, is false.** Every OpenVM memory access is a *read-echo*:
+receive `[as, ptr, d₀..d₃, prev_ts]` with multiplicity `-1`, then send `[as, ptr, d₀..d₃, ts]` with
+multiplicity `+1` — the *same* data limbs. For a write the sent limbs are new and range-checked;
+for a read they are whatever was in memory, and the chip constrains them not at all. But
+`statefulSendsMaintain` demands `maintainsInvariants` — hence byte-valued limbs — of every memory
+message with multiplicity `1`, from the algebraic constraints alone.
+
+Measured on the export: of 11 memory sends, **2 carry data limbs that appear in no lookup anywhere
+in the circuit** (`a__*_3`, `b__*_3` — a register read echoed straight back). Their byte-ness is
+inherited from whoever wrote the register, and nothing in the circuit re-establishes it.
+
+Consequence: `openVmHost` rejects realistic guest chips, `CanProduce` is empty for them, and
+`openVm_vmSoundReplacement` is vacuously true where it matters.
+
+**Why the obvious fix is not enough.** The natural repair is to let `algebraicallyForces` also
+assume the chip's *stateless* interactions are accepted — non-circular, because
+`forcesAccepts_of_hostSound`'s stateless branch uses only `sendOnly` + `sinksAreTables` + balance
+and never touches the stateful clauses, so stateless acceptance can be derived first. That fixes
+the *computed*-write case (an ALU output is byte-checked by `bitwise_lookup`). It does **not** fix
+the read-echo, which has no stateless interaction at all.
+
+Conditioning on the chip's own stateful *receives* would make the clause true, but that is exactly
+what `maintains_of_stateful_active` is trying to derive — genuinely circular. And balancing alone
+cannot break the cycle: two chips can each receive a non-byte word and send another one, balancing
+perfectly. What rules that out in reality is the strictly increasing timestamp, which order-blind
+`VmSat` does not see. So the byte invariant is not derivable here; it has to be assumed, in the
+same shape the README already assumes it chip-level ("every memory writer in the deployed system is
+byte-range-checked").
+
+Recorded as machine-checked Lean in `ApcOptimizer/VmSpec/OpenVmLegalAudit.lean`: `readEchoChip`
+(one memory access, no algebraic constraints, no lookups) satisfies clauses 1 and 2, fails clause 3
+(`readEchoChip_not_statefulSendsMaintain`, for any `p > 256`), and hence makes the whole VM produce
+nothing (`not_canProduce_of_readEcho`).
+
+**Two smaller findings.**
+
+* The real export's bus map is *not* `defaultBusMap`: `TupleRangeChecker` sits at bus **10** with
+  sizes `[256, 8192]`, not bus 7 with `[256, 2048]`. `openVmHost` is hard-wired to `defaultBusMap`,
+  and `openVmHost_absorbsStateless` depends on `defaultBusMap_stateless` pinning the stateless ids
+  to `{2,3,6,7}`. The chip-level optimizer is parameterized by the parsed bus map, so only the
+  VM-level draft is affected — but it should be parameterized too.
+* `memoryPayload?` matches any payload of length **≥ 6** (`_timestamp` binds the tail). A memory
+  access with a block size other than 4 either parses with the wrong limbs or, at length < 6,
+  returns `none` and makes the byte clause vacuous. Fine for RV32 APCs (block size is always 4);
+  a gap if a guest ever touches the native address space.
+
+## New validation theorems
+
+In `Validation.lean`: `VmEquivalent` is an equivalence relation (`refl`/`symm`/`trans`);
+`vmCompleteReplacement_iff` (completeness is soundness the other way round); and the pair that
+frames the audit finding —
+
+* `not_canProduce_of_illegal`: a guest list containing an illegal chip produces *nothing*. This is
+  what makes checking legality inside `VmSat` safe rather than assuming it.
+* `canProduce_idle`: **the spec is not vacuous.** Any VM whose singleton host chips can sit idle
+  has at least the empty run, so `VmSoundReplacement` is not holding for free. Without it, the
+  audit finding above would be indistinguishable from a spec that is simply empty.
+
+## Degree bounds at VM level
+
+`Host` gained a `degreeBound : DegreeBound` field, sitting next to `maxInstances` — both are
+capacity limits of the proving backend, not of any one chip. `VmSat` gained a matching conjunct,
+`Vm.guestsWithinDegree` (`∀ c ∈ guestChips, c.withinDegree host.degreeBound`), placed alongside
+`Vm.guestsLegal` and for the same reason: a chip the backend cannot prove has no runs, so it
+belongs in the definition of a run rather than in a hypothesis.
+
+That placement is the payoff. `Spec.lean` has to bolt `optimizerRespectsDegreeBound` onto
+`Optimizer.isCorrect` as a separate conjunct, because a single `Circuit`'s `refines` has no notion
+of the circuit being *runnable*. At VM level it is a consequence —
+`guestsWithinDegree_of_vmCompleteReplacement`: if `G'` is a complete replacement for `G` and `G`
+can produce anything at all, then `G'` is within the bound. `canProduce_idle` supplies the "can
+produce anything at all". No extra conjunct on the optimizer.
+
+Threading: one new hypothesis (`c.withinDegree host.degreeBound` for the chip being *restored*) on
+`vmSoundReplacement_cons`, and its `∀ c ∈ G` form on `vmSoundReplacement_append`,
+`vmSoundReplacement_of_forall₂`, `openVm_vmSoundReplacement`, `canProduce_of_subset` and
+`canProduce_idle` — exactly parallel to the existing legality hypothesis, and required only of the
+optimizer's *input*. `openVmHost` uses OpenVM's `defaultDegreeBound`. New in `Validation.lean`:
+`guestsWithinDegree_of_canProduce` and `not_canProduce_of_overDegree`.
+
+Note the `VmSat` conjunct chain got one longer: the last component is now
+`guestsLegal ∧ guestsWithinDegree`, so `hsat.2.2.2.2` became `hsat.2.2.2.2.1`.
+
+## The legalGuest fix, phase 1: a rank on stateful state
+
+`Host` gained `statefulRank : BusMessage p → ℕ` (for OpenVM, `openVmRank` = the memory record's
+timestamp, `0` off the memory bus), and `Circuit.statefulSendsMaintain` gained a hypothesis:
+
+> a stateful **send** maintains the invariants, provided everything the same instance touches at a
+> strictly lower rank already does (`Circuit.lowerRanksMaintain`).
+
+`maintains_of_stateful_active` is now a strong induction on that rank, which is what makes the
+whole thing work: balance alone provably cannot establish the byte invariant, since two chips can
+each receive a bad word and send another one, cancelling exactly. The rank kills that — one of the
+two would have to send below the rank it received at.
+
+Rank is a **natural number**, deliberately. `<` on `ℕ` is well-founded, so the induction has
+something to descend on, and all the wrap-sensitivity of "the timestamp went up" lands in the
+per-chip check of the legality clause rather than in the spec.
+
+`OpenVmLegalAudit.lean` flipped from a negative result to a mixed one:
+
+* `readEchoChip_legalGuest` — the read-echo shape is legal **when `t₀.val < t₁.val`**.
+* `readEchoChip_not_legalGuest_of_stale` — and illegal when it isn't. The timestamp condition is
+  load-bearing, not decoration.
+* `freshWriteChip_not_legalGuest` — a value justified by a bitwise-lookup range check is *still*
+  rejected. This is the marker for phase 2.
+
+## Phase 2: lookups, and legalGuest is now true of OpenVM
+
+`Circuit.statefulSendsMaintain` gained its second hypothesis, `Circuit.statelessAccepted` — the
+chip's own lookups hold. `statelessAccepted_of_sinks` (`Realizes.lean`) derives it for every guest
+instance from `Circuit.statelessSendOnly`, `Host.sinksAreTables`, balance and the trace budget,
+with no stateful clause taking part, so there is no circularity. It is the manuscript's stateless
+`bus_int.tex` induction, now factored out of `forcesAccepts_of_hostSound` and reused in
+`maintains_of_stateful_active` (which gained `hsinks`).
+
+The two hypotheses match the two shapes an OpenVM memory send has, and the audit file checks both:
+
+* `readEchoChip_legalGuest` — the echo, carried by the rank hypothesis, legal iff `t₀.val < t₁.val`
+  (at this stage that inequality was a hypothesis; phase 3 derives it).
+* `freshWriteChip_legalGuest` — the computed write, carried by the lookup hypothesis. It has no
+  stateful traffic below its send's rank at all.
+
+So the finding that opened this thread is discharged: `Circuit.legalGuest` now holds of the shapes
+real OpenVM circuits have, and the memory byte invariant is *derived*, not assumed.
+
+Phase 2 cost exactly what phase 1 predicted — one new lemma, one extra hypothesis on
+`maintains_of_stateful_active`, one line at the `sendsMaintain` application site. Weakening a
+definition that appears only *negatively* invalidated nothing.
+
+## Phase 3: what OpenVM actually checks about timestamps
+
+The read-echo's `t₀.val < t₁.val` was a hypothesis, and the question was whether a real chip can
+discharge it. **It cannot, as stated.** Reading `openvm/crates/circuits/primitives/src/
+assert_less_than/mod.rs` and `crates/vm/src/system/memory/offline_checker/bridge.rs`:
+
+`MemoryOfflineChecker::eval_timestamps` attaches an `AssertLtSubAir` to every memory access, with
+`max_bits = MemoryConfig::timestamp_max_bits` (default and hard cap `29`). That sub-AIR does *not*
+constrain `prev_timestamp < timestamp`. It constrains
+
+```
+enabled * (timestamp - prev_timestamp - 1) = enabled * (lo + 2^17 * hi)
+```
+
+with `lo`, `hi` range-checked to 17 and 12 bits on the variable range checker. So all a chip
+forces is that the *difference* is small. OpenVM's own comment states the missing premise:
+
+> Soundness requirement: max_bits <= 29. max_bits > 29 doesn't work: the approach is to check that
+> y-x-1 is non-negative. For a field with prime modular, this is equivalent to checking that
+> y-x-1 is in the range [0, 2^max_bits - 1]. However, for max_bits > 29, if y is small enough and
+> x is large enough, then y-x-1 is negative but can still be in the range due to the field size
+> not being big enough.
+
+i.e. bounded difference orders the two timestamps only while both are already below `2^max_bits`.
+That premise is global — OpenVM documents it on `MemoryConfig` ("all timestamps must be in the
+range `[0, 2^timestamp_max_bits)`") and enforces it with the connector chip, which range-checks a
+segment's final timestamp. No single chip can establish it.
+
+### What changed
+
+* **`Host.rankBound : ℕ`**, alongside `maxInstances` and `degreeBound` — the VM's rank window.
+  `openVmRankBound = 2 ^ openVmTimestampBits = 2 ^ 29`.
+* **`VmAssignment.withinRankBound`**, a new `VmSat` conjunct: every guest instance's traffic
+  satisfies `Circuit.ranksBounded`.
+* **`Circuit.ranksBounded`** is stated on `Circuit.allEffects` under a `rank m ≠ 0` guard, *not*
+  per bus interaction. That is what makes it survive an optimization: `isSoundReplacementOf`
+  preserves `Circuit.sideEffects`, which agrees with `allEffects` on exactly the stateful buses,
+  and `Host.realizes.rankStateless` (a new field) says a rank sees no other bus. A per-interaction
+  version would not transfer — two interactions can cancel.
+* **`Circuit.statefulSendsMaintain` gained `ranksBounded` as a third hypothesis**, so
+  `Circuit.legalGuest` now takes a `rankBound` too.
+* **`VmSat` is now a structure** (7 fields), since `.2.2.2.2.2`-style projections do not survive
+  adding a conjunct. Field names match the definitions: `satisfiesGuest`, `satisfiesHost`,
+  `balances`, `withinBudget`, `withinRankBound`, `guestsLegal`, `guestsWithinDegree`.
+
+### What the audit file now proves
+
+`readEchoChip` carries the real gadget — `assertLtLoLookup` (17 bits), `assertLtHiLookup`
+(12 bits), and `assertLtConstraint` (`t₁ - t₀ - 1 = lo + 2^17 * hi`) — and
+`readEchoChip_timestamps_increase` *derives* `t₀.val < t₁.val` from: the two range checks (via
+`statelessAccepted`), the constraint (via `satisfiesAlgebraic`), and `t₀.val < 2^29` (via
+`ranksBounded`). All three of `statefulSendsMaintain`'s hypotheses are consumed, each for a
+different reason. `readEchoChip_legalGuest` is now unconditional, on `hp : 2 ^ 30 < p` — the
+arithmetic needs `t₀.val + 1 + lo.val + 2^17 * hi.val < p`, and that sum is `< 2^30`, which is
+exactly why 29 is OpenVM's cap for a 31-bit field.
+
+The degenerate case is handled without the rank bound: if `t₀ = t₁` the receive and send cancel,
+so `ranksBounded` says nothing — but then the constraint reads `-1 = lo + 2^17 * hi`, and
+`(-1).val = p - 1 > 2^29` contradicts the limb bounds directly.
+
+`staleEchoChip_not_legalGuest` replaces the old `readEchoChip_not_legalGuest_of_stale`: strip the
+gadget out, echo the word back at the timestamp it was found at, and the chip is rejected. So the
+gadget is load-bearing, not decorative.
+
+### The remaining assumption, stated plainly
+
+`VmAssignment.withinRankBound` is an assumption about the *run*, discharged in reality by OpenVM's
+connector chip, which this spec does not model. It sits next to `VmAssignment.withinBudget`, which
+has the same character (a "nothing wraps `ZMod p`" condition the VM's configuration guarantees).
+Modelling the connector — and the execution-bridge chain that propagates its bound backwards —
+would discharge it, and is the natural successor to this work.
+
+## Phase 4: `VmSat` is now only about runs
+
+**User's criterion:** `VmSat` should hold of exactly what would pass OpenVM's actual constraints.
+`Vm.guestsLegal` failed it — `Circuit.legalGuest` quantifies over all assignments of a circuit,
+which no AIR evaluates, so a real OpenVM run *can* violate it. Folding it into satisfaction
+silently dropped those runs from `CanProduce`, which is a soundness hole in the modelling: the
+theorem said nothing about the very runs an illegal optimizer output would produce.
+`Vm.guestsWithinDegree` went with it — a degree bound is a setup-time property of a circuit, not
+of a run.
+
+`VmSat` is now five fields, all properties of the assignment: `satisfiesGuest`, `satisfiesHost`,
+`balances`, `withinBudget`, `withinRankBound`.
+
+### Where the two requirements went
+
+Both became preservation obligations in `Basic.lean`, stated separately from the Sat semantics:
+
+```lean
+def PreservesLegality (host : Host p) (guestChips guestChips' : List (Circuit p)) : Prop :=
+  (∀ c ∈ guestChips, host.legalGuest c) → ∀ c ∈ guestChips', host.legalGuest c
+
+def PreservesDegree (host : Host p) (guestChips guestChips' : List (Circuit p)) : Prop :=
+  (∀ c ∈ guestChips, c.withinDegree host.degreeBound) →
+    ∀ c ∈ guestChips', c.withinDegree host.degreeBound
+```
+
+`PreservesDegree` is entirely decoupled — nothing in the equivalence proof consumes it.
+
+`PreservesLegality` is *not* decoupled, and this is the one thing the change forces into the open:
+`Host.forcesAccepts` runs its balancing argument over the list the VM is actually executing, which
+for a sound replacement is the **optimized** one. So legality of `G'` is genuinely needed, and
+`vmSoundReplacement_of_forall₂` now takes `hLegal` on `G` *plus* `hPreserve`. Previously that need
+was met by `VmSat` — i.e. assumed away.
+
+### Consequences
+
+* `Host.forcesAccepts` gained a `∀ c ∈ G, host.legalGuest c` premise; `statelessAccepted_of_sinks`
+  and `maintains_of_stateful_active` take it as `hGuests` instead of reading `hsat.guestsLegal`.
+* `vmSoundReplacement_cons` no longer asks anything of `c` — not legality, not degree. `VmSat`
+  carries no circuit-level property, so the restored run has nothing to re-establish.
+* `vmSoundReplacement_append` threads legality exactly like `hSize`: on `T ++ T'` and on `S`.
+* Deleted: `guestsLegal_of_canProduce`, `guestsWithinDegree_of_canProduce`,
+  `not_canProduce_of_illegal`, `not_canProduce_of_overDegree`, and
+  `guestsWithinDegree_of_vmCompleteReplacement`. The last was the nicest casualty — "completeness
+  implies the degree bound for free" was only true because the bound was in `VmSat`.
+* `canProduce_of_subset` and `canProduce_idle` lost their legality/degree hypotheses.
+
+## Phase 5: `withinRankBound` out too — the criterion is *directly checked*
+
+The criterion is sharper than "true of every real run": `VmSat` may hold only what an OpenVM AIR
+checks **directly**. `withinRankBound` fails that, and reading `VmConnectorAir::eval` settles it —
+the connector's trace is two rows, `begin` (asserted `= 1`) and `end`, and it range-checks
+`local.timestamp` on its own rows only. So OpenVM directly constrains *two* timestamps per
+segment, plus, per memory access, only the bounded difference. Nothing constrains an intermediate
+or per-record timestamp. "Every timestamp is in range" is a multi-chip consequence — exactly the
+kind of thing this spec exists to derive.
+
+`VmSat` is now four fields: `satisfiesGuest`, `satisfiesHost`, `balances`, `withinBudget`.
+
+### Where it went
+
+```lean
+def Host.pinsRanks (host : Host p) : Prop :=
+  ∀ (G : List (Circuit p)) (a : VmAssignment p ⟨host, G⟩), VmSat ⟨host, G⟩ a →
+    a.withinRankBound
+```
+
+A claim about the *host*, sibling to `Host.forcesAccepts` — but where `forcesAccepts` is derived
+from `Host.realizes`, this one is **assumed**. `Host.forcesAccepts` gained an `a.withinRankBound`
+premise; `vmSoundReplacement_cons` and its callers thread `hPins`, and
+`openVm_vmSoundReplacement` now carries it as a visible, undischarged hypothesis.
+
+**It is not provable for `openVmHost` as it stands**: the host models neither the connector nor
+the bridge terminator, and none of its eight chips constrains a timestamp — `memoryInitHostChip`
+and `memoryFinalizeHostChip` impose no bound. So the OpenVM soundness theorem is, as of this
+phase, conditional on a hypothesis this development cannot supply. That is strictly better than
+before, when the same gap was hidden inside `VmSat` and invisible in every statement — but it is a
+real debt, and it makes modelling the connector the next thing worth doing rather than a nicety.
+
+### What the change bought back
+
+Taking it out of `VmSat` deleted the machinery that existed only to carry it across a replacement:
+
+* `Circuit.ranksBounded` is now **per bus interaction**, not `allEffects`-with-a-guard. The guard
+  existed so the predicate would survive `Circuit.isSoundReplacementOf`, which preserves only
+  `sideEffects`; with `withinRankBound` out of `VmSat` there is nothing to transfer.
+* `Host.realizes.rankStateless` — deleted, along with `openVmHost_rankStateless`. It existed only
+  to make that transfer go through.
+* The `hranks` block in `vmSoundReplacement_cons` — deleted.
+* `readEchoChip_allEffects_recv` and the `t₀ = t₁` case split in
+  `readEchoChip_timestamps_increase` — deleted. With a per-interaction bound the receive's
+  timestamp is in range because the chip actively receives at it, full stop.
+
+## Phase 6: `Host.pinsRanks` discharged — walking the execution bridge
+
+`openVmHost_pinsRanks` (`Implementation/OpenVmChain.lean`) is proved. The one thing it needs beyond
+what the VM already supplies is an arithmetic budget, which replaced `hPins` in
+`openVm_vmSoundReplacement`:
+
+```lean
+(hWindow : (maxInstances + 1) * (window + 1) < p)
+```
+
+That is exactly the sanctioned kind of assumption: a bound on instance counts depending on the
+window. It says a run of at most `maxInstances` instructions, each advancing the clock by less than
+`window`, cannot wrap `ZMod p`.
+
+### The argument
+
+`Implementation/Chain.lean` states it with no mention of a circuit, a bus or a host. A
+`VmChain.Chain` is a `Fintype` of *arcs*, each consuming a state (`src`) and producing one (`dst`),
+such that
+
+* `balanced` — every state is consumed exactly as often as it is produced (as **ℕ** counts),
+* `advTime` — every arc but one advances a `ZMod p`-valued clock by a natural `adv e`,
+* `advPos` — that advance is positive,
+* `totalLt` — the advances total less than `p`.
+
+The distinguished arc is `conn`. From those four fields:
+
+1. `Chain.exists_succ` — balance makes the successor relation total, so `Chain.succ` exists by
+   choice (it need not be canonical, or injective).
+2. `Chain.no_cycle` — a stretch of the walk returning to its own start, avoiding `conn`, advances
+   the clock by a natural in `[1, p)` while leaving it unchanged. Contradiction.
+3. `Chain.walk_inj` — hence the walk is injective until it meets `conn`, and `Chain.exists_walk_conn`
+   — hence it must meet it, or it would inject `ℕ` into finitely many arcs.
+4. `Chain.time_conn` — balance again, now summed: `∑ time (src e) = ∑ time (dst e)`, which collapses
+   to `time (src conn) = time (dst conn) + total`.
+5. `Chain.arc_position` — combining 3 and 4: every arc's consumed reading is `time (dst conn) + T`
+   for an honest natural `T`, with `T + adv e ≤ total`.
+
+### The instantiation
+
+`OpenVmChain.lean` builds the chain: `BridgeArc gA := Option ((s : Fin G.length) × Fin (gA s).length)`
+— one arc per realized guest instance, plus `none` for the connector.
+
+* `src`/`dst` of a guest arc are the `(pc, t)` it receives and the `(pc', t + d)` it sends, read off
+  a `ClockStep` chosen once per instance from `Circuit.advancesClock`.
+* `src`/`dst` of the connector are `(finalPc, finalTimestamp)` and `(initialPc, 1)`.
+* `balanced` is `VmSat.balances` on bus `0`, upgraded from `ZMod p` to ℕ counts by the budget
+  (`bridge_balanced`); `openVmHost_bridge_isolated` is what says no other host chip is on bus `0`,
+  and `connector_busStateOf` computes the connector's contribution.
+* `time` is `openVmBridgeTimestamp`.
+
+Then `bridge_chain_bound` reads off: each instance's `base` is `((1 + T : ℕ) : ZMod p)` and
+`1 + T + d ≤ finalTimestamp.val`. Since `ConnectorBoundary.finalTimestampBounded` range-checks
+`finalTimestamp.val < 2 ^ 29`, and `Circuit.advancesClock` puts every memory access of the instance
+at `base + δ` with `0 < δ < d`, every memory timestamp in the run is below the window.
+
+### Two things worth remembering
+
+* The `some x` case of `bridge_balanced` needs `p ≠ 2`: an arc that consumed and produced the same
+  state would net both `-1` and `1` there. `bridge_p_large` derives `6 < p` from the presence of a
+  single instance (which forces `1 ≤ maxInstances` and `2 ≤ window`), so no extra hypothesis.
+* `Chain.succ` is *not* assumed injective, and the arcs are not assumed to form one cycle. Coverage
+  comes from walking *forward* from each arc to the connector rather than from decomposing the arc
+  set into cycles, which is why no flow-decomposition machinery is needed.
+
+## Phase 7: audit-surface cleanup, a translation-validation checker, and the legality-preservation
+   question
+
+Independent-session work, requested as a batch: address `Basic.lean`'s inline TODOs, revisit the
+organization of the `L`/`maxInstances`/`window` size-type constraints, build a basic static
+checker for `legalGuest`'s `sendOnly`/`polarity` clauses, and investigate whether soundness implies
+`PreservesLegality`.
+
+**`Basic.lean` TODOs.** `VmAssignment.satisfiesGuest`/`satisfiesHost`/`balances`/`withinBudget`
+were separate one-line defs whose only call sites dotted off a `VmSat` value (never a bare
+`VmAssignment`) — inlined directly into `VmSat`'s field types, a pure removal of dead indirection.
+`GuestAssignment.satisfiesAlgebraic` and `HostAssignment.legal` stayed: both are used directly
+elsewhere. The dead `let vm := { host := vm.host, guestChips := vm.guestChips }` in `CanProduce`
+(an eta-expansion of `vm` itself) is gone. The "tie in substitution theorem" TODO became an
+accurate account of what blocks it (item 2 above) rather than a stale action item. Two purely
+cosmetic-naming TODOs (shorten "assignment"; rename `net`/`netBus`) were resolved by deciding not
+to act — not worth the churn for no semantic gain.
+
+**Size-constraint reorganization.** Tried naming `(maxInstances + 1) * (window + 1) < p` once as
+an `abbrev ClockBudget` (checked empirically first that `abbrev` stays transparent to `omega` and
+to `rw`/`exact`-style unification — a scratch build confirmed it, Lean's tactics unfold
+`@[reducible]` defs) and using it everywhere the formula recurred verbatim
+(`openVm_vmSoundReplacement`'s `hWindow` plus seven lemmas in `OpenVmChain.lean`). Reverted at the
+user's request — `L` was grouped with the other size variables in `openVm_vmSoundReplacement`'s
+binders instead (`{maxInstances ptrReg countReg window L : ℕ}`), and the raw formula stayed spelled
+out everywhere. Also investigated bundling the `L`/`hSize`/`hBudget` triple into a structure and
+concluded it wasn't a net win: `hSize`'s list argument genuinely varies per call site (whole `G`,
+`c' :: R`, `G ++ G'`, a `Finset`-sum sub-`List`, …), so bundling would trade the current direct
+re-application of `hSize` for `.mono`-style projection lemmas at every call site — no shorter, and
+further from the individual proofs that actually need `hSize` alone (e.g. `guestCount_le`).
+
+**`VmSpec/Analysis/` (new folder).** Two files, neither spec nor `Implementation/`:
+
+- `SendOnlyPolarity.lean` — `checkMultiplicities`, a decidable syntactic pass folding each bus
+  interaction's multiplicity to a literal constant (`Expression.foldConst`) and checking it against
+  the legal set for its bus's statefulness. `checkMultiplicities_sound` turns a `true` result into
+  actual `Circuit.statelessSendOnly ∧ Circuit.statefulPolarity`, for any `GuestBusRules` sharing the
+  `isStateful` function checked against. Sound but intentionally incomplete: a bare-variable
+  multiplicity (e.g. a boolean flag range-checked elsewhere) never folds, so a legitimate
+  conditionally-gated send is rejected — recognizing that pattern (matching against a booleanity
+  constraint in `algebraicConstraints`) is a real next tier, not attempted.
+- `LegalityPreservation.lean` — the answer to "does soundness imply `PreservesLegality`?": no,
+  formally. `toyBusSemantics` models a stateless bus whose acceptance never inspects multiplicity
+  (true of every real OpenVM lookup table). `illegalCircuit` replaces a legal chip's constant
+  multiplicity `1` with a wholly free variable; `illegalCircuit_isSoundReplacementOf` shows this is
+  a sound replacement (`sideEffects` never sees a stateless bus; `satisfies` is magnitude-blind
+  too), and `illegalCircuit_not_statelessSendOnly` shows it directly violates `statelessSendOnly`.
+  The mechanism generalizes to `statefulPolarity`/`statefulSendsMaintain` too (splitting one
+  stateful send into two interactions whose multiplicities cancel to the same net) — argued in
+  prose in `agent-docs/legality-preservation.md` rather than formalized a second time, since the
+  construction is the same shape.
+
+Both files needed `import`ing into `VmSpec.lean` to become part of the actual build/audit surface
+and the unused-theorem check's reachable set — a file compiled by `lake build`'s default target
+set but not imported anywhere is invisible to `Scripts/UnusedTheorems.lean`, which only walks from
+`ApcOptimizer`/`Main`'s transitive imports. (Caught this the first time by noticing the check
+still reported the pre-existing ignore count unchanged after adding a new file with new theorems.)
+
+**Where this leaves `PreservesLegality`.** Not a small missing lemma — it needs a genuinely
+separate legality-preservation argument per optimizer pass, parallel to (not derivable from) each
+pass's existing soundness proof. `agent-docs/legality-preservation.md` has the full argument and
+suggests the practical path: most passes either don't touch bus interactions or touch them in
+syntactically multiplicity-preserving ways, so `PreservesLegality` for those should reduce to a
+short corollary plus the `SendOnlyPolarity` checker run on the pass's output, rather than a new
+semantic proof each time.
+
+**Follow-up naming pass.** `ClockBudget` (this phase's abbrev for the window budget) was reverted
+at the user's request — spelled out inline again everywhere. Then, on request, the two remaining
+bare size-type identifiers were renamed for consistency with `maxInstances`: `window` →
+`maxWindow` (`Circuit.advancesClock`, `openVmHost`, and everything downstream) and `L` →
+`maxInteractions` (`Theorems.lean`, `Connection.lean`, `Counting.lean`, `Realizes.lean`). Care was
+needed distinguishing this from the unrelated "rank window" phrase (`RankModel`'s bound, prose
+only, never a bound identifier) scattered through the same files' docstrings — those stayed as
+`window`. Older sections of this log below predate the rename and still say `window`/`L`; that is
+accurate to what the code looked like at the time, not stale.
+
+## Phase 8: `Audit/` folder — auditing the audit surface, in one place
+
+`OpenVmLegalAudit.lean` sat directly under `VmSpec/`, doing the same job as the `Analysis/` folder
+from Phase 7 — evidence that the audited hypotheses are non-vacuous — but under a different label
+("evidence" vs. "a checker's claim, not its implementation") and in a different location, purely
+for historical reasons (it predates `Analysis/`). Merged: `Analysis/` renamed to `Audit/`, and
+`OpenVmLegalAudit.lean` moved in alongside `SendOnlyPolarity.lean` and `LegalityPreservation.lean`.
+All three now share one `VmSpec.lean` doc section ("Audited — files that audit the audit surface")
+and one local `README.md`. No Lean content changed — namespaces live in the files, not the
+directory, so the move is a pure reorganization; `Scripts/unused-theorems.txt`'s fully-qualified
+names are unaffected.
+
 ## Next step on resume
 
 In rough priority order:
 
-1. **`Host.absorbsStateless` for `openVmHost`** — the last hypothesis of
-   `canEffect_of_isSoundReplacementOf` not discharged for a concrete host. Shape and remaining
-   work described in the section above.
-2. **Record the wraparound side condition in the manuscript**, on `eq:stateless_as_pred`. The
+1. **Record the wraparound side condition in the manuscript**, on `eq:stateless_as_pred`. The
    Lean now has the honest version (`VmAssignment.withinBudget` plus `L * maxInstances < p`); the
    prose does not.
-3. **Derive `Circuit.statefulAccepts`** rather than assuming it — the manuscript's
-   `eq:legal:recv_byte` from `eq:legal:stateful:send_byte` plus balancing.
-4. **The completeness half** (`CanEffect host G e → CanEffect host G' e`). Its blocker is
+2. **Wire the VM-level statement to the optimizer.** `openVm_vmSoundReplacement` takes a
+   `List.Forall₂` of per-chip `isSoundReplacementOf`, and `openVmOptimizer_maintainsCorrectness`
+   produces exactly that per chip. What still blocks assembling the two is `PreservesLegality` —
+   confirmed in "Phase 7" *not* derivable from soundness, so this needs each pass to carry its own
+   legality-preservation proof (`agent-docs/legality-preservation.md`), which is real work, not a
+   short step. It is also what would let the VM-level statement seed
+   `Scripts/unused-theorems.txt` (still true — see Phase 7's own ignore-list entries, which had to
+   be added by hand because the folder is not reachable from the correctness roots), and what
+   makes the `Spec.lean` audit-surface question above answerable.
+3. ~~**Model the connector chip and the execution-bridge terminator**, to discharge
+   `Host.pinsRanks`.~~ Done — see "Phase 6".
+4. **Check `Circuit.legalGuest` against a whole exported APC**, not just the isolated shapes in
+   `OpenVmLegalAudit.lean` — an APC has many memory accesses sharing one `from_timestamp`, and
+   `readEchoChip` only exercises one.
+5. **Parameterize `openVmHost` by the bus map** rather than hard-wiring `defaultBusMap`.
+6. **The completeness half** (`CanProduce ⟨host, G⟩ e → CanProduce ⟨host, G'⟩ e`). Its blocker is
    unchanged: `Circuit.isCompleteReplacementOf` is gated on `Circuit.admissible`, a list-order
    property (`admissibleMemoryBus`) that order-blind `VmSat` cannot supply. Either it becomes an
    explicit "real trace" hypothesis, or `MemoryBus.lean` changes.
 
-## Full current content of `ApcOptimizer/VmSpec.lean`
+## Full current content of `ApcOptimizer/VmSpec/Basic.lean`
 
 ```lean
 import ApcOptimizer.Spec
@@ -571,28 +1282,32 @@ import Mathlib.Algebra.BigOperators.Fin
 
 set_option autoImplicit false
 
-/-! `Spec.lean` defines equivalence for a single `Circuit`, with "the rest of the VM" abstracted
-    away as an opaque `BusSemantics` (per-message `accepts`/`admissible`/`maintainsInvariants`
-    predicates).
+/-! VM-level correctness: what it means to replace a *list* of guest chips, run against a fixed
+    host, by another list.
 
-    It's equivalence definition is conditioned on certain VM-level invariants
-    and assumptions.  It is not clear whether those hold.
+    `Spec.lean` defines equivalence for a single `Circuit`, with "the rest of the VM" abstracted
+    away as an opaque `BusSemantics` — per-message `accepts`/`admissible`/`maintainsInvariants`
+    predicates — and conditioned on VM-level invariants it cannot itself justify. This file makes
+    the VM explicit instead: host chips are named, buses balance globally, and the observable is
+    the VM's input/output, so no per-message assumption is needed.
 
-    This file defines equivalence for a *list* of guest chips together in the
-    context of a host.  It's definition omits complex assumptions and
-    invariants.
+    The definition is equi-effectfulness: for every effect one chipset can produce
+    (`CanProduce`), the other can produce it too. Soundness is one direction
+    (`VmSoundReplacement`), completeness the other.
 
-    Our next task is to ensure that if each chip (`Circuit`) in the list is
-    replaced by an equivalent chip, according to the other definition, then this
-    equivalence definition holds.
+    The rest of the folder:
 
-    The basic structure of the definition is equi-effectfulness: for every
-    effect one chipset can produce, the other can produce it too, and vice
-    versa.
-
-    So, we need to define chips, effects, whether a chipset can produce an
-    effect (i.e., whether some assignment to it has that effect).
-    -/
+    * `Validation.lean` — that the definitions here behave: `VmSat` doesn't see instance order,
+      and the guest-chip list is used as a *set*.
+    * `Legal.lean` — `Circuit.legalGuest`, what a VM requires of a chip before running it.
+    * `Counting.lean` — the honest natural-number counts that keep a balance argument from
+      wrapping around `ZMod p`.
+    * `Realizes.lean` — `Host.realizes`, the single condition tying a host's chips to a
+      `BusSemantics`, and what it buys (`Host.forcesAccepts`).
+    * `Connection.lean` — the soundness half: per-chip `Circuit.isSoundReplacementOf` implies
+      `VmSoundReplacement`.
+    * `OpenVm.lean`, `OpenVmConnection.lean` — a concrete OpenVM host, and the discharge of every
+      host-side condition for it. -/
 
 variable {p : ℕ} [Fact p.Prime]
 
@@ -631,6 +1346,38 @@ structure Host (p : ℕ) where
   /-- The VM's trace budget: the most guest-chip instances a satisfying assignment may realize,
       in total across all types (see `VmAssignment.withinBudget`). -/
   maxInstances : ℕ
+  /-- The proving backend's degree bound: the most a guest circuit's expressions may be nested
+      before this backend can no longer prove it. Unlike `maxInstances` this is checked of a
+      circuit, not of a run, so it stays out of `VmSat`; see `PreservesDegree`. -/
+  degreeBound : DegreeBound
+  /-- How the VM orders its stateful state — for OpenVM, a memory record's timestamp. A natural
+      number, so `<` is well-founded: this is what `maintains_of_stateful_active` inducts on, and
+      what makes the memory byte invariant derivable rather than assumed. See
+      `Circuit.statefulSendsMaintain`. -/
+  statefulRank : BusMessage p → ℕ
+  /-- How far `statefulRank` may reach in a run this VM will accept — for OpenVM,
+      `2 ^ timestamp_max_bits` (see `openVmRankBound`).
+
+      A rank reads a field element as a natural number, so "the rank went up" is the order it
+      looks like only while ranks stay inside a window too narrow to wrap. A chip cannot check
+      that for itself, and OpenVM's does not try: its `AssertLtSubAir` range-checks the limbs of
+      `timestamp - prev_timestamp - 1`, which coincides with `prev_timestamp < timestamp` exactly
+      when both sit below this bound. OpenVM pins them there, but only indirectly — its connector
+      chip range-checks a segment's two boundary timestamps, and the execution-bridge chain plus
+      the trace budget carry that to every timestamp in between. So the bound belongs to the VM,
+      like `maxInstances`, while the claim that a run respects it is `Host.pinsRanks`. -/
+  rankBound : ℕ
+  /-- Which guest circuits this host is prepared to run — the VM's well-formedness requirements
+      on a guest chip (for OpenVM: binary multiplicities on lookup buses, `±1` on stateful ones,
+      byte-valued memory sends).
+
+      These live on the `Host` because they are the VM's requirements, not any chip's. They are
+      *not* a conjunct of `VmSat`, and that placement matters: a real OpenVM AIR cannot check any
+      of them — each quantifies over all assignments of the circuit, which no constraint system
+      evaluates — so a run that breaks one still exists, and folding legality into satisfaction
+      would quietly drop those runs from `CanProduce`. They are hypotheses of the equivalence
+      theorems instead (`PreservesLegality`). -/
+  legalGuest : Circuit p → Prop
   /-- The `chips` index that is the input chip type. -/
   inputChip : Fin chips.length
   /-- Map from an input chip instance's effects to its contribution to the input stream. -/
@@ -660,37 +1407,67 @@ def Circuit.allEffects (circuit : Circuit p) (assignment : ChipAssignment p) :
     ((circuit.busInteractions.map (fun bi => bi.eval assignment)).filter
       (fun m => decide ((m.busId, m.payload) = message))).map (fun m => m.multiplicity) |>.sum
 
-/-- An assignment to a VM: for each guest-chip *type*, however many algebraic assignments the
-    witness chooses to realize (the trip count is not fixed by `guestChips` itself — see the
-    module docstring); likewise, for each host-chip type, however many bus contributions it
-    realizes, one per instance (constrained to at most one wherever `HostChip.singleton`
-    opts in — see `VmSat`). -/
+/-- Every message this instance actively touches has rank below `bound` — for OpenVM, every
+    memory record it reads or writes carries a timestamp inside the VM's window. -/
+def Circuit.ranksBounded (c : Circuit p) (rank : BusMessage p → ℕ) (bound : ℕ)
+    (asg : ChipAssignment p) : Prop :=
+  ∀ bi ∈ c.busInteractions, (bi.eval asg).multiplicity ≠ 0 →
+    rank ((bi.eval asg).busId, (bi.eval asg).payload) < bound
+
+/-- The guest half of a VM assignment: for each guest-chip *type*, however many algebraic
+    assignments the witness chooses to realize (the trip count is not fixed by `guestChips`
+    itself — see the module docstring). -/
+abbrev GuestAssignment (p : ℕ) (guestChips : List (Circuit p)) :=
+  Fin guestChips.length → List (ChipAssignment p)
+
+/-- The host half of a VM assignment: for each host-chip type, however many bus contributions it
+    realizes, one per instance (constrained to at most one wherever `HostChip.singleton` opts
+    in — see `HostAssignment.legal`). -/
+abbrev HostAssignment (p : ℕ) (host : Host p) := Fin host.chips.length → List (BusState p)
+
+/-- An assignment to a VM. -/
 structure VmAssignment (p : ℕ) (vm : Vm p) where
-  guestAssignments : Fin (vm.guestChips.length) → List (ChipAssignment p)
-  hostAssignment : Fin (vm.host.chips.length) → List (BusState p)
+  guestAssignments : GuestAssignment p vm.guestChips
+  hostAssignment : HostAssignment p vm.host
 
-/-- The net multiplicity contributed to every bus message, summed over host and guest. -/
-def VmAssignment.netBus {vm : Vm p} (a : VmAssignment p vm) : BusState p :=
-  fun message =>
-    (∑ t : Fin vm.guestChips.length,
-      ((a.guestAssignments t).map (fun asg => (vm.guestChips.get t).allEffects asg message)).sum) +
-    (∑ t : Fin vm.host.chips.length,
-      ((a.hostAssignment t).map (fun effect => effect message)).sum)
+/-- The net multiplicity the guest instances contribute to every message. -/
+def GuestAssignment.net {G : List (Circuit p)} (gA : GuestAssignment p G) : BusState p :=
+  fun message => ∑ t : Fin G.length, ((gA t).map (fun asg => (G.get t).allEffects asg message)).sum
 
-/-- Every realized guest-chip instance's algebraic constraints hold under its own assignment. -/
-def VmAssignment.satisfiesGuest {vm : Vm p}
-    (a : VmAssignment p vm) : Prop :=
-  ∀ t : Fin vm.guestChips.length, ∀ asg ∈ a.guestAssignments t,
-    ∀ c ∈ (vm.guestChips.get t).algebraicConstraints, c.eval asg = 0
+/-- The net multiplicity the host instances contribute to every message. -/
+def HostAssignment.net {host : Host p} (hA : HostAssignment p host) : BusState p :=
+  fun message => ∑ t : Fin host.chips.length, ((hA t).map (fun effect => effect message)).sum
+
+/-- How many guest instances the assignment realizes, across all types. -/
+def GuestAssignment.instanceCount {G : List (Circuit p)} (gA : GuestAssignment p G) : ℕ :=
+  ∑ t : Fin G.length, (gA t).length
+
+/-- Every realized guest instance satisfies its own chip's algebraic constraints. -/
+def GuestAssignment.satisfiesAlgebraic {G : List (Circuit p)} (gA : GuestAssignment p G) : Prop :=
+  ∀ t : Fin G.length, ∀ asg ∈ gA t, (G.get t).satisfiesAlgebraic asg
 
 /-- Every realized host-chip instance's contribution is one its type may legally make, and
     every host-chip type that opts into `HostChip.singleton` has at most one realized
     instance. -/
+def HostAssignment.legal {host : Host p} (hA : HostAssignment p host) : Prop :=
+  (∀ t : Fin host.chips.length, ∀ effect ∈ hA t, (host.chips.get t).canProduce effect) ∧
+  (∀ t : Fin host.chips.length, (host.chips.get t).singleton → (hA t).length = 1)
+
+/-- The net multiplicity contributed to every bus message, summed over host and guest. -/
+def VmAssignment.netBus {vm : Vm p} (a : VmAssignment p vm) : BusState p :=
+  fun message => a.guestAssignments.net message + a.hostAssignment.net message
+
+omit [Fact p.Prime] in
+theorem netBus_apply {vm : Vm p} (a : VmAssignment p vm) (message : BusMessage p) :
+    a.netBus message = a.guestAssignments.net message + a.hostAssignment.net message := rfl
+
+/-- Every realized guest-chip instance's algebraic constraints hold under its own assignment. -/
+def VmAssignment.satisfiesGuest {vm : Vm p} (a : VmAssignment p vm) : Prop :=
+  a.guestAssignments.satisfiesAlgebraic
+
+/-- The host side of the assignment is legal (`HostAssignment.legal`). -/
 def VmAssignment.satisfiesHost {vm : Vm p} (a : VmAssignment p vm) : Prop :=
-  (∀ t : Fin vm.host.chips.length, ∀ effect ∈ a.hostAssignment t,
-    (vm.host.chips.get t).canProduce effect) ∧
-  (∀ t : Fin vm.host.chips.length,
-    (vm.host.chips.get t).singleton → (a.hostAssignment t).length = 1)
+  a.hostAssignment.legal
 
 /-- Every bus balances: the net contribution to every message is zero. -/
 def VmAssignment.balances {vm : Vm p} (a : VmAssignment p vm) : Prop :=
@@ -700,15 +1477,44 @@ def VmAssignment.balances {vm : Vm p} (a : VmAssignment p vm) : Prop :=
 
     This is needed to prevent overflow, e.g., in multiplicities. -/
 def VmAssignment.withinBudget {vm : Vm p} (a : VmAssignment p vm) : Prop :=
-  (∑ t : Fin vm.guestChips.length, (a.guestAssignments t).length) ≤ vm.host.maxInstances
+  a.guestAssignments.instanceCount ≤ vm.host.maxInstances
+
+/-- Every guest instance's traffic stays inside the VM's rank window (`Host.rankBound`).
+
+    Needed to prevent overflow, but of a different kind than `withinBudget`: not in a multiplicity
+    but in the rank itself, which is a field element read as a natural number and ordered only
+    while it stays in the window.
+
+    Not a conjunct of `VmSat`, because no OpenVM AIR checks it: the connector constrains the two
+    timestamps on its own two rows, and a memory access constrains only the *difference* across
+    it. That every timestamp in between is in range is a multi-chip consequence, and deriving it
+    is this spec's job rather than its premise — see `Host.pinsRanks`. -/
+def VmAssignment.withinRankBound {vm : Vm p} (a : VmAssignment p vm) : Prop :=
+  ∀ t : Fin vm.guestChips.length, ∀ asg ∈ a.guestAssignments t,
+    (vm.guestChips.get t).ranksBounded vm.host.statefulRank vm.host.rankBound asg
 
 -- ANCHOR: vmSat
 /-- Whether a VM assignment is satisfying: every realized instance behaves (its own algebraic
     constraints, or, for a host-chip instance, its type's legality), every host-chip type that
-    opts into `singleton` stays a singleton, every bus balances, and the whole thing fits the
-    VM's trace budget. -/
-def VmSat (vm: Vm p) (a : VmAssignment p vm) : Prop :=
-  a.satisfiesGuest ∧ a.satisfiesHost ∧ a.balances ∧ a.withinBudget
+    opts into `singleton` stays a singleton, every bus balances, and the whole thing fits the VM's
+    trace budget and rank window.
+
+    Every conjunct is something a real OpenVM run is checked on *directly*, and nothing else goes
+    in. Two kinds of thing are therefore absent:
+
+    * Requirements on a guest *circuit* — `Host.legalGuest`, `Host.degreeBound`. These quantify
+      over all assignments, which no constraint system evaluates, so a run violating one still
+      exists. They are obligations on the optimizer instead (`PreservesLegality`,
+      `PreservesDegree`).
+    * Invariants that hold of every real run but only as a *consequence* of several chips —
+      `VmAssignment.withinRankBound`. Assuming one here would shrink `CanProduce` below the set of
+      runs OpenVM admits, and would assume away the very thing this spec exists to derive
+      (`Host.pinsRanks`). -/
+structure VmSat (vm : Vm p) (a : VmAssignment p vm) : Prop where
+  satisfiesGuest : a.satisfiesGuest
+  satisfiesHost : a.satisfiesHost
+  balances : a.balances
+  withinBudget : a.withinBudget
 -- ANCHOR_END: vmSat
 
 /-- The effects of a satisfying VM assignment: the input stream its input-chip instances pulled,
@@ -716,46 +1522,9 @@ def VmSat (vm: Vm p) (a : VmAssignment p vm) : Prop :=
 def VmAssignment.effects {vm : Vm p} (a : VmAssignment p vm) (h : VmSat vm a) : VmEffect p :=
   { input := (a.hostAssignment vm.host.inputChip).map vm.host.getInputChunk |>.flatten,
     output := vm.host.getOutput ((a.hostAssignment vm.host.outputChip).head (by
-      obtain ⟨-, ⟨-, hsingle⟩, -⟩ := h
-      have hlen := hsingle vm.host.outputChip vm.host.outputSingleton
+      have hlen := h.satisfiesHost.2 vm.host.outputChip vm.host.outputSingleton
       intro hnil
       simp [hnil] at hlen)) }
-
-omit [Fact p.Prime] in
-/-- VM-satisfiability is assignment-order-independent (unidirectional). -/
-theorem VmSat.of_perm {vm : Vm p} {a a' : VmAssignment p vm}
-    (hguest : ∀ t, (a'.guestAssignments t).Perm (a.guestAssignments t))
-    (hhost : ∀ t, (a'.hostAssignment t).Perm (a.hostAssignment t))
-    (hsat : VmSat vm a) : VmSat vm a' := by
-  obtain ⟨h1, ⟨h2, h3⟩, h4, h5⟩ := hsat
-  have hnet : a'.netBus = a.netBus := by
-    funext message
-    show (∑ t : Fin vm.guestChips.length,
-        ((a'.guestAssignments t).map (fun asg => (vm.guestChips.get t).allEffects asg message)).sum) +
-      (∑ t : Fin vm.host.chips.length,
-        ((a'.hostAssignment t).map (fun effect => effect message)).sum) =
-      (∑ t : Fin vm.guestChips.length,
-        ((a.guestAssignments t).map (fun asg => (vm.guestChips.get t).allEffects asg message)).sum) +
-      (∑ t : Fin vm.host.chips.length,
-        ((a.hostAssignment t).map (fun effect => effect message)).sum)
-    rw [Finset.sum_congr rfl (fun t _ => ((hguest t).map _).sum_eq),
-      Finset.sum_congr rfl (fun t _ => ((hhost t).map _).sum_eq)]
-  exact ⟨fun t asg hasg => h1 t asg ((hguest t).mem_iff.mp hasg),
-    ⟨fun t effect hcontrib => h2 t effect ((hhost t).mem_iff.mp hcontrib),
-      fun t hsingle => (hhost t).length_eq ▸ h3 t hsingle⟩,
-    ⟨fun message => (congrFun hnet message).trans (h4 message),
-      (Finset.sum_congr rfl (fun t _ => (hguest t).length_eq)).trans_le h5⟩⟩
-
-omit [Fact p.Prime] in
-/-- VM-satisfiability is assignment-order-independent (bidirectional). -/
-theorem VmSat.perm_iff {vm : Vm p} {a a' : VmAssignment p vm}
-    (hguest : ∀ t, (a'.guestAssignments t).Perm (a.guestAssignments t))
-    (hhost : ∀ t, (a'.hostAssignment t).Perm (a.hostAssignment t)) :
-    VmSat vm a' ↔ VmSat vm a :=
-  ⟨fun h => VmSat.of_perm (fun t => (hguest t).symm) (fun t => (hhost t).symm) h,
-    fun h => VmSat.of_perm hguest hhost h⟩
-
--- TODO: prove that host chip list and guest chip lists are *sets*
 
 -- ANCHOR: canEffect
 /-- Whether `guestChips`, run against `host`, can produce effect `e`. -/
@@ -765,119 +1534,40 @@ def CanProduce (vm : Vm p) (e : VmEffect p) : Prop :=
 -- ANCHOR_END: canEffect
 
 -- ANCHOR: vmEquivalent
-/-- `guestChips'` is a VM-level equivalent replacement for `guestChips` against the fixed
-    `host`: they are equi-effectful.
+/-- `guestChips'` is a *sound* VM-level replacement for `guestChips`: it can produce no effect
+    the original could not. Nothing new becomes possible.
 
-    This is the multi-chip analogue of `Circuit.isSoundReplacementOf` /
-    `Circuit.isCompleteReplacementOf`. -/
+    The multi-chip analogue of `Circuit.isSoundReplacementOf`. -/
+def VmSoundReplacement (host : Host p) (guestChips guestChips' : List (Circuit p)) : Prop :=
+  ∀ e : VmEffect p, CanProduce ⟨host, guestChips'⟩ e → CanProduce ⟨host, guestChips⟩ e
+
+/-- `guestChips'` is a *complete* VM-level replacement for `guestChips`: every effect the
+    original could produce, it can produce too. Nothing is lost.
+
+    The multi-chip analogue of `Circuit.isCompleteReplacementOf`. -/
+def VmCompleteReplacement (host : Host p) (guestChips guestChips' : List (Circuit p)) : Prop :=
+  ∀ e : VmEffect p, CanProduce ⟨host, guestChips⟩ e → CanProduce ⟨host, guestChips'⟩ e
+
+/-- `guestChips'` is a VM-level equivalent replacement for `guestChips` against the fixed
+    `host`: they are equi-effectful. -/
 def VmEquivalent (host : Host p) (guestChips guestChips' : List (Circuit p)) : Prop :=
-  ∀ e : VmEffect p, CanProduce ⟨host, guestChips⟩  e ↔ CanProduce ⟨host, guestChips'⟩ e
+  VmSoundReplacement host guestChips guestChips' ∧
+    VmCompleteReplacement host guestChips guestChips'
 -- ANCHOR_END: vmEquivalent
 
---------- The guest-chip list is a set ---------
+/-- The replacement chips are ones the host will run, given that the originals were. The VM-level
+    counterpart of the `Host.legalGuest` field, kept out of `VmSat` — see there.
 
-omit [Fact p.Prime] in
-/-- Regrouping a sum over `Fin m` by the fibres of `φ` changes nothing. -/
-theorem sum_fiber {M : Type} [AddCommMonoid M] {n m : ℕ} (φ : Fin m → Fin n) (X : Fin m → M) :
-    (∑ s : Fin n, ∑ t : Fin m, if φ t = s then X t else 0) = ∑ t : Fin m, X t := by
-  rw [Finset.sum_comm]
-  exact Finset.sum_congr rfl (fun t _ => by simp)
+    Soundness needs this, not just legality of the originals: `Host.forcesAccepts` runs its
+    balancing argument over the list the VM is actually executing, which for a sound replacement
+    is the *optimized* one. -/
+def PreservesLegality (host : Host p) (guestChips guestChips' : List (Circuit p)) : Prop :=
+  (∀ c ∈ guestChips, host.legalGuest c) → ∀ c ∈ guestChips', host.legalGuest c
 
-omit [Fact p.Prime] in
-/-- If every chip of `guestChips'` also occurs in `guestChips`, then `guestChips` can produce
-    every effect `guestChips'` can.
-
-    Each chip type of `guestChips'` is assigned a home in `guestChips` carrying the same circuit,
-    and the instances of everything mapped to one home are pooled into that home's instance list.
-    Pooling is invisible to `VmSat`: the balance sums regroup by fibre (`sum_fiber`), the
-    algebraic constraints are per-instance and the two homes carry the same circuit, and
-    `VmAssignment.withinBudget` survives because pooling moves instances around without creating
-    any. -/
-theorem canProduce_of_subset {host : Host p} {G G' : List (Circuit p)}
-    (hsub : ∀ c ∈ G', c ∈ G) {e : VmEffect p} (h : CanProduce ⟨host, G'⟩ e) :
-    CanProduce ⟨host, G⟩ e := by
-  obtain ⟨a', hsat', rfl⟩ := h
-  have hex : ∀ t : Fin G'.length, ∃ s : Fin G.length, G.get s = G'.get t := fun t =>
-    List.mem_iff_get.mp (hsub _ (List.get_mem G' t))
-  choose φ hφ using hex
-  set gA : (s : Fin G.length) → List (ChipAssignment p) := fun s =>
-    (List.ofFn fun t : Fin G'.length => if φ t = s then a'.guestAssignments t else []).flatten
-    with hgA
-  have hmem : ∀ (s : Fin G.length) (asg : ChipAssignment p), asg ∈ gA s →
-      ∃ t : Fin G'.length, φ t = s ∧ asg ∈ a'.guestAssignments t := by
-    intro s asg hasg
-    rw [hgA] at hasg
-    obtain ⟨l, hl, hin⟩ := List.mem_flatten.mp hasg
-    obtain ⟨t, rfl⟩ := List.mem_ofFn.mp hl
-    by_cases ht : φ t = s
-    · exact ⟨t, ht, by simpa [ht] using hin⟩
-    · simp [ht] at hin
-  have hguest : ∀ s : Fin G.length, ∀ asg ∈ gA s,
-      ∀ c ∈ (G.get s).algebraicConstraints, c.eval asg = 0 := by
-    intro s asg hasg
-    obtain ⟨t, ht, hin⟩ := hmem s asg hasg
-    subst ht
-    rw [hφ t]
-    exact hsat'.1 t asg hin
-  have hnet : ∀ m : BusMessage p,
-      (∑ s : Fin G.length, ((gA s).map fun asg => (G.get s).allEffects asg m).sum)
-        = ∑ t : Fin G'.length,
-            ((a'.guestAssignments t).map fun asg => (G'.get t).allEffects asg m).sum := by
-    intro m
-    have hs : ∀ s : Fin G.length,
-        ((gA s).map fun asg => (G.get s).allEffects asg m).sum
-          = ∑ t : Fin G'.length, if φ t = s then
-              ((a'.guestAssignments t).map fun asg => (G'.get t).allEffects asg m).sum else 0 := by
-      intro s
-      rw [hgA]
-      simp only [List.map_flatten, List.sum_flatten, List.map_ofFn, List.sum_ofFn]
-      refine Finset.sum_congr rfl (fun t _ => ?_)
-      by_cases ht : φ t = s
-      · simp only [Function.comp_apply, if_pos ht]
-        rw [← ht, hφ t]
-      · simp [ht]
-    rw [Finset.sum_congr rfl (fun s _ => hs s)]
-    exact sum_fiber φ _
-  have hlensum : (∑ s : Fin G.length, (gA s).length)
-      = ∑ t : Fin G'.length, (a'.guestAssignments t).length := by
-    have hs : ∀ s : Fin G.length, (gA s).length
-        = ∑ t : Fin G'.length, if φ t = s then (a'.guestAssignments t).length else 0 := by
-      intro s
-      rw [hgA]
-      simp only [List.length_flatten, List.map_ofFn, List.sum_ofFn]
-      refine Finset.sum_congr rfl (fun t _ => ?_)
-      by_cases ht : φ t = s <;> simp [ht]
-    rw [Finset.sum_congr rfl (fun s _ => hs s)]
-    exact sum_fiber φ _
-  refine ⟨⟨gA, a'.hostAssignment⟩, ⟨hguest, hsat'.2.1, ⟨fun m => ?_, ?_⟩⟩, rfl⟩
-  · show (∑ s : Fin G.length, ((gA s).map fun asg => (G.get s).allEffects asg m).sum) +
-      (∑ t : Fin host.chips.length, ((a'.hostAssignment t).map fun c => c m).sum) = 0
-    rw [hnet]
-    exact hsat'.2.2.1 m
-  · show (∑ s : Fin G.length, (gA s).length) ≤ host.maxInstances
-    rw [hlensum]
-    exact hsat'.2.2.2
-
-omit [Fact p.Prime] in
-/-- **The guest-chip list is a set.** Only *which* circuits occur matters: neither their order
-    nor how many times each is repeated changes what the VM can produce. -/
-theorem canProduce_congr_of_mem {host : Host p} {G G' : List (Circuit p)}
-    (hmem : {c : Circuit p | c ∈ G} = {c | c ∈ G'}) (e : VmEffect p) :
-    CanProduce ⟨host, G⟩ e ↔ CanProduce ⟨host, G'⟩ e :=
-  ⟨canProduce_of_subset (fun c hc => (Set.ext_iff.mp hmem c).mp hc),
-    canProduce_of_subset (fun c hc => (Set.ext_iff.mp hmem c).mpr hc)⟩
-
-omit [Fact p.Prime] in
-/-- Two guest-chip lists with the same elements are `VmEquivalent` — reordering them, repeating a
-    chip, or dropping a repeat is never an observable change. -/
-theorem vmEquivalent_of_mem {host : Host p} {G G' : List (Circuit p)}
-    (hmem : {c : Circuit p | c ∈ G} = {c | c ∈ G'}) : VmEquivalent host G G' :=
-  canProduce_congr_of_mem hmem
-
-omit [Fact p.Prime] in
-/-- Permuting the guest-chip list is not observable. -/
-theorem vmEquivalent_of_perm {host : Host p} {G G' : List (Circuit p)} (hperm : G.Perm G') :
-    VmEquivalent host G G' :=
-  vmEquivalent_of_mem (Set.ext fun _ => hperm.mem_iff)
--- TODO: add degree constraints?
+/-- The replacement chips fit the backend's degree bound, given that the originals did. The
+    VM-level counterpart of `Spec.lean`'s `optimizerRespectsDegreeBound`, and independent of
+    everything else here: nothing in the equivalence proof consumes it. -/
+def PreservesDegree (host : Host p) (guestChips guestChips' : List (Circuit p)) : Prop :=
+  (∀ c ∈ guestChips, c.withinDegree host.degreeBound) →
+    ∀ c ∈ guestChips', c.withinDegree host.degreeBound
 ```
