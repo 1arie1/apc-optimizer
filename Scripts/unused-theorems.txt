@@ -75,6 +75,7 @@ list_sum_map_cast_mul
 guestNet_eq_count_mul
 guestCount_le
 guestNet_ne_zero_of_uniform
+guestNet_add_ne_zero_of_uniform
 payloadOk_of_exists
 maintains_of_stateful_active
 forcesAccepts_of_hostSound
@@ -106,6 +107,7 @@ ApcOptimizer.OpenVM.InputRead.interactions_data
 ApcOptimizer.OpenVM.memory_maintains
 ApcOptimizer.OpenVM.bridge_maintains
 ApcOptimizer.OpenVM.openVmHost_statefulChipsMaintain
+ApcOptimizer.OpenVM.openVmHost_finalize_exempt
 ApcOptimizer.OpenVM.defaultBusMap_stateless
 ApcOptimizer.OpenVM.restrict_ne_zero
 ApcOptimizer.OpenVM.openVmHost_absorbsStateless
@@ -154,13 +156,17 @@ ApcOptimizer.OpenVM.openVmHost_pinsRanks
 
 # `OpenVmLegalAudit.lean` checks `Circuit.legalGuest` against both OpenVM memory-send shapes: the
 # read-echo (carrying OpenVM's own `AssertLtSubAir`, from which the timestamp ordering is derived)
-# and the lookup-justified fresh write.
+# and the lookup-justified fresh write. `stepChip` wraps the read-echo access in the
+# execution-bridge step `Circuit.advancesClock` needs, giving the one instance in the file that
+# is a genuine `Circuit.legalGuest`, not just the three bus-facing conditions.
 # Nothing here feeds a correctness proof — the file exists so the findings cannot silently rot.
 ApcOptimizer.OpenVM.openVmRank_mem
 ApcOptimizer.OpenVM.openVmPayloadOk_mem_iff
 ApcOptimizer.OpenVM.readEchoChip_statelessSendOnly
 ApcOptimizer.OpenVM.readEchoChip_statefulPolarity
+ApcOptimizer.OpenVM.readEcho_limbs
 ApcOptimizer.OpenVM.readEchoChip_limbs
+ApcOptimizer.OpenVM.readEcho_timestamps_increase
 ApcOptimizer.OpenVM.readEchoChip_timestamps_increase
 ApcOptimizer.OpenVM.readEchoChip_statefulSendsMaintain
 ApcOptimizer.OpenVM.readEchoChip_legalGuest
@@ -170,6 +176,10 @@ ApcOptimizer.OpenVM.freshWriteChip_statefulPolarity
 ApcOptimizer.OpenVM.freshWriteChip_statefulSendsMaintain
 ApcOptimizer.OpenVM.freshWriteChip_legalGuest
 ApcOptimizer.OpenVM.stepChip_advancesClock
+ApcOptimizer.OpenVM.stepChip_statelessSendOnly
+ApcOptimizer.OpenVM.stepChip_statefulPolarity
+ApcOptimizer.OpenVM.stepChip_statefulSendsMaintain
+ApcOptimizer.OpenVM.stepChip_legalGuest
 
 # `Analysis/SendOnlyPolarity.lean` is a translation-validation checker: nothing in the correctness
 # argument calls it, it exists to be run against a candidate circuit. `foldConst_eq` feeds only

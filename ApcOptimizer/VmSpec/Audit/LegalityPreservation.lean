@@ -58,6 +58,9 @@ def toyGuestRules (p : ℕ) : GuestBusRules p where
   isStateful _ := false
   accepts _ := True
   payloadOk _ := True
+  execBusId := 0
+  memBusId := 0
+  getTimestamp _ := 0
 
 /-- The original chip: one interaction on the stateless bus, multiplicity fixed at the literal `1`.
     Legal by inspection — `statelessSendOnly` is forced by the constant. -/
@@ -116,6 +119,7 @@ theorem illegalCircuit_not_statelessSendOnly [Fact p.Prime] (hp : 2 < p) :
     `openVm_vmSoundReplacement` already does. -/
 theorem soundness_not_legalityPreserving [Fact p.Prime] (hp : 2 < p) :
     (illegalCircuit p).isSoundReplacementOf (legalCircuit p) (toyBusSemantics p) ∧
-      ¬ ∃ rank bound, (illegalCircuit p).legalGuest (toyGuestRules p) rank bound :=
+      ¬ ∃ rank bound maxWindow,
+        (illegalCircuit p).legalGuest (toyGuestRules p) rank bound maxWindow :=
   ⟨illegalCircuit_isSoundReplacementOf,
-    fun ⟨_, _, hleg⟩ => illegalCircuit_not_statelessSendOnly hp hleg.sendOnly⟩
+    fun ⟨_, _, _, hleg⟩ => illegalCircuit_not_statelessSendOnly hp hleg.sendOnly⟩

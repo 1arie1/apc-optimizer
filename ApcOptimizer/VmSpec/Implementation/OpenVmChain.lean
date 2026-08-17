@@ -50,11 +50,13 @@ structure ClockStep (p : ℕ) (c : Circuit p) (asg : ChipAssignment p)
     ∃ δ : ℕ, 0 < δ ∧ δ < d ∧
       openVmMemTimestamp ((bi.eval asg).busId, (bi.eval asg).payload) = base + (δ : ZMod p)
 
-theorem clockStep_nonempty {c : Circuit p} {asg : ChipAssignment p}
-    {execBusId memBusId maxWindow : ℕ}
-    (h : Circuit.advancesClock c execBusId memBusId maxWindow) (hsat : c.satisfiesAlgebraic asg) :
-    Nonempty (ClockStep p c asg execBusId memBusId maxWindow) := by
+theorem clockStep_nonempty {c : Circuit p} {asg : ChipAssignment p} {r : GuestBusRules p}
+    {maxWindow : ℕ}
+    (h : Circuit.advancesClock c r maxWindow) (hsat : c.satisfiesAlgebraic asg)
+    (hget : r.getTimestamp = openVmMemTimestamp := by rfl) :
+    Nonempty (ClockStep p c asg r.execBusId r.memBusId maxWindow) := by
   obtain ⟨pcFrom, pcTo, base, d, h1, h2, h3, h4, h5, h6⟩ := h asg hsat
+  rw [hget] at h6
   exact ⟨⟨pcFrom, pcTo, base, d, h1, h2, h3, h4, h5, h6⟩⟩
 
 --------- Guest nets as sums over instances ---------
@@ -92,15 +94,15 @@ theorem connector_busStateOf (r : ConnectorBoundary p) (m : BusMessage p) :
     a lookup bus and the four memory-bus chips to memory, so on bus `0` the host's whole net is the
     connector's — and the connector is a singleton, so there is exactly one witness to name. -/
 theorem openVmHost_bridge_isolated (maxInstances ptrReg countReg maxWindow : ℕ)
-    {hA : HostAssignment p (openVmHost (p := p) maxInstances ptrReg countReg maxWindow 1)}
+    {hA : HostAssignment p (openVmHost (p := p) maxInstances ptrReg countReg maxWindow)}
     (hlegal : hA.satisfies) :
     ∃ r : ConnectorBoundary p, ∀ m : BusMessage p, m.1 = 0 →
       hA.busEffect m = busStateOf (r.interactions 0) m := by
   classical
   -- The connector's single instance.
-  have hconnIdx : (openVmHost (p := p) maxInstances ptrReg countReg maxWindow 1).chips.length = 9 :=
+  have hconnIdx : (openVmHost (p := p) maxInstances ptrReg countReg maxWindow).chips.length = 9 :=
     rfl
-  set k : Fin (openVmHost (p := p) maxInstances ptrReg countReg maxWindow 1).chips.length :=
+  set k : Fin (openVmHost (p := p) maxInstances ptrReg countReg maxWindow).chips.length :=
     ⟨8, by rw [hconnIdx]; omega⟩ with hk
   have hlen : (hA k).length = 1 := hlegal.2 _ trivial
   obtain ⟨c, hc⟩ := List.length_eq_one_iff.mp hlen
@@ -109,7 +111,7 @@ theorem openVmHost_bridge_isolated (maxInstances ptrReg countReg maxWindow : ℕ
   refine ⟨r, fun m hm => ?_⟩
   -- Every other chip leaves bus `0` alone.
   have hzero :
-      ∀ t : Fin (openVmHost (p := p) maxInstances ptrReg countReg maxWindow 1).chips.length,
+      ∀ t : Fin (openVmHost (p := p) maxInstances ptrReg countReg maxWindow).chips.length,
       (t : ℕ) ≠ 8 → ∀ c' ∈ hA t, c' m = 0 := by
     intro t ht c' hc'
     have hleg := hlegal.1 t c' hc'
@@ -119,8 +121,8 @@ theorem openVmHost_bridge_isolated (maxInstances ptrReg countReg maxWindow : ℕ
     · exact absurd (hleg m hne).1 (by rw [hm]; omega)
     · exact absurd (hleg m hne).1 (by rw [hm]; omega)
     · exact absurd (hleg m hne).1 (by rw [hm]; omega)
-    · exact absurd (hleg m hne).1 (by rw [hm]; omega)
-    · exact absurd (hleg m hne).1 (by rw [hm]; omega)
+    · exact absurd (hleg m hne).1 (by rw [hm]; simp only [openVmMemBusId]; omega)
+    · exact absurd (hleg m hne).1 (by rw [hm]; simp only [openVmMemBusId]; omega)
     · obtain ⟨r', hr'⟩ := hleg
       rw [hr'] at hne
       obtain ⟨msg, hmsg, heq⟩ := exists_of_busStateOf_ne_zero hne
@@ -132,14 +134,14 @@ theorem openVmHost_bridge_isolated (maxInstances ptrReg countReg maxWindow : ℕ
       exact absurd ((congrArg Prod.fst heq).symm.trans
         (InputRead.interactions_busId r' ptrReg countReg 1 msg hmsg)) (by rw [hm]; omega)
     · exact absurd rfl ht
-  have hz : ∀ t : Fin (openVmHost (p := p) maxInstances ptrReg countReg maxWindow 1).chips.length,
+  have hz : ∀ t : Fin (openVmHost (p := p) maxInstances ptrReg countReg maxWindow).chips.length,
       (t : ℕ) ≠ 8 → ((hA t).map (fun effect => effect m)).sum = 0 := by
     intro t ht
     refine List.sum_eq_zero (fun v hv => ?_)
     obtain ⟨c', hc', rfl⟩ := List.mem_map.mp hv
     exact hzero t ht c' hc'
   have hnet : hA.busEffect m
-      = ∑ t : Fin (openVmHost (p := p) maxInstances ptrReg countReg maxWindow 1).chips.length,
+      = ∑ t : Fin (openVmHost (p := p) maxInstances ptrReg countReg maxWindow).chips.length,
         ((hA t).map (fun effect => effect m)).sum := rfl
   rw [hnet, Finset.sum_eq_single k (fun t _ ht => hz t (fun h => ht (Fin.ext h)))
     (fun h => absurd (Finset.mem_univ k) h), hc, hr]
@@ -394,13 +396,13 @@ end Bridge
     legal guest, and the connector's range-checked final timestamp. -/
 theorem openVmHost_pinsRanks (maxInstances ptrReg countReg maxWindow : ℕ)
     (hp : (maxInstances + 1) * (maxWindow + 1) < p) :
-    (openVmHost (p := p) maxInstances ptrReg countReg maxWindow 1).pinsRanks
-      (openVmRankModel 1) := by
+    (openVmHost (p := p) maxInstances ptrReg countReg maxWindow).pinsRanks
+      (openVmRankModel openVmMemBusId) := by
   classical
   have hppos : 0 < p := Nat.lt_of_le_of_lt (Nat.zero_le _) hp
   haveI : NeZero p := ⟨by omega⟩
   intro G L hGuests _hSize _hBudget a hsat t asg hasg bi hbi hmult
-  show openVmRank 1 ((bi.eval asg).busId, (bi.eval asg).payload) < openVmRankBound
+  show openVmRank openVmMemBusId ((bi.eval asg).busId, (bi.eval asg).payload) < openVmRankBound
   by_cases hbus : bi.busId = 1
   swap
   · have hne : ¬ ((bi.eval asg).busId, (bi.eval asg).payload).1 = 1 := hbus
@@ -441,7 +443,7 @@ theorem openVmHost_pinsRanks (maxInstances ptrReg countReg maxWindow : ℕ)
     rw [hδeq, hbase]
     push_cast
     ring
-  have hrank : openVmRank 1 ((bi.eval asg).busId, (bi.eval asg).payload)
+  have hrank : openVmRank openVmMemBusId ((bi.eval asg).busId, (bi.eval asg).payload)
       = (openVmMemTimestamp ((bi.eval asg).busId, (bi.eval asg).payload)).val := by
     simp only [openVmRank, openVmMemTimestamp]
     rw [if_pos (show ((bi.eval asg).busId, (bi.eval asg).payload).1 = 1 from hbus)]

@@ -238,3 +238,53 @@ theorem guestNet_ne_zero_of_uniform [Fact p.Prime] {host : Host p} {G : Guest p}
   have := ZMod.val_cast_of_lt hlt
   rw [hcast, ZMod.val_zero] at this
   exact this.symm
+
+/-- Like `guestNet_ne_zero_of_uniform`, but absorbs one extra uniform contribution `e` — a
+    singleton host chip's own touch of `m`, which is `0` or the same `v` the guests carry. The
+    extra unit of budget headroom (`+ 1 < p` rather than `< p`) is not decoration: without it,
+    exactly `p - 1` guest receives plus the one host receive sum to `p ≡ 0`, and the pile *would*
+    balance. -/
+theorem guestNet_add_ne_zero_of_uniform [Fact p.Prime] {host : Host p} {G : Guest p}
+    {maxInteractions : ℕ}
+    {a : VmAssignment p ⟨host, G⟩} {m : BusMessage p} {v : ZMod p} (hsat : VmSat ⟨host, G⟩ a)
+    (hSize : ∀ c ∈ G, c.busInteractions.length ≤ maxInteractions)
+    (hBudget : maxInteractions * host.maxInstances + 1 < p) (hv : v ≠ 0)
+    (huni : ∀ t : Fin G.length, ∀ asg ∈ a.guestAssignments t, (G.get t).uniformAt asg m v)
+    {t : Fin G.length} {asg : ChipAssignment p} (hasg : asg ∈ a.guestAssignments t)
+    {bi : BusInteraction (Expression p)} (hbi : bi ∈ (G.get t).busInteractions)
+    (hmsg : ((bi.eval asg).busId, (bi.eval asg).payload) = m)
+    (hmult : (bi.eval asg).multiplicity ≠ 0)
+    {e : ZMod p} (he : e = 0 ∨ e = v) :
+    a.guestAssignments.busEffect m + e ≠ 0 := by
+  have hcount_le : a.guestAssignments.count m ≤ host.maxInstances * maxInteractions :=
+    le_trans (guestCount_le hSize) (Nat.mul_le_mul_right maxInteractions hsat.withinBudget)
+  have hlt : a.guestAssignments.count m + 1 < p := by
+    have hcomm : host.maxInstances * maxInteractions = maxInteractions * host.maxInstances :=
+      Nat.mul_comm _ _
+    omega
+  have hne : NeZero p := ⟨(Fact.out : p.Prime).ne_zero⟩
+  rw [guestNet_eq_count_mul huni]
+  rcases he with he | he
+  · subst he
+    rw [add_zero]
+    refine mul_ne_zero ?_ hv
+    have hpos : a.guestAssignments.count m ≠ 0 := by
+      intro h
+      refine countAt_ne_zero hbi hmsg hmult ?_
+      have hz := Finset.sum_eq_zero_iff.mp h t (Finset.mem_univ t)
+      exact List.sum_eq_zero_iff.mp hz _ (List.mem_map_of_mem hasg)
+    intro hcast
+    refine hpos ?_
+    have hval := ZMod.val_cast_of_lt (lt_of_le_of_lt (Nat.le_succ _) hlt)
+    rw [hcast, ZMod.val_zero] at hval
+    exact hval.symm
+  · subst he
+    rw [← add_one_mul]
+    refine mul_ne_zero ?_ hv
+    have hcast_eq : (a.guestAssignments.count m : ZMod p) + 1
+        = ((a.guestAssignments.count m + 1 : ℕ) : ZMod p) := by push_cast; ring
+    rw [hcast_eq]
+    intro hcast
+    have hval := ZMod.val_cast_of_lt hlt
+    rw [hcast, ZMod.val_zero] at hval
+    omega

@@ -110,12 +110,12 @@ theorem effects_eq_of_io {host : Host p} {G G' : Guest p}
     Legality is required of the list being *run* — the optimized one. Nothing is asked of `c`:
     `VmSat` carries no circuit-level property, so the restored run has nothing to re-establish. -/
 theorem vmSoundReplacement_cons [Fact p.Prime]
-    {host : Host p} {bs : BusSemantics p} {rm : RankModel p}
-    {c c' : Circuit p} {R : Guest p} {maxInteractions : ℕ}
-    (hHost : host.realizes bs rm)
+    {host : Host p} {bs : BusSemantics p} {rm : RankModel p} {r0 : GuestBusRules p}
+    {maxWindow : ℕ} {c c' : Circuit p} {R : Guest p} {maxInteractions : ℕ}
+    (hHost : host.realizes bs rm r0 maxWindow)
     (hLegal : ∀ d ∈ c' :: R, host.legalGuest d)
     (hSize : ∀ d ∈ c' :: R, d.busInteractions.length ≤ maxInteractions)
-    (hBudget : maxInteractions * host.maxInstances < p)
+    (hBudget : maxInteractions * host.maxInstances + 1 < p)
     (hSound : c'.isSoundReplacementOf c bs) :
     VmSoundReplacement host (c :: R) (c' :: R) := by
   rintro e ⟨a', hsat', rfl⟩
@@ -207,9 +207,10 @@ theorem vmSoundReplacement_cons [Fact p.Prime]
     Note that the size bound is needed on *both* lists, not just the optimized one: the
     intermediate lists mix chips from each, and `Host.forcesAccepts` applies to a whole list. -/
 theorem vmSoundReplacement_append [Fact p.Prime]
-    {host : Host p} {bs : BusSemantics p} {rm : RankModel p} {maxInteractions : ℕ}
-    (hHost : host.realizes bs rm)
-    (hBudget : maxInteractions * host.maxInstances < p)
+    {host : Host p} {bs : BusSemantics p} {rm : RankModel p} {r0 : GuestBusRules p}
+    {maxWindow : ℕ} {maxInteractions : ℕ}
+    (hHost : host.realizes bs rm r0 maxWindow)
+    (hBudget : maxInteractions * host.maxInstances + 1 < p)
     {T T' : Guest p}
     (hSound : List.Forall₂ (fun c c' => c'.isSoundReplacementOf c bs) T T') :
     (∀ d ∈ T ++ T', host.legalGuest d) →
@@ -268,13 +269,13 @@ theorem vmSoundReplacement_append [Fact p.Prime]
     interaction-count bound `maxInteractions` that keeps those arguments from wrapping around
     `ZMod p`. -/
 theorem vmSoundReplacement_of_forall₂ [Fact p.Prime]
-    {host : Host p} {bs : BusSemantics p} {rm : RankModel p}
-    {G G' : Guest p} {maxInteractions : ℕ}
-    (hHost : host.realizes bs rm)
+    {host : Host p} {bs : BusSemantics p} {rm : RankModel p} {r0 : GuestBusRules p}
+    {maxWindow : ℕ} {G G' : Guest p} {maxInteractions : ℕ}
+    (hHost : host.realizes bs rm r0 maxWindow)
     (hLegal : ∀ c ∈ G, host.legalGuest c)
     (hPreserve : PreservesLegality host G G')
     (hSize : ∀ c ∈ G ++ G', c.busInteractions.length ≤ maxInteractions)
-    (hBudget : maxInteractions * host.maxInstances < p)
+    (hBudget : maxInteractions * host.maxInstances + 1 < p)
     (hSound : List.Forall₂ (fun c c' => c'.isSoundReplacementOf c bs) G G') :
     VmSoundReplacement host G G' := by
   have hall : ∀ d ∈ G ++ G', host.legalGuest d := by

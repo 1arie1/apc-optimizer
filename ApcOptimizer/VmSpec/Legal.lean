@@ -47,6 +47,14 @@ structure GuestBusRules (p : ℕ) where
       what it *sends*, and the fact has to transfer to whoever *receives* the same tuple at the
       opposite multiplicity. Nothing here mentions polarity, so nothing has to quantify it away. -/
   payloadOk : BusMessage p → Prop
+  /-- Which bus is the execution bridge and which is memory, and how to read a message's own
+      timestamp off its payload — what `Circuit.advancesClock`'s temporal contract needs. Naming
+      them here, rather than passing them as loose parameters wherever `advancesClock` is
+      invoked, is what lets it become a field of `Circuit.legalGuest` below instead of a
+      condition bolted on separately by each VM's `Host.legalGuest`. -/
+  execBusId : Nat
+  memBusId : Nat
+  getTimestamp : BusMessage p → ZMod p
 
 /-- Every message this instance actively touches has rank below `bound` — for OpenVM, every
     memory record it reads or writes carries a timestamp inside the VM's window.
@@ -137,9 +145,51 @@ def Circuit.statefulSendsMaintain (c : Circuit p) (r : GuestBusRules p)
           c.lowerRanksMaintain r rank asg (rank ((bi.eval asg).busId, (bi.eval asg).payload)) →
             r.payloadOk ((bi.eval asg).busId, (bi.eval asg).payload)
 
+/-- **One instruction, bounded clock steps** — a VM's temporal contract on an instruction
+    executor, and the missing premise that makes a run's timestamps orderable.
+
+    For OpenVM (whitepaper §4.5): every instruction executor AIR "must constrain that it adds a
+    message `(pc_from, t_from)` to the receive set and a message `(pc_to, t_to)` to the send set
+    exactly once for each instruction that appears in the AIR trace", and "must also constrain
+    that `t_from < t_to`". §4.2 adds that the timestamps at which it touches guest state satisfy
+    `t_from < t_{i,j} < t_to`.
+
+    The advance `d` and the memory offsets `δ` are *natural numbers*, and every timestamp is given
+    as `base + δ` rather than by comparing `.val`s. That is what makes the clause wrap-free: it
+    says where a timestamp sits relative to the instruction's own start, which is a statement no
+    field wraparound can spoof, and it is why this — unlike `Circuit.statefulSendsMaintain` — needs
+    no rank window as a hypothesis. Establishing that window is precisely what it is for.
+
+    `r.getTimestamp` is how a VM reads a message's own timestamp off its payload (for OpenVM,
+    `openVmMemTimestamp`, payload index `6`) — a fixed VM-wide convention, the same way
+    `r.execBusId`/`r.memBusId` are, so it lives on `r` too rather than as a parameter here.
+    `maxWindow` bounds the advance and is *not* such a fixed convention — it is a property of the
+    instruction set rather than the VM state: for the RV32 chips the advance is a literal
+    `timestamp_delta`, but a fused APC advances by its whole basic block, so it stays a parameter
+    here (like `rankBound`) instead of living on `r`. Every clause is a statement about the
+    evaluated interactions of a satisfying assignment, so a static pass over a chip's timestamp
+    expressions decides it; the intended recognizer is "exactly two execution-bridge interactions,
+    at literal multiplicities `1` and `-1`, whose timestamp expressions differ by a literal". -/
+def Circuit.advancesClock (c : Circuit p) (r : GuestBusRules p) (maxWindow : ℕ) : Prop :=
+  ∀ asg : ChipAssignment p, c.satisfiesAlgebraic asg →
+    ∃ (pcFrom pcTo base : ZMod p) (d : ℕ),
+      0 < d ∧ d < maxWindow ∧
+      -- Exactly one bridge receive, at the instruction's start.
+      c.allEffects asg (r.execBusId, [pcFrom, base]) = -1 ∧
+      -- Exactly one bridge send, `d` ticks later.
+      c.allEffects asg (r.execBusId, [pcTo, base + (d : ZMod p)]) = 1 ∧
+      -- (Nothing else on the bridge---making the "exactly" above meaningful.)
+      (∀ m : BusMessage p, m.1 = r.execBusId → m ≠ (r.execBusId, [pcFrom, base]) →
+        m ≠ (r.execBusId, [pcTo, base + (d : ZMod p)]) → c.allEffects asg m = 0) ∧
+      -- Every memory access sits strictly inside the step.
+      (∀ bi ∈ c.busInteractions, bi.busId = r.memBusId → (bi.eval asg).multiplicity ≠ 0 →
+        ∃ δ : ℕ, 0 < δ ∧ δ < d ∧
+          r.getTimestamp ((bi.eval asg).busId, (bi.eval asg).payload) = base + (δ : ZMod p))
+
 /-- What a VM requires of any guest chip it will run. Instantiates the `Host.legalGuest` field. -/
 structure Circuit.legalGuest (c : Circuit p) (r : GuestBusRules p) (rank : BusMessage p → ℕ)
-    (rankBound : ℕ) : Prop where
+    (rankBound : ℕ) (maxWindow : ℕ) : Prop where
   sendOnly : c.statelessSendOnly r
   polarity : c.statefulPolarity r
   sendsMaintain : c.statefulSendsMaintain r rank rankBound
+  advancesClock : c.advancesClock r maxWindow
