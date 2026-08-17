@@ -193,3 +193,13 @@ checkMultiplicities_sound
 illegalCircuit_isSoundReplacementOf
 illegalCircuit_not_statelessSendOnly
 soundness_not_legalityPreserving
+
+# `Audit/SoundnessGivesLegality.lean` measures how much of `Circuit.legalGuest` a chip-level
+# soundness proof already gives (`legalOnAccepted_of_isSoundReplacementOf`) and exhibits the
+# residue (`legalOnAccepted_not_statelessSendOnly`); the rest feed only those two.
+ApcOptimizer.OpenVM.legalOnAccepted_of_guaranteesInvariants
+ApcOptimizer.OpenVM.legalOnAccepted_of_isSoundReplacementOf
+ApcOptimizer.OpenVM.legalOnAccepted_not_statelessSendOnly
+ApcOptimizer.OpenVM.zeroMultiplicity_replaceable_by_receive
+ApcOptimizer.OpenVM.not_accepts_outOfTable
+ApcOptimizer.OpenVM.sideEffects_eq
