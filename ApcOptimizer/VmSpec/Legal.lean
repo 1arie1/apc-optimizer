@@ -139,8 +139,10 @@ def Circuit.lowerRanksMaintain (c : Circuit p) (r : GuestBusRules p) (rank : Bus
 def Circuit.statefulSendsMaintain (c : Circuit p) (r : GuestBusRules p)
     (rank : BusMessage p → ℕ) (rankBound : ℕ) : Prop :=
   ∀ asg : ChipAssignment p, c.satisfiesAlgebraic asg → c.statelessAccepted r asg →
+    -- TODO(AO): why does this not cause failure? what is the right place for this?
     c.ranksBounded rank rankBound asg →
       ∀ bi ∈ c.busInteractions, r.isStateful bi.busId = true →
+        -- TODO(AO): filter instead of implication?
         (bi.eval asg).multiplicity = 1 →
           c.lowerRanksMaintain r rank asg (rank ((bi.eval asg).busId, (bi.eval asg).payload)) →
             r.payloadOk ((bi.eval asg).busId, (bi.eval asg).payload)
@@ -191,5 +193,6 @@ structure Circuit.legalGuest (c : Circuit p) (r : GuestBusRules p) (rank : BusMe
     (rankBound : ℕ) (maxWindow : ℕ) : Prop where
   sendOnly : c.statelessSendOnly r
   polarity : c.statefulPolarity r
+  -- TODO(AO): per AG, put rank boundedness here?
   sendsMaintain : c.statefulSendsMaintain r rank rankBound
   advancesClock : c.advancesClock r maxWindow

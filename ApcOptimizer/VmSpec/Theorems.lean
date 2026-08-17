@@ -30,14 +30,16 @@ variable {p : ℕ}
     -/
 theorem openVm_vmSoundReplacement [Fact p.Prime]
     {maxInstances ptrReg countReg maxWindow maxInteractions : ℕ} {G G' : Guest p}
+    -- TODO(AO): add a vm here (depending on sizes); this removes size bounds below
     -- TODO(AO): we'll have to closely audit these conditions
     (hLegal : ∀ c ∈ G,
       c.legalGuest (openVmGuestRules defaultBusMap openVmMemBusId) (openVmRank openVmMemBusId) openVmRankBound maxWindow)
-    -- TODO(AO): we'll have to prove this
+    -- TODO(AO): we'll have to prove this (and fold into chip-level soundness)
     (hPreserve : PreservesLegality (openVmHost maxInstances ptrReg countReg maxWindow) G G')
     (hWindow : (maxInstances + 1) * (maxWindow + 1) < p)
     (hSize : ∀ c ∈ G ++ G', c.busInteractions.length ≤ maxInteractions)
     (hBudget : maxInteractions * maxInstances + 1 < p)
+    -- NB: isSoundReplacementOf must, but does not, depend on some size bounds
     (hSound : List.Forall₂ (fun c c' => c'.isSoundReplacementOf c
       (openVmBusSemantics p defaultBusMap)) G G') :
     VmSoundReplacement (openVmHost maxInstances ptrReg countReg maxWindow) G G' :=
