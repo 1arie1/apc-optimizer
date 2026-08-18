@@ -5,6 +5,7 @@ import ApcOptimizer.VmSpec.Theorems
 import ApcOptimizer.VmSpec.Audit.OpenVmLegalAudit
 import ApcOptimizer.VmSpec.Audit.SendOnlyPolarity
 import ApcOptimizer.VmSpec.Audit.LegalityPreservation
+import ApcOptimizer.VmSpec.Audit.SoundnessGivesLegality
 import ApcOptimizer.VmSpec.Implementation.Rank
 import ApcOptimizer.VmSpec.Implementation.Counting
 import ApcOptimizer.VmSpec.Implementation.Realizes

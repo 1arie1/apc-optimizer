@@ -27,6 +27,27 @@ variable {p : ℕ}
     * for `hLegal`, we need to believe that OpenVM's instructions meet it
     * for `hPreserve`, we need to prove that the optimizer preserves legality
 
+    **How much of that is genuinely new work** (`Audit/SoundnessGivesLegality.lean`): OpenVM's
+    `maintainsInvariants` already pins a message's multiplicity (`= 1` on every lookup bus, `= ±1`
+    on the execution bridge and memory) and carries `openVmPayloadOk` on memory, and
+    `Circuit.isSoundReplacementOf`'s second conjunct transports it. So a pass that proves `hSound`
+    for a chip that guarantees the bus invariants already delivers all three bus-shape clauses of
+    `Circuit.legalGuest` — but only on assignments the semantics *accepts*
+    (`legalOnAccepted_of_isSoundReplacementOf`). What remains is:
+
+    * those three clauses on assignments that are algebraically satisfying but not accepted —
+      which is where the VM-level argument consumes them, since `statelessAccepted_of_sinks` and
+      `maintains_of_stateful_active` are what *derive* acceptance
+      (`legalOnAccepted_not_statelessSendOnly` shows the gap is real, not an artefact); and
+    * all of `Circuit.advancesClock`, which has no counterpart in `Spec.lean` at all.
+
+    Both `hLegal` and `hPreserve` are used only to build one list — every chip of `G ++ G'` is
+    legal (`vmSoundReplacement_of_forall₂`) — and that list is consumed only by
+    `Host.forcesAccepts`, over whichever mixed list an intermediate substitution step is running.
+    Since `hPreserve` is applied exactly once, to `hLegal`, the pair is interchangeable with
+    assuming `G'` legal outright; the `PreservesLegality` phrasing records an obligation on the
+    optimizer rather than an assumption on its output.
+
     -/
 theorem openVm_vmSoundReplacement [Fact p.Prime]
     {maxInstances ptrReg countReg maxWindow maxInteractions : ℕ} {G G' : Guest p}
@@ -34,7 +55,9 @@ theorem openVm_vmSoundReplacement [Fact p.Prime]
     -- TODO(AO): we'll have to closely audit these conditions
     (hLegal : ∀ c ∈ G,
       c.legalGuest (openVmGuestRules defaultBusMap openVmMemBusId) (openVmRank openVmMemBusId) openVmRankBound maxWindow)
-    -- TODO(AO): we'll have to prove this (and fold into chip-level soundness)
+    -- TODO(AO): we'll have to prove this
+    -- AG: many questions about legality. At the very least, we just need to assume that G' is legal
+    -- AG: since at this stage G and G' are not related, preserving legality doesn't have a separate meaning.
     (hPreserve : PreservesLegality (openVmHost maxInstances ptrReg countReg maxWindow) G G')
     (hWindow : (maxInstances + 1) * (maxWindow + 1) < p)
     (hSize : ∀ c ∈ G ++ G', c.busInteractions.length ≤ maxInteractions)
