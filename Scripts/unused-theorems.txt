@@ -93,13 +93,25 @@ vmSoundReplacement_of_forall₂
 # `apc2105000*` results and the two lemmas they share.
 ApcOptimizer.OpenVM.babyBear_negOne
 ApcOptimizer.OpenVM.allEffects_eq_zero_of_mults_zero
-ApcOptimizer.OpenVM.apc2105000Opt_isValid_bool
-ApcOptimizer.OpenVM.apc2105000Opt_statelessSendOnly
-ApcOptimizer.OpenVM.apc2105000Opt_statefulPolarity
-ApcOptimizer.OpenVM.apc2105000Opt_satisfiesAlgebraic_zero
-ApcOptimizer.OpenVM.apc2105000Opt_mults_zero_on_padding
-ApcOptimizer.OpenVM.apc2105000Opt_not_advancesClock
+ApcOptimizer.OpenVM.apc2105000Opt_checkMultiplicities
+ApcOptimizer.OpenVM.apc2105000Opt_legalMultiplicities
+ApcOptimizer.OpenVM.apc2105000Opt_no_padding_row
+ApcOptimizer.OpenVM.apc2105000Unopt_checkMultiplicitiesWith
+ApcOptimizer.OpenVM.apc2105000Unopt_legalMultiplicities
 ApcOptimizer.OpenVM.apc2105000Unopt_zero_not_satisfiesAlgebraic
+ApcOptimizer.OpenVM.apc2105000Gated_checkMultiplicities_fails
+ApcOptimizer.OpenVM.apc2105000Gated_satisfiesAlgebraic_zero
+ApcOptimizer.OpenVM.apc2105000Gated_mults_zero_on_padding
+ApcOptimizer.OpenVM.apc2105000Gated_not_advancesClock
+
+# `Audit/SendOnlyPolarity.lean`'s constant-propagation tier: its root is
+# `checkMultiplicitiesWith_sound`, used by `Audit/RealApcLegality.lean`, and the rest feed it.
+Expression.signedPart_sq
+Expression.signedPart_eval
+pinRuleOf_eval
+lookupPin_mem
+Expression.foldConstWith_eq
+checkMultiplicitiesWith_sound
 
 # `OpenVm.lean`'s `rfl`-lemma naming `openVmHost`'s single input chip, used by
 # `openVmHost_absorbsStateless` in a `simp only` that rewrites by `rfl`.

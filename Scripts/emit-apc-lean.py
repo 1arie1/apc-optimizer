@@ -38,7 +38,10 @@ def expr(e) -> str:
 
 
 def emit(name: str, path: str) -> None:
-    machine = json.load(open(path))["machine"]
+    dump = json.load(open(path))
+    # Intermediate-stage dumps are the bare machine; `_000_unopt` and the final
+    # one wrap it alongside `block`/`bus_map` (see `apc-dumps/README.md`).
+    machine = dump.get("machine", dump)
     src = path.rsplit("/", 1)[-1]
     print("/-- `%s`, emitted verbatim from `%s`" % (name, src))
     print("    by `Scripts/emit-apc-lean.py`: %d algebraic constraints, %d bus interactions. -/"

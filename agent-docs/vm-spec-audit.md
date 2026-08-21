@@ -239,9 +239,27 @@ until the completeness half is attempted.
 by `Scripts/emit-apc-lean.py`).*
 
 This closes the "check `legalGuest` against a whole exported APC" item, negatively. Of the three
-bus-shape clauses, `statelessSendOnly` and `statefulPolarity` are **true** of the optimized APC and
-proved; `advancesClock` is **false**, of both the optimized and the unoptimized form, for three
-independent reasons.
+bus-shape clauses, `statelessSendOnly` and `statefulPolarity` are **true** and proved, of both the
+unoptimized APC and the optimized one — every such proof discharged by `Audit/SendOnlyPolarity.lean`'s
+decidable checker, not by hand. `advancesClock` is **false**, of every form, for three independent
+reasons.
+
+The circuits are taken at three points of powdr's pipeline. `apc2105000Opt` is stage
+`039_trivial_simp`, not the pipeline's final output: the last pass introduces a fresh `is_valid`
+column and multiplies every multiplicity by it, which is the AIR's padding gate and what G1 below
+is about. Stage `039` is that same circuit one pass earlier — identical interactions and
+constraints, multiplicities the literal `±1`.
+
+**The checker had to grow a tier.** `checkMultiplicities` only folds literals, which suffices for
+`039` but not for the unoptimized APC, whose multiplicities are opcode-flag sums.
+`checkMultiplicitiesWith` adds constant propagation: `pinRuleOf` reads `Expression`-to-constant
+rules off the algebraic constraints (`1 - (add + sub + xor + or + and) = 0` pins the flag sum to
+`1`; `rs2_as_i - 0 = 0` pins that operand's address space to `0`), and multiplicities fold against
+them. Sound for free, since both clauses already quantify over `satisfiesAlgebraic` assignments.
+27 rules come off the unoptimized APC and all 71 of its multiplicities fold. Neither tier reaches a
+bare boolean gate (`is_valid * (is_valid - 1) = 0` is not linear, so no rule comes off it), so
+stage `040`'s clauses — true, and provable by hand — are out of the checker's reach; a booleanity
+tier is the natural next one.
 
 **G1. The padding row (optimized APC only) — proved.** powdr's optimizer replaces each fused
 instruction's pinned opcode-flag sum with one fresh `is_valid` column carrying only

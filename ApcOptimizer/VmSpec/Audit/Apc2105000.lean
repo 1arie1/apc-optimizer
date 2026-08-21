@@ -272,9 +272,64 @@ def apc2105000Unopt : Circuit babyBear where
     , { busId := 0, multiplicity := .add (.add (.const 0) (.var ⟨"opcode_beq_flag_3", some 128⟩)) (.var ⟨"opcode_bne_flag_3", some 129⟩),
         payload := [.add (.add (.var ⟨"from_state__pc_3", some 108⟩) (.mul (.var ⟨"cmp_result_3", some 126⟩) (.var ⟨"imm_3", some 127⟩))) (.mul (.add (.const 1) (.mul (.const 2013265920) (.var ⟨"cmp_result_3", some 126⟩))) (.const 4)), .add (.var ⟨"from_state__timestamp_3", some 109⟩) (.const 2)] } ]
 
-/-- `apc2105000Opt`, emitted verbatim from `apc_candidate_2105000_040.json`
-    by `Scripts/emit-apc-lean.py`: 4 algebraic constraints, 23 bus interactions. -/
+/-- `apc2105000Opt`, emitted verbatim from `apc_candidate_2105000_039_trivial_simp.json`
+    by `Scripts/emit-apc-lean.py`: 3 algebraic constraints, 23 bus interactions. -/
 def apc2105000Opt : Circuit babyBear where
+  algebraicConstraints :=
+    [ .mul (.var ⟨"cmp_result_3", some 126⟩) (.add (.var ⟨"cmp_result_3", some 126⟩) (.mul (.const 2013265920) (.const 1)))
+    , .mul (.add (.const 1) (.mul (.const 2013265920) (.var ⟨"cmp_result_3", some 126⟩))) (.var ⟨"a__0_2", some 91⟩)
+    , .add (.mul (.var ⟨"free_var_136", some 136⟩) (.var ⟨"a__0_2", some 91⟩)) (.mul (.const 2013265920) (.var ⟨"cmp_result_3", some 126⟩)) ]
+  busInteractions :=
+    [ { busId := 1, multiplicity := .mul (.const 2013265920) (.const 1),
+        payload := [.const 1, .const 40, .var ⟨"a__0_0", some 19⟩, .var ⟨"a__1_0", some 20⟩, .var ⟨"a__2_0", some 21⟩, .var ⟨"a__3_0", some 22⟩, .var ⟨"reads_aux__0__base__prev_timestamp_0", some 6⟩] }
+    , { busId := 1, multiplicity := .const 1,
+        payload := [.const 1, .const 40, .var ⟨"a__0_0", some 19⟩, .var ⟨"a__1_0", some 20⟩, .var ⟨"a__2_0", some 21⟩, .var ⟨"a__3_0", some 22⟩, .var ⟨"from_state__timestamp_0", some 1⟩] }
+    , { busId := 1, multiplicity := .mul (.const 2013265920) (.const 1),
+        payload := [.const 1, .const 52, .var ⟨"writes_aux__prev_data__0_0", some 15⟩, .var ⟨"writes_aux__prev_data__1_0", some 16⟩, .var ⟨"writes_aux__prev_data__2_0", some 17⟩, .var ⟨"writes_aux__prev_data__3_0", some 18⟩, .var ⟨"writes_aux__base__prev_timestamp_0", some 12⟩] }
+    , { busId := 0, multiplicity := .mul (.const 2013265920) (.const 1),
+        payload := [.const 2105000, .var ⟨"from_state__timestamp_0", some 1⟩] }
+    , { busId := 1, multiplicity := .mul (.const 2013265920) (.const 1),
+        payload := [.const 1, .const 44, .var ⟨"a__0_1", some 55⟩, .var ⟨"a__1_1", some 56⟩, .var ⟨"a__2_1", some 57⟩, .var ⟨"a__3_1", some 58⟩, .var ⟨"reads_aux__0__base__prev_timestamp_1", some 42⟩] }
+    , { busId := 1, multiplicity := .mul (.const 2013265920) (.const 1),
+        payload := [.const 1, .const 56, .var ⟨"writes_aux__prev_data__0_1", some 51⟩, .var ⟨"writes_aux__prev_data__1_1", some 52⟩, .var ⟨"writes_aux__prev_data__2_1", some 53⟩, .var ⟨"writes_aux__prev_data__3_1", some 54⟩, .var ⟨"writes_aux__base__prev_timestamp_1", some 48⟩] }
+    , { busId := 1, multiplicity := .const 1,
+        payload := [.const 1, .const 56, .var ⟨"a__0_1", some 55⟩, .var ⟨"a__1_1", some 56⟩, .var ⟨"a__2_1", some 57⟩, .var ⟨"a__3_1", some 58⟩, .add (.var ⟨"from_state__timestamp_0", some 1⟩) (.const 5)] }
+    , { busId := 6, multiplicity := .const 1,
+        payload := [.var ⟨"a__0_0", some 19⟩, .const 3, .add (.add (.var ⟨"a__0_0", some 19⟩) (.const 3)) (.mul (.const 2013265920) (.mul (.const 2) (.var ⟨"a__0_2", some 91⟩))), .const 1] }
+    , { busId := 1, multiplicity := .const 1,
+        payload := [.const 1, .const 52, .var ⟨"a__0_0", some 19⟩, .var ⟨"a__1_0", some 20⟩, .var ⟨"a__2_0", some 21⟩, .var ⟨"a__3_0", some 22⟩, .add (.var ⟨"from_state__timestamp_0", some 1⟩) (.const 6)] }
+    , { busId := 1, multiplicity := .const 1,
+        payload := [.const 1, .const 44, .var ⟨"a__0_2", some 91⟩, .const 0, .const 0, .const 0, .add (.var ⟨"from_state__timestamp_0", some 1⟩) (.const 9)] }
+    , { busId := 1, multiplicity := .mul (.const 2013265920) (.const 1),
+        payload := [.const 1, .const 0, .const 0, .const 0, .const 0, .const 0, .var ⟨"reads_aux__1__base__prev_timestamp_3", some 115⟩] }
+    , { busId := 1, multiplicity := .const 1,
+        payload := [.const 1, .const 0, .const 0, .const 0, .const 0, .const 0, .add (.var ⟨"from_state__timestamp_0", some 1⟩) (.const 10)] }
+    , { busId := 0, multiplicity := .const 1,
+        payload := [.add (.const 2105016) (.mul (.const 2013265920) (.mul (.const 192) (.var ⟨"cmp_result_3", some 126⟩))), .add (.var ⟨"from_state__timestamp_0", some 1⟩) (.const 11)] }
+    , { busId := 3, multiplicity := .const 1,
+        payload := [.var ⟨"reads_aux__0__base__timestamp_lt_aux__lower_decomp__0_0", some 7⟩, .const 17] }
+    , { busId := 3, multiplicity := .const 1,
+        payload := [.add (.add (.add (.mul (.const 15360) (.var ⟨"reads_aux__0__base__prev_timestamp_0", some 6⟩)) (.mul (.const 15360) (.var ⟨"reads_aux__0__base__timestamp_lt_aux__lower_decomp__0_0", some 7⟩))) (.const 15360)) (.mul (.const 2013265920) (.mul (.const 15360) (.var ⟨"from_state__timestamp_0", some 1⟩))), .const 12] }
+    , { busId := 3, multiplicity := .const 1,
+        payload := [.var ⟨"writes_aux__base__timestamp_lt_aux__lower_decomp__0_0", some 13⟩, .const 17] }
+    , { busId := 3, multiplicity := .const 1,
+        payload := [.add (.add (.mul (.const 15360) (.var ⟨"writes_aux__base__prev_timestamp_0", some 12⟩)) (.mul (.const 15360) (.var ⟨"writes_aux__base__timestamp_lt_aux__lower_decomp__0_0", some 13⟩))) (.mul (.const 2013265920) (.add (.mul (.const 15360) (.var ⟨"from_state__timestamp_0", some 1⟩)) (.const 15360))), .const 12] }
+    , { busId := 3, multiplicity := .const 1,
+        payload := [.var ⟨"reads_aux__0__base__timestamp_lt_aux__lower_decomp__0_1", some 43⟩, .const 17] }
+    , { busId := 3, multiplicity := .const 1,
+        payload := [.add (.add (.mul (.const 15360) (.var ⟨"reads_aux__0__base__prev_timestamp_1", some 42⟩)) (.mul (.const 15360) (.var ⟨"reads_aux__0__base__timestamp_lt_aux__lower_decomp__0_1", some 43⟩))) (.mul (.const 2013265920) (.add (.mul (.const 15360) (.var ⟨"from_state__timestamp_0", some 1⟩)) (.const 30720))), .const 12] }
+    , { busId := 3, multiplicity := .const 1,
+        payload := [.var ⟨"writes_aux__base__timestamp_lt_aux__lower_decomp__0_1", some 49⟩, .const 17] }
+    , { busId := 3, multiplicity := .const 1,
+        payload := [.add (.add (.mul (.const 15360) (.var ⟨"writes_aux__base__prev_timestamp_1", some 48⟩)) (.mul (.const 15360) (.var ⟨"writes_aux__base__timestamp_lt_aux__lower_decomp__0_1", some 49⟩))) (.mul (.const 2013265920) (.add (.mul (.const 15360) (.var ⟨"from_state__timestamp_0", some 1⟩)) (.const 61440))), .const 12] }
+    , { busId := 3, multiplicity := .const 1,
+        payload := [.var ⟨"reads_aux__1__base__timestamp_lt_aux__lower_decomp__0_3", some 116⟩, .const 17] }
+    , { busId := 3, multiplicity := .const 1,
+        payload := [.add (.add (.mul (.const 15360) (.var ⟨"reads_aux__1__base__prev_timestamp_3", some 115⟩)) (.mul (.const 15360) (.var ⟨"reads_aux__1__base__timestamp_lt_aux__lower_decomp__0_3", some 116⟩))) (.mul (.const 2013265920) (.add (.mul (.const 15360) (.var ⟨"from_state__timestamp_0", some 1⟩)) (.const 138240))), .const 12] } ]
+
+/-- `apc2105000Gated`, emitted verbatim from `apc_candidate_2105000_040.json`
+    by `Scripts/emit-apc-lean.py`: 4 algebraic constraints, 23 bus interactions. -/
+def apc2105000Gated : Circuit babyBear where
   algebraicConstraints :=
     [ .mul (.var ⟨"cmp_result_3", some 126⟩) (.add (.var ⟨"cmp_result_3", some 126⟩) (.mul (.const 2013265920) (.const 1)))
     , .mul (.add (.const 1) (.mul (.const 2013265920) (.var ⟨"cmp_result_3", some 126⟩))) (.var ⟨"a__0_2", some 91⟩)
