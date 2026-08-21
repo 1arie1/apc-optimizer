@@ -54,9 +54,13 @@ Sites, in dependency order:
 
 Verify: `lake build` clean with no warnings, then `bash Scripts/check-proof-integrity.sh`.
 
-## Change 2 — take receives out of the clause, and bound them at VM level
+## Change 2 — say the right thing about memory receives
 
 *Real work. Changes the audited surface. Review before landing.*
+
+Two candidate shapes, in preference order: tie each receive to its own send by a bounded distance
+(the requirement OpenVM already enforces — see below), or, failing that, drop receives from the
+clause and rebuild their timestamp bound at VM level.
 
 ### The problem this has to solve
 
@@ -90,7 +94,42 @@ much: every intermediate timestamp being in range "is a multi-chip consequence, 
 this argument's job rather than its premise". The current clause shortcuts that by assuming it
 per-chip, and that assumption is what is false.
 
-### The change
+### The requirement that probably belongs here instead
+
+Rather than dropping receives from the clause and rebuilding everything globally, tie each receive
+to its own send. OpenVM already enforces exactly this, per access, with `AssertLtSubAir` (the
+`timestamp_lt` gadget): every memory access range-checks `t_send − t_prev − 1`, decomposed into a
+17-bit and a 12-bit limb at the default `timestamp_max_bits = 29`. So **the two halves of one
+memory access are a bounded distance apart**, and that is a property of the chip alone.
+
+In the imported APC this is visible as the variable-range-checker traffic:
+
+```
+[reads_aux__0__base__timestamp_lt_aux__lower_decomp__0_0, 17]
+[15360*prev_ts + 15360*decomp0 + 15360 - 15360*ts, 12]
+```
+
+So the memory conjunct would read, roughly:
+
+* every memory **send** sits at `base + δ` with `δ < d` (Change 1's form); and
+* every memory **receive** is matched by a send of the same address, at a timestamp a bounded
+  distance later — `∃ Δ : ℕ, Δ < timestampBound ∧ t_send = t_recv + Δ`.
+
+This is strictly better than the "receives leave the clause" plan below: it is checkable per chip,
+it is what the AIR actually constrains, and it keeps the rank bound derivable locally rather than
+needing a new VM-level balancing argument.
+
+**The one step to check before committing to it.** Bounded distance plus a bounded send gives a
+bounded receive only if the subtraction does not underflow. From `t_send = t_recv + Δ` in `ZMod p`
+we get `t_recv.val = t_send.val − Δ` **when `Δ ≤ t_send.val`**; otherwise `t_recv.val` is
+`p − (Δ − t_send.val)`, which is enormous. That is the same wraparound `readEcho_limbs`
+(`Audit/OpenVmLegalAudit.lean`) has to rule out, and there it is ruled out by an a-priori window
+bound on `t₀`. Work out where that comes from here before writing the clause — the likely answer
+is that it follows from the send being inside the window and the run starting at timestamp `1`
+(`ConnectorBoundary`), which would make the whole thing local after all. If it does not, fall back
+to the VM-level plan below.
+
+### The change (fallback: receives leave the clause entirely)
 
 **Audited surface — one edit.** In `Legal.lean`, restrict the memory conjunct to sends: replace
 `(bi.eval asg).multiplicity ≠ 0 →` with `(bi.eval asg).multiplicity = 1 →`. `= 1` is the right way
