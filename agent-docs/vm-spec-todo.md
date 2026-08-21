@@ -35,11 +35,13 @@ points at the OpenVM route.
    hand-maintained ignore block the folder needs today.
 3. ~~Model the connector chip and the execution-bridge terminator, to discharge
    `Host.pinsRanks`.~~ Done — `vm-spec-wip.md`, Phase 6.
-4. ~~Check `Circuit.legalGuest` against a whole exported APC.~~ Done, negatively — finding G in
-   `vm-spec-audit.md`, `ApcOptimizer/VmSpec/Audit/RealApcLegality.lean`. **Replaced by: fix
-   `Circuit.advancesClock`**, which is false of real APCs three ways over. The memory half is
-   mechanical (restrict to sends, allow `δ = 0`); the bridge half needs a decision about padding
-   rows and about whether the clause may assume bus acceptance.
+4. ~~Check `Circuit.legalGuest` against a whole exported APC.~~ Done — finding G in
+   `vm-spec-audit.md`, `ApcOptimizer/VmSpec/Audit/RealApcLegality.lean`. Both multiplicity clauses
+   hold and are proved by static analysis; `Circuit.advancesClock` is false. **Replaced by: fix
+   `Circuit.advancesClock`**, with step-by-step instructions in
+   [`advances-clock-fix.md`](advances-clock-fix.md) — one free change (allow a memory access at
+   exactly `base`) and one real one (take receives out of the clause and bound their timestamps at
+   VM level, where they belong).
 5. **Parameterize `openVmHost` by the bus map** rather than hard-wiring `defaultBusMap`.
 6. **Model `HINT_BUFFER`** as a second entry in `Host.inputChips` — `Rv32HintStoreAir`'s other
    opcode, count off operand `a`, many words per instance. Phase 9 reshaped `Host` for exactly
