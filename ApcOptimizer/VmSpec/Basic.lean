@@ -3,19 +3,19 @@ import Mathlib.Algebra.BigOperators.Fin
 
 set_option autoImplicit false
 
-/-! VM-level correctness: what it means to correctly replace one list of guest
-    chips with another, against a fixed host.
+/-! VM-level correctness: what it means to correctly replace one list of guest chips with another,
+    against a fixed host.
 
-    `Spec.lean` defines equivalence for a single `Circuit`, with "the rest of
-    the VM" abstracted away as `BusSemantics` — per-message `accepts` /
-    `admissible` / `maintainsInvariants` predicates — and conditioned on
-    VM-level invariants it cannot itself justify. This file makes the VM
-    explicit instead: host chips are named, buses balance globally, and the
-    observable is the VM's input/output, so no per-message assumption is needed.
+    `Spec.lean` defines equivalence for a single `Circuit`, with "the rest of the VM" abstracted
+    away as `BusSemantics`: per-message `accepts` / `admissible` / `maintainsInvariants` predicates,
+    with conditions on VM-level invariants that are not obviously true.
 
-    The definition is equi-effectfulness: for every effect one chipset can produce
-    (`CanProduce`), the other can produce it too. Soundness is one direction
-    (`VmSoundReplacement`), completeness the other.
+    This file makes the VM explicit instead: host chips are named, buses balance globally, and the
+    observable is the VM's input/output, so no per-message assumptions are needed.
+
+    The definition is equi-effectfulness: for every effect one chipset can produce (`CanProduce`),
+    the other can produce it too. Soundness is one direction (`VmSoundReplacement`), completeness
+    the other.
 
     This file must be audited, as must the host definition that it uses.
 
@@ -25,9 +25,10 @@ set_option autoImplicit false
     into `VmSoundReplacement` for a whole VM. `vmSoundReplacement_of_forall₂`
     (`Implementation/Connection.lean`) already consumes exactly the per-chip
     `Circuit.isSoundReplacementOf` a chip-level optimizer proves; what blocks assembling the two is
-    `PreservesLegality`, which soundness does not give for free — see the counterexample in
-    `agent-docs/legality-preservation.md`. Closing that gap needs each optimizer pass to also prove
-    it preserves `Circuit.legalGuest`/`Circuit.advancesClock`, which no pass does today. -/
+    its legality hypothesis on the optimizer's *output*, which soundness does not give for free —
+    see the counterexample in `agent-docs/legality-preservation.md`. Closing that gap needs each
+    optimizer pass to also prove it preserves `Circuit.legalGuest`/`Circuit.advancesClock`, which
+    no pass does today. -/
 
 variable {p : ℕ} [Fact p.Prime]
 
@@ -37,8 +38,18 @@ variable {p : ℕ} [Fact p.Prime]
 structure HostChip (p : ℕ) where
   /-- Whether this `BusState` can be produced by this host-chip type. -/
   canProduce : BusState p → Prop
-  /-- Must a satisfying assignment instantiate this chip just once? E.g. mem-init. -/
-  singleton : Prop := False
+  /-- The most instances of this chip a satisfying assignment may realize
+      (`HostAssignment.satisfies`). Chips a VM has one of — memory init/final, a lookup table, the
+      output chip — take `1`; the input chip, invoked once per chunk pulled, takes the VM's budget.
+
+      Every chip carries a bound, with no way to opt out: the anti-wraparound arithmetic
+      (`Host.noMultOverflow`, `Implementation/Counting.lean`) counts what touches a bus, so an
+      unbounded chip could let a bus balance only modulo `p`.
+
+      Note this bounds instances *above* only. A chip that must be present is not expressible, and
+      does not need to be: a chip whose `canProduce` holds of `0` — every chip of `openVmHost` —
+      contributes nothing when absent, which is the same run as one that instantiates it idle. -/
+  instanceBound : ℕ
 
 /-- A VM's input: a stream of values. -/
 abbrev VmInput (p : ℕ) := List (ZMod p)
@@ -51,43 +62,73 @@ structure VmEffect (p : ℕ) where
   input : VmInput p
   output : VmOutput p
 
-/-- **The VM the correctness statement is about.** Every field here is *spec*: it feeds `VmSat`
-    or `VmAssignment.effects`, and so determines what `CanProduce` — and hence `VmEquivalent` —
-    means. Get one wrong and the theorem is about the wrong machine.
+/-- **The VM the correctness statement is about.** Every field here is audited, on one of two
+    counts: it feeds `VmSat`/`VmAssignment.effects`, and so determines what `CanProduce` — hence
+    `VmEquivalent` — means; or it is what the theorems require of the guest chips they are handed
+    (`legalGuest`, and the sizes it is stated at). Get one wrong and the theorem is about the
+    wrong machine, or is about the right one vacuously.
 
-    Deliberately absent is anything the *soundness argument* needs but the statement does not. The
-    ordering on stateful state and its window live in `Implementation/Rank.lean`'s `RankModel`,
-    which no statement in this file mentions; the backend's degree bound is a parameter of
-    `PreservesDegree`. See this module's header for the audit tiers. -/
+    The sizes are fields rather than loose hypotheses on each theorem precisely so that the latter
+    read cleanly: `maxWindow`/`maxInteractions` and the two anti-wraparound conditions are facts
+    about how a VM is configured, fixed once when a concrete `Host` is built.
+
+    Deliberately absent is anything the *soundness argument* needs but neither the statement nor
+    its hypotheses do. The ordering on stateful state and its window live in
+    `Implementation/Rank.lean`'s `RankModel`, which no statement in this file mentions; the
+    backend's degree bound is a parameter of `PreservesDegree`. See this module's header for the
+    audit tiers. -/
 structure Host (p : ℕ) where
   chips : List (HostChip p)
   /-- The VM's trace budget: the most guest-chip instances a satisfying assignment may realize,
       in total across all types (see `VmAssignment.withinBudget`). -/
   maxInstances : ℕ
-  /-- Which guest circuits this host is prepared to run — the VM's well-formedness requirements
-      on a guest chip (for OpenVM: binary multiplicities on lookup buses, `±1` on stateful ones,
-      byte-valued memory sends).
+  /-- The most one guest instance may advance the clock (`Circuit.advancesClock`).
+
+      Needed to prevent clock overflows, unlocking time-inductive arguments. -/
+  maxWindow : ℕ
+  /-- The most bus interactions one guest instance may carry.
+
+      Needed to prevent multiplicity overflows, unlocking counting arguments. -/
+  maxInteractions : ℕ
+  /-- Which guest circuits this host is prepared to run.  We need only optimize these correctly.
+
+      For OpenVM: binary multiplicities on lookup buses, `±1` on stateful ones, byte-valued memory
+      sends.
 
       These live on the `Host` because they are the VM's requirements, not any chip's. They are
-      *not* a conjunct of `VmSat`, and that placement matters: a real OpenVM AIR cannot check any
-      of them — each quantifies over all assignments of the circuit, which no constraint system
-      evaluates — so a run that breaks one still exists, and folding legality into satisfaction
-      would quietly drop those runs from `CanProduce`. They are hypotheses of the equivalence
-      theorems instead (`PreservesLegality`). -/
+      *not* a conjunct of `VmSat`, because they are not (and cannot) be checked in constraints.  -/
   legalGuest : Circuit p → Prop
-  /-- The `chips` index that is the input chip type. -/
+  /-- The `chips` index that is the input chip. -/
   inputChip : Fin chips.length
   /-- Map from an input chip instance's effects to its contribution to the input stream. -/
   getInputChunk : BusState p → VmInput p
-  /-- The `chips` index that is the output chip type/instance (it's a singleton). -/
+  /-- Map from an input chip instance's effects to when it ran. `VmAssignment.effects` orders
+      chunks by this rather than by an instance's arbitrary position in the assignment, which
+      carries no meaning (`VmSat.perm_iff`). -/
+  getInputTime : BusState p → ZMod p
+  /-- The `chips` index that is the output chip type (`instanceBound` `1`, so at most one
+      instance: see `VmAssignment.effects`). -/
   outputChip : Fin chips.length
   /-- Map from an output chip instance's effects to the output array. -/
   getOutput : BusState p → VmOutput p
-  /-- The output must be a singleton. -/
-  outputSingleton : (chips.get outputChip).singleton
+  /-- No timestamp overflow: a run of `maxInstances` instructions, each advancing the clock by less
+      than `maxWindow`, does not overflow.
+
+      TODO(AO): why the +1's?
+       -/
+  noTimeOverflow : (maxInstances + 1) * (maxWindow + 1) < p
+  /-- No multiplicity overflow: a run of `maxInstances` instructions, each with at most
+      `maxInteractions` bus interactions, does not overflow.
+
+      The `+ 1` is for the exempt host chip's own touch. -/
+  noMultOverflow : maxInteractions * maxInstances + 1 < p
 
 /-- A list of guest chips. -/
 abbrev Guest (p : ℕ) := List (Circuit p)
+
+/-- Every chip in `G` is one this host will run. -/
+def Host.legalGuests (host : Host p) (G : Guest p) : Prop :=
+  ∀ c ∈ G, host.legalGuest c
 
 /-- A VM: a host and guest chips. -/
 structure Vm (p : ℕ) where
@@ -138,10 +179,15 @@ def GuestAssignment.instanceCount {G : Guest p} (gA : GuestAssignment p G) : ℕ
 def GuestAssignment.satisfiesAlgebraic {G : Guest p} (gA : GuestAssignment p G) : Prop :=
   ∀ t : Fin G.length, ∀ asg ∈ gA t, (G.get t).satisfiesAlgebraic asg
 
-/-- All host assignments are producible and (if applicable) respect singleton-ness. -/
-def HostAssignment.satisfies {host : Host p} (hA : HostAssignment p host) : Prop :=
-  (∀ t : Fin host.chips.length, ∀ effect ∈ hA t, (host.chips.get t).canProduce effect) ∧
-  (∀ t : Fin host.chips.length, (host.chips.get t).singleton → (hA t).length = 1)
+/-- All host assignments are producible and stay inside their chip's instance count.
+
+    The count clause is the host-side half of `VmSat.withinBudget`: OpenVM's trace budget caps
+    every chip in a segment, not only the guest ones. -/
+structure HostAssignment.satisfies {host : Host p} (hA : HostAssignment p host) : Prop where
+  /-- Every realized instance's effect is one its chip can have. -/
+  producible : ∀ t : Fin host.chips.length, ∀ effect ∈ hA t, (host.chips.get t).canProduce effect
+  /-- No chip is realized more times than the VM allows (`HostChip.instanceBound`). -/
+  withinBound : ∀ t : Fin host.chips.length, (hA t).length ≤ (host.chips.get t).instanceBound
 
 /-- The net multiplicity contributed to every bus message, summed over host and guest. -/
 def VmAssignment.busEffect {vm : Vm p} (a : VmAssignment p vm) : BusState p :=
@@ -157,7 +203,7 @@ def VmAssignment.busEffect {vm : Vm p} (a : VmAssignment p vm) : BusState p :=
 
     * Requirements on a guest *circuit* — `Host.legalGuest`, the degree bound. These quantify
       over all assignments---not checkable or checked at runtime. These become
-      assumptions/obligations on the optimizer instead (`PreservesLegality`,
+      assumptions/obligations on the optimizer instead (`Host.legalGuests`,
       `PreservesDegree`).
     * Invariants that are *consequences* of several chips and/or the host. Such
       invariants are proved in `Implementation/` and are not part of this
@@ -167,32 +213,43 @@ def VmAssignment.busEffect {vm : Vm p} (a : VmAssignment p vm) : BusState p :=
 structure VmSat (vm : Vm p) (a : VmAssignment p vm) : Prop where
   /-- Every guest-chip instance's algebraic constraints hold under `a`. -/
   satisfiesGuest : a.guestAssignments.satisfiesAlgebraic
-  /-- The host side of the assignment is producible and singleton-respecting
+  /-- The host side of the assignment is producible and within its instance counts
       (`HostAssignment.satisfies`). -/
   satisfiesHost : a.hostAssignment.satisfies
   /-- Every bus balances: the net multiplicity of every message is zero. -/
   balances : ∀ message : BusMessage p, a.busEffect message = 0
-  /-- There are not too many guest-chip instances in total.
+  /-- There are not too many guest-chip instances in total. The host side of the same budget is
+      `HostAssignment.satisfies`'s count clauses.
 
       This is enforced by OpenVM's proof system and is needed to prevent overflow, e.g., in
       multiplicities. -/
   withinBudget : a.guestAssignments.instanceCount ≤ vm.host.maxInstances
 -- ANCHOR_END: vmSat
 
-/-- The effects of a satisfying VM assignment: the input stream its input-chip instances pulled,
-    concatenated in list order, and the array its output-chip instance left behind. -/
-def VmAssignment.effects {vm : Vm p} (a : VmAssignment p vm) (h : VmSat vm a) : VmEffect p :=
-  { input := (a.hostAssignment vm.host.inputChip).map vm.host.getInputChunk |>.flatten,
-    output := vm.host.getOutput ((a.hostAssignment vm.host.outputChip).head (by
-      -- proof: the output chip's assignment is nonempty, so `head` is safe to call
-      have hlen := h.satisfiesHost.2 vm.host.outputChip vm.host.outputSingleton
-      intro hnil
-      simp [hnil] at hlen)) }
+/-- The input-chip instances of a VM assignment, in the order their chunks are read: sorted by
+    `Host.getInputTime`, not by an instance's arbitrary position in the assignment
+    (`VmAssignment.effects`). -/
+def VmAssignment.orderedInputInstances {vm : Vm p} (a : VmAssignment p vm) : List (BusState p) :=
+  (a.hostAssignment vm.host.inputChip).mergeSort
+    (fun c c' => decide ((vm.host.getInputTime c).val ≤ (vm.host.getInputTime c').val))
+
+/-- The effects of a VM assignment: the input stream its input-chip instances pulled, concatenated
+    in time order (`VmAssignment.orderedInputInstances`), and the array its output-chip instance
+    left behind.
+
+    Total, and so stated of any assignment rather than only a satisfying one. The output chip's
+    `HostChip.instanceBound` is `1`, so the assignment realizes it at most once and there is no
+    other instance the `headD` could be hiding; an assignment that omits it produces whatever
+    `getOutput` reads off the empty contribution, which is the same array a chip that ran and
+    received nothing would leave. -/
+def VmAssignment.effects {vm : Vm p} (a : VmAssignment p vm) : VmEffect p :=
+  { input := a.orderedInputInstances.map vm.host.getInputChunk |>.flatten,
+    output := vm.host.getOutput ((a.hostAssignment vm.host.outputChip).headD 0) }
 
 -- ANCHOR: canEffect
 /-- Whether `vm` can produce effect `e`. -/
 def CanProduce (vm : Vm p) (e : VmEffect p) : Prop :=
-  ∃ (a : VmAssignment p vm) (h : VmSat vm a), a.effects h = e
+  ∃ a : VmAssignment p vm, VmSat vm a ∧ a.effects = e
 -- ANCHOR_END: canEffect
 
 -- ANCHOR: vmEquivalent
@@ -216,14 +273,6 @@ def VmEquivalent (host : Host p) (guestChips guestChips' : Guest p) : Prop :=
   VmSoundReplacement host guestChips guestChips' ∧
     VmCompleteReplacement host guestChips guestChips'
 -- ANCHOR_END: vmEquivalent
-
-/-- If `guestChips` are legal for `host`, then so are `guestChips'`.
-
-    Not derivable from soundness — `agent-docs/legality-preservation.md` has a formal
-    counterexample (`VmSpec/Audit/LegalityPreservation.lean`). Each optimizer pass will need
-    its own argument for this. -/
-def PreservesLegality (host : Host p) (guestChips guestChips' : Guest p) : Prop :=
-  (∀ c ∈ guestChips, host.legalGuest c) → ∀ c ∈ guestChips', host.legalGuest c
 
 /-- If `guestChips` fit the backend's degree bound, then so do `guestChips'`.
 

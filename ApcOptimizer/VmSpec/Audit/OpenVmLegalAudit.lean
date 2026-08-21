@@ -32,10 +32,10 @@ set_option autoImplicit false
     **Fresh write.** A value the chip computes and writes is byte-valued because of a
     bitwise-lookup range check — OpenVM's own `op = 1, x = y` idiom, since `xor x x = 0` holds for
     any byte. `freshWriteChip` has no stateful traffic below its send's rank at all, so what
-    carries it is `Circuit.statelessAccepted` (`freshWriteChip_legalGuest`).
+    carries it is `Circuit.satisfiesStateless` (`freshWriteChip_legalGuest`).
 
     Neither hypothesis is circular: the rank one is the induction hypothesis of
-    `maintains_of_stateful_active`, and the lookup one is `statelessAccepted_of_sinks`, which uses
+    `maintains_of_stateful_active`, and the lookup one is `satisfiesStateless_of_sinks`, which uses
     no stateful clause. -/
 
 namespace ApcOptimizer.OpenVM
@@ -138,7 +138,7 @@ theorem readEcho_limbs [Fact (1 < p)] (hp : 17 < p) {c : Circuit p} (lo hi : Var
     (hmemLo : assertLtLoLookup lo ∈ c.busInteractions)
     (hmemHi : assertLtHiLookup hi ∈ c.busInteractions)
     {asg : ChipAssignment p}
-    (hacc : c.statelessAccepted (openVmGuestRules defaultBusMap openVmMemBusId) asg) :
+    (hacc : c.satisfiesStateless (openVmGuestRules defaultBusMap openVmMemBusId) asg) :
     (asg lo).val < 2 ^ 17 ∧ (asg hi).val < 2 ^ 12 := by
   have hlo := hacc (assertLtLoLookup lo) hmemLo rfl one_ne_zero
   have hhi := hacc (assertLtHiLookup hi) hmemHi rfl one_ne_zero
@@ -151,7 +151,7 @@ theorem readEcho_limbs [Fact (1 < p)] (hp : 17 < p) {c : Circuit p} (lo hi : Var
 /-- The limb bounds, specialized to `readEchoChip` itself. -/
 theorem readEchoChip_limbs [Fact (1 < p)] (hp : 17 < p) (x lo hi : Variable) (ptr t₀ t₁ : ZMod p)
     {asg : ChipAssignment p}
-    (hacc : (readEchoChip x lo hi ptr t₀ t₁).statelessAccepted
+    (hacc : (readEchoChip x lo hi ptr t₀ t₁).satisfiesStateless
       (openVmGuestRules defaultBusMap openVmMemBusId) asg) :
     (asg lo).val < 2 ^ 17 ∧ (asg hi).val < 2 ^ 12 :=
   readEcho_limbs hp lo hi (by simp [readEchoChip]) (by simp [readEchoChip]) hacc
@@ -445,14 +445,16 @@ theorem stepChip_statefulSendsMaintain (hp : 2 ^ 30 < p) (x lo hi : Variable)
     `stepChip` is `readEchoChip`'s memory access wrapped in the execution-bridge step OpenVM
     requires around it, and it satisfies all four conditions — this is the file's answer to
     "is `Circuit.legalGuest` satisfiable by anything a real VM would actually run". -/
-theorem stepChip_legalGuest (hp : 2 ^ 30 < p) {maxWindow : ℕ} (hw : 3 < maxWindow)
+theorem stepChip_legalGuest (hp : 2 ^ 30 < p) {maxWindow maxInteractions : ℕ} (hw : 3 < maxWindow)
+    (hi6 : 6 ≤ maxInteractions)
     (x lo hi : Variable) (pcFrom pcTo ptr base : ZMod p) :
     (stepChip x lo hi pcFrom pcTo ptr base).legalGuest (openVmGuestRules defaultBusMap openVmMemBusId)
-      (openVmRank openVmMemBusId) openVmRankBound maxWindow where
+      (openVmRank openVmMemBusId) openVmRankBound maxWindow maxInteractions where
   sendOnly := stepChip_statelessSendOnly x lo hi pcFrom pcTo ptr base
   polarity := stepChip_statefulPolarity x lo hi pcFrom pcTo ptr base
   sendsMaintain := stepChip_statefulSendsMaintain hp x lo hi pcFrom pcTo ptr base
   advancesClock := stepChip_advancesClock (by omega) hw x lo hi pcFrom pcTo ptr base
+  size := by simpa [stepChip] using hi6
 
 /-- The same access with `AssertLtSubAir` removed: the word is handed back at the timestamp it was
     found at. -/
@@ -463,10 +465,11 @@ def staleEchoChip (x : Variable) (ptr t : ZMod p) : Circuit p where
 /-- **And the gadget is doing real work.** Strip it out and the chip is rejected: with the two
     timestamps equal the rank hypothesis is vacuous, so nothing establishes that the limb is a
     byte — and indeed nothing in the circuit does. -/
-theorem staleEchoChip_not_legalGuest (hp : 256 < p) {maxWindow : ℕ} (x : Variable) (ptr t : ZMod p)
+theorem staleEchoChip_not_legalGuest (hp : 256 < p) {maxWindow maxInteractions : ℕ}
+    (x : Variable) (ptr t : ZMod p)
     (ht : t.val < openVmRankBound) :
     ¬ (staleEchoChip x ptr t).legalGuest (openVmGuestRules defaultBusMap openVmMemBusId)
-        (openVmRank openVmMemBusId) openVmRankBound maxWindow := by
+        (openVmRank openVmMemBusId) openVmRankBound maxWindow maxInteractions := by
   haveI : NeZero p := ⟨by omega⟩
   haveI : Fact (1 < p) := ⟨by omega⟩
   intro h
@@ -549,7 +552,7 @@ theorem freshWriteChip_statefulPolarity (x : Variable) (ptr t : ZMod p) :
 
 /-- **The fresh write discharges its obligation from its own range check.** The chip has no
     stateful traffic below the send's rank, so `Circuit.lowerRanksMaintain` gives nothing; what
-    carries it is `Circuit.statelessAccepted` on the bitwise lookup, whose `op = 1` case is
+    carries it is `Circuit.satisfiesStateless` on the bitwise lookup, whose `op = 1` case is
     exactly `isByte x`. -/
 theorem freshWriteChip_statefulSendsMaintain (hp : 256 < p) (x : Variable) (ptr t : ZMod p) :
     (freshWriteChip x ptr t).statefulSendsMaintain (openVmGuestRules defaultBusMap openVmMemBusId)

@@ -8,6 +8,9 @@ documents — not part of the audited surface, and not a substitute for it.
   framework, `BusFacts`, and the pipeline. The map an agent reads before extending the optimizer.
 - [`ideas.md`](ideas.md) — a ranked shortlist of future optimization ideas. Agents add ideas that
   don't fit the current session and remove ones that have been implemented.
+- [`vm-spec-audit.md`](vm-spec-audit.md) — the running list of audit findings against
+  `ApcOptimizer/VmSpec/`: what is wrong with the audited surface, what each defect costs the
+  VM-level theorem, and which ones are fixed.
 - [`log.md`](log.md) — an append-only history of optimizer changes: each entry records the idea,
   whether it worked, and its effect on effectiveness. Earlier entries describe superseded designs.
 

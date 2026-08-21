@@ -36,8 +36,8 @@ def openVmRankModel (memBusId : Nat := openVmMemBusId) : RankModel p :=
 /-- `memoryFinalizeHostChip`'s slot in `openVmHost.chips` — the one host chip
     `Host.statefulChipsMaintain` carves out as `Host.exemptChip` instead of assuming outright
     (`openVmHost_finalize_exempt`). -/
-def openVmFinalizeIdx (maxInstances ptrReg countReg maxWindow : ℕ) :
-    Fin (openVmHost (p := p) maxInstances ptrReg countReg maxWindow).chips.length :=
+def openVmFinalizeIdx (P : OpenVmParams p) :
+    Fin (openVmHost P).chips.length :=
   ⟨5, by simp [openVmHost]⟩
 
 /-- A message `busStateOf` gives a nonzero net multiplicity is carried by one of its
@@ -54,7 +54,7 @@ theorem exists_of_busStateOf_ne_zero {msgs : List (BusInteraction (ZMod p))} {m 
 theorem OutputRead.interactions_busId (r : OutputRead p) (memBusId : Nat) :
     ∀ msg ∈ r.interactions memBusId, msg.busId = memBusId := by
   intro msg hmsg
-  obtain ⟨⟨i, w⟩, -, rfl⟩ := List.mem_map.mp hmsg
+  obtain ⟨⟨i, w, t⟩, -, rfl⟩ := List.mem_map.mp hmsg
   rfl
 
 theorem ConnectorBoundary.interactions_busId (r : ConnectorBoundary p) (execBusId : Nat) :
@@ -63,16 +63,22 @@ theorem ConnectorBoundary.interactions_busId (r : ConnectorBoundary p) (execBusI
   simp only [ConnectorBoundary.interactions, List.mem_cons, List.not_mem_nil, or_false] at hmsg
   rcases hmsg with rfl | rfl <;> rfl
 
-theorem InputRead.interactions_busId (r : InputRead p) (ptrReg countReg memBusId : Nat) :
-    ∀ msg ∈ r.interactions ptrReg countReg memBusId, msg.busId = memBusId := by
+/-- Every message an `InputRead` describes is on the execution bridge (the two clock-step
+    messages `InputRead.interactions` opens with) or the memory bus (everything else) — never
+    anywhere else, mirroring `ClockStep.other` for a guest instruction. -/
+theorem InputRead.interactions_busId (r : InputRead p) (ptrReg countReg execBusId memBusId : Nat) :
+    ∀ msg ∈ r.interactions ptrReg countReg execBusId memBusId,
+      msg.busId = execBusId ∨ msg.busId = memBusId := by
   intro msg hmsg
-  rw [InputRead.interactions, List.mem_append] at hmsg
-  rcases hmsg with h | h
+  rw [InputRead.interactions, List.mem_append, List.mem_append] at hmsg
+  rcases hmsg with (h | h) | h
   · simp only [List.mem_cons, List.not_mem_nil, or_false] at h
-    rcases h with rfl | rfl | rfl | rfl <;> rfl
+    rcases h with rfl | rfl <;> exact Or.inl rfl
+  · simp only [List.mem_cons, List.not_mem_nil, or_false] at h
+    rcases h with rfl | rfl | rfl | rfl <;> exact Or.inr rfl
   · obtain ⟨⟨i, b, old, _t⟩, -, h⟩ := List.mem_flatMap.mp h
     simp only [List.mem_cons, List.not_mem_nil, or_false] at h
-    rcases h with rfl | rfl <;> rfl
+    rcases h with rfl | rfl <;> exact Or.inr rfl
 
 /-- **`openVmHost`'s table sinks are honest.** Each of the four lookup chips restates its bus's
     case of `OpenVM.accepts`, and the four memory-bus chips cannot carry a stateless message at
@@ -80,12 +86,12 @@ theorem InputRead.interactions_busId (r : InputRead p) (ptrReg countReg memBusId
 
     With `forcesAccepts_of_hostSound`, this feeds `Host.forcesAccepts` for a concrete OpenVM host
     — the condition that was outright false before `VmSat` gained its trace budget. -/
-theorem openVmHost_sinksAreTables (maxInstances ptrReg countReg maxWindow : ℕ) :
-    (openVmHost (p := p) maxInstances ptrReg countReg maxWindow).sinksAreTables
+theorem openVmHost_sinksAreTables (P : OpenVmParams p) :
+    (openVmHost P).sinksAreTables
       (openVmBusSemantics p defaultBusMap) := by
   rintro hA hlegal ⟨mb, ml⟩ hm hnet mult hmult
   obtain ⟨t, c, hc, hcm⟩ := exists_instance_of_hostNet_ne_zero hnet
-  have hleg := hlegal.1 t c hc
+  have hleg := hlegal.producible t c hc
   show ApcOptimizer.OpenVM.accepts defaultBusMap _
   fin_cases t
   -- PC lookup: arity only, exactly as `OpenVM.accepts` has it.
@@ -124,14 +130,16 @@ theorem openVmHost_sinksAreTables (maxInstances ptrReg countReg maxWindow : ℕ)
       (congrArg Prod.fst heq).symm.trans (OutputRead.interactions_busId r 1 msg hmsg)
     subst hbus
     simp [openVmBusSemantics, defaultBusMap, OpenVmBusType.isStateful] at hm
-  · obtain ⟨r, hr⟩ := hleg
+  · obtain ⟨r, -, hr⟩ := hleg
     rw [hr] at hcm
     obtain ⟨msg, hmsg, heq⟩ := exists_of_busStateOf_ne_zero hcm
-    have hbus : mb = 1 :=
-      (congrArg Prod.fst heq).symm.trans
-        (InputRead.interactions_busId r ptrReg countReg 1 msg hmsg)
-    subst hbus
-    simp [openVmBusSemantics, defaultBusMap, OpenVmBusType.isStateful] at hm
+    rcases InputRead.interactions_busId r P.ptrReg P.countReg 0 1 msg hmsg with h0 | h1
+    · have hbus : mb = 0 := (congrArg Prod.fst heq).symm.trans h0
+      subst hbus
+      simp [openVmBusSemantics, defaultBusMap, OpenVmBusType.isStateful] at hm
+    · have hbus : mb = 1 := (congrArg Prod.fst heq).symm.trans h1
+      subst hbus
+      simp [openVmBusSemantics, defaultBusMap, OpenVmBusType.isStateful] at hm
   -- The connector lives on the execution bridge, which is stateful.
   · obtain ⟨r, hr⟩ := hleg
     rw [hr] at hcm
@@ -221,8 +229,8 @@ theorem OutputRead.interactions_data (r : OutputRead p) (memBusId : Nat) :
     ∀ msg ∈ r.interactions memBusId, ∀ f : MemoryPayload p,
       memoryPayload? msg.payload = some f → ∀ d ∈ f.data, isByte d := by
   intro msg hmsg f hf d hd
-  obtain ⟨⟨i, w⟩, hiw, rfl⟩ := List.mem_map.mp hmsg
-  have hw : isByte w := r.wordsAreBytes w (List.of_mem_zip hiw).2
+  obtain ⟨⟨i, w, t⟩, hiw, rfl⟩ := List.mem_map.mp hmsg
+  have hw : isByte w := r.wordsAreBytes w (List.of_mem_zip (List.of_mem_zip hiw).2).1
   simp only [memoryPayload?, Option.some.injEq] at hf
   subst hf
   simp at hd
@@ -233,12 +241,15 @@ theorem OutputRead.interactions_data (r : OutputRead p) (memBusId : Nat) :
 /-- Every message an `InputRead` describes carries byte-valued data limbs — the peeked register
     values by `ptrLimbsAreBytes`/`countLimbsAreBytes`, the overwritten words by
     `oldWordsAreBytes`, the written values by `bytesAreBytes`. -/
-theorem InputRead.interactions_data (r : InputRead p) (ptrReg countReg memBusId : Nat) :
-    ∀ msg ∈ r.interactions ptrReg countReg memBusId, ∀ f : MemoryPayload p,
+theorem InputRead.interactions_data (r : InputRead p) (ptrReg countReg execBusId memBusId : Nat) :
+    ∀ msg ∈ r.interactions ptrReg countReg execBusId memBusId, ∀ f : MemoryPayload p,
       memoryPayload? msg.payload = some f → ∀ d ∈ f.data, isByte d := by
   intro msg hmsg f hf d hd
-  rw [InputRead.interactions, List.mem_append] at hmsg
-  rcases hmsg with h | h
+  rw [InputRead.interactions, List.mem_append, List.mem_append] at hmsg
+  rcases hmsg with (h | h) | h
+  · -- The two bridge messages carry a two-element payload, too short to be a memory record.
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at h
+    rcases h with rfl | rfl <;> simp [memoryPayload?] at hf
   · simp only [List.mem_cons, List.not_mem_nil, or_false] at h
     rcases h with rfl | rfl | rfl | rfl
     · exact r.ptrLimbsAreBytes d (memoryPayload?_word hf d hd)
@@ -289,18 +300,18 @@ theorem bridge_maintains (payload : List (ZMod p)) :
   rw [ApcOptimizer.OpenVM.maintainsInvariants]
   exact Or.inl rfl
 
-/-- **Memory finalization is `openVmHost`'s exempt chip.** It is `singleton`
-    (`memoryFinalizeHostChip`), and its own `canProduce` already pins every active touch to
-    multiplicity `-1` — nothing else is needed, since `Host.exemptChip` doesn't ask for the byte
-    fact `Realizes.lean`'s induction derives instead. -/
-theorem openVmHost_finalize_exempt (maxInstances ptrReg countReg maxWindow : ℕ) :
-    (openVmHost (p := p) maxInstances ptrReg countReg maxWindow).exemptChip
+/-- **Memory finalization is `openVmHost`'s exempt chip.** It runs at most once
+    (`memoryFinalizeHostChip`'s `instanceBound`), and its own `canProduce` already pins every
+    active touch to multiplicity `-1` — nothing else is needed, since `Host.exemptChip` doesn't ask
+    for the byte fact `Realizes.lean`'s induction derives instead. -/
+theorem openVmHost_finalize_exempt (P : OpenVmParams p) :
+    (openVmHost P).exemptChip
       (openVmBusSemantics p defaultBusMap)
-      (openVmFinalizeIdx (p := p) maxInstances ptrReg countReg maxWindow) where
-  singleton := trivial
+      (openVmFinalizeIdx P) where
+  bound := Nat.le_refl 1
   uniform := by
     rintro hA hlegal c hc ⟨mb, ml⟩ hst hcm
-    have hleg := hlegal.1 _ c hc
+    have hleg := hlegal.producible _ c hc
     exact (hleg (mb, ml) hcm).2.1
 
 /-- **`openVmHost`'s stateful traffic maintains the bus invariants**, apart from memory
@@ -312,12 +323,12 @@ theorem openVmHost_finalize_exempt (maxInstances ptrReg countReg maxWindow : ℕ
 
     Memory initialization is the one genuinely irreducible case: nothing precedes it on the rank
     order to derive it from, so it is still asserted directly. -/
-theorem openVmHost_statefulChipsMaintain (maxInstances ptrReg countReg maxWindow : ℕ) :
-    (openVmHost (p := p) maxInstances ptrReg countReg maxWindow).statefulChipsMaintain
+theorem openVmHost_statefulChipsMaintain (P : OpenVmParams p) :
+    (openVmHost P).statefulChipsMaintain
       (openVmBusSemantics p defaultBusMap)
-      (openVmFinalizeIdx (p := p) maxInstances ptrReg countReg maxWindow) := by
+      (openVmFinalizeIdx P) := by
   rintro hA hlegal t ht c hc ⟨mb, ml⟩ hst hcm
-  have hleg := hlegal.1 t c hc
+  have hleg := hlegal.producible t c hc
   fin_cases t
   -- The four lookup chips pin the bus id to a stateless bus.
   · have hbus := (hleg (mb, ml) hcm).1
@@ -333,7 +344,7 @@ theorem openVmHost_statefulChipsMaintain (maxInstances ptrReg countReg maxWindow
     subst hbus
     simp [openVmBusSemantics, defaultBusMap, OpenVmBusType.isStateful] at hst
   -- Memory initialization: byte-valued by the chip's own predicate.
-  · obtain ⟨hbus, -, f, hf, hbytes, -⟩ := hleg (mb, ml) hcm
+  · obtain ⟨hbus, -, f, hf, hbytes, -, -⟩ := hleg (mb, ml) hcm
     subst hbus
     refine memory_maintains (fun f' hf' => ?_)
     rw [hf] at hf'
@@ -349,15 +360,20 @@ theorem openVmHost_statefulChipsMaintain (maxInstances ptrReg countReg maxWindow
     have hbus : mb = 1 := hb ▸ OutputRead.interactions_busId r 1 msg hmsg
     subst hbus
     exact hpl ▸ memory_maintains (hpl ▸ OutputRead.interactions_data r 1 msg hmsg)
-  -- Input chip: pinned to an `InputRead`, whose bytes and old words are bytes.
-  · obtain ⟨r, hr⟩ := hleg
+  -- Input chip: on the execution bridge (polarity alone, like the connector) or pinned to an
+  -- `InputRead`'s memory writes, whose bytes and old words are bytes.
+  · obtain ⟨r, -, hr⟩ := hleg
     rw [hr] at hcm
     obtain ⟨msg, hmsg, heq⟩ := exists_of_busStateOf_ne_zero hcm
     obtain ⟨hb, hpl⟩ := Prod.mk.injEq .. ▸ heq
-    have hbus : mb = 1 := hb ▸ InputRead.interactions_busId r ptrReg countReg 1 msg hmsg
-    subst hbus
-    exact hpl ▸ memory_maintains
-      (hpl ▸ InputRead.interactions_data r ptrReg countReg 1 msg hmsg)
+    rcases InputRead.interactions_busId r P.ptrReg P.countReg 0 1 msg hmsg with h0 | h1
+    · have hbus : mb = 0 := hb.symm.trans h0
+      subst hbus
+      exact hpl ▸ bridge_maintains ml
+    · have hbus : mb = 1 := hb.symm.trans h1
+      subst hbus
+      exact hpl ▸ memory_maintains
+        (hpl ▸ InputRead.interactions_data r P.ptrReg P.countReg 0 1 msg hmsg)
   -- Connector: on the execution bridge, where polarity is the whole invariant.
   · obtain ⟨r, hr⟩ := hleg
     rw [hr] at hcm
@@ -393,13 +409,13 @@ theorem restrict_ne_zero {δ : BusState p} {b : Nat} {m : BusMessage p}
   · exact ⟨hb, by simpa [hb] using h⟩
   · simp [hb] at h
 
-/-- **`openVmHost` can re-balance a stateless change.** `δ` lives on the four lookup buses, so
-    each lookup chip absorbs its own bus's slice of it in a single extra instance: the chip's
-    predicate constrains *which* payloads may carry a nonzero net, not what that net is, and no
-    lookup chip is `HostChip.singleton`. The memory, input and output chips are left untouched,
-    which is what carries the observed `VmEffect` across the rebuild. -/
-theorem openVmHost_absorbsStateless (maxInstances ptrReg countReg maxWindow : ℕ) :
-    (openVmHost (p := p) maxInstances ptrReg countReg maxWindow).absorbsStateless
+/-- **`openVmHost` can re-balance a stateless change.** `δ` lives on the four lookup buses, and
+    each lookup chip absorbs its own bus's slice of it into what its instances already net: the
+    chip's predicate constrains *which* payloads may carry a nonzero net, not what that net is, so
+    it is closed under sums (`hadd`, `hsum`). The memory, input and output chips are left
+    untouched, which is what carries the observed `VmEffect` across the rebuild. -/
+theorem openVmHost_absorbsStateless (P : OpenVmParams p) :
+    (openVmHost P).absorbsStateless
       (openVmBusSemantics p defaultBusMap) := by
   intro hA hlegal δ hδ
   -- δ lives on the four lookup buses.
@@ -414,7 +430,33 @@ theorem openVmHost_absorbsStateless (maxInstances ptrReg countReg maxWindow : �
     match hbm : defaultBusMap m.1 with
     | none => rw [hbm] at hacc'; exact absurd hacc' (by simp)
     | some t => rw [hbm] at hst'; exact defaultBusMap_stateless hbm hst'
-  set extra : HostAssignment p (openVmHost (p := p) maxInstances ptrReg countReg maxWindow) :=
+  -- A lookup chip's predicate is closed under sums, so one instance can carry what a whole list
+  -- of them netted, plus its bus's slice of `δ`.
+  have hadd : ∀ (busId : Nat) (accept : List (ZMod p) → Prop) (c r : BusState p),
+      (lookupTableHostChip busId accept).canProduce c →
+      (lookupTableHostChip busId accept).canProduce r →
+      (lookupTableHostChip busId accept).canProduce (c + r) := by
+    intro busId accept c r hc hr m hm
+    by_cases h : c m = 0
+    · exact hr m (by simpa [h] using hm)
+    · exact hc m h
+  have hsum : ∀ (busId : Nat) (accept : List (ZMod p) → Prop) (l : List (BusState p)),
+      (∀ c ∈ l, (lookupTableHostChip busId accept).canProduce c) →
+      (lookupTableHostChip busId accept).canProduce l.sum := by
+    intro busId accept l
+    induction l with
+    | nil => intro _ m hm; exact absurd rfl hm
+    | cons c l ih =>
+      intro hall
+      exact hadd busId accept c l.sum (hall c (by simp))
+        (ih fun d hd => hall d (by simp [hd]))
+  have hsumApply : ∀ (l : List (BusState p)) (m : BusMessage p),
+      l.sum m = (l.map (fun c => c m)).sum := by
+    intro l m
+    induction l with
+    | nil => rfl
+    | cons c l ih => simp [ih]
+  set extra : HostAssignment p (openVmHost P) :=
     fun t =>
     match (t : ℕ) with
     | 0 => [fun m => if m.1 = 2 then δ m else 0]
@@ -422,67 +464,97 @@ theorem openVmHost_absorbsStateless (maxInstances ptrReg countReg maxWindow : �
     | 2 => [fun m => if m.1 = 3 then δ m else 0]
     | 3 => [fun m => if m.1 = 7 then δ m else 0]
     | _ => [] with hextra
-  refine ⟨fun t => extra t ++ hA t, ⟨?_, ?_⟩, ?_, rfl, rfl⟩
+  -- Each lookup chip is a singleton, so the rebuild pools its instances into one that nets the
+  -- same plus its slice; every other chip is left exactly as it was.
+  set hA' : HostAssignment p (openVmHost P) :=
+    fun t =>
+    match (t : ℕ) with
+    | 0 => [(hA t).sum + fun m => if m.1 = 2 then δ m else 0]
+    | 1 => [(hA t).sum + fun m => if m.1 = 6 then δ m else 0]
+    | 2 => [(hA t).sum + fun m => if m.1 = 3 then δ m else 0]
+    | 3 => [(hA t).sum + fun m => if m.1 = 7 then δ m else 0]
+    | _ => hA t with hA'def
+  have key : ∀ b : Nat, ∀ m : BusMessage p,
+      (if m.1 = b then δ m else 0) ≠ 0 →
+        m.1 = b ∧ ∃ mult : ZMod p, ApcOptimizer.OpenVM.accepts defaultBusMap
+          (⟨b, mult, m.2⟩ : BusInteraction (ZMod p)) := by
+    intro b m hm
+    obtain ⟨hb, hne⟩ := restrict_ne_zero hm
+    obtain ⟨-, mult, -, hacc⟩ := hδ m hne
+    refine ⟨hb, mult, ?_⟩
+    have hacc' : ApcOptimizer.OpenVM.accepts defaultBusMap
+      (⟨m.1, mult, m.2⟩ : BusInteraction (ZMod p)) := hacc
+    rw [hb] at hacc'
+    exact hacc'
+  have hslice2 : (pcLookupHostChip (p := p) 2).canProduce
+      (fun m => if m.1 = 2 then δ m else 0) := by
+    intro m hm
+    obtain ⟨hb, mult, hacc⟩ := key 2 m hm
+    refine ⟨hb, ?_⟩
+    rw [ApcOptimizer.OpenVM.accepts] at hacc
+    simp only [defaultBusMap] at hacc
+    exact hacc
+  have hslice6 : (bitwiseLookupHostChip (p := p) 6).canProduce
+      (fun m => if m.1 = 6 then δ m else 0) := by
+    intro m hm
+    obtain ⟨hb, mult, hacc⟩ := key 6 m hm
+    refine ⟨hb, ?_⟩
+    rw [ApcOptimizer.OpenVM.accepts] at hacc
+    simp only [defaultBusMap] at hacc
+    revert hacc
+    rcases hml : m.2 with _ | ⟨x, _ | ⟨y, _ | ⟨z, _ | ⟨op, _ | ⟨w, rest⟩⟩⟩⟩⟩ <;> exact id
+  have hslice3 : (variableRangeCheckerHostChip (p := p) 3).canProduce
+      (fun m => if m.1 = 3 then δ m else 0) := by
+    intro m hm
+    obtain ⟨hb, mult, hacc⟩ := key 3 m hm
+    refine ⟨hb, ?_⟩
+    rw [ApcOptimizer.OpenVM.accepts] at hacc
+    simp only [defaultBusMap] at hacc
+    revert hacc
+    rcases hml : m.2 with _ | ⟨x, _ | ⟨y, _ | ⟨z, rest⟩⟩⟩ <;> exact id
+  have hslice7 : (tupleRangeCheckerHostChip (p := p) 7 256 2048).canProduce
+      (fun m => if m.1 = 7 then δ m else 0) := by
+    intro m hm
+    obtain ⟨hb, mult, hacc⟩ := key 7 m hm
+    refine ⟨hb, ?_⟩
+    rw [ApcOptimizer.OpenVM.accepts] at hacc
+    simp only [defaultBusMap] at hacc
+    revert hacc
+    rcases hml : m.2 with _ | ⟨x, _ | ⟨y, _ | ⟨z, rest⟩⟩⟩ <;> exact id
+  refine ⟨hA', ⟨?_, ?_⟩, ?_, rfl, rfl⟩
   · intro t effect hmem
-    rw [List.mem_append] at hmem
-    rcases hmem with hnew | hold
-    · have key : ∀ b : Nat, ∀ m : BusMessage p,
-          (if m.1 = b then δ m else 0) ≠ 0 →
-            m.1 = b ∧ ∃ mult : ZMod p, ApcOptimizer.OpenVM.accepts defaultBusMap
-              (⟨b, mult, m.2⟩ : BusInteraction (ZMod p)) := by
-        intro b m hm
-        obtain ⟨hb, hne⟩ := restrict_ne_zero hm
-        obtain ⟨-, mult, -, hacc⟩ := hδ m hne
-        refine ⟨hb, mult, ?_⟩
-        have hacc' : ApcOptimizer.OpenVM.accepts defaultBusMap
-          (⟨m.1, mult, m.2⟩ : BusInteraction (ZMod p)) := hacc
-        rw [hb] at hacc'
-        exact hacc'
-      fin_cases t <;> rw [hextra] at hnew <;> simp at hnew <;> subst hnew
-      · show (pcLookupHostChip (p := p) 2).canProduce _
-        intro m hm
-        obtain ⟨hb, mult, hacc⟩ := key 2 m hm
-        refine ⟨hb, ?_⟩
-        rw [ApcOptimizer.OpenVM.accepts] at hacc
-        simp only [defaultBusMap] at hacc
-        exact hacc
-      · show (bitwiseLookupHostChip (p := p) 6).canProduce _
-        intro m hm
-        obtain ⟨hb, mult, hacc⟩ := key 6 m hm
-        refine ⟨hb, ?_⟩
-        rw [ApcOptimizer.OpenVM.accepts] at hacc
-        simp only [defaultBusMap] at hacc
-        revert hacc
-        rcases hml : m.2 with _ | ⟨x, _ | ⟨y, _ | ⟨z, _ | ⟨op, _ | ⟨w, rest⟩⟩⟩⟩⟩ <;> exact id
-      · show (variableRangeCheckerHostChip (p := p) 3).canProduce _
-        intro m hm
-        obtain ⟨hb, mult, hacc⟩ := key 3 m hm
-        refine ⟨hb, ?_⟩
-        rw [ApcOptimizer.OpenVM.accepts] at hacc
-        simp only [defaultBusMap] at hacc
-        revert hacc
-        rcases hml : m.2 with _ | ⟨x, _ | ⟨y, _ | ⟨z, rest⟩⟩⟩ <;> exact id
-      · show (tupleRangeCheckerHostChip (p := p) 7 256 2048).canProduce _
-        intro m hm
-        obtain ⟨hb, mult, hacc⟩ := key 7 m hm
-        refine ⟨hb, ?_⟩
-        rw [ApcOptimizer.OpenVM.accepts] at hacc
-        simp only [defaultBusMap] at hacc
-        revert hacc
-        rcases hml : m.2 with _ | ⟨x, _ | ⟨y, _ | ⟨z, rest⟩⟩⟩ <;> exact id
-    · exact hlegal.1 t effect hold
-  · intro t hsing
+    fin_cases t <;> simp only [hA'def] at hmem
+    · simp at hmem
+      subst hmem
+      show (pcLookupHostChip (p := p) 2).canProduce _
+      exact hadd 2 _ _ _ (hsum 2 _ _ fun c hc => hlegal.producible _ c hc) hslice2
+    · simp at hmem
+      subst hmem
+      show (bitwiseLookupHostChip (p := p) 6).canProduce _
+      exact hadd 6 _ _ _ (hsum 6 _ _ fun c hc => hlegal.producible _ c hc) hslice6
+    · simp at hmem
+      subst hmem
+      show (variableRangeCheckerHostChip (p := p) 3).canProduce _
+      exact hadd 3 _ _ _ (hsum 3 _ _ fun c hc => hlegal.producible _ c hc) hslice3
+    · simp at hmem
+      subst hmem
+      show (tupleRangeCheckerHostChip (p := p) 7 256 2048).canProduce _
+      exact hadd 7 _ _ _ (hsum 7 _ _ fun c hc => hlegal.producible _ c hc) hslice7
+    all_goals exact hlegal.producible _ effect hmem
+  · -- The pooled lookup chips hold one instance each, which is their whole budget.
+    intro t
     fin_cases t
-    · exact hsing.elim
-    · exact hsing.elim
-    · exact hsing.elim
-    · exact hsing.elim
-    all_goals (show ([] ++ hA _).length = 1; rw [List.nil_append]; exact hlegal.2 _ hsing)
+    · exact Nat.le_refl 1
+    · exact Nat.le_refl 1
+    · exact Nat.le_refl 1
+    · exact Nat.le_refl 1
+    all_goals exact hlegal.withinBound _
   · funext m
-    show (∑ t : Fin 9, ((extra t ++ hA t).map (fun c => c m)).sum) = hA.busEffect m + δ m
-    have hsplit : ∀ t : Fin 9, ((extra t ++ hA t).map (fun c => c m)).sum
+    show (∑ t : Fin 9, ((hA' t).map (fun c => c m)).sum) = hA.busEffect m + δ m
+    have hsplit : ∀ t : Fin 9, ((hA' t).map (fun c => c m)).sum
         = ((extra t).map (fun c => c m)).sum + ((hA t).map (fun c => c m)).sum := by
-      intro t; rw [List.map_append, List.sum_append]
+      intro t
+      fin_cases t <;> simp [hA'def, hextra, hsumApply, add_comm]
     rw [Finset.sum_congr rfl (fun t _ => hsplit t), Finset.sum_add_distrib]
     have hhost : (∑ t : Fin 9, ((hA t).map (fun c => c m)).sum) = hA.busEffect m := rfl
     rw [hhost, add_comm ((∑ t : Fin 9, ((extra t).map (fun c => c m)).sum)), add_right_inj]
@@ -533,52 +605,52 @@ theorem openVmGuestRules_eq (busMap : BusMap) (memBusId : Nat) :
     `openVmGuestRules defaultBusMap openVmMemBusId` itself as the clock template — so `advancesClock` (needed
     by the rank-window argument, `openVmHost_advancesClock_unpack`) is just another field of the
     very same structure, not a separate conjunct to unpack. -/
-theorem openVmHost_legalGuest_unpack (maxInstances ptrReg countReg maxWindow : ℕ) (c : Circuit p) :
-    (openVmHost (p := p) maxInstances ptrReg countReg maxWindow).legalGuest c →
+theorem openVmHost_legalGuest_unpack (P : OpenVmParams p) (c : Circuit p) :
+    (openVmHost P).legalGuest c →
       c.legalGuest ((openVmBusSemantics p defaultBusMap).toGuestRules
           (openVmGuestRules defaultBusMap openVmMemBusId))
-        (openVmRank openVmMemBusId) openVmRankBound maxWindow :=
+        (openVmRank openVmMemBusId) openVmRankBound (openVmHost P).maxWindow (openVmHost P).maxInteractions :=
   fun h => openVmGuestRules_eq defaultBusMap openVmMemBusId ▸ h
 
 /-- The temporal contract, which the rank-window argument consumes — a field projection now,
     not a separate conjunct. -/
 theorem openVmHost_advancesClock_unpack
-    (maxInstances ptrReg countReg maxWindow : ℕ) (c : Circuit p) :
-    (openVmHost (p := p) maxInstances ptrReg countReg maxWindow).legalGuest c →
-      Circuit.advancesClock c (openVmGuestRules defaultBusMap openVmMemBusId) maxWindow :=
+    (P : OpenVmParams p) (c : Circuit p) :
+    (openVmHost P).legalGuest c →
+      Circuit.advancesClock c (openVmGuestRules defaultBusMap openVmMemBusId) P.maxWindow :=
   fun h => h.advancesClock
 
 /-- **`Host.forcesAccepts` for a concrete OpenVM host**, with no hypotheses: in any satisfying
     OpenVM run within the trace budget, every guest instance's assignment is
     `Circuit.satisfies`-good, not merely algebraically consistent. -/
-theorem openVmHost_forcesAccepts [Fact p.Prime] (maxInstances ptrReg countReg maxWindow : ℕ)
-    (hPins : (openVmHost (p := p) maxInstances ptrReg countReg maxWindow).pinsRanks
+theorem openVmHost_forcesAccepts [Fact p.Prime] (P : OpenVmParams p)
+    (hPins : (openVmHost P).pinsRanks
       (openVmRankModel openVmMemBusId)) :
-    (openVmHost (p := p) maxInstances ptrReg countReg maxWindow).forcesAccepts
+    (openVmHost P).forcesAccepts
       (openVmBusSemantics p defaultBusMap) :=
-  forcesAccepts_of_hostSound (openVmHost_legalGuest_unpack maxInstances ptrReg countReg maxWindow)
-    (openVmHost_sinksAreTables maxInstances ptrReg countReg maxWindow)
-    ⟨openVmFinalizeIdx maxInstances ptrReg countReg maxWindow,
-      openVmHost_finalize_exempt maxInstances ptrReg countReg maxWindow,
-      openVmHost_statefulChipsMaintain maxInstances ptrReg countReg maxWindow⟩
+  forcesAccepts_of_hostSound (openVmHost_legalGuest_unpack P)
+    (openVmHost_sinksAreTables P)
+    ⟨openVmFinalizeIdx P,
+      openVmHost_finalize_exempt P,
+      openVmHost_statefulChipsMaintain P⟩
     (openVmBusSemantics_statefulAcceptsOfPayloadOk (openVmGuestRules defaultBusMap openVmMemBusId)) hPins
 
 /-- **`openVmHost` realizes OpenVM's bus semantics** — unconditionally. This is the whole VM-side
     obligation of `vmSoundReplacement_of_forall₂`, discharged for a concrete host. -/
-theorem openVmHost_realizes (maxInstances ptrReg countReg maxWindow : ℕ)
-    (hPins : (openVmHost (p := p) maxInstances ptrReg countReg maxWindow).pinsRanks
+theorem openVmHost_realizes (P : OpenVmParams p)
+    (hPins : (openVmHost P).pinsRanks
       (openVmRankModel openVmMemBusId)) :
-    (openVmHost (p := p) maxInstances ptrReg countReg maxWindow).realizes
+    (openVmHost P).realizes
       (openVmBusSemantics p defaultBusMap) (openVmRankModel openVmMemBusId)
-      (openVmGuestRules defaultBusMap openVmMemBusId) maxWindow where
-  legalGuest := openVmHost_legalGuest_unpack maxInstances ptrReg countReg maxWindow
-  sinksAreTables := openVmHost_sinksAreTables maxInstances ptrReg countReg maxWindow
-  statefulChipsMaintain := ⟨openVmFinalizeIdx maxInstances ptrReg countReg maxWindow,
-    openVmHost_finalize_exempt maxInstances ptrReg countReg maxWindow,
-    openVmHost_statefulChipsMaintain maxInstances ptrReg countReg maxWindow⟩
+      (openVmGuestRules defaultBusMap openVmMemBusId) where
+  legalGuest := openVmHost_legalGuest_unpack P
+  sinksAreTables := openVmHost_sinksAreTables P
+  statefulChipsMaintain := ⟨openVmFinalizeIdx P,
+    openVmHost_finalize_exempt P,
+    openVmHost_statefulChipsMaintain P⟩
   statefulAcceptsOfPayloadOk :=
     openVmBusSemantics_statefulAcceptsOfPayloadOk (openVmGuestRules defaultBusMap openVmMemBusId)
-  absorbsStateless := openVmHost_absorbsStateless maxInstances ptrReg countReg maxWindow
+  absorbsStateless := openVmHost_absorbsStateless P
   pinsRanks := hPins
 
 end ApcOptimizer.OpenVM

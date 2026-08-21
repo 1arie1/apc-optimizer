@@ -54,7 +54,6 @@ VmEquivalent.refl
 VmEquivalent.symm
 VmEquivalent.trans
 canProduce_idle
-head_congr
 
 # `Counting.lean` / `Realizes.lean` / `Connection.lean`, which prove the soundness half of the
 # bridge from `Spec.lean`'s per-chip `isSoundReplacementOf` to `Basic.lean`'s `VmEquivalent`.
@@ -79,7 +78,7 @@ guestNet_add_ne_zero_of_uniform
 payloadOk_of_exists
 maintains_of_stateful_active
 forcesAccepts_of_hostSound
-statelessAccepted_of_sinks
+satisfiesStateless_of_sinks
 Host.realizes.forcesAccepts
 soundWitness_spec
 guestNet_cons
@@ -136,10 +135,34 @@ VmChain.Chain.exists_prefix
 VmChain.Chain.sum_time_src_eq_dst
 VmChain.Chain.time_conn
 VmChain.Chain.arc_position
+# `Chain.time_injOn`/`Chain.src_injOn` (no two non-connector arcs share a clock reading, hence not
+# a state either) and their supporting lemmas: the input chip is now wired onto the execution
+# bridge (`InputRead.pcFrom`/`pcTo`/`d`, `OpenVmChain.lean`'s `BridgeArc`), so these are consumed —
+# by `openVmHost_inputTime_injOn` below, closing A2 in `agent-docs/vm-spec-audit.md` — but the
+# whole `VmSpec/Implementation/` tree is still outside the four roots above, same as everything
+# else in this section.
+VmChain.mod_pred_succ
+VmChain.mod_succ_pred
+VmChain.no_selfBalanced_of_not_mem_conn
+VmChain.walk_conn_shift
+VmChain.walk_conn_cycleLen
+VmChain.walk_conn_ne_conn_of_pos_lt
+VmChain.walk_conn_injOn
+VmChain.walk_conn_periodic
+VmChain.walk_conn_mod
+VmChain.walk_conn_dst_eq_src_succ
+VmChain.cycleSet_selfBalanced
+VmChain.cycleSet_eq_univ
+VmChain.exists_index_of_ne_conn
+VmChain.Chain.time_injOn
+VmChain.Chain.src_injOn
 ApcOptimizer.OpenVM.clockStep_nonempty
 ApcOptimizer.OpenVM.list_map_sum_eq_sum_fin
 ApcOptimizer.OpenVM.guestNet_eq_sum_inst
 ApcOptimizer.OpenVM.connector_busStateOf
+ApcOptimizer.OpenVM.busStateOf_append
+ApcOptimizer.OpenVM.busStateOf_eq_zero_of_busId_ne
+ApcOptimizer.OpenVM.inputRead_busStateOf_execBus
 ApcOptimizer.OpenVM.openVmHost_bridge_isolated
 ApcOptimizer.OpenVM.bridgeSrc_busId
 ApcOptimizer.OpenVM.bridgeDst_busId
@@ -153,6 +176,7 @@ ApcOptimizer.OpenVM.bridge_total_le
 ApcOptimizer.OpenVM.bridge_totalLt
 ApcOptimizer.OpenVM.bridge_chain_bound
 ApcOptimizer.OpenVM.openVmHost_pinsRanks
+ApcOptimizer.OpenVM.openVmHost_inputTime_injOn
 
 # `OpenVmLegalAudit.lean` checks `Circuit.legalGuest` against both OpenVM memory-send shapes: the
 # read-echo (carrying OpenVM's own `AssertLtSubAir`, from which the timestamp ordering is derived)
@@ -203,3 +227,6 @@ ApcOptimizer.OpenVM.legalOnAccepted_not_statelessSendOnly
 ApcOptimizer.OpenVM.zeroMultiplicity_replaceable_by_receive
 ApcOptimizer.OpenVM.not_accepts_outOfTable
 ApcOptimizer.OpenVM.sideEffects_eq
+ApcOptimizer.OpenVM.looseTabled_not_isSoundReplacementOf
+ApcOptimizer.OpenVM.checkedStepChip_legalGuest
+ApcOptimizer.OpenVM.openVm_sound_but_illegal

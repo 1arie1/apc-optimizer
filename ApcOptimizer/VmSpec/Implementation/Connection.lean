@@ -87,14 +87,15 @@ theorem guestInstanceCount_cons {c : Circuit p} {R : Guest p}
     same observable effect, whatever their guest chips do. -/
 theorem effects_eq_of_io {host : Host p} {G G' : Guest p}
     {a : VmAssignment p ⟨host, G⟩} {a' : VmAssignment p ⟨host, G'⟩}
-    (h : VmSat ⟨host, G⟩ a) (h' : VmSat ⟨host, G'⟩ a')
     (hin : a.hostAssignment host.inputChip = a'.hostAssignment host.inputChip)
     (hout : a.hostAssignment host.outputChip = a'.hostAssignment host.outputChip) :
-    a.effects h = a'.effects h' := by
-  unfold VmAssignment.effects
+    a.effects = a'.effects := by
+  have hord : a.orderedInputInstances = a'.orderedInputInstances := by
+    unfold VmAssignment.orderedInputInstances
+    rw [hin]
   exact congrArg₂ VmEffect.mk
-    (congrArg List.flatten (congrArg (List.map host.getInputChunk) hin))
-    (congrArg host.getOutput (head_congr hout _ _))
+    (congrArg List.flatten (congrArg (List.map host.getInputChunk) hord))
+    (congrArg host.getOutput (congrArg (fun l => l.headD 0) hout))
 
 --------- One substitution ---------
 
@@ -111,18 +112,16 @@ theorem effects_eq_of_io {host : Host p} {G G' : Guest p}
     `VmSat` carries no circuit-level property, so the restored run has nothing to re-establish. -/
 theorem vmSoundReplacement_cons [Fact p.Prime]
     {host : Host p} {bs : BusSemantics p} {rm : RankModel p} {r0 : GuestBusRules p}
-    {maxWindow : ℕ} {c c' : Circuit p} {R : Guest p} {maxInteractions : ℕ}
-    (hHost : host.realizes bs rm r0 maxWindow)
+    {c c' : Circuit p} {R : Guest p}
+    (hHost : host.realizes bs rm r0)
     (hLegal : ∀ d ∈ c' :: R, host.legalGuest d)
-    (hSize : ∀ d ∈ c' :: R, d.busInteractions.length ≤ maxInteractions)
-    (hBudget : maxInteractions * host.maxInstances + 1 < p)
     (hSound : c'.isSoundReplacementOf c bs) :
     VmSoundReplacement host (c :: R) (c' :: R) := by
   rintro e ⟨a', hsat', rfl⟩
   -- The host forces every optimized guest instance to be `Circuit.satisfies`-good.
   have hsat'g : ∀ (t : Fin (c' :: R).length), ∀ asg ∈ a'.guestAssignments t,
       ((c' :: R).get t).satisfies bs asg :=
-    hHost.forcesAccepts (c' :: R) maxInteractions hLegal hSize hBudget a' hsat'
+    hHost.forcesAccepts (c' :: R) hLegal a' hsat'
   -- Per instance of the replaced chip, the original assignment soundness promises.
   set w : ChipAssignment p → ChipAssignment p := soundWitness c' c bs with hw
   have hwit : ∀ asg ∈ a'.guestAssignments 0,
@@ -197,65 +196,49 @@ theorem vmSoundReplacement_cons [Fact p.Prime]
         (gA := Fin.tail a'.guestAssignments) (gA' := a'.guestAssignments) rfl (fun _ => rfl)
       rw [h1, List.length_map, ← h2]
       exact hsat'.withinBudget
-  exact ⟨⟨gA, hA'⟩, hsat, effects_eq_of_io hsat hsat' hA'in hA'out⟩
+  exact ⟨⟨gA, hA'⟩, hsat, effects_eq_of_io hA'in hA'out⟩
 
 --------- Many substitutions ---------
 
 /-- The induction behind `vmSoundReplacement_of_forall₂`: `S` accumulates the chips already
     replaced, rotated to the back of the list, so the next chip to replace is always at the head.
 
-    Note that the size bound is needed on *both* lists, not just the optimized one: the
-    intermediate lists mix chips from each, and `Host.forcesAccepts` applies to a whole list. -/
+    Note that legality is needed of *both* lists, not just the optimized one: the intermediate
+    lists mix chips from each, and `Host.forcesAccepts` applies to a whole list. -/
 theorem vmSoundReplacement_append [Fact p.Prime]
     {host : Host p} {bs : BusSemantics p} {rm : RankModel p} {r0 : GuestBusRules p}
-    {maxWindow : ℕ} {maxInteractions : ℕ}
-    (hHost : host.realizes bs rm r0 maxWindow)
-    (hBudget : maxInteractions * host.maxInstances + 1 < p)
+    (hHost : host.realizes bs rm r0)
     {T T' : Guest p}
     (hSound : List.Forall₂ (fun c c' => c'.isSoundReplacementOf c bs) T T') :
-    (∀ d ∈ T ++ T', host.legalGuest d) →
-    (∀ d ∈ T ++ T', d.busInteractions.length ≤ maxInteractions) →
-    ∀ S : Guest p, (∀ d ∈ S, host.legalGuest d) →
-      (∀ d ∈ S, d.busInteractions.length ≤ maxInteractions) →
+    host.legalGuests (T ++ T') →
+    ∀ S : Guest p, host.legalGuests S →
         VmSoundReplacement host (T ++ S) (S ++ T') := by
   induction hSound with
-  | nil => intro _ _ S _ _; simpa using VmSoundReplacement.refl host S
+  | nil => intro _ S _; simpa using VmSoundReplacement.refl host S
   | @cons c c' U U' hcc _ ih =>
-    intro hLegal hSize S hLS hS
+    intro hLegal S hLS
     have hmemU : ∀ d ∈ U, d ∈ (c :: U) ++ (c' :: U') := fun d hd => by simp [hd]
     have hmemU' : ∀ d ∈ U', d ∈ (c :: U) ++ (c' :: U') := fun d hd => by simp [hd]
-    have hc' : c'.busInteractions.length ≤ maxInteractions := hSize c' (by simp)
     have hlc' : host.legalGuest c' := hLegal c' (by simp)
     have h1 : VmSoundReplacement host (c :: (U ++ S)) (c' :: (U ++ S)) := by
-      refine vmSoundReplacement_cons hHost (fun d hd => ?_) (fun d hd => ?_) hBudget hcc
-      · rcases List.mem_cons.mp hd with rfl | hd
-        · exact hlc'
-        · rcases List.mem_append.mp hd with hd | hd
-          · exact hLegal d (hmemU d hd)
-          · exact hLS d hd
-      · rcases List.mem_cons.mp hd with rfl | hd
-        · exact hc'
-        · rcases List.mem_append.mp hd with hd | hd
-          · exact hSize d (hmemU d hd)
-          · exact hS d hd
+      refine vmSoundReplacement_cons hHost (fun d hd => ?_) hcc
+      rcases List.mem_cons.mp hd with rfl | hd
+      · exact hlc'
+      · rcases List.mem_append.mp hd with hd | hd
+        · exact hLegal d (hmemU d hd)
+        · exact hLS d hd
     have h2 : VmSoundReplacement host (c' :: (U ++ S)) (U ++ (S ++ [c'])) :=
       VmSoundReplacement.of_perm (by
         rw [← List.append_assoc]
         exact (List.perm_append_singleton c' (U ++ S)).symm)
     have h3 : VmSoundReplacement host (U ++ (S ++ [c'])) ((S ++ [c']) ++ U') := by
-      refine ih (fun d hd => ?_) (fun d hd => ?_) (S ++ [c']) (fun d hd => ?_) (fun d hd => ?_)
+      refine ih (fun d hd => ?_) (S ++ [c']) (fun d hd => ?_)
       · rcases List.mem_append.mp hd with hd | hd
         · exact hLegal d (hmemU d hd)
         · exact hLegal d (hmemU' d hd)
       · rcases List.mem_append.mp hd with hd | hd
-        · exact hSize d (hmemU d hd)
-        · exact hSize d (hmemU' d hd)
-      · rcases List.mem_append.mp hd with hd | hd
         · exact hLS d hd
         · rw [List.mem_singleton.mp hd]; exact hlc'
-      · rcases List.mem_append.mp hd with hd | hd
-        · exact hS d hd
-        · rw [List.mem_singleton.mp hd]; exact hc'
     simpa using h1.trans (h2.trans h3)
 
 /-- **The soundness half of the VM-level connection.** If every guest chip of `G'` is a sound
@@ -263,25 +246,20 @@ theorem vmSoundReplacement_append [Fact p.Prime]
     against `host`: every effect the optimized guest chips can produce, the original ones can
     produce too.
 
-    `hLegal` constrains the optimizer's input; `hPreserve` is the obligation on its output, and it
-    cannot be dropped — `Host.forcesAccepts` runs its balancing argument over the list the VM is
-    executing, which here is `G'`. Beyond that, the only assumption about the output is the
-    interaction-count bound `maxInteractions` that keeps those arguments from wrapping around
-    `ZMod p`. -/
+    Legality is required of *both* lists at once, and the `G'` half is not redundant: the
+    intermediate lists of `vmSoundReplacement_append` mix chips from each, and `Host.forcesAccepts`
+    runs its balancing argument over whichever whole list the VM is executing. That single
+    hypothesis is also all that is assumed about the optimizer's output — the interaction-count
+    bound that keeps those arguments from wrapping around `ZMod p` is a clause of legality
+    (`Circuit.legalGuest`'s `size`), so it rides along.
+
+    Whoever supplies this has to establish `G'` legal *somehow*; per-chip soundness does not give
+    it, and `Audit/LegalityPreservation.lean` is the counterexample. -/
 theorem vmSoundReplacement_of_forall₂ [Fact p.Prime]
     {host : Host p} {bs : BusSemantics p} {rm : RankModel p} {r0 : GuestBusRules p}
-    {maxWindow : ℕ} {G G' : Guest p} {maxInteractions : ℕ}
-    (hHost : host.realizes bs rm r0 maxWindow)
-    (hLegal : ∀ c ∈ G, host.legalGuest c)
-    (hPreserve : PreservesLegality host G G')
-    (hSize : ∀ c ∈ G ++ G', c.busInteractions.length ≤ maxInteractions)
-    (hBudget : maxInteractions * host.maxInstances + 1 < p)
+    {G G' : Guest p}
+    (hHost : host.realizes bs rm r0)
+    (hLegal : host.legalGuests (G ++ G'))
     (hSound : List.Forall₂ (fun c c' => c'.isSoundReplacementOf c bs) G G') :
     VmSoundReplacement host G G' := by
-  have hall : ∀ d ∈ G ++ G', host.legalGuest d := by
-    intro d hd
-    rcases List.mem_append.mp hd with hd | hd
-    · exact hLegal d hd
-    · exact hPreserve hLegal d hd
-  simpa using
-    vmSoundReplacement_append hHost hBudget hSound hall hSize [] (by simp) (by simp)
+  simpa using vmSoundReplacement_append hHost hSound hLegal [] (by simp [Host.legalGuests])

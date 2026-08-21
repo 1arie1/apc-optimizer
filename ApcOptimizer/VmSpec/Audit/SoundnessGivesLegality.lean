@@ -1,4 +1,5 @@
 import ApcOptimizer.VmSpec.OpenVm
+import Mathlib.Algebra.Field.ZMod
 import Mathlib.Tactic.LinearCombination
 
 set_option autoImplicit false
@@ -21,7 +22,7 @@ set_option autoImplicit false
 
     The residue is the quantifier. `Circuit.legalGuest`'s clauses are stated over
     `Circuit.satisfiesAlgebraic` — acceptance dropped — because that is where the VM-level proof
-    consumes them: `statelessAccepted_of_sinks` and `maintains_of_stateful_active` are what
+    consumes them: `satisfiesStateless_of_sinks` and `maintains_of_stateful_active` are what
     *derive* acceptance from bus balance, and `VmSat` hands their guest instances nothing but
     algebraic satisfaction. Assuming acceptance there would be circular.
 
@@ -32,6 +33,17 @@ set_option autoImplicit false
     `Audit/LegalityPreservation.lean`'s, which runs on a toy semantics whose `maintainsInvariants`
     is `True` — that one shows `isSoundReplacementOf` transports no legality *in general*; this one
     shows what survives for OpenVM and where it stops.
+
+    That witness invites two objections, and `openVm_sound_but_illegal` gives up neither: it is
+    vacuous (its lookup is in no table on every assignment, so the chip has no satisfying
+    assignment at all), and the chip it replaces is not itself a `Circuit.legalGuest`. The
+    sharpened form is a satisfiable chip, a sound replacement of one legal in full, whose offending
+    interaction carries a payload the range checker *accepts*.
+    `looseTabled_not_isSoundReplacementOf` says why any such witness must route through an
+    assignment the semantics rejects: `Audit/LegalityPreservation.lean`'s toy witness transplanted
+    onto a real OpenVM lookup bus — multiplicity free, payload in-table — is *not* a sound
+    replacement, because `ApcOptimizer.OpenVM.maintainsInvariants` pins that multiplicity and the
+    second conjunct rejects the change.
 
     `zeroMultiplicity_replaceable_by_receive` sharpens the same hole into a statement about
     `Circuit.isSoundReplacementOf` itself, with no free variable in sight: a bus interaction at
@@ -314,5 +326,258 @@ theorem legalOnAccepted_not_statelessSendOnly [Fact p.Prime] (hp : 18 < p) :
     · have := congrArg ZMod.val h1
       rw [hv2, ZMod.val_one] at this
       omega
+
+--------- What it does not transport, against a chip the VM would run ---------
+
+/-- The replacement's free multiplicity. -/
+private abbrev multVar : Variable := ⟨"y", none⟩
+
+/-- The replacement's free range-check width. -/
+private abbrev widthVar : Variable := ⟨"b", none⟩
+
+/-- An in-table range check — `0 < 2 ^ 0` — at the literal multiplicity `1`. -/
+def tabledRangeCheck (p : ℕ) : Circuit p where
+  algebraicConstraints := []
+  busInteractions :=
+    [{ busId := rangeBusId, multiplicity := .const 1, payload := [.const 0, .const 0] }]
+
+/-- The same interaction with a fresh, unconstrained multiplicity: `Audit/LegalityPreservation.lean`'s
+    toy witness transplanted onto a real OpenVM lookup bus. -/
+def looseTabledRangeCheck (p : ℕ) : Circuit p where
+  algebraicConstraints := []
+  busInteractions :=
+    [{ busId := rangeBusId, multiplicity := .var multVar, payload := [.const 0, .const 0] }]
+
+/-- **The toy counterexample does not lift verbatim.** `Audit/LegalityPreservation.lean` frees a
+    stateless multiplicity under a semantics whose `maintainsInvariants` is `True`, and notes that
+    `ApcOptimizer.OpenVM.accepts` likewise never reads a lookup's multiplicity. That is true and
+    not enough: OpenVM's `maintainsInvariants` *does* read it, pinning it to `1` on every lookup
+    bus, and `Circuit.isSoundReplacementOf`'s second conjunct transports that. Freeing the
+    multiplicity of a lookup that stays in-table is therefore not a sound replacement here —
+    `y := 2` satisfies the chip and breaks the invariant.
+
+    So an OpenVM witness has to reach an assignment the semantics does *not* accept; which one is
+    what `openVm_sound_but_illegal` chooses, and it is the acceptance gate rather than
+    multiplicity-blindness that opens the hole. -/
+theorem looseTabled_not_isSoundReplacementOf [Fact p.Prime] (hp : 2 < p) :
+    ¬ (looseTabledRangeCheck p).isSoundReplacementOf (tabledRangeCheck p)
+      (openVmBusSemantics p defaultBusMap) := by
+  haveI : Fact (1 < p) := ⟨by omega⟩
+  have h2ne0 : ((2 : ℕ) : ZMod p) ≠ 0 := by
+    intro h
+    have := congrArg ZMod.val h
+    rw [ZMod.val_cast_of_lt (by omega), ZMod.val_zero] at this; omega
+  have h2ne1 : ((2 : ℕ) : ZMod p) ≠ 1 := by
+    intro h
+    have := congrArg ZMod.val h
+    rw [ZMod.val_cast_of_lt (by omega), ZMod.val_one] at this; omega
+  intro hSound
+  have hGI : (tabledRangeCheck p).guaranteesInvariants (openVmBusSemantics p defaultBusMap) := by
+    refine fun asg _ bi hbi _ => ?_
+    simp only [tabledRangeCheck, List.mem_singleton] at hbi
+    subst hbi
+    simp [openVmBusSemantics, maintainsInvariants, defaultBusMap, BusInteraction.eval,
+      Expression.eval]
+  have hsat : (looseTabledRangeCheck p).satisfies (openVmBusSemantics p defaultBusMap)
+      (fun _ => ((2 : ℕ) : ZMod p)) := by
+    refine ⟨fun e he => ?_, fun bi hbi _ => ?_⟩
+    · simp [looseTabledRangeCheck] at he
+    · simp only [looseTabledRangeCheck, List.mem_singleton] at hbi
+      subst hbi
+      simp [openVmBusSemantics, accepts, defaultBusMap, BusInteraction.eval, Expression.eval]
+  have hGI' : ∀ bi ∈ (looseTabledRangeCheck p).busInteractions,
+      bi.multiplicity.eval (fun _ => ((2 : ℕ) : ZMod p)) ≠ 0 →
+        maintainsInvariants defaultBusMap (bi.eval (fun _ => ((2 : ℕ) : ZMod p))) :=
+    fun bi hbi hmult => hSound.2 hGI _ hsat bi hbi hmult
+  have hbad := hGI'
+    ⟨rangeBusId, .var multVar, [.const 0, .const 0]⟩ (by simp [looseTabledRangeCheck]) h2ne0
+  simp only [maintainsInvariants, defaultBusMap, BusInteraction.eval, Expression.eval] at hbad
+  exact h2ne1 hbad
+
+/-- One instruction step (`Circuit.advancesClock`: receive `(0, 0)`, send `(0, 1)`) carrying an
+    in-table range check at the literal multiplicity `1`. A genuine `Circuit.legalGuest`
+    (`checkedStepChip_legalGuest`) — the chip `openVm_sound_but_illegal` replaces. -/
+def checkedStepChip (p : ℕ) : Circuit p where
+  algebraicConstraints := []
+  busInteractions :=
+    [ ⟨openVmExecBusId, .const (-1), [.const 0, .const 0]⟩,
+      ⟨openVmExecBusId, .const 1, [.const 0, .const 1]⟩,
+      ⟨rangeBusId, .const 1, [.const 0, .const 0]⟩ ]
+
+/-- The "optimized" chip: the same step, but both its range checks — one of free width, one at the
+    in-table payload `(0, 0)` — go out at one free multiplicity, tied to the width by
+    `(y - 1) (b - 18) = 0`.
+
+    The free width is the poison. On `b = 18` the first check is in no table
+    (`ApcOptimizer.OpenVM.accepts` caps the variable range checker at `17` bits), so no assignment
+    extending it is `Circuit.satisfies`, and everything soundness transports switches off for the
+    *whole* chip — leaving the second, perfectly acceptable check free to go out at `y = 2`. -/
+def poisonedStepChip (p : ℕ) : Circuit p where
+  algebraicConstraints :=
+    [.mul (.add (.var multVar) (.const (-1)))
+      (.add (.var widthVar) (.const (-((18 : ℕ) : ZMod p))))]
+  busInteractions :=
+    [ ⟨openVmExecBusId, .const (-1), [.const 0, .const 0]⟩,
+      ⟨openVmExecBusId, .const 1, [.const 0, .const 1]⟩,
+      ⟨rangeBusId, .var multVar, [.const 0, .var widthVar]⟩,
+      ⟨rangeBusId, .var multVar, [.const 0, .const 0]⟩ ]
+
+/-- `checkedStepChip` is a chip `openVmHost` will run: all five clauses of `Circuit.legalGuest`,
+    including `Circuit.advancesClock`, at any window above one tick. -/
+private theorem checkedStepChip_legalGuest [Fact p.Prime] (hp : 18 < p)
+    {maxWindow maxInteractions : ℕ} (hw : 1 < maxWindow) (hi : 3 ≤ maxInteractions) :
+    (checkedStepChip p).legalGuest (openVmGuestRules defaultBusMap openVmMemBusId)
+      (openVmRank openVmMemBusId) openVmRankBound maxWindow maxInteractions := by
+  haveI : Fact (1 < p) := ⟨by omega⟩
+  refine ⟨?_, ?_, ?_, ?_, by simp [checkedStepChip]; omega⟩
+  · intro asg _ bi hbi hst
+    simp only [checkedStepChip, List.mem_cons, List.not_mem_nil, or_false] at hbi
+    rcases hbi with rfl | rfl | rfl <;>
+      simp_all [openVmGuestRules, openVmIsStateful, defaultBusMap, OpenVmBusType.isStateful,
+        BusInteraction.eval, Expression.eval, openVmExecBusId]
+  · intro asg _ bi hbi hst
+    simp only [checkedStepChip, List.mem_cons, List.not_mem_nil, or_false] at hbi
+    rcases hbi with rfl | rfl | rfl <;>
+      simp_all [openVmGuestRules, openVmIsStateful, defaultBusMap, OpenVmBusType.isStateful,
+        BusInteraction.eval, Expression.eval, openVmExecBusId]
+  · intro asg _ _ _ bi hbi hst hmult _
+    simp only [checkedStepChip, List.mem_cons, List.not_mem_nil, or_false] at hbi
+    rcases hbi with rfl | rfl | rfl <;>
+      simp_all [openVmGuestRules, openVmIsStateful, openVmPayloadOk, defaultBusMap,
+        OpenVmBusType.isStateful, BusInteraction.eval, Expression.eval, openVmExecBusId]
+  · intro asg _
+    refine ⟨0, 0, 0, 1, by omega, hw, ?_, ?_, ?_, ?_⟩
+    · simp [Circuit.allEffects, checkedStepChip, BusInteraction.eval, Expression.eval,
+        openVmGuestRules, openVmExecBusId]
+    · simp [Circuit.allEffects, checkedStepChip, BusInteraction.eval, Expression.eval,
+        openVmGuestRules, openVmExecBusId]
+    · intro m hm h1 h2
+      simp only [openVmGuestRules] at hm h1 h2
+      have e1 : ¬ ((openVmExecBusId, [(0 : ZMod p), 0]) = m) := fun h => h1 h.symm
+      have e2 : ¬ ((openVmExecBusId, [(0 : ZMod p), 1]) = m) := by
+        intro h; exact h2 (by simpa using h.symm)
+      have e3 : ¬ ((rangeBusId, [(0 : ZMod p), 0]) = m) := by
+        intro h; rw [← h] at hm; simp [rangeBusId] at hm
+      simp [Circuit.allEffects, checkedStepChip, BusInteraction.eval, Expression.eval, e1, e2, e3]
+    · intro bi hbi hmem _
+      simp only [checkedStepChip, List.mem_cons, List.not_mem_nil, or_false] at hbi
+      rcases hbi with rfl | rfl | rfl <;>
+        simp_all [openVmGuestRules, openVmMemBusId, openVmExecBusId, rangeBusId]
+
+/-- **The residue, against a chip OpenVM would actually run.** `looseRangeCheck` leaves two ways
+    out: its lookup is in no table on *any* assignment, so the chip has no satisfying assignment at
+    all, and `deadRangeCheck` is not a `Circuit.legalGuest` (nothing on the execution bridge, so no
+    `Circuit.advancesClock`). Neither survives here.
+
+    `poisonedStepChip` is a sound replacement of a chip that is legal in full; it is satisfiable,
+    so nothing below is vacuous; it is not `Circuit.statelessSendOnly`; and the interaction that
+    breaks it carries a payload the variable range checker *accepts*. That last point is what makes
+    the residue bite: the multiplicity discipline exists to stop a lookup being counted a number of
+    times that wraps the characteristic (whitepaper §2.2.4), and this is a legitimate message
+    counted twice — not a message no table would answer.
+
+    The mechanism is the quantifier, in the one form soundness cannot reach. Everything
+    `legalOnAccepted_of_isSoundReplacementOf` transports is gated on `Circuit.satisfies`, which is
+    a property of the *whole* chip: one unacceptable interaction anywhere in it — the free-width
+    check at `b = 18` — voids the gate for every other interaction on that assignment.
+
+    `18 < p` only keeps the out-of-table width, the offending multiplicity `2`, `0` and `1`
+    distinct field elements. -/
+theorem openVm_sound_but_illegal [Fact p.Prime] (hp : 18 < p)
+    {maxWindow maxInteractions : ℕ} (hw : 1 < maxWindow) (hi : 3 ≤ maxInteractions) :
+    (checkedStepChip p).legalGuest (openVmGuestRules defaultBusMap openVmMemBusId)
+        (openVmRank openVmMemBusId) openVmRankBound maxWindow maxInteractions ∧
+      (poisonedStepChip p).isSoundReplacementOf (checkedStepChip p)
+        (openVmBusSemantics p defaultBusMap) ∧
+      (∃ asg, (poisonedStepChip p).satisfies (openVmBusSemantics p defaultBusMap) asg) ∧
+      ¬ (poisonedStepChip p).statelessSendOnly (openVmGuestRules defaultBusMap openVmMemBusId) ∧
+      accepts defaultBusMap ⟨rangeBusId, ((2 : ℕ) : ZMod p), [0, 0]⟩ := by
+  haveI : Fact (1 < p) := ⟨by omega⟩
+  have h18 : (((18 : ℕ) : ZMod p)).val = 18 := ZMod.val_cast_of_lt (by omega)
+  have h2v : (((2 : ℕ) : ZMod p)).val = 2 := ZMod.val_cast_of_lt (by omega)
+  have hcheckedSat : ∀ asg,
+      (checkedStepChip p).satisfies (openVmBusSemantics p defaultBusMap) asg := by
+    refine fun asg => ⟨fun e he => ?_, fun bi hbi _ => ?_⟩
+    · simp [checkedStepChip] at he
+    · simp only [checkedStepChip, List.mem_cons, List.not_mem_nil, or_false] at hbi
+      rcases hbi with rfl | rfl | rfl <;>
+        simp [openVmBusSemantics, accepts, defaultBusMap, BusInteraction.eval, Expression.eval,
+          openVmExecBusId, rangeBusId]
+  -- Only the execution bridge is stateful, and both chips carry the same two literal bridge
+  -- interactions.
+  have hSideEffects : ∀ asg asg',
+      (poisonedStepChip p).sideEffects (openVmBusSemantics p defaultBusMap) asg =
+        (checkedStepChip p).sideEffects (openVmBusSemantics p defaultBusMap) asg' := by
+    intro asg asg'
+    funext m
+    simp [Circuit.sideEffects, poisonedStepChip, checkedStepChip, BusInteraction.eval,
+      Expression.eval, openVmBusSemantics, defaultBusMap, OpenVmBusType.isStateful,
+      List.filter_cons, openVmExecBusId, rangeBusId]
+  -- On an accepted assignment the width is in range, so `b - 18 ≠ 0` and the constraint pins `y`.
+  have hpin : ∀ asg, (poisonedStepChip p).satisfies (openVmBusSemantics p defaultBusMap) asg →
+      asg multVar ≠ 0 → asg multVar = 1 := by
+    intro asg hsat hy
+    have hwidth := hsat.2 ⟨rangeBusId, .var multVar, [.const 0, .var widthVar]⟩
+      (by simp [poisonedStepChip]) (by simpa [BusInteraction.eval, Expression.eval] using hy)
+    have hb : (asg widthVar).val ≤ 17 := by
+      simpa [openVmBusSemantics, accepts, defaultBusMap, BusInteraction.eval, Expression.eval,
+        rangeBusId] using hwidth.1
+    have hbne : asg widthVar + -((18 : ℕ) : ZMod p) ≠ 0 := by
+      intro h
+      have hbeq : asg widthVar = ((18 : ℕ) : ZMod p) := by linear_combination h
+      rw [hbeq, h18] at hb; omega
+    have hc := hsat.1
+      (.mul (.add (.var multVar) (.const (-1)))
+        (.add (.var widthVar) (.const (-((18 : ℕ) : ZMod p)))))
+      (by simp [poisonedStepChip])
+    simp only [Expression.eval] at hc
+    rcases mul_eq_zero.mp hc with h | h
+    · linear_combination h
+    · exact absurd h hbne
+  have hpoisonedGI :
+      (poisonedStepChip p).guaranteesInvariants (openVmBusSemantics p defaultBusMap) := by
+    refine fun asg hsat bi hbi hmult => ?_
+    simp only [poisonedStepChip, List.mem_cons, List.not_mem_nil, or_false] at hbi
+    rcases hbi with rfl | rfl | rfl | rfl
+    · simp [openVmBusSemantics, maintainsInvariants, defaultBusMap, BusInteraction.eval,
+        Expression.eval, openVmExecBusId]
+    · simp [openVmBusSemantics, maintainsInvariants, defaultBusMap, BusInteraction.eval,
+        Expression.eval, openVmExecBusId]
+    · have := hpin asg hsat (by simpa [BusInteraction.eval, Expression.eval] using hmult)
+      simp [openVmBusSemantics, maintainsInvariants, defaultBusMap, BusInteraction.eval,
+        Expression.eval, rangeBusId, this]
+    · have := hpin asg hsat (by simpa [BusInteraction.eval, Expression.eval] using hmult)
+      simp [openVmBusSemantics, maintainsInvariants, defaultBusMap, BusInteraction.eval,
+        Expression.eval, rangeBusId, this]
+  refine ⟨checkedStepChip_legalGuest hp hw hi,
+    ⟨fun asg _ => ⟨asg, hcheckedSat asg, hSideEffects asg asg⟩, fun _ => hpoisonedGI⟩,
+    ⟨?_, ?_, ?_⟩⟩
+  -- `y = 1`, `b = 0` is an honest run of the chip: the hole below is not vacuity.
+  · refine ⟨fun v => if v = widthVar then 0 else 1, ?_, ?_⟩
+    · intro e he
+      simp only [poisonedStepChip, List.mem_cons, List.not_mem_nil, or_false] at he
+      subst he
+      simp [Expression.eval]
+    · refine fun bi hbi _ => ?_
+      simp only [poisonedStepChip, List.mem_cons, List.not_mem_nil, or_false] at hbi
+      rcases hbi with rfl | rfl | rfl | rfl <;>
+        simp [openVmBusSemantics, accepts, defaultBusMap, BusInteraction.eval, Expression.eval,
+          openVmExecBusId, rangeBusId]
+  -- `y = 2`, `b = 18` satisfies the constraint, and sends an in-table check twice.
+  · intro hlegal
+    have hforced := hlegal
+      (fun v => if v = widthVar then ((18 : ℕ) : ZMod p) else ((2 : ℕ) : ZMod p))
+      (by
+        intro e he
+        simp only [poisonedStepChip, List.mem_cons, List.not_mem_nil, or_false] at he
+        subst he
+        simp [Expression.eval])
+      ⟨rangeBusId, .var multVar, [.const 0, .const 0]⟩ (by simp [poisonedStepChip]) rfl
+    simp only [BusInteraction.eval, Expression.eval] at hforced
+    rw [if_neg (by decide)] at hforced
+    rcases hforced with h | h
+    · have := congrArg ZMod.val h; rw [h2v, ZMod.val_zero] at this; omega
+    · have := congrArg ZMod.val h; rw [h2v, ZMod.val_one] at this; omega
+  · simp [accepts, defaultBusMap, rangeBusId]
 
 end ApcOptimizer.OpenVM

@@ -97,12 +97,12 @@ def Host.statefulChipsMaintain (host : Host p) (bs : BusSemantics p)
 
     Deliberately silent on *which* messages it touches: `canProduce` still pins that (bus id,
     address space, ...) — this only supplies the one fact the induction cannot get any other
-    way. `singleton` is what caps the instance at one term in the sum, so folding it in costs the
-    budget exactly one extra unit of headroom (`Counting.lean`'s
+    way. `HostChip.instanceBound` is what caps the chip at one term in the sum, so folding it in
+    costs the budget exactly one extra unit of headroom (`Counting.lean`'s
     `guestNet_add_ne_zero_of_uniform`), not an unbounded one. -/
 structure Host.exemptChip (host : Host p) (bs : BusSemantics p) (idx : Fin host.chips.length) :
     Prop where
-  singleton : (host.chips.get idx).singleton
+  bound : (host.chips.get idx).instanceBound ≤ 1
   uniform : ∀ hA : HostAssignment p host, hA.satisfies →
     ∀ c ∈ hA idx, ∀ m : BusMessage p, bs.isStateful m.1 = true → c m ≠ 0 → c m = -1
 
@@ -110,10 +110,10 @@ structure Host.exemptChip (host : Host p) (bs : BusSemantics p) (idx : Fin host.
     on stateless messages the semantics accepts, some legal host assignment nets exactly `δ` more,
     **leaving the input and output chips alone**.
 
-    Lookup host chips are free in exactly this way — their legality predicate constrains *which*
-    payloads may carry a nonzero net multiplicity, not what that multiplicity is — and they are
-    not `HostChip.singleton`, so their instance count is free too. The input/output clauses are
-    what make the observed effect survive the rebuild.
+    Lookup host chips are free in exactly this way: their legality predicate constrains *which*
+    payloads may carry a nonzero net multiplicity, not what that multiplicity is, so the change is
+    absorbed into what they already net rather than by adding instances. The input/output clauses
+    are what make the observed effect survive the rebuild.
 
     Note what this does *not* permit: the input and output chips are pinned, so the observed
     `VmEffect` is carried across untouched. -/
@@ -144,10 +144,8 @@ def Host.absorbsStateless (host : Host p) (bs : BusSemantics p) : Prop :=
     check as `ConnectorBoundary.finalTimestampBounded` — is therefore the only place a chain can
     start, and one checked timestamp bounds the whole run. -/
 def Host.pinsRanks (host : Host p) (rm : RankModel p) : Prop :=
-  ∀ (G : Guest p) (maxInteractions : ℕ),
-    (∀ c ∈ G, host.legalGuest c) →
-    (∀ c ∈ G, c.busInteractions.length ≤ maxInteractions) →
-    maxInteractions * host.maxInstances < p →
+  ∀ (G : Guest p),
+    host.legalGuests G →
     ∀ (a : VmAssignment p ⟨host, G⟩), VmSat ⟨host, G⟩ a → a.withinRankBound rm
 
 /-- **A host realizes its bus semantics.** The single hypothesis the connecting theorems need of
@@ -155,15 +153,15 @@ def Host.pinsRanks (host : Host p) (rm : RankModel p) : Prop :=
     which one carries which step stays visible.)
 
     `r0` is the clock template `bs.toGuestRules` borrows its `execBusId`/`memBusId`/`getTimestamp`
-    from — in practice `openVmGuestRules`'s own value — and `maxWindow` bounds how far a guest
-    instance may advance the clock (`Circuit.advancesClock`); see `Legal.lean` for why neither
-    lives on `rm`. -/
+    from — in practice `openVmGuestRules`'s own value; see `Legal.lean` for why it does not live
+    on `rm`. -/
 structure Host.realizes (host : Host p) (bs : BusSemantics p) (rm : RankModel p)
-    (r0 : GuestBusRules p) (maxWindow : ℕ) : Prop where
+    (r0 : GuestBusRules p) : Prop where
   /-- The host's `Host.legalGuest` field is at least `Circuit.legalGuest` for `bs`, at this
-      argument's own `rm.rank` and `rm.bound`. -/
+      argument's own `rm.rank` and `rm.bound` and the host's own sizes. -/
   legalGuest : ∀ c : Circuit p,
-    host.legalGuest c → c.legalGuest (bs.toGuestRules r0) rm.rank rm.bound maxWindow
+    host.legalGuest c →
+      c.legalGuest (bs.toGuestRules r0) rm.rank rm.bound host.maxWindow host.maxInteractions
   sinksAreTables : host.sinksAreTables bs
   /-- One host-chip type is carved out and derivable instead of assumed — for `openVmHost`,
       `memoryFinalizeHostChip` (see `Host.exemptChip`). Existential rather than two separate data
@@ -181,17 +179,16 @@ structure Host.realizes (host : Host p) (bs : BusSemantics p) (rm : RankModel p)
     `Circuit.satisfies`-good, not merely algebraically consistent.
 
     Every chip in `G` must be one the host will run: the balancing argument is over the whole
-    list, so one illegal chip anywhere on a bus breaks it. `maxInteractions` bounds each chip's
-    bus-interaction count; `maxInteractions * host.maxInstances + 1 < p` is the anti-wraparound
-    condition (see `Counting.lean`) — one unit more than the guest-only argument needs, because
-    the exempt host chip (`Host.exemptChip`) can add one more receive to the same pile.
+    list, so one illegal chip anywhere on a bus breaks it. That legality is also where the
+    anti-wraparound bookkeeping comes from — `Circuit.legalGuest`'s `size` clause bounds each
+    chip's bus-interaction count, and `Host.budgetOk` says the resulting pile fits in `ZMod p`
+    (see `Counting.lean`), with one unit to spare for the receive the exempt host chip
+    (`Host.exemptChip`) can add to it.
 
     Proved from `Host.realizes` — see `forcesAccepts_of_hostSound`. -/
 def Host.forcesAccepts (host : Host p) (bs : BusSemantics p) : Prop :=
-  ∀ (G : Guest p) (maxInteractions : ℕ),
-    (∀ c ∈ G, host.legalGuest c) →
-    (∀ c ∈ G, c.busInteractions.length ≤ maxInteractions) →
-    maxInteractions * host.maxInstances + 1 < p →
+  ∀ (G : Guest p),
+    host.legalGuests G →
     ∀ (a : VmAssignment p ⟨host, G⟩), VmSat ⟨host, G⟩ a →
       ∀ (t : Fin G.length), ∀ asg ∈ a.guestAssignments t, (G.get t).satisfies bs asg
 
@@ -204,19 +201,24 @@ def Host.forcesAccepts (host : Host p) (bs : BusSemantics p) : Prop :=
     Nothing stateful takes part — only `Circuit.statelessSendOnly`, `Host.sinksAreTables`, bus
     balance and the trace budget — which is what makes it safe to hand to
     `Circuit.statefulSendsMaintain`, whose own derivation depends on it. -/
-theorem statelessAccepted_of_sinks [Fact p.Prime] {host : Host p} {bs : BusSemantics p}
-    {rm : RankModel p} {r0 : GuestBusRules p} {maxWindow : ℕ}
-    {G : Guest p} {maxInteractions : ℕ} {a : VmAssignment p ⟨host, G⟩}
+theorem satisfiesStateless_of_sinks [Fact p.Prime] {host : Host p} {bs : BusSemantics p}
+    {rm : RankModel p} {r0 : GuestBusRules p}
+    {G : Guest p} {a : VmAssignment p ⟨host, G⟩}
     (hunpack : ∀ c : Circuit p,
-      host.legalGuest c → c.legalGuest (bs.toGuestRules r0) rm.rank rm.bound maxWindow)
-    (hsinks : host.sinksAreTables bs) (hGuests : ∀ c ∈ G, host.legalGuest c)
-    (hSize : ∀ c ∈ G, c.busInteractions.length ≤ maxInteractions)
-    (hBudget : maxInteractions * host.maxInstances < p) (hsat : VmSat ⟨host, G⟩ a)
+      host.legalGuest c →
+        c.legalGuest (bs.toGuestRules r0) rm.rank rm.bound host.maxWindow host.maxInteractions)
+    (hsinks : host.sinksAreTables bs) (hGuests : host.legalGuests G)
+    (hsat : VmSat ⟨host, G⟩ a)
     (t : Fin G.length) (asg : ChipAssignment p) (hasg : asg ∈ a.guestAssignments t) :
-    (G.get t).statelessAccepted (bs.toGuestRules r0) asg := by
+    (G.get t).satisfiesStateless (bs.toGuestRules r0) asg := by
   have hlegal : ∀ s : Fin G.length,
-      (G.get s).legalGuest (bs.toGuestRules r0) rm.rank rm.bound maxWindow :=
+      (G.get s).legalGuest (bs.toGuestRules r0) rm.rank rm.bound host.maxWindow
+        host.maxInteractions :=
     fun s => hunpack _ (hGuests _ (List.get_mem G s))
+  have hSize : ∀ c ∈ G, c.busInteractions.length ≤ host.maxInteractions :=
+    fun c hc => (hunpack c (hGuests c hc)).size
+  have hBudget : host.maxInteractions * host.maxInstances < p := by
+    have := host.noMultOverflow; omega
   intro bi hbi hst hmult
   have hm : bs.isStateful ((bi.eval asg).busId, (bi.eval asg).payload).1 = false := hst
   have huni : ∀ s : Fin G.length, ∀ asg' ∈ a.guestAssignments s,
@@ -254,25 +256,28 @@ theorem statelessAccepted_of_sinks [Fact p.Prime] {host : Host p} {bs : BusSeman
     step as the guest side, rather than settled outright — it costs the one extra unit of budget
     `guestNet_add_ne_zero_of_uniform` needs. -/
 theorem maintains_of_stateful_active [Fact p.Prime] {host : Host p} {bs : BusSemantics p}
-    {rm : RankModel p} {r0 : GuestBusRules p} {maxWindow : ℕ}
-    {G : Guest p} {maxInteractions : ℕ} {a : VmAssignment p ⟨host, G⟩}
+    {rm : RankModel p} {r0 : GuestBusRules p}
+    {G : Guest p} {a : VmAssignment p ⟨host, G⟩}
     (hunpack : ∀ c : Circuit p,
-      host.legalGuest c → c.legalGuest (bs.toGuestRules r0) rm.rank rm.bound maxWindow)
+      host.legalGuest c →
+        c.legalGuest (bs.toGuestRules r0) rm.rank rm.bound host.maxWindow host.maxInteractions)
     (hsinks : host.sinksAreTables bs)
     (hstateful : ∃ idx : Fin host.chips.length,
       host.exemptChip bs idx ∧ host.statefulChipsMaintain bs idx)
-    (hGuests : ∀ c ∈ G, host.legalGuest c)
-    (hSize : ∀ c ∈ G, c.busInteractions.length ≤ maxInteractions)
-    (hBudget : maxInteractions * host.maxInstances + 1 < p) (hsat : VmSat ⟨host, G⟩ a)
+    (hGuests : host.legalGuests G)
+    (hsat : VmSat ⟨host, G⟩ a)
     (hRanks : a.withinRankBound rm)
     {t : Fin G.length} {asg : ChipAssignment p} (hasg : asg ∈ a.guestAssignments t)
     {bi : BusInteraction (Expression p)} (hbi : bi ∈ (G.get t).busInteractions)
     (hst : bs.isStateful bi.busId = true) (hmult : (bi.eval asg).multiplicity ≠ 0) :
     (bs.toGuestRules r0).payloadOk ((bi.eval asg).busId, (bi.eval asg).payload) := by
   obtain ⟨idx, hexempt, hstateful⟩ := hstateful
-  have hBudget' : maxInteractions * host.maxInstances < p := by omega
+  have hSize : ∀ c ∈ G, c.busInteractions.length ≤ host.maxInteractions :=
+    fun c hc => (hunpack c (hGuests c hc)).size
+  have hBudget : host.maxInteractions * host.maxInstances + 1 < p := host.noMultOverflow
   have hlegal : ∀ s : Fin G.length,
-      (G.get s).legalGuest (bs.toGuestRules r0) rm.rank rm.bound maxWindow :=
+      (G.get s).legalGuest (bs.toGuestRules r0) rm.rank rm.bound host.maxWindow
+        host.maxInteractions :=
     fun s => hunpack _ (hGuests _ (List.get_mem G s))
   suffices key : ∀ r : ℕ, ∀ (s : Fin G.length) (asg' : ChipAssignment p),
       asg' ∈ a.guestAssignments s → ∀ bi' ∈ (G.get s).busInteractions,
@@ -304,8 +309,8 @@ theorem maintains_of_stateful_active [Fact p.Prime] {host : Host p} {bs : BusSem
         intro bj hbj hstj hmultj hlt
         rw [hmsg'', hrank] at hlt
         exact ih _ hlt u asg'' hasg'' bj hbj hstj hmultj rfl
-      have hacc : (G.get u).statelessAccepted (bs.toGuestRules r0) asg'' :=
-        statelessAccepted_of_sinks hunpack hsinks hGuests hSize hBudget' hsat u asg'' hasg''
+      have hacc : (G.get u).satisfiesStateless (bs.toGuestRules r0) asg'' :=
+        satisfiesStateless_of_sinks hunpack hsinks hGuests hsat u asg'' hasg''
       exact absurd (hmsg'' ▸ (hlegal u).sendsMaintain asg''
           (hsat.satisfiesGuest u asg'' hasg'') hacc (hRanks u asg'' hasg'') bi'' hbi'' hst'' h1
           hlow) hno
@@ -326,18 +331,21 @@ theorem maintains_of_stateful_active [Fact p.Prime] {host : Host p} {bs : BusSem
           ((bi'.eval asg').busId, (bi'.eval asg').payload))).sum :=
     Finset.sum_eq_single idx (fun u _ hu => hzero u hu)
       (fun h => absurd (Finset.mem_univ idx) h)
-  -- And that touch, being a single instance, is `0` or `-1` — never a genuine sender either.
-  have hlen : (a.hostAssignment idx).length = 1 := hsat.satisfiesHost.2 idx hexempt.singleton
-  obtain ⟨c0, hc0⟩ := List.length_eq_one_iff.mp hlen
+  -- And that touch — at most one instance — is `0` or `-1`, never a genuine sender either.
+  have hlen : (a.hostAssignment idx).length ≤ 1 :=
+    le_trans (hsat.satisfiesHost.withinBound idx) hexempt.bound
   have he : ((a.hostAssignment idx).map (fun effect => effect
         ((bi'.eval asg').busId, (bi'.eval asg').payload))).sum = 0
       ∨ ((a.hostAssignment idx).map (fun effect => effect
         ((bi'.eval asg').busId, (bi'.eval asg').payload))).sum = (-1 : ZMod p) := by
-    rw [hc0, List.map_cons, List.map_nil, List.sum_cons, List.sum_nil, add_zero]
-    by_cases hc0m : c0 ((bi'.eval asg').busId, (bi'.eval asg').payload) = 0
-    · exact Or.inl hc0m
-    · exact Or.inr (hexempt.uniform a.hostAssignment (hsat.satisfiesHost) c0
-        (hc0 ▸ List.mem_cons_self) _ hst' hc0m)
+    match hc0 : a.hostAssignment idx, hlen with
+    | [], _ => exact Or.inl rfl
+    | [c0], _ =>
+      rw [List.map_cons, List.map_nil, List.sum_cons, List.sum_nil, add_zero]
+      by_cases hc0m : c0 ((bi'.eval asg').busId, (bi'.eval asg').payload) = 0
+      · exact Or.inl hc0m
+      · exact Or.inr (hexempt.uniform a.hostAssignment (hsat.satisfiesHost) c0
+          (hc0 ▸ List.mem_cons_self) _ hst' hc0m)
   -- A pile of receives — guest and (at most) the one exempt host touch — that cannot balance.
   have hneg : (-1 : ZMod p) ≠ 0 := neg_ne_zero.mpr one_ne_zero
   refine guestNet_add_ne_zero_of_uniform hsat hSize hBudget hneg huni hasg' hbi' rfl hmult' he ?_
@@ -351,27 +359,27 @@ theorem maintains_of_stateful_active [Fact p.Prime] {host : Host p} {bs : BusSem
     instance the full `Circuit.satisfies` — not just its algebraic constraints, and with no
     assumption about acceptance placed on the guest chips themselves. -/
 theorem forcesAccepts_of_hostSound [Fact p.Prime] {host : Host p} {bs : BusSemantics p}
-    {rm : RankModel p} {r0 : GuestBusRules p} {maxWindow : ℕ}
+    {rm : RankModel p} {r0 : GuestBusRules p}
     (hunpack : ∀ c : Circuit p,
-      host.legalGuest c → c.legalGuest (bs.toGuestRules r0) rm.rank rm.bound maxWindow)
+      host.legalGuest c →
+        c.legalGuest (bs.toGuestRules r0) rm.rank rm.bound host.maxWindow host.maxInteractions)
     (hsinks : host.sinksAreTables bs)
     (hstateful : ∃ idx : Fin host.chips.length,
       host.exemptChip bs idx ∧ host.statefulChipsMaintain bs idx)
     (hbs : bs.statefulAcceptsOfPayloadOk r0) (hpins : host.pinsRanks rm) :
     host.forcesAccepts bs := by
-  intro G maxInteractions hGuests hSize hBudget a hsat t asg hasg
-  have hBudget' : maxInteractions * host.maxInstances < p := by omega
-  have hRanks := hpins G maxInteractions hGuests hSize hBudget' a hsat
+  intro G hGuests a hsat t asg hasg
+  have hRanks := hpins G hGuests a hsat
   refine ⟨hsat.satisfiesGuest t asg hasg, fun bi hbi hmult => ?_⟩
   by_cases hst : bs.isStateful bi.busId
-  · exact hbs _ hst (maintains_of_stateful_active hunpack hsinks hstateful hGuests hSize hBudget
+  · exact hbs _ hst (maintains_of_stateful_active hunpack hsinks hstateful hGuests
       hsat hRanks hasg hbi hst hmult)
-  · exact statelessAccepted_of_sinks hunpack hsinks hGuests hSize hBudget' hsat t asg hasg bi hbi
+  · exact satisfiesStateless_of_sinks hunpack hsinks hGuests hsat t asg hasg bi hbi
       (by simpa using hst) hmult
 
 /-- `Host.realizes` gives `Host.forcesAccepts`. -/
 theorem Host.realizes.forcesAccepts [Fact p.Prime] {host : Host p} {bs : BusSemantics p}
-    {rm : RankModel p} {r0 : GuestBusRules p} {maxWindow : ℕ} (h : host.realizes bs rm r0 maxWindow) :
+    {rm : RankModel p} {r0 : GuestBusRules p} (h : host.realizes bs rm r0) :
     host.forcesAccepts bs :=
   forcesAccepts_of_hostSound h.legalGuest h.sinksAreTables h.statefulChipsMaintain
     h.statefulAcceptsOfPayloadOk h.pinsRanks

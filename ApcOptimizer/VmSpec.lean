@@ -66,8 +66,8 @@ import ApcOptimizer.VmSpec.Implementation.Validation
       theorem to be true of it.
     * `Audit/LegalityPreservation.lean` — a formal counterexample: a per-chip
       `Circuit.isSoundReplacementOf` that violates `Circuit.statelessSendOnly` outright, showing
-      `PreservesLegality` cannot be derived from soundness and has to be assumed or separately
-      established, as `openVm_vmSoundReplacement` already does.
+      legality of the optimizer's output cannot be derived from soundness and has to be assumed or
+      separately established, as `openVm_vmSoundReplacement` already does.
 
     ### Not audited — the argument
 

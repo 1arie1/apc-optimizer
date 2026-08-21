@@ -34,10 +34,6 @@ omit [Fact p.Prime] in
 theorem vmCompleteReplacement_iff {host : Host p} {G G' : Guest p} :
     VmCompleteReplacement host G G' ↔ VmSoundReplacement host G' G := Iff.rfl
 
-theorem head_congr {α : Type _} {l l' : List α} (h : l = l') (hl : l ≠ []) (hl' : l' ≠ []) :
-    l.head hl = l'.head hl' := by
-  subst h; rfl
-
 --------- Sound replacement is a preorder ---------
 
 omit [Fact p.Prime] in
@@ -82,7 +78,7 @@ theorem VmSat.of_perm {vm : Vm p} {a a' : VmAssignment p vm}
     Finset.sum_congr rfl (fun t _ => (hguest t).length_eq)
   exact ⟨fun t asg hasg => h1 t asg ((hguest t).mem_iff.mp hasg),
     ⟨fun t effect hcontrib => h2 t effect ((hhost t).mem_iff.mp hcontrib),
-      fun t hsingle => (hhost t).length_eq ▸ h3 t hsingle⟩,
+      fun t => (hhost t).length_eq ▸ h3 t⟩,
     fun message => (congrFun hnet message).trans (h4 message),
     hcount.trans_le h5⟩
 
@@ -208,56 +204,21 @@ theorem VmSoundReplacement.of_perm {host : Host p} {G G' : Guest p} (hperm : G.P
   (vmEquivalent_of_perm hperm).1
 
 omit [Fact p.Prime] in
-/-- **The spec is not vacuous.** Every VM whose singleton host chips can sit idle has at least the
-    empty run: no guest instance at all, every singleton host chip contributing nothing, every
-    other host chip absent.
+/-- **The spec is not vacuous.** Every VM has at least the empty run: no guest instance at all and
+    no host instance either, which every `HostChip.instanceBound` allows.
 
     Worth stating because `VmSoundReplacement` is a statement about *all* producible effects, and
-    would hold for free of a `CanProduce` that were empty — as `not_canProduce_of_illegal` shows it
-    can be. `hinput` rules out an input chip forced to pull a chunk; it holds for `openVmHost`,
-    whose `inputHostChip` is deliberately not a singleton. -/
-theorem canProduce_idle {host : Host p} {G : Guest p}
-    (hzero : ∀ t : Fin host.chips.length, (host.chips.get t).singleton →
-      (host.chips.get t).canProduce 0)
-    (hinput : ¬ (host.chips.get host.inputChip).singleton) :
+    would hold for free of a `CanProduce` that were empty. It needs no hypothesis on the host: since a chip's instance count is bounded above and
+    never forced, leaving one out is always legal, and a chip that must be present cannot be
+    written down (`HostChip.instanceBound`). -/
+theorem canProduce_idle {host : Host p} {G : Guest p} :
     CanProduce ⟨host, G⟩ ⟨[], host.getOutput 0⟩ := by
-  classical
-  obtain ⟨hA, hsing, hnot⟩ : ∃ hA : HostAssignment p host,
-      (∀ t, (host.chips.get t).singleton → hA t = [0]) ∧
-      (∀ t, ¬ (host.chips.get t).singleton → hA t = []) :=
-    ⟨fun t => if (host.chips.get t).singleton then [0] else [],
-      fun t hs => if_pos hs, fun t hs => if_neg hs⟩
-  have hhnet : ∀ m : BusMessage p, hA.busEffect m = 0 := by
-    intro m
-    show (∑ t : Fin host.chips.length, ((hA t).map (fun effect => effect m)).sum) = 0
-    refine Finset.sum_eq_zero (fun t _ => ?_)
-    by_cases hs : (host.chips.get t).singleton
-    · rw [hsing t hs]; simp
-    · rw [hnot t hs]; simp
-  have hsat : VmSat (⟨host, G⟩ : Vm p) ⟨fun _ => [], hA⟩ := by
-    refine ⟨fun t asg hasg =>
-        absurd (show asg ∈ ([] : List (ChipAssignment p)) from hasg) (by simp),
-      ⟨fun t effect hmem => ?_, fun t hs => ?_⟩, fun m => ?_, ?_⟩
-    · replace hmem : effect ∈ hA t := hmem
-      by_cases hs : (host.chips.get t).singleton
-      · rw [hsing t hs] at hmem
-        rw [List.mem_singleton.mp hmem]
-        exact hzero t hs
-      · rw [hnot t hs] at hmem
-        exact absurd hmem (by simp)
-    · show (hA t).length = 1
-      rw [hsing t hs]; rfl
-    · rw [busEffect_apply]
-      show GuestAssignment.busEffect (G := G) (fun _ => []) m + hA.busEffect m = 0
-      rw [hhnet m, add_zero]
-      show (∑ _t : Fin G.length, (([] : List (ChipAssignment p)).map _).sum) = 0
-      simp
-    · show (∑ _t : Fin G.length, ([] : List (ChipAssignment p)).length) ≤ host.maxInstances
-      simp
-  refine ⟨⟨fun _ => [], hA⟩, hsat, ?_⟩
-  show VmAssignment.effects _ hsat = _
-  unfold VmAssignment.effects
-  refine congrArg₂ VmEffect.mk ?_ (congrArg host.getOutput ?_)
-  · show ((hA host.inputChip).map host.getInputChunk).flatten = []
-    rw [hnot host.inputChip hinput]; rfl
-  · exact head_congr (hsing host.outputChip host.outputSingleton) _ (by simp)
+  refine ⟨⟨fun _ => [], fun _ => []⟩, ⟨fun t asg hasg => absurd hasg (by simp),
+    ⟨fun t effect hmem => absurd hmem (by simp), fun t => by simp⟩, fun m => ?_,
+    by simp [GuestAssignment.instanceCount]⟩, ?_⟩
+  · show GuestAssignment.busEffect (G := G) (fun _ => []) m
+      + HostAssignment.busEffect (host := host) (fun _ => []) m = 0
+    simp [GuestAssignment.busEffect, HostAssignment.busEffect]
+  · show VmAssignment.effects (vm := ⟨host, G⟩) ⟨fun _ => [], fun _ => []⟩ = _
+    simp [VmAssignment.effects, VmAssignment.orderedInputInstances]
+

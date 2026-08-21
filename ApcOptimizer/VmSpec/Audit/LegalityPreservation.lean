@@ -4,8 +4,8 @@ set_option autoImplicit false
 
 /-! **Soundness does not imply legality preservation — a formal witness.**
 
-    `PreservesLegality` (`Basic.lean`) is stated as a hypothesis of `openVm_vmSoundReplacement`
-    rather than derived, and this file is why it cannot be derived: a per-chip
+    `openVm_vmSoundReplacement` requires the optimizer's *output* to be legal, as a hypothesis
+    rather than a consequence, and this file is why it cannot be a consequence: a per-chip
     `Circuit.isSoundReplacementOf` puts no constraint at all on a bus interaction's *multiplicity
     shape*, so a chip can be a perfectly sound replacement while violating
     `Circuit.statelessSendOnly` outright.
@@ -23,15 +23,23 @@ set_option autoImplicit false
       runs that happen to occur.
 
     A chip that sends an *unconstrained* multiplicity to a stateless bus whose semantics accepts
-    any magnitude (true of every OpenVM lookup table: `ApcOptimizer.OpenVM.accepts` never inspects
-    `BusInteraction.multiplicity`, only the payload) is illegal and yet a perfectly sound
-    replacement of a chip that sends the same message with a legal, constant multiplicity —
+    any magnitude, and asks nothing further of it, is illegal and yet a perfectly sound replacement
+    of a chip that sends the same message with a legal, constant multiplicity —
     `illegalCircuit_isSoundReplacementOf` and `illegalCircuit_not_statelessSendOnly` make this
     precise. This is not a corner case specific to `statelessSendOnly`: the
     analogous move — splitting one stateful send into two interactions whose multiplicities cancel
     to the same net — breaks `statefulPolarity` exactly as directly, for the same reason.
 
-    What this means for closing `PreservesLegality`: it cannot come from an optimizer pass's
+    Both halves of `toyBusSemantics` are load-bearing, and the second is one a concrete VM can take
+    back. `ApcOptimizer.OpenVM.accepts` does indeed never read a lookup's multiplicity — but
+    `ApcOptimizer.OpenVM.maintainsInvariants` pins it to `1`, and `Circuit.isSoundReplacementOf`'s
+    second conjunct transports that from the original chip, so this witness does *not* lift to
+    OpenVM as it stands (`ApcOptimizer.OpenVM.looseTabled_not_isSoundReplacementOf`). The gap is
+    real for OpenVM too, by the other route — an assignment the semantics does not accept, where
+    the transported invariants say nothing:
+    `ApcOptimizer.OpenVM.openVm_sound_but_illegal` in `Audit/SoundnessGivesLegality.lean`.
+
+    What this means for discharging that hypothesis: it cannot come from an optimizer pass's
     soundness proof, however that proof is phrased. Each pass would need its own, separate
     legality-preservation argument — parallel to, not derived from, its existing
     `isSoundReplacementOf`/`isCompleteReplacementOf` proof. No pass in
@@ -42,9 +50,11 @@ set_option autoImplicit false
 variable {p : ℕ}
 
 /-- A toy bus semantics with a single stateless bus (`0`) that accepts every message regardless of
-    multiplicity — exactly how every OpenVM lookup table behaves
-    (`ApcOptimizer.OpenVM.accepts` never reads `BusInteraction.multiplicity`). Chosen to isolate
-    the mechanism: nothing here is OpenVM-specific except that this acceptance shape is real. -/
+    multiplicity — as every OpenVM lookup table does, `ApcOptimizer.OpenVM.accepts` never reading
+    `BusInteraction.multiplicity` — and asks nothing of it afterwards, which OpenVM does *not* do
+    (`ApcOptimizer.OpenVM.maintainsInvariants` pins a lookup to `1`). Chosen to isolate the
+    mechanism at the level of `Spec.lean`'s interface; see the module docstring for what changes
+    once a VM constrains multiplicities of its own. -/
 def toyBusSemantics (p : ℕ) : BusSemantics p where
   isStateful _ := false
   accepts _ := True
@@ -114,12 +124,12 @@ theorem illegalCircuit_not_statelessSendOnly [Fact p.Prime] (hp : 2 < p) :
 
 /-- **The two put together.** A per-chip sound replacement, entirely blind to
     `Circuit.legalGuest`'s multiplicity-shape clauses. Nothing about `isSoundReplacementOf` — the
-    interface `vmSoundReplacement_of_forall₂` consumes — rules this out, so `PreservesLegality`
+    interface `vmSoundReplacement_of_forall₂` consumes — rules this out, so legality of the output
     cannot be derived from it; it has to be assumed or separately established, as
     `openVm_vmSoundReplacement` already does. -/
 theorem soundness_not_legalityPreserving [Fact p.Prime] (hp : 2 < p) :
     (illegalCircuit p).isSoundReplacementOf (legalCircuit p) (toyBusSemantics p) ∧
-      ¬ ∃ rank bound maxWindow,
-        (illegalCircuit p).legalGuest (toyGuestRules p) rank bound maxWindow :=
+      ¬ ∃ rank bound maxWindow maxInteractions,
+        (illegalCircuit p).legalGuest (toyGuestRules p) rank bound maxWindow maxInteractions :=
   ⟨illegalCircuit_isSoundReplacementOf,
-    fun ⟨_, _, _, hleg⟩ => illegalCircuit_not_statelessSendOnly hp hleg.sendOnly⟩
+    fun ⟨_, _, _, _, hleg⟩ => illegalCircuit_not_statelessSendOnly hp hleg.sendOnly⟩
