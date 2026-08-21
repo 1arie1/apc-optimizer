@@ -87,14 +87,17 @@ theorem guestInstanceCount_cons {c : Circuit p} {R : Guest p}
     same observable effect, whatever their guest chips do. -/
 theorem effects_eq_of_io {host : Host p} {G G' : Guest p}
     {a : VmAssignment p ⟨host, G⟩} {a' : VmAssignment p ⟨host, G'⟩}
-    (hin : a.hostAssignment host.inputChip = a'.hostAssignment host.inputChip)
+    (hin : ∀ i ∈ host.inputChips, a.hostAssignment i = a'.hostAssignment i)
     (hout : a.hostAssignment host.outputChip = a'.hostAssignment host.outputChip) :
     a.effects = a'.effects := by
+  have hinst : (host.inputChips.flatMap fun i => (a.hostAssignment i).map (fun c => (i, c)))
+      = host.inputChips.flatMap fun i => (a'.hostAssignment i).map (fun c => (i, c)) :=
+    List.flatMap_congr (fun i hi => by rw [hin i hi])
   have hord : a.orderedInputInstances = a'.orderedInputInstances := by
-    unfold VmAssignment.orderedInputInstances
-    rw [hin]
+    unfold VmAssignment.orderedInputInstances VmAssignment.inputInstances
+    rw [hinst]
   exact congrArg₂ VmEffect.mk
-    (congrArg List.flatten (congrArg (List.map host.getInputChunk) hord))
+    (congrArg (List.flatMap fun x => host.getInputChunk x.1 x.2) hord)
     (congrArg host.getOutput (congrArg (fun l => l.headD 0) hout))
 
 --------- One substitution ---------

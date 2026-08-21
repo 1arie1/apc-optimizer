@@ -88,6 +88,10 @@ vmSoundReplacement_cons
 vmSoundReplacement_append
 vmSoundReplacement_of_forall₂
 
+# `OpenVm.lean`'s `rfl`-lemma naming `openVmHost`'s single input chip, used by
+# `openVmHost_absorbsStateless` in a `simp only` that rewrites by `rfl`.
+ApcOptimizer.OpenVM.openVmHost_inputChips
+
 # `OpenVmConnection.lean` discharges the connecting theorem's host-side conditions for
 # `openVmHost`. Same story: its own root is `openVm_vmSoundReplacement`, and the rest feed its
 # proof.

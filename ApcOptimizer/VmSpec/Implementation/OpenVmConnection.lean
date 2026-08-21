@@ -66,19 +66,16 @@ theorem ConnectorBoundary.interactions_busId (r : ConnectorBoundary p) (execBusI
 /-- Every message an `InputRead` describes is on the execution bridge (the two clock-step
     messages `InputRead.interactions` opens with) or the memory bus (everything else) — never
     anywhere else, mirroring `ClockStep.other` for a guest instruction. -/
-theorem InputRead.interactions_busId (r : InputRead p) (ptrReg countReg execBusId memBusId : Nat) :
-    ∀ msg ∈ r.interactions ptrReg countReg execBusId memBusId,
+theorem InputRead.interactions_busId (r : InputRead p) (ptrReg execBusId memBusId : Nat) :
+    ∀ msg ∈ r.interactions ptrReg execBusId memBusId,
       msg.busId = execBusId ∨ msg.busId = memBusId := by
   intro msg hmsg
-  rw [InputRead.interactions, List.mem_append, List.mem_append] at hmsg
-  rcases hmsg with (h | h) | h
-  · simp only [List.mem_cons, List.not_mem_nil, or_false] at h
-    rcases h with rfl | rfl <;> exact Or.inl rfl
-  · simp only [List.mem_cons, List.not_mem_nil, or_false] at h
-    rcases h with rfl | rfl | rfl | rfl <;> exact Or.inr rfl
-  · obtain ⟨⟨i, b, old, _t⟩, -, h⟩ := List.mem_flatMap.mp h
-    simp only [List.mem_cons, List.not_mem_nil, or_false] at h
-    rcases h with rfl | rfl <;> exact Or.inr rfl
+  rw [InputRead.interactions] at hmsg
+  simp only [List.mem_cons, List.not_mem_nil, or_false] at hmsg
+  rcases hmsg with rfl | rfl | rfl | rfl | rfl | rfl
+  · exact Or.inl rfl
+  · exact Or.inl rfl
+  all_goals exact Or.inr rfl
 
 /-- **`openVmHost`'s table sinks are honest.** Each of the four lookup chips restates its bus's
     case of `OpenVM.accepts`, and the four memory-bus chips cannot carry a stateless message at
@@ -130,10 +127,10 @@ theorem openVmHost_sinksAreTables (P : OpenVmParams p) :
       (congrArg Prod.fst heq).symm.trans (OutputRead.interactions_busId r 1 msg hmsg)
     subst hbus
     simp [openVmBusSemantics, defaultBusMap, OpenVmBusType.isStateful] at hm
-  · obtain ⟨r, -, hr⟩ := hleg
+  · obtain ⟨r, hr⟩ := hleg
     rw [hr] at hcm
     obtain ⟨msg, hmsg, heq⟩ := exists_of_busStateOf_ne_zero hcm
-    rcases InputRead.interactions_busId r P.ptrReg P.countReg 0 1 msg hmsg with h0 | h1
+    rcases InputRead.interactions_busId r P.ptrReg 0 1 msg hmsg with h0 | h1
     · have hbus : mb = 0 := (congrArg Prod.fst heq).symm.trans h0
       subst hbus
       simp [openVmBusSemantics, defaultBusMap, OpenVmBusType.isStateful] at hm
@@ -239,36 +236,27 @@ theorem OutputRead.interactions_data (r : OutputRead p) (memBusId : Nat) :
   all_goals exact isByte_zero
 
 /-- Every message an `InputRead` describes carries byte-valued data limbs — the peeked register
-    values by `ptrLimbsAreBytes`/`countLimbsAreBytes`, the overwritten words by
-    `oldWordsAreBytes`, the written values by `bytesAreBytes`. -/
-theorem InputRead.interactions_data (r : InputRead p) (ptrReg countReg execBusId memBusId : Nat) :
-    ∀ msg ∈ r.interactions ptrReg countReg execBusId memBusId, ∀ f : MemoryPayload p,
+    value by `ptrLimbsAreBytes`, the overwritten word by `oldWordIsBytes`, the written value by
+    `byteIsByte`. -/
+theorem InputRead.interactions_data (r : InputRead p) (ptrReg execBusId memBusId : Nat) :
+    ∀ msg ∈ r.interactions ptrReg execBusId memBusId, ∀ f : MemoryPayload p,
       memoryPayload? msg.payload = some f → ∀ d ∈ f.data, isByte d := by
   intro msg hmsg f hf d hd
-  rw [InputRead.interactions, List.mem_append, List.mem_append] at hmsg
-  rcases hmsg with (h | h) | h
-  · -- The two bridge messages carry a two-element payload, too short to be a memory record.
-    simp only [List.mem_cons, List.not_mem_nil, or_false] at h
-    rcases h with rfl | rfl <;> simp [memoryPayload?] at hf
-  · simp only [List.mem_cons, List.not_mem_nil, or_false] at h
-    rcases h with rfl | rfl | rfl | rfl
-    · exact r.ptrLimbsAreBytes d (memoryPayload?_word hf d hd)
-    · exact r.ptrLimbsAreBytes d (memoryPayload?_word hf d hd)
-    · exact r.countLimbsAreBytes d (memoryPayload?_word hf d hd)
-    · exact r.countLimbsAreBytes d (memoryPayload?_word hf d hd)
-  · obtain ⟨⟨i, b, old, t⟩, hmem, h⟩ := List.mem_flatMap.mp h
-    have hb : b ∈ r.bytes := (List.of_mem_zip (List.of_mem_zip hmem).2).1
-    have hold : old ∈ r.oldWords :=
-      (List.of_mem_zip (List.of_mem_zip (List.of_mem_zip hmem).2).2).1
-    simp only [List.mem_cons, List.not_mem_nil, or_false] at h
-    rcases h with rfl | rfl
-    · exact r.oldWordsAreBytes old hold d (memoryPayload?_word hf d hd)
-    · simp only [memoryPayload?, Option.some.injEq] at hf
-      subst hf
-      simp at hd
-      rcases hd with rfl | rfl | rfl | rfl
-      · exact r.bytesAreBytes d hb
-      all_goals exact isByte_zero
+  rw [InputRead.interactions] at hmsg
+  simp only [List.mem_cons, List.not_mem_nil, or_false] at hmsg
+  rcases hmsg with rfl | rfl | rfl | rfl | rfl | rfl
+  -- The two bridge messages carry a two-element payload, too short to be a memory record.
+  · simp [memoryPayload?] at hf
+  · simp [memoryPayload?] at hf
+  · exact r.ptrLimbsAreBytes d (memoryPayload?_word hf d hd)
+  · exact r.ptrLimbsAreBytes d (memoryPayload?_word hf d hd)
+  · exact r.oldWordIsBytes d (memoryPayload?_word hf d hd)
+  · simp only [memoryPayload?, Option.some.injEq] at hf
+    subst hf
+    simp at hd
+    rcases hd with rfl | rfl | rfl | rfl
+    · exact r.byteIsByte
+    all_goals exact isByte_zero
 
 /-- On the memory bus, a payload whose data limbs are bytes maintains OpenVM's invariants. This
     is the witness every memory-touching host chip supplies: multiplicity `1` satisfies the
@@ -362,18 +350,18 @@ theorem openVmHost_statefulChipsMaintain (P : OpenVmParams p) :
     exact hpl ▸ memory_maintains (hpl ▸ OutputRead.interactions_data r 1 msg hmsg)
   -- Input chip: on the execution bridge (polarity alone, like the connector) or pinned to an
   -- `InputRead`'s memory writes, whose bytes and old words are bytes.
-  · obtain ⟨r, -, hr⟩ := hleg
+  · obtain ⟨r, hr⟩ := hleg
     rw [hr] at hcm
     obtain ⟨msg, hmsg, heq⟩ := exists_of_busStateOf_ne_zero hcm
     obtain ⟨hb, hpl⟩ := Prod.mk.injEq .. ▸ heq
-    rcases InputRead.interactions_busId r P.ptrReg P.countReg 0 1 msg hmsg with h0 | h1
+    rcases InputRead.interactions_busId r P.ptrReg 0 1 msg hmsg with h0 | h1
     · have hbus : mb = 0 := hb.symm.trans h0
       subst hbus
       exact hpl ▸ bridge_maintains ml
     · have hbus : mb = 1 := hb.symm.trans h1
       subst hbus
       exact hpl ▸ memory_maintains
-        (hpl ▸ InputRead.interactions_data r P.ptrReg P.countReg 0 1 msg hmsg)
+        (hpl ▸ InputRead.interactions_data r P.ptrReg 0 1 msg hmsg)
   -- Connector: on the execution bridge, where polarity is the whole invariant.
   · obtain ⟨r, hr⟩ := hleg
     rw [hr] at hcm
@@ -521,7 +509,7 @@ theorem openVmHost_absorbsStateless (P : OpenVmParams p) :
     simp only [defaultBusMap] at hacc
     revert hacc
     rcases hml : m.2 with _ | ⟨x, _ | ⟨y, _ | ⟨z, rest⟩⟩⟩ <;> exact id
-  refine ⟨hA', ⟨?_, ?_⟩, ?_, rfl, rfl⟩
+  refine ⟨hA', ⟨?_, ?_⟩, ?_, ?_, rfl⟩
   · intro t effect hmem
     fin_cases t <;> simp only [hA'def] at hmem
     · simp at hmem
@@ -566,6 +554,11 @@ theorem openVmHost_absorbsStateless (P : OpenVmParams p) :
     by_cases hz : δ m = 0
     · simp [hz]
     · rcases hsupp m hz with h | h | h | h <;> simp [h]
+  · -- The only input chip is index `7`, which `hA'` leaves alone.
+    intro i hi
+    simp only [openVmHost_inputChips, List.mem_singleton] at hi
+    subst hi
+    rfl
 
 /-- **The rules `OpenVm.lean` writes out are the ones `openVmBusSemantics` induces.** This is the
     only place the two meet: `accepts` and `isStateful` agree definitionally (the former *is* the

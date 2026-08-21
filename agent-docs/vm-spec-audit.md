@@ -130,6 +130,13 @@ zero bus cost, and the recovered chunk need not be what was written.
 **Fix.** Put the AssertLt discipline on the witness, or make the witness part of the assignment
 instead of recovering it by choice.
 
+**Not fixed by the `HINT_STOREW` rewrite (2026-08-21).** Narrowing the chip to one word per
+instance removes the count register but leaves the mechanism untouched: with `ptrTime = base + 1`,
+`oldWord = #v[byte, 0, 0, 0]` and `wordTime = base + 2`, both memory pairs cancel and the whole
+contribution collapses to the bridge pair — for *any* `byte`. Two witnesses, one contribution,
+different chunks. What A3 needs is `prev_timestamp < timestamp` on each access, which is
+independent of which hint opcode is modelled.
+
 ## B. `VmSat` budgets the guest and not the host
 
 *Status: fixed — see `HostChip.instanceBound` (2026-08-20). The quantitative half is still open:
@@ -203,6 +210,14 @@ justified.
 
 **Probe.** One concrete `example : OpenVmParams babyBear := …` at the sizes actually targeted.
 
+**Sharpened by the `HINT_STOREW` rewrite (2026-08-21).** `maxInputInstances` now counts input
+*data*, not chunks: one instance is one hint instruction, hence one byte. It shares `windowOk`'s
+budget line with `maxInstances`, so at `maxInstances = 2²²` and `maxWindow = 478` the room left is
+`maxInputInstances < 7711` — under eight thousand input bytes per segment. That is real OpenVM's
+arithmetic, not the model's (a real segment does execute one `HINT_STOREW` per word), but it makes
+the probe above more pressing, and it is an argument for modelling `HINT_BUFFER`, whose whole point
+is to pull many words on one bridge arc.
+
 ## E. *Dropped (2026-08-20)*
 
 Inheriting `OpenVmSemantics.lean`'s `accepts`/`maintainsInvariants`/`defaultBusMap` — including the
@@ -225,12 +240,21 @@ until the completeness half is attempted.
   legality, and `Host.pinsRanks` supplies the fact globally.
 * `Audit/OpenVmLegalAudit.lean`'s chips carry *constant* `t₀`/`t₁`/`pc`/`ptr`, whereas an exported APC
   has them as columns sharing one `from_timestamp`. Legality against a whole APC is untested.
-* `inputHostChip` now sits on the execution bridge like a guest instruction
-  (`InputRead.pcFrom`/`pcTo`/`d`, closing A2), but unlike `Circuit.advancesClock`, nothing pins its
-  own memory accesses (`ptrTime`/`countTime`/`wordTimes`) inside `(base, base + d)` — the AssertLt
-  discipline a real guest step's own algebra would have to supply. Harmless for anything currently
-  proved (`Host.pinsRanks` only bounds guest ranks), but the input chip's own memory-timestamp
-  story is still more permissive than a real `Rv32HintStoreAir`.
+* `inputHostChip` sits on the execution bridge like a guest instruction
+  (`InputRead.pcFrom`/`pcTo`, closing A2), and since the `HINT_STOREW` rewrite its *sends* land at
+  `base + 1` and `base + 2`, strictly inside `(base, base + inputStepWindow)` — the layout
+  `Circuit.advancesClock` demands and `stepChip` exhibits. Its *receives* are still free:
+  `ptrTime`/`wordTime` are unconstrained, where `advancesClock` would put them in the window too.
+  That is the AssertLt discipline a real guest step's own algebra supplies, and its absence is
+  exactly A3's mechanism. Harmless for anything currently proved (`Host.pinsRanks` only bounds
+  guest ranks).
+* Only `HINT_STOREW` is modelled. `Rv32HintStoreAir` implements two opcodes, and `HINT_BUFFER` —
+  count register off operand `a`, `num_words` words per instance — has no chip. `Host.inputChips`
+  is a list so adding it is a new entry rather than a reshape, but until it exists a real segment
+  that uses `HINT_BUFFER` is outside the model.
+* `openVmHost` still treats `ptrReg` as a VM-wide constant. It is instruction operand `b`, chosen
+  per instruction by the compiler (`extensions/rv32im/circuit/src/hintstore/execution.rs`), so a
+  faithful model puts it in the per-instance witness. `TODO(AO)` on `InputRead.interactions`.
 * `memoryInitHostChip` still allows arbitrary initial memory in address spaces `1`/`2`, with
   unbounded (even infinite) support: a segment's public inputs are an unobserved VM input (address
   space `3` is now pinned to `0` — see A1). Restricting address space `3` to memory init's own senders

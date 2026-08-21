@@ -220,5 +220,6 @@ theorem canProduce_idle {host : Host p} {G : Guest p} :
       + HostAssignment.busEffect (host := host) (fun _ => []) m = 0
     simp [GuestAssignment.busEffect, HostAssignment.busEffect]
   · show VmAssignment.effects (vm := ⟨host, G⟩) ⟨fun _ => [], fun _ => []⟩ = _
-    simp [VmAssignment.effects, VmAssignment.orderedInputInstances]
+    simp [VmAssignment.effects, VmAssignment.orderedInputInstances,
+      VmAssignment.inputInstances]
 

@@ -124,7 +124,7 @@ def Host.absorbsStateless (host : Host p) (bs : BusSemantics p) : Prop :=
         bs.isStateful m.1 = false ∧
           ∃ mult : ZMod p, mult ≠ 0 ∧ bs.accepts ⟨m.1, mult, m.2⟩) →
       ∃ hA' : HostAssignment p host, hA'.satisfies ∧ hA'.busEffect = hA.busEffect + δ ∧
-        hA' host.inputChip = hA host.inputChip ∧
+        (∀ i ∈ host.inputChips, hA' i = hA i) ∧
         hA' host.outputChip = hA host.outputChip
 
 /-- **The host keeps its runs inside the rank window.** A claim about the VM, not about any guest

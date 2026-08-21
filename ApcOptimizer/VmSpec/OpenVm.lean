@@ -6,17 +6,17 @@ set_option autoImplicit false
 /-! Draft `HostChip`s for OpenVM, built against `ApcOptimizer.OpenVM`'s bus semantics
     (`OpenVmSemantics.lean`) — illustrating how `Basic.lean`'s host-chip abstraction covers
     OpenVM's actual host chips: its four stateless lookup tables, memory
-    initialization/finalization, the output chip, an input chip modeled after `vm.tex`'s
-    description (reads a pointer and a word count from two registers, then writes that many
-    unconstrained words starting at the pointer), and the connector, which seeds and terminates the
-    execution bridge. Assembled into a concrete `openVmHost : Host p` at the bottom.
+    initialization/finalization, the output chip, a `HINT_STOREW` input chip (peeks a pointer
+    register, then writes one unconstrained word there), and the connector, which seeds and
+    terminates the execution bridge. Assembled into a concrete `openVmHost : Host p` at the
+    bottom.
 
     `Host.getInputChunk`/`Host.getOutput : BusState p → List (ZMod p)` need to read an *ordered
     array* off a bare `BusState p` function, which — unlike a `Circuit`'s own
     `busInteractions : List _` — carries no finite enumeration of what it touches. The fix used
     here: `inputHostChip`/`outputHostChip`'s `canProduce` predicates don't just restrict a
-    contribution, they pin it *exactly* to the messages some witness (`InputRead`/`OutputRead`,
-    bundling the count and the values) would produce. `inputChunkOf`/`outputArrayOf` then
+    contribution, they pin it *exactly* to the messages some witness (`InputRead`/`OutputRead`)
+    would produce. `inputChunkOf`/`outputArrayOf` then
     recover *a* witness with classical choice — it need not be the unique one (nothing here
     proves the witness is determined by the resulting `BusState p`), only *some* witness whose
     reconstructed messages match, which is all `inputHostChip.canProduce`/
@@ -188,38 +188,43 @@ def outputHostChip (memBusId : Nat := openVmMemBusId) : HostChip p where
 def wordValue (limbs : Vector (ZMod p) 4) : ZMod p :=
   limbs[0] + 256 * limbs[1] + 65536 * limbs[2] + 16777216 * limbs[3]
 
-/-- A witness that an input-chip instance's contribution is a legal read: which pointer and
-    count registers it peeked (`ptrLimbs`, `countLimbs`, each a 32-bit value spread over four
-    byte limbs as OpenVM stores it), which new values it wrote (`bytes`), and which words those
-    writes overwrote (`oldWords`, unconstrained — a write doesn't care what was there before,
-    but the memory bus still needs a value for the receive half of the access). -/
+/-- How far a `HINT_STOREW` instance advances the execution-bridge clock: one tick per memory
+    access — the pointer-register peek and the word write — plus one, so both sit *strictly*
+    inside `(base, base + inputStepWindow)`, the layout `Circuit.advancesClock` demands of a guest
+    instruction and `Audit/OpenVmLegalAudit.lean`'s `stepChip` exhibits. -/
+def inputStepWindow : ℕ := 3
+
+/-- A witness that an input-chip instance's contribution is a legal `HINT_STOREW`: which pointer
+    register it peeked (`ptrLimbs`, a 32-bit value spread over four byte limbs as OpenVM stores
+    it), which value it wrote (`byte`), and which word that write overwrote (`oldWord`,
+    unconstrained — a write doesn't care what was there before, but the memory bus still needs a
+    value for the receive half of the access).
+
+    One word, not a run of them: `Rv32HintStoreAir` implements two opcodes, and `HINT_STOREW`
+    hardcodes `num_words` to `1` and reads no count register at all
+    (`extensions/rv32im/circuit/src/hintstore/mod.rs`). `HINT_BUFFER`, which does read a count off
+    operand `a`, is a second chip type this host does not model yet — `Host.inputChips` is a list
+    so that adding it is a new entry rather than a reshape. -/
 structure InputRead (p : ℕ) where
   ptrLimbs : Vector (ZMod p) 4
-  countLimbs : Vector (ZMod p) 4
-  bytes : List (ZMod p)
-  oldWords : List (Vector (ZMod p) 4)
-  bytesLen : bytes.length = (wordValue countLimbs).val
-  oldWordsLen : oldWords.length = (wordValue countLimbs).val
+  byte : ZMod p
+  oldWord : Vector (ZMod p) 4
   /-- Memory holds bytes; see `memoryFinalizeHostChip`. Registers included — a peeked register is
       a memory access like any other, so its limbs carry the same discipline. -/
-  bytesAreBytes : ∀ b ∈ bytes, isByte b
-  oldWordsAreBytes : ∀ w ∈ oldWords, ∀ d ∈ w.toList, isByte d
+  byteIsByte : isByte byte
+  oldWordIsBytes : ∀ d ∈ oldWord.toList, isByte d
   ptrLimbsAreBytes : ∀ d ∈ ptrLimbs.toList, isByte d
-  countLimbsAreBytes : ∀ d ∈ countLimbs.toList, isByte d
-  /-- When each peeked/overwritten word was last set — free rather than pinned to `0`: it was set
-      by whatever earlier instruction touched it, at whatever time that was, which has nothing to
-      do with *this* instance's own timing. -/
+  /-- When the peeked register and the overwritten word were last set — free rather than pinned to
+      `0`: they were set by whatever earlier instruction touched them, at whatever time that was,
+      which has nothing to do with *this* instance's own timing. -/
   ptrTime : ZMod p
-  countTime : ZMod p
-  wordTimes : List (ZMod p)
-  wordTimesLen : wordTimes.length = (wordValue countLimbs).val
+  wordTime : ZMod p
   /-- This instance's own start time — free rather than pinned to `0`, since the chip may run at
       any point in a segment (it is legal to invoke repeatedly — see `inputHostChip`'s
       `instanceBound`), not only at its very first instant, which timestamp `0` is reserved for
-      (`memoryInitHostChip`). Every write this instance makes lands at `base` plus a fixed
-      per-access offset (`InputRead.interactions`) — one shared clock advancing once per access,
-      matching `Rv32HintStoreAir`'s single `from_state.timestamp` and its `timestamp_pp` counter,
-      not each write independently one tick after whatever it happened to overwrite. -/
+      (`memoryInitHostChip`). Both accesses land at `base` plus a fixed offset
+      (`InputRead.interactions`) — one shared clock advancing once per access, matching
+      `Rv32HintStoreAir`'s single `from_state.timestamp` and its `timestamp_pp` counter. -/
   base : ZMod p
   /-- The `pc` this instance starts at, on the execution bridge — an input-chip instance is an
       instruction executor like any other (whitepaper §4.5: "every instruction executor AIR must
@@ -228,103 +233,83 @@ structure InputRead (p : ℕ) where
   pcFrom : ZMod p
   /-- The `pc` it hands on. -/
   pcTo : ZMod p
-  /-- How far this instance advances the clock on the execution bridge (`inputHostChip` bounds it,
-      the same way `ClockStep.dLt` bounds a guest instruction's). -/
-  d : ℕ
-  dPos : 0 < d
 
-/-- The address the read starts writing at, decoded from the pointer register's limbs. -/
+/-- The address the write lands at, decoded from the pointer register's limbs. -/
 def InputRead.ptr (r : InputRead p) : ZMod p := wordValue r.ptrLimbs
-
-/-- How many words the read pulls, decoded from the count register's limbs. -/
-def InputRead.count (r : InputRead p) : ZMod p := wordValue r.countLimbs
 
 /-- The bus interactions an `InputRead` describes: one execution-bridge step
     (`Circuit.advancesClock`'s shape, mirrored exactly — see `ClockStep`), receiving `(pcFrom,
-    base)` and sending `(pcTo, base + d)`; then peek `ptrReg` and `countReg` (each a full
-    four-limb register word, whatever was there at `ptrTime`/`countTime`), then write `r.bytes`
-    (one value's low limb per word, the rest zeroed — see the module docstring) at consecutive
-    addresses starting at `r.ptr` (each overwriting whatever was at `wordTimes[i]`).
+    base)` and sending `(pcTo, base + inputStepWindow)`; then peek `ptrReg` (a full four-limb
+    register word, whatever was there at `ptrTime`) at `base + 1`, then write `r.byte` (in the low
+    limb, the rest zeroed — see the module docstring) at `r.ptr` at `base + 2`, overwriting
+    whatever was there at `wordTime`.
 
-    Every write — all `2 + r.count.val` accesses this instance makes — lands at `r.base` plus its
-    own position in a single increasing sequence (`0` for the pointer peek, `1` for the count
-    peek, `2 + i` for word `i`), not independently one tick after whatever value it happened to
-    overwrite: an instance advances one shared clock once per access
-    (`extensions/rv32im/circuit/src/hintstore/mod.rs`'s `Rv32HintStoreAir`, whose
-    `timestamp_pp()` does exactly this off one `from_state.timestamp`), not `2 + r.count.val`
-    independent per-access clocks. -/
+    Both accesses land at `r.base` plus their own position in a single increasing sequence, not
+    independently one tick after whatever value they happened to overwrite: an instance advances
+    one shared clock once per access (`extensions/rv32im/circuit/src/hintstore/mod.rs`'s
+    `Rv32HintStoreAir`, whose `timestamp_pp()` does exactly this off one `from_state.timestamp`). -/
 
--- TODO(AO): `ptrReg`/`countReg` are *not* actually VM-wide constants the way `openVmHost` treats
--- them (as fixed parameters shared by every `InputRead` in a run). Checked against real OpenVM
+-- TODO(AO): `ptrReg` is *not* actually a VM-wide constant the way `openVmHost` treats it (as a
+-- fixed parameter shared by every `InputRead` in a run). Checked against real OpenVM
 -- (`extensions/rv32im/circuit/src/hintstore/execution.rs`, `HintStorePreCompute`/
 -- `execute_e12_impl`): the pointer register is instruction operand `b`, chosen per instruction by
--- the compiler, not fixed VM-wide. Worse, this repo's single `inputHostChip` actually conflates
--- two distinct real opcodes: `HINT_STOREW` writes exactly one word and has *no* count register at
--- all (`num_words` is hardcoded to `1`); only `HINT_BUFFER` reads a count, off operand `a`. So a
--- faithful model needs `InputRead`'s registers (and whether a count register exists at all) to be
--- part of the per-instance witness, not `openVmHost`'s fixed `ptrReg`/`countReg` parameters —
--- likely two host chip types, one per real opcode. Deliberately not done yet.
-def InputRead.interactions (r : InputRead p) (ptrReg countReg execBusId memBusId : Nat) :
+-- the compiler, not fixed VM-wide. A faithful model needs it in the per-instance witness rather
+-- than in `openVmHost`'s parameters. Deliberately not done yet.
+def InputRead.interactions (r : InputRead p) (ptrReg execBusId memBusId : Nat) :
     List (BusInteraction (ZMod p)) :=
   [ { busId := execBusId, multiplicity := -1, payload := [r.pcFrom, r.base] },
-    { busId := execBusId, multiplicity := 1, payload := [r.pcTo, r.base + (r.d : ZMod p)] } ] ++
-  [ { busId := memBusId, multiplicity := -1,
+    { busId := execBusId, multiplicity := 1,
+      payload := [r.pcTo, r.base + (inputStepWindow : ZMod p)] },
+    { busId := memBusId, multiplicity := -1,
       payload := [1, (ptrReg : ZMod p)] ++ r.ptrLimbs.toList ++ [r.ptrTime] },
     { busId := memBusId, multiplicity := 1,
-      payload := [1, (ptrReg : ZMod p)] ++ r.ptrLimbs.toList ++ [r.base] },
+      payload := [1, (ptrReg : ZMod p)] ++ r.ptrLimbs.toList ++ [r.base + 1] },
     { busId := memBusId, multiplicity := -1,
-      payload := [1, (countReg : ZMod p)] ++ r.countLimbs.toList ++ [r.countTime] },
+      payload := [2, r.ptr] ++ r.oldWord.toList ++ [r.wordTime] },
     { busId := memBusId, multiplicity := 1,
-      payload := [1, (countReg : ZMod p)] ++ r.countLimbs.toList ++ [r.base + 1] } ] ++
-  ((List.range r.count.val).zip (r.bytes.zip (r.oldWords.zip r.wordTimes))).flatMap
-    (fun (i, b, old, t) =>
-      [ { busId := memBusId, multiplicity := -1,
-          payload := [2, r.ptr + (i : ZMod p)] ++ old.toList ++ [t] },
-        { busId := memBusId, multiplicity := 1,
-          payload := [2, r.ptr + (i : ZMod p), b, 0, 0, 0, r.base + 2 + (i : ZMod p)] } ])
+      payload := [2, r.ptr, r.byte, 0, 0, 0, r.base + 2] } ]
 
-/-- The input host chip (default bus `1` for memory, `0` for the execution bridge): reads a
-    pointer and a word count by peeking two fixed registers (address space `1`), then writes that
-    many unconstrained words at consecutive addresses starting at the pointer (address space `2`)
-    — pinned exactly to an `InputRead` witness, mirroring `outputHostChip`. The one host chip a
-    segment may realize more than once, matching that the input chip is invoked again for each
-    further chunk pulled off the input stream — but at most `maxInstances` times, since it writes
-    to memory and the trace budget caps it as it caps a guest chip (`HostChip.instanceBound`).
+/-- The `HINT_STOREW` input host chip (default bus `1` for memory, `0` for the execution bridge):
+    peeks a pointer register (address space `1`), then writes one unconstrained word at that
+    pointer (address space `2`) — pinned exactly to an `InputRead` witness, mirroring
+    `outputHostChip`. The one host chip a segment may realize more than once, matching that the
+    hint instruction is executed again for each further word pulled off the input stream — but at
+    most `maxInstances` times, since it writes to memory and the trace budget caps it as it caps a
+    guest chip (`HostChip.instanceBound`).
 
-    `maxWindow` bounds the witness's own clock advance `r.d`, the same way `ClockStep.dLt` bounds
-    a guest instruction's — the anti-wraparound budget an input-chip instance needs to sit
-    alongside guest instances on the same execution bridge (`OpenVmParams.windowOk`). -/
-def inputHostChip (ptrReg countReg maxInstances maxWindow : Nat)
+    Its clock advance is the constant `inputStepWindow`, not a witness field: a real `HINT_STOREW`
+    makes a fixed number of accesses. `OpenVmParams.inputWindowOk` is where that constant meets
+    `maxWindow`, the anti-wraparound budget an instance needs to sit alongside guest instances on
+    the same execution bridge (`OpenVmParams.windowOk`). -/
+def inputHostChip (ptrReg maxInstances : Nat)
     (execBusId : Nat := openVmExecBusId) (memBusId : Nat := openVmMemBusId) :
     HostChip p where
   canProduce contribution :=
-    ∃ r : InputRead p, r.d < maxWindow ∧
-      contribution = busStateOf (r.interactions ptrReg countReg execBusId memBusId)
+    ∃ r : InputRead p, contribution = busStateOf (r.interactions ptrReg execBusId memBusId)
   instanceBound := maxInstances
 
 open Classical in
-/-- Recover an input-chip instance's stream chunk from its contribution: the `bytes` of *some*
-    witnessing `InputRead` (see the module docstring for why "some" is enough), or `[]` if the
-    contribution isn't a legal read at all. This is what `Host.getInputChunk` should be, for an
-    `openVmHost` built with the same `ptrReg`/`countReg`/`maxWindow`/`execBusId`/`memBusId`. -/
-noncomputable def inputChunkOf (ptrReg countReg maxWindow execBusId memBusId : Nat)
+/-- Recover an input-chip instance's stream datum from its contribution: the `byte` of *some*
+    witnessing `InputRead` (see the module docstring for why "some" is enough) as a one-element
+    chunk, or `[]` if the contribution isn't a legal read at all. This is what
+    `Host.getInputChunk` should be, for an `openVmHost` built with the same
+    `ptrReg`/`execBusId`/`memBusId`. -/
+noncomputable def inputChunkOf (ptrReg execBusId memBusId : Nat)
     (contribution : BusState p) : VmInput p :=
-  if h : ∃ r : InputRead p, r.d < maxWindow ∧
-      contribution = busStateOf (r.interactions ptrReg countReg execBusId memBusId)
-  then h.choose.bytes else []
+  if h : ∃ r : InputRead p, contribution = busStateOf (r.interactions ptrReg execBusId memBusId)
+  then [h.choose.byte] else []
 
 open Classical in
 /-- Recover an input-chip instance's start time from its contribution: the `base` of the *same*
-    witnessing `InputRead` `inputChunkOf` recovers its `bytes` from — `Classical.choose` depends
+    witnessing `InputRead` `inputChunkOf` recovers its `byte` from — `Classical.choose` depends
     only on the existential's proposition, not on which proof of it is in hand, so the two agree
     on one witness — or `0` if the contribution isn't a legal read at all (irrelevant: sorting
     puts such a chunk somewhere, but it contributes `[]` either way). This is what
     `Host.getInputTime` should be, for an `openVmHost` built with the same
-    `ptrReg`/`countReg`/`maxWindow`/`execBusId`/`memBusId`. -/
-noncomputable def inputTimeOf (ptrReg countReg maxWindow execBusId memBusId : Nat)
+    `ptrReg`/`execBusId`/`memBusId`. -/
+noncomputable def inputTimeOf (ptrReg execBusId memBusId : Nat)
     (contribution : BusState p) : ZMod p :=
-  if h : ∃ r : InputRead p, r.d < maxWindow ∧
-      contribution = busStateOf (r.interactions ptrReg countReg execBusId memBusId)
+  if h : ∃ r : InputRead p, contribution = busStateOf (r.interactions ptrReg execBusId memBusId)
   then h.choose.base else 0
 
 open Classical in
@@ -450,12 +435,12 @@ def connectorHostChip (execBusId : Nat := openVmExecBusId) : HostChip p where
 structure OpenVmParams (p : ℕ) where
   /-- The VM's trace budget (see `VmAssignment.withinBudget`). -/
   maxInstances : ℕ
-  /-- The registers the input chip peeks: the input pointer and the word count. -/
+  /-- The register the input chip peeks for its write pointer. -/
   ptrReg : Nat
-  countReg : Nat
   /-- The most input-chip instances a segment may realize. Every other host chip is capped at one
       instance, so this is what keeps the host side of a run finite
-      (`HostAssignment.satisfies`). -/
+      (`HostAssignment.satisfies`). One instance is one `HINT_STOREW`, hence one input datum: an
+      N-word chunk costs N instances of this budget. -/
   maxInputInstances : ℕ
   /-- The `Circuit.advancesClock` bound. A property of the chips being run rather than of OpenVM —
       a fused APC advances by its whole basic block, not by one instruction's `timestamp_delta`. -/
@@ -463,15 +448,18 @@ structure OpenVmParams (p : ℕ) where
   /-- The most bus interactions a guest chip may carry. -/
   maxInteractions : ℕ
   /-- No timestamp overflow on the *whole* execution bridge — guest instances and input-chip
-      instances together, since both now sit on it (`InputRead.pcFrom`/`pcTo`/`d`). Strictly more
+      instances together, since both now sit on it (`InputRead.pcFrom`/`pcTo`). Strictly more
       than `Host.noTimeOverflow` (which only needs the guest term); `openVmHost` derives that
       weaker fact from this one. -/
   windowOk : (maxInstances + maxInputInstances + 1) * (maxWindow + 1) < p
   budgetOk : maxInteractions * maxInstances + 1 < p
+  /-- An input-chip instance's own clock advance fits the window too. Pinned rather than
+      per-witness, since `inputStepWindow` is a constant (`inputHostChip`). -/
+  inputWindowOk : inputStepWindow < maxWindow
 
 /-- A concrete OpenVM `Host`: `defaultBusMap`'s four stateless lookup tables (default bus ids),
-    memory initialization (all-zero) and finalization, the output chip, an input chip that
-    peeks registers `P.ptrReg`/`P.countReg` — all sharing `openVmMemBusId`, `defaultBusMap`'s
+    memory initialization (all-zero) and finalization, the output chip, a `HINT_STOREW` input chip
+    that peeks register `P.ptrReg` — all sharing `openVmMemBusId`, `defaultBusMap`'s
     memory bus — and the connector, which seeds and terminates the execution bridge.
 
     No `memBusId`/`busMap` parameters: every chip below is already pinned to `defaultBusMap`'s own
@@ -492,10 +480,10 @@ noncomputable def openVmHost (P : OpenVmParams p) : Host p where
     [ pcLookupHostChip, bitwiseLookupHostChip, variableRangeCheckerHostChip,
       tupleRangeCheckerHostChip, memoryInitHostChip,
       memoryFinalizeHostChip, outputHostChip,
-      inputHostChip P.ptrReg P.countReg P.maxInputInstances P.maxWindow, connectorHostChip ]
-  inputChip := ⟨7, by simp⟩
-  getInputChunk := inputChunkOf P.ptrReg P.countReg P.maxWindow openVmExecBusId openVmMemBusId
-  getInputTime := inputTimeOf P.ptrReg P.countReg P.maxWindow openVmExecBusId openVmMemBusId
+      inputHostChip P.ptrReg P.maxInputInstances, connectorHostChip ]
+  inputChips := [⟨7, by simp⟩]
+  getInputChunk := fun _ => inputChunkOf P.ptrReg openVmExecBusId openVmMemBusId
+  getInputTime := fun _ => inputTimeOf P.ptrReg openVmExecBusId openVmMemBusId
   outputChip := ⟨6, by simp⟩
   getOutput := outputArrayOf openVmMemBusId
   noTimeOverflow := by
@@ -505,5 +493,14 @@ noncomputable def openVmHost (P : OpenVmParams p) : Host p where
           Nat.mul_le_mul_right _ (by omega)
       _ < p := h
   noMultOverflow := P.budgetOk
+
+/-- `openVmHost`'s one input chip. `Host.inputChips` is a list — a VM may pull input through
+    several chip types — but this host models only `HINT_STOREW`, so the list is this singleton
+    (`openVmHost_inputChips`). -/
+def openVmInputChip (P : OpenVmParams p) : Fin (openVmHost P).chips.length :=
+  ⟨7, by simp [openVmHost]⟩
+
+@[simp] theorem openVmHost_inputChips (P : OpenVmParams p) :
+    (openVmHost P).inputChips = [openVmInputChip P] := rfl
 
 end ApcOptimizer.OpenVM

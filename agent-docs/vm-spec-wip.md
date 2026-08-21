@@ -1282,6 +1282,46 @@ chip; it now pools each chip's instances into its single one, plus that bus's sl
 Still open on the same finding: the *quantitative* half. `Host.noMultOverflow` counts guest
 interactions only, so host contributions are still outside the anti-wraparound arithmetic.
 
+## Phase 9: the input chip is `HINT_STOREW`, and `Host` takes a *list* of input chips
+
+Two changes, landed together because the second is what makes the first honest about what it left
+out.
+
+**`InputRead` models one real opcode.** `Rv32HintStoreAir` implements two: `HINT_STOREW` hardcodes
+`num_words` to `1` and reads no count register at all, while `HINT_BUFFER` reads a count off
+operand `a`. The old `InputRead` was neither — it peeked a count register *and* wrote a run of
+words, so the count-register access was an interaction real OpenVM never makes on either path. It
+is now `HINT_STOREW`: one pointer peek, one word write. The structure went from 19 fields to 11
+(`countLimbs`, `countTime`, `wordTimes` and the three `count`-indexed length invariants are gone,
+and `bytes`/`oldWords` became scalars), `interactions` from a two-element append plus a
+`List.range count |>.zip` flatMap to a literal six-element list, and `countReg` out of five
+signatures.
+
+**The clock advance is a constant.** `InputRead.d`/`dPos` are replaced by `inputStepWindow := 3`:
+one tick per access plus one, so both accesses sit *strictly* inside `(base, base + 3)` — the
+layout `Circuit.advancesClock` demands of a guest instruction and `OpenVmLegalAudit.lean`'s
+`stepChip` exhibits. The sends moved to `base + 1` and `base + 2` accordingly (they were at
+`base + 0`, `base + 1`, `base + 2 + i`, i.e. running past `base + d`). The per-witness bound
+`r.d < maxWindow` became the parameter field `OpenVmParams.inputWindowOk`, so
+`openVmHost_bridge_isolated` no longer carries that conjunct and the chain lemmas take
+`inputStepWindow < maxWindow` once rather than per instance.
+
+**`Host.inputChip` → `Host.inputChips : List (Fin chips.length)`.** `getInputChunk`/`getInputTime`
+are now indexed by which chip produced the instance. `VmAssignment.inputInstances` gathers every
+input chip's instances tagged with that index, and `orderedInputInstances` sorts *all of them
+together* by `getInputTime` — so chip types interleave by clock reading rather than concatenating
+chip by chip, which is the only order that means anything (a `HINT_BUFFER` between two
+`HINT_STOREW`s reads in the middle, not before or after both). `Host.absorbsStateless` and
+`effects_eq_of_io` pin every input chip rather than one. `openVmHost` instantiates the list as the
+singleton `[openVmInputChip P]`, so nothing about the OpenVM proofs changed in strength.
+
+Both `lake build` and `Scripts/check-proof-integrity.sh` are clean. Net effect on the audit list:
+the "conflates two opcodes" half of the `TODO(AO)` on `InputRead.interactions` is closed, the
+lower tier's memory-window bullet is half closed (sends pinned, receives still free), A3 is
+*unchanged* — the self-cancelling-write witness works verbatim on one word — and Finding D got
+sharper, since `maxInputInstances` now counts input bytes rather than chunks and shares
+`windowOk`'s budget line with the guest instances.
+
 ## Next step on resume
 
 In rough priority order:
@@ -1304,6 +1344,9 @@ In rough priority order:
    `OpenVmLegalAudit.lean` — an APC has many memory accesses sharing one `from_timestamp`, and
    `readEchoChip` only exercises one.
 5. **Parameterize `openVmHost` by the bus map** rather than hard-wiring `defaultBusMap`.
+5b. **Model `HINT_BUFFER`** as a second entry in `Host.inputChips` (Phase 9 reshaped the `Host` for
+   exactly this). It is also what would relieve Finding D's budget squeeze, since one instance
+   would again pull many words on a single bridge arc.
 6. **The completeness half** (`CanProduce ⟨host, G⟩ e → CanProduce ⟨host, G'⟩ e`). Its blocker is
    unchanged: `Circuit.isCompleteReplacementOf` is gated on `Circuit.admissible`, a list-order
    property (`admissibleMemoryBus`) that order-blind `VmSat` cannot supply. Either it becomes an
@@ -1346,7 +1389,7 @@ set_option autoImplicit false
 
 variable {p : ℕ} [Fact p.Prime]
 
-/-- A host-chip (memory init/final, a lookup table, the input chip, the output
+/-- A host-chip (memory init/final, a lookup table, an input chip, the output
     chip, ...). It is defined only by the effects it can have and by how many
     instances it can have. There is no explicit circuit. -/
 structure HostChip (p : ℕ) where
@@ -1354,7 +1397,7 @@ structure HostChip (p : ℕ) where
   canProduce : BusState p → Prop
   /-- The most instances of this chip a satisfying assignment may realize
       (`HostAssignment.satisfies`). Chips a VM has one of — memory init/final, a lookup table, the
-      output chip — take `1`; the input chip, invoked once per chunk pulled, takes the VM's budget.
+      output chip — take `1`; an input chip, invoked once per chunk pulled, takes the VM's budget.
 
       Every chip carries a bound, with no way to opt out: the anti-wraparound arithmetic
       (`Host.noMultOverflow`, `Implementation/Counting.lean`) counts what touches a bus, so an
@@ -1412,10 +1455,18 @@ structure Host (p : ℕ) where
       These live on the `Host` because they are the VM's requirements, not any chip's. They are
       *not* a conjunct of `VmSat`, because they are not (and cannot) be checked in constraints.  -/
   legalGuest : Circuit p → Prop
-  /-- The `chips` index that is the input chip. -/
-  inputChip : Fin chips.length
-  /-- Map from an input chip instance's effects to its contribution to the input stream. -/
-  getInputChunk : BusState p → VmInput p
+  /-- The `chips` indices that pull the input stream. A list rather than a single index: a VM may
+      read input through several chip types — OpenVM has one per hint opcode — whose instances
+      interleave in one stream, ordered by `getInputTime`. -/
+  inputChips : List (Fin chips.length)
+  /-- Map from an input chip instance's effects to its contribution to the input stream, indexed
+      by which of `inputChips` produced it (chip types read the stream differently). -/
+  getInputChunk : Fin chips.length → BusState p → VmInput p
+  /-- Map from an input chip instance's effects to when it ran. `VmAssignment.effects` orders
+      chunks by this rather than by an instance's arbitrary position in the assignment, which
+      carries no meaning (`VmSat.perm_iff`) — across chip types as well as within one, so the
+      shared clock is what makes the interleaving well defined. -/
+  getInputTime : Fin chips.length → BusState p → ZMod p
   /-- The `chips` index that is the output chip type (`instanceBound` `1`, so at most one
       instance: see `VmAssignment.effects`). -/
   outputChip : Fin chips.length
@@ -1536,8 +1587,25 @@ structure VmSat (vm : Vm p) (a : VmAssignment p vm) : Prop where
   withinBudget : a.guestAssignments.instanceCount ≤ vm.host.maxInstances
 -- ANCHOR_END: vmSat
 
+/-- Every instance of every input chip, tagged with the `Host.inputChips` index that realized it —
+    the tag is what lets `Host.getInputChunk` read a chunk off an instance whose chip type is no
+    longer implied by its position. -/
+def VmAssignment.inputInstances {vm : Vm p} (a : VmAssignment p vm) :
+    List (Fin vm.host.chips.length × BusState p) :=
+  vm.host.inputChips.flatMap fun i => (a.hostAssignment i).map (fun c => (i, c))
+
+/-- The input-chip instances of a VM assignment, in the order their chunks are read: sorted by
+    `Host.getInputTime`, not by an instance's arbitrary position in the assignment
+    (`VmAssignment.effects`). One sort over every input chip's instances together, so chip types
+    interleave by time rather than concatenating chip by chip. -/
+def VmAssignment.orderedInputInstances {vm : Vm p} (a : VmAssignment p vm) :
+    List (Fin vm.host.chips.length × BusState p) :=
+  a.inputInstances.mergeSort
+    (fun x y => decide ((vm.host.getInputTime x.1 x.2).val ≤ (vm.host.getInputTime y.1 y.2).val))
+
 /-- The effects of a VM assignment: the input stream its input-chip instances pulled, concatenated
-    in list order, and the array its output-chip instance left behind.
+    in time order (`VmAssignment.orderedInputInstances`), and the array its output-chip instance
+    left behind.
 
     Total, and so stated of any assignment rather than only a satisfying one. The output chip's
     `HostChip.instanceBound` is `1`, so the assignment realizes it at most once and there is no
@@ -1545,7 +1613,7 @@ structure VmSat (vm : Vm p) (a : VmAssignment p vm) : Prop where
     `getOutput` reads off the empty contribution, which is the same array a chip that ran and
     received nothing would leave. -/
 def VmAssignment.effects {vm : Vm p} (a : VmAssignment p vm) : VmEffect p :=
-  { input := (a.hostAssignment vm.host.inputChip).map vm.host.getInputChunk |>.flatten,
+  { input := a.orderedInputInstances.flatMap (fun x => vm.host.getInputChunk x.1 x.2),
     output := vm.host.getOutput ((a.hostAssignment vm.host.outputChip).headD 0) }
 
 -- ANCHOR: canEffect

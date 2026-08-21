@@ -32,7 +32,7 @@ set_option autoImplicit false
 
 variable {p : ℕ} [Fact p.Prime]
 
-/-- A host-chip (memory init/final, a lookup table, the input chip, the output
+/-- A host-chip (memory init/final, a lookup table, an input chip, the output
     chip, ...). It is defined only by the effects it can have and by how many
     instances it can have. There is no explicit circuit. -/
 structure HostChip (p : ℕ) where
@@ -40,7 +40,7 @@ structure HostChip (p : ℕ) where
   canProduce : BusState p → Prop
   /-- The most instances of this chip a satisfying assignment may realize
       (`HostAssignment.satisfies`). Chips a VM has one of — memory init/final, a lookup table, the
-      output chip — take `1`; the input chip, invoked once per chunk pulled, takes the VM's budget.
+      output chip — take `1`; an input chip, invoked once per chunk pulled, takes the VM's budget.
 
       Every chip carries a bound, with no way to opt out: the anti-wraparound arithmetic
       (`Host.noMultOverflow`, `Implementation/Counting.lean`) counts what touches a bus, so an
@@ -98,14 +98,18 @@ structure Host (p : ℕ) where
       These live on the `Host` because they are the VM's requirements, not any chip's. They are
       *not* a conjunct of `VmSat`, because they are not (and cannot) be checked in constraints.  -/
   legalGuest : Circuit p → Prop
-  /-- The `chips` index that is the input chip. -/
-  inputChip : Fin chips.length
-  /-- Map from an input chip instance's effects to its contribution to the input stream. -/
-  getInputChunk : BusState p → VmInput p
+  /-- The `chips` indices that pull the input stream. A list rather than a single index: a VM may
+      read input through several chip types — OpenVM has one per hint opcode — whose instances
+      interleave in one stream, ordered by `getInputTime`. -/
+  inputChips : List (Fin chips.length)
+  /-- Map from an input chip instance's effects to its contribution to the input stream, indexed
+      by which of `inputChips` produced it (chip types read the stream differently). -/
+  getInputChunk : Fin chips.length → BusState p → VmInput p
   /-- Map from an input chip instance's effects to when it ran. `VmAssignment.effects` orders
       chunks by this rather than by an instance's arbitrary position in the assignment, which
-      carries no meaning (`VmSat.perm_iff`). -/
-  getInputTime : BusState p → ZMod p
+      carries no meaning (`VmSat.perm_iff`) — across chip types as well as within one, so the
+      shared clock is what makes the interleaving well defined. -/
+  getInputTime : Fin chips.length → BusState p → ZMod p
   /-- The `chips` index that is the output chip type (`instanceBound` `1`, so at most one
       instance: see `VmAssignment.effects`). -/
   outputChip : Fin chips.length
@@ -226,12 +230,21 @@ structure VmSat (vm : Vm p) (a : VmAssignment p vm) : Prop where
   withinBudget : a.guestAssignments.instanceCount ≤ vm.host.maxInstances
 -- ANCHOR_END: vmSat
 
+/-- Every instance of every input chip, tagged with the `Host.inputChips` index that realized it —
+    the tag is what lets `Host.getInputChunk` read a chunk off an instance whose chip type is no
+    longer implied by its position. -/
+def VmAssignment.inputInstances {vm : Vm p} (a : VmAssignment p vm) :
+    List (Fin vm.host.chips.length × BusState p) :=
+  vm.host.inputChips.flatMap fun i => (a.hostAssignment i).map (fun c => (i, c))
+
 /-- The input-chip instances of a VM assignment, in the order their chunks are read: sorted by
     `Host.getInputTime`, not by an instance's arbitrary position in the assignment
-    (`VmAssignment.effects`). -/
-def VmAssignment.orderedInputInstances {vm : Vm p} (a : VmAssignment p vm) : List (BusState p) :=
-  (a.hostAssignment vm.host.inputChip).mergeSort
-    (fun c c' => decide ((vm.host.getInputTime c).val ≤ (vm.host.getInputTime c').val))
+    (`VmAssignment.effects`). One sort over every input chip's instances together, so chip types
+    interleave by time rather than concatenating chip by chip. -/
+def VmAssignment.orderedInputInstances {vm : Vm p} (a : VmAssignment p vm) :
+    List (Fin vm.host.chips.length × BusState p) :=
+  a.inputInstances.mergeSort
+    (fun x y => decide ((vm.host.getInputTime x.1 x.2).val ≤ (vm.host.getInputTime y.1 y.2).val))
 
 /-- The effects of a VM assignment: the input stream its input-chip instances pulled, concatenated
     in time order (`VmAssignment.orderedInputInstances`), and the array its output-chip instance
@@ -243,7 +256,7 @@ def VmAssignment.orderedInputInstances {vm : Vm p} (a : VmAssignment p vm) : Lis
     `getOutput` reads off the empty contribution, which is the same array a chip that ran and
     received nothing would leave. -/
 def VmAssignment.effects {vm : Vm p} (a : VmAssignment p vm) : VmEffect p :=
-  { input := a.orderedInputInstances.map vm.host.getInputChunk |>.flatten,
+  { input := a.orderedInputInstances.flatMap (fun x => vm.host.getInputChunk x.1 x.2),
     output := vm.host.getOutput ((a.hostAssignment vm.host.outputChip).headD 0) }
 
 -- ANCHOR: canEffect
