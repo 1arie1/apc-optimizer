@@ -232,6 +232,58 @@ deliberate choice, not a defect. Recorded so it is not rediscovered as one.
 `Validation.lean`'s sanity lemmas. No theorem constrains them, so a mistake there stays invisible
 until the completeness half is attempted.
 
+## G. `Circuit.advancesClock` is false of real APCs
+
+*Status: open — the clause needs to change. Established 2026-08-21 against the keccak block at pc
+`2105000` (`ApcOptimizer/VmSpec/Audit/RealApcLegality.lean`, circuits emitted from powdr's dumps
+by `Scripts/emit-apc-lean.py`).*
+
+This closes the "check `legalGuest` against a whole exported APC" item, negatively. Of the three
+bus-shape clauses, `statelessSendOnly` and `statefulPolarity` are **true** of the optimized APC and
+proved; `advancesClock` is **false**, of both the optimized and the unoptimized form, for three
+independent reasons.
+
+**G1. The padding row (optimized APC only) — proved.** powdr's optimizer replaces each fused
+instruction's pinned opcode-flag sum with one fresh `is_valid` column carrying only
+`is_valid * (is_valid - 1) = 0`. Nothing pins it to `1`, so the all-zero assignment is
+algebraically satisfying, every multiplicity is `±is_valid = 0`, and the circuit nets `0` on every
+message of every bus. `advancesClock` demands a bridge receive with net `-1` on *every*
+algebraically-satisfying assignment, so it has no witness there
+(`apc2105000Opt_not_advancesClock`).
+
+The unoptimized APC has no such row: it carries `1 - (add + sub + xor + or + and) = 0` per
+instruction (`apc2105000Unopt_zero_not_satisfiesAlgebraic`). Same block, same semantics — **the
+optimization is what broke legality**, which makes this the `PreservesLegality` gap of
+`legality-preservation.md` observed in the wild rather than constructed.
+
+**G2. Nothing algebraic chains the fused instructions (unoptimized APC).** Not formalized — the
+clause has to change anyway. The unoptimized APC pins each instruction's `pc` to a literal but
+leaves `from_state__timestamp_0..3` as four independent columns; the chaining that makes them
+consecutive is enforced by execution-bridge *balance*, which `advancesClock` deliberately does not
+assume (it is stated on `satisfiesAlgebraic` alone). So an assignment may give the four
+instructions unrelated start times, leaving four distinct bridge states each with net `-1` where
+the clause allows one. A concrete satisfying assignment doing this was checked outside Lean
+(timestamps `1000/7000/23000/55000`, all eight bridge messages distinct).
+
+**G3. The memory clause does not describe real memory access (both forms).** Not formalized.
+`Circuit.advancesClock` requires *every* memory interaction to sit at `base + δ` with `0 < δ < d`.
+Real APCs violate this twice over:
+
+* Receives sit at free `*_prev_timestamp_*` columns — the record left by an *earlier* instruction,
+  which the AssertLt gadget constrains to be **less than** `base`, not inside the window.
+* The first memory send sits at `from_state__timestamp_0 + 0`, i.e. exactly `base`, so `δ = 0`.
+
+`Audit/OpenVmLegalAudit.lean`'s `stepChip` satisfies the clause only because it idealizes: it puts
+its receive at `base + 1`, inside the window, which no real chip does.
+
+**What the clause has to become.** At minimum: restrict the memory condition to *sends* (positive
+multiplicity), and relax `0 < δ` to `0 ≤ δ`. That is necessary but not sufficient — G1 and G2 are
+about the bridge clauses, not the memory one, and both stem from `algebraicallyForces` quantifying
+over assignments the bus semantics would reject. G1 additionally needs a decision about padding
+rows: either legality is conditioned on an activity flag being `1`, or the clause is stated on
+`Circuit.satisfies` rather than `satisfiesAlgebraic` — which is exactly the trade-off
+`legality-preservation.md` analyses, now with a concrete case to test against.
+
 ## Lower tier
 
 * `Circuit.advancesClock` is the strongest clause of legality: it demands execution-bridge traffic on

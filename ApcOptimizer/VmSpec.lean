@@ -6,6 +6,7 @@ import ApcOptimizer.VmSpec.Audit.OpenVmLegalAudit
 import ApcOptimizer.VmSpec.Audit.SendOnlyPolarity
 import ApcOptimizer.VmSpec.Audit.LegalityPreservation
 import ApcOptimizer.VmSpec.Audit.SoundnessGivesLegality
+import ApcOptimizer.VmSpec.Audit.RealApcLegality
 import ApcOptimizer.VmSpec.Implementation.Rank
 import ApcOptimizer.VmSpec.Implementation.Counting
 import ApcOptimizer.VmSpec.Implementation.Realizes
@@ -64,6 +65,13 @@ import ApcOptimizer.VmSpec.Implementation.Validation
       correctness statement is audited in `ApcOptimizer/Implementation/OptimizerPasses/`; the
       checker itself (`Expression.foldConst`, `checkMultiplicities`) needs no audit, only that
       theorem to be true of it.
+    * `Audit/RealApcLegality.lean` — the legality clauses measured against two *real* APCs, the
+      keccak block at pc `2105000` before and after powdr's optimizer (`Audit/Apc2105000.lean`,
+      emitted from the dumps by `Scripts/emit-apc-lean.py`). Both multiplicity clauses hold of the
+      optimized circuit; `Circuit.advancesClock` is proved *false* of it, on the all-zero padding
+      row the optimizer's fresh `is_valid` column makes algebraically satisfying. The unoptimized
+      circuit pins its opcode-flag sums to `1` and so has no such row — the same block, and the
+      optimization is what broke legality.
     * `Audit/LegalityPreservation.lean` — a formal counterexample: a per-chip
       `Circuit.isSoundReplacementOf` that violates `Circuit.statelessSendOnly` outright, showing
       legality of the optimizer's output cannot be derived from soundness and has to be assumed or

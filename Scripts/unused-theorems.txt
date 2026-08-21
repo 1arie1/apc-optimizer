@@ -88,6 +88,19 @@ vmSoundReplacement_cons
 vmSoundReplacement_append
 vmSoundReplacement_of_forall₂
 
+# `Audit/RealApcLegality.lean` measures the legality clauses against two real APCs. Like every
+# other `VmSpec/` file it is unreachable from the four roots; its own roots are the six
+# `apc2105000*` results and the two lemmas they share.
+ApcOptimizer.OpenVM.babyBear_negOne
+ApcOptimizer.OpenVM.allEffects_eq_zero_of_mults_zero
+ApcOptimizer.OpenVM.apc2105000Opt_isValid_bool
+ApcOptimizer.OpenVM.apc2105000Opt_statelessSendOnly
+ApcOptimizer.OpenVM.apc2105000Opt_statefulPolarity
+ApcOptimizer.OpenVM.apc2105000Opt_satisfiesAlgebraic_zero
+ApcOptimizer.OpenVM.apc2105000Opt_mults_zero_on_padding
+ApcOptimizer.OpenVM.apc2105000Opt_not_advancesClock
+ApcOptimizer.OpenVM.apc2105000Unopt_zero_not_satisfiesAlgebraic
+
 # `OpenVm.lean`'s `rfl`-lemma naming `openVmHost`'s single input chip, used by
 # `openVmHost_absorbsStateless` in a `simp only` that rewrites by `rfl`.
 ApcOptimizer.OpenVM.openVmHost_inputChips
