@@ -37,26 +37,6 @@ variable {p : ℕ}
 
 --------- One instance's clock witness ---------
 
-/-- One instruction step, as a bridge arc: it consumes `(pcFrom, base)` and produces
-    `(pcTo, base + d)`. -/
-structure ClockArc (p : ℕ) where
-  /-- The `pc` the instruction starts at. -/
-  pcFrom : ZMod p
-  /-- The `pc` it hands on. -/
-  pcTo : ZMod p
-  /-- The timestamp it starts at. -/
-  base : ZMod p
-  /-- How far it advances the clock. -/
-  d : ℕ
-
-/-- What one arc puts on the execution bridge: `1` at the state it produces, `-1` at the state it
-    consumes. An instance's whole bridge net is the sum of its arcs' (`ClockStep.net`), which is
-    what lets the intermediate states of a *fused* instance cancel inside the sum on assignments
-    that chain them, and stand as separate arcs on assignments that do not. -/
-def ClockArc.effect (execBusId : ℕ) (α : ClockArc p) (m : BusMessage p) : ZMod p :=
-  (if (execBusId, [α.pcTo, α.base + (α.d : ZMod p)]) = m then (1 : ZMod p) else 0)
-    - (if (execBusId, [α.pcFrom, α.base]) = m then (1 : ZMod p) else 0)
-
 /-- The witness `Circuit.advancesClock` supplies for one instance, packaged as data so that a
     whole assignment's worth of witnesses can be chosen at once.
 
@@ -77,37 +57,13 @@ structure ClockStep (p : ℕ) (c : Circuit p) (asg : ChipAssignment p)
       openVmMemTimestamp ((bi.eval asg).busId, (bi.eval asg).payload) = α.base + (δ : ZMod p)
 
 theorem clockStep_nonempty {c : Circuit p} {asg : ChipAssignment p} {r : GuestBusRules p}
-    {maxWindow : ℕ} (hp : 2 < p)
+    {maxWindow : ℕ}
     (h : Circuit.advancesClock c r maxWindow) (hsat : c.satisfiesAlgebraic asg)
     (hget : r.getTimestamp = openVmMemTimestamp := by rfl) :
     Nonempty (ClockStep p c asg r.execBusId r.memBusId maxWindow) := by
-  haveI : NeZero p := ⟨by omega⟩
-  obtain ⟨pcFrom, pcTo, base, d, h1, h2, h3, h4, h5, h6⟩ := h asg hsat
-  rw [hget] at h6
-  refine ⟨⟨[⟨pcFrom, pcTo, base, d⟩], by simpa using h1, by simpa using h2, ?_, ?_⟩⟩
-  · intro m hm
-    simp only [List.map_cons, List.map_nil, List.sum_cons, List.sum_nil, add_zero,
-      ClockArc.effect]
-    by_cases hd : ((r.execBusId : ℕ), [pcTo, base + (d : ZMod p)]) = m <;>
-      by_cases hs : ((r.execBusId : ℕ), [pcFrom, base]) = m
-    · -- The step would have to consume and produce the same state, netting both `-1` and `1`.
-      exfalso
-      have hxy : ((r.execBusId : ℕ), [pcFrom, base])
-          = ((r.execBusId : ℕ), [pcTo, base + (d : ZMod p)]) := hs.trans hd.symm
-      rw [hxy, h4] at h3
-      have h2' : ((2 : ℕ) : ZMod p) = 0 := by
-        have := eq_neg_iff_add_eq_zero.mp h3
-        push_cast
-        rw [← one_add_one_eq_two]
-        exact this
-      exact absurd (VmChain.natCast_eq_zero_of_lt (by omega) h2') (by omega)
-    · rw [if_pos hd, if_neg hs, sub_zero, ← hd]; exact h4
-    · rw [if_neg hd, if_pos hs, zero_sub, ← hs]; exact h3
-    · rw [if_neg hd, if_neg hs, sub_zero]
-      exact h5 m hm (fun hcon => hs hcon.symm) (fun hcon => hd hcon.symm)
-  · intro bi hbi hbus hmult
-    obtain ⟨δ, hd1, hd2, hd3⟩ := h6 bi hbi hbus hmult
-    exact ⟨⟨pcFrom, pcTo, base, d⟩, by simp, δ, hd1, hd2, hd3⟩
+  obtain ⟨arcs, h1, h2, h3, h4⟩ := h asg hsat
+  rw [hget] at h4
+  exact ⟨⟨arcs, h1, h2, h3, h4⟩⟩
 
 --------- Guest nets as sums over instances ---------
 
@@ -592,16 +548,6 @@ end Bridge
 
 --------- The rank window ---------
 
-/-- Any configured VM has room for a few small naturals: an input-chip step alone advances the
-    clock by `inputStepWindow`, which `OpenVmParams.inputWindowOk` fits inside `maxWindow`. -/
-theorem openVmParams_two_lt (P : OpenVmParams p) : 2 < p := by
-  have hw := P.inputWindowOk
-  have hp := P.windowOk
-  calc 2 < P.maxWindow + 1 := by simp only [inputStepWindow] at hw; omega
-    _ ≤ (P.maxInstances + P.maxInputInstances + 1) * (P.maxWindow + 1) :=
-        Nat.le_mul_of_pos_left _ (by omega)
-    _ < p := hp
-
 /-- **`openVmHost` keeps its runs inside the rank window** — with no hypotheses left.
 
     The last undischarged assumption of the VM-level soundness theorem. The arithmetic it needs is
@@ -616,7 +562,6 @@ theorem openVmHost_pinsRanks (P : OpenVmParams p) :
   have hp := P.windowOk
   have hppos : 0 < p := Nat.lt_of_le_of_lt (Nat.zero_le _) hp
   haveI : NeZero p := ⟨by omega⟩
-  have hp2 := openVmParams_two_lt P
   intro G hGuests a hsat t asg hasg bi hbi hmult
   show openVmRank openVmMemBusId ((bi.eval asg).busId, (bi.eval asg).payload) < openVmRankBound
   by_cases hbus : bi.busId = 1
@@ -629,7 +574,7 @@ theorem openVmHost_pinsRanks (P : OpenVmParams p) :
   -- A clock witness for every instance, chosen once.
   have hNonempty : ∀ x : ((s : Fin G.length) × Fin (a.guestAssignments s).length),
       Nonempty (ClockStep p (G.get x.1) ((a.guestAssignments x.1).get x.2) 0 1 P.maxWindow) :=
-    fun x => clockStep_nonempty hp2
+    fun x => clockStep_nonempty
       (openVmHost_advancesClock_unpack P _
         (hGuests _ (List.get_mem G x.1)))
       (hsat.satisfiesGuest x.1 _ (List.get_mem _ _))
@@ -692,10 +637,9 @@ theorem openVmHost_inputTime_injOn (P : OpenVmParams p)
   have hp := P.windowOk
   have hppos : 0 < p := Nat.lt_of_le_of_lt (Nat.zero_le _) hp
   haveI : NeZero p := ⟨by omega⟩
-  have hp2 := openVmParams_two_lt P
   have hNonempty : ∀ x : ((s : Fin G.length) × Fin (a.guestAssignments s).length),
       Nonempty (ClockStep p (G.get x.1) ((a.guestAssignments x.1).get x.2) 0 1 P.maxWindow) :=
-    fun x => clockStep_nonempty hp2
+    fun x => clockStep_nonempty
       (openVmHost_advancesClock_unpack P _
         (hGuests _ (List.get_mem G x.1)))
       (hsat.satisfiesGuest x.1 _ (List.get_mem _ _))

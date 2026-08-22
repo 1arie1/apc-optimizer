@@ -314,7 +314,16 @@ theorem stepChip_advancesClock (hp : 3 < p) {maxWindow : ℕ} (hw : 3 < maxWindo
     have hv := ZMod.val_natCast_of_lt (show 3 < p by omega)
     rw [hcast3, h, ZMod.val_zero] at hv
     omega
-  refine fun asg _ => ⟨pcFrom, pcTo, base, 3, by omega, hw, ?_, ?_, ?_, ?_⟩
+  refine fun asg _ => ⟨[⟨pcFrom, pcTo, base, 3⟩], by simp, by simpa using hw,
+    ClockArc.net_singleton _ ?_ ?_ ?_ ?_, ?_⟩
+  · intro hcon
+    rw [Prod.ext_iff] at hcon
+    have hb : base = base + ((3 : ℕ) : ZMod p) := by
+      have h2 := hcon.2
+      simp only [List.cons.injEq, and_true] at h2
+      exact h2.2
+    rw [hcast3] at hb
+    exact h3 (by linear_combination -hb)
   · simp [Circuit.allEffects, stepChip, bridgeRecv, bridgeSend, readEchoRecv, readEchoSend,
       assertLtLoLookup, assertLtHiLookup, BusInteraction.eval, Expression.eval,
       openVmGuestRules, h3]
@@ -333,10 +342,10 @@ theorem stepChip_advancesClock (hp : 3 < p) {maxWindow : ℕ} (hw : 3 < maxWindo
     rcases hbi with rfl | rfl | rfl | rfl | rfl | rfl
     · simp [bridgeRecv, openVmGuestRules] at *
     · simp [bridgeSend, openVmGuestRules] at *
-    · exact ⟨1, by omega, by omega, by
+    · exact ⟨⟨pcFrom, pcTo, base, 3⟩, by simp, 1, by simp, by simp, by
         simp [readEchoRecv, openVmGuestRules, BusInteraction.eval, Expression.eval,
           openVmMemTimestamp]⟩
-    · exact ⟨2, by omega, by omega, by
+    · exact ⟨⟨pcFrom, pcTo, base, 3⟩, by simp, 2, by simp, by simp, by
         simp [readEchoSend, openVmGuestRules, BusInteraction.eval, Expression.eval,
           openVmMemTimestamp]⟩
     · simp [assertLtLoLookup, openVmGuestRules] at *

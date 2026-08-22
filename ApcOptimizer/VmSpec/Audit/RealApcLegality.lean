@@ -20,7 +20,7 @@ set_option maxHeartbeats 4000000
     | --- | --- | --- | --- |
     | `statelessSendOnly` | **true** | **true** | true, out of checker reach |
     | `statefulPolarity` | **true** | **true** | true, out of checker reach |
-    | `advancesClock` | false | false, memory clause only | **false**, no bus traffic at all |
+    | `advancesClock` | false | false, memory clause only | false, memory clause only |
 
     Every "true" above is discharged by `Audit/SendOnlyPolarity.lean`'s decidable checker and its
     soundness theorem — a `Bool` and a `rfl`, with no case analysis over the circuit written by
@@ -29,13 +29,15 @@ set_option maxHeartbeats 4000000
     because a constraint pins them.
 
     **Why `039` and not the pipeline's final output.** The last pass introduces a fresh `is_valid`
-    column and multiplies every multiplicity by it, carrying only `is_valid * (is_valid - 1) = 0`.
-    That is the AIR's padding gate — with it, the all-zero row is algebraically satisfying, the
-    circuit nets `0` on every message of every bus, and `Circuit.advancesClock`, which demands a
-    bridge receive with net `-1` on *every* algebraically-satisfying assignment, has no witness
-    (`apc2105000Gated_not_advancesClock`). Stage `039` is that same circuit one pass earlier:
-    identical bus interactions and constraints, multiplicities the literal `±1`, no padding row.
-    It is the form these clauses are stated for, so it is the one the results below use.
+    column and multiplies every multiplicity by it, which puts the circuit out of the multiplicity
+    checker's reach (`apc2105000Gated_checkMultiplicities_fails`): `Expression.foldConst` returns
+    `none` on a bare variable, and the booleanity constraint `is_valid * (is_valid - 1) = 0` is not
+    linear, so no pin rule comes off it either. Stage `039` is that same circuit one pass earlier —
+    identical bus interactions and constraints, multiplicities the literal `±1`.
+
+    The padding row that gate introduces is *not* a reason to prefer `039` any more:
+    `Circuit.advancesClock` decomposes the bridge net into a list of steps, and the all-zero row is
+    the empty list (`apc2105000Gated_padding_bridge`).
 
     **What still fails, and is not fixable by choosing a different circuit.**
     `Circuit.advancesClock` requires *every* memory interaction to sit at `base + δ` with
@@ -97,9 +99,9 @@ theorem apc2105000Opt_legalMultiplicities :
 theorem apc2105000Gated_checkMultiplicities_fails :
     checkMultiplicities apcRules.isStateful apc2105000Gated = false := by decide
 
-/-- **The optimized APC has no padding row**, so `apc2105000Gated_not_advancesClock` below does not
-    transfer to it: its multiplicities are literals, and one of them is nonzero under every
-    assignment. -/
+/-- **The optimized APC has no padding row**: its multiplicities are literals, and one of them is
+    nonzero under every assignment — so unlike `apc2105000Gated_padding_bridge`'s row, no
+    assignment makes this circuit silent. -/
 theorem apc2105000Opt_no_padding_row (asg : ChipAssignment babyBear) :
     ¬ ∀ bi ∈ apc2105000Opt.busInteractions, (bi.eval asg).multiplicity = 0 := by
   intro h
@@ -146,16 +148,22 @@ theorem apc2105000Gated_mults_zero_on_padding :
     | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl <;>
     simp [BusInteraction.eval, Expression.eval]
 
-/-- **`Circuit.advancesClock` is false of the gated APC**, at every window — where it is *not*
-    false of `apc2105000Opt` for this reason, the two circuits differing only by the `is_valid`
-    gate. This is why the results above are stated at stage `039`. -/
-theorem apc2105000Gated_not_advancesClock (maxWindow : ℕ) :
-    ¬ apc2105000Gated.advancesClock apcRules maxWindow := by
-  intro h
-  obtain ⟨pcFrom, pcTo, base, d, -, -, hrecv, -⟩ :=
-    h (fun _ => 0) apc2105000Gated_satisfiesAlgebraic_zero
-  rw [allEffects_eq_zero_of_mults_zero apc2105000Gated_mults_zero_on_padding] at hrecv
-  exact absurd hrecv (by decide)
+/-- **The padding row is a no-op instance, and the clause now says so.** `Circuit.advancesClock`
+    decomposes an instance's bridge net into a *list* of steps, and the empty list is a legal
+    witness: it nets zero, which is exactly what a row with `is_valid = 0` puts on the bridge.
+
+    This is the half of finding G1 the arc form closes. The clause used to demand a bridge receive
+    netting `-1` on *every* algebraically-satisfying assignment, which the all-zero row has no way
+    to supply — so stage `040` failed the clause outright. It no longer does; what still fails, for
+    `040` and `039` alike, is the memory conjunct (finding G3). -/
+theorem apc2105000Gated_padding_bridge {maxWindow : ℕ} (hw : 0 < maxWindow) :
+    ∃ arcs : List (ClockArc babyBear),
+      (∀ α ∈ arcs, 0 < α.d) ∧ (arcs.map (·.d)).sum < maxWindow ∧
+      ∀ m : BusMessage babyBear, m.1 = openVmExecBusId →
+        apc2105000Gated.allEffects (fun _ => 0) m
+          = (arcs.map (fun α => α.effect openVmExecBusId m)).sum := by
+  refine ⟨[], by simp, by simpa using hw, fun m _ => ?_⟩
+  simpa using allEffects_eq_zero_of_mults_zero apc2105000Gated_mults_zero_on_padding m
 
 /-- **The unoptimized APC has no padding row either**: it pins each fused instruction's opcode-flag
     sum to `1` (`1 - (add + sub + xor + or + and) = 0`, one per instruction). -/

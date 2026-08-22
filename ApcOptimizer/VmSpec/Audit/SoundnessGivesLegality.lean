@@ -446,7 +446,12 @@ private theorem checkedStepChip_legalGuest [Fact p.Prime] (hp : 18 < p)
       simp_all [openVmGuestRules, openVmIsStateful, openVmPayloadOk, defaultBusMap,
         OpenVmBusType.isStateful, BusInteraction.eval, Expression.eval, openVmExecBusId]
   · intro asg _
-    refine ⟨0, 0, 0, 1, by omega, hw, ?_, ?_, ?_, ?_⟩
+    refine ⟨[⟨0, 0, 0, 1⟩], by simp, by simpa using hw,
+      ClockArc.net_singleton _ ?_ ?_ ?_ ?_, ?_⟩
+    · intro hcon
+      simp only [Prod.mk.injEq, List.cons.injEq, zero_add, Nat.cast_one, and_true,
+        true_and] at hcon
+      exact absurd hcon (zero_ne_one' (ZMod p))
     · simp [Circuit.allEffects, checkedStepChip, BusInteraction.eval, Expression.eval,
         openVmGuestRules, openVmExecBusId]
     · simp [Circuit.allEffects, checkedStepChip, BusInteraction.eval, Expression.eval,

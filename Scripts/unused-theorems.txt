@@ -102,7 +102,8 @@ ApcOptimizer.OpenVM.apc2105000Unopt_zero_not_satisfiesAlgebraic
 ApcOptimizer.OpenVM.apc2105000Gated_checkMultiplicities_fails
 ApcOptimizer.OpenVM.apc2105000Gated_satisfiesAlgebraic_zero
 ApcOptimizer.OpenVM.apc2105000Gated_mults_zero_on_padding
-ApcOptimizer.OpenVM.apc2105000Gated_not_advancesClock
+ApcOptimizer.OpenVM.apc2105000Gated_padding_bridge
+ClockArc.net_singleton
 
 # `Audit/SendOnlyPolarity.lean`'s constant-propagation tier: its root is
 # `checkMultiplicitiesWith_sound`, used by `Audit/RealApcLegality.lean`, and the rest feed it.
@@ -200,7 +201,6 @@ ApcOptimizer.OpenVM.bridge_balanced
 ApcOptimizer.OpenVM.bridge_advPos
 ApcOptimizer.OpenVM.clockStep_arcs_length_lt
 ApcOptimizer.OpenVM.sum_arcs_length_le
-ApcOptimizer.OpenVM.openVmParams_two_lt
 ApcOptimizer.OpenVM.bridge_advTime
 ApcOptimizer.OpenVM.bridge_total_le
 ApcOptimizer.OpenVM.bridge_totalLt
