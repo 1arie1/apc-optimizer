@@ -196,10 +196,11 @@ ApcOptimizer.OpenVM.openVmHost_bridge_isolated
 ApcOptimizer.OpenVM.bridgeSrc_busId
 ApcOptimizer.OpenVM.bridgeDst_busId
 ApcOptimizer.OpenVM.card_bridgeArc
-ApcOptimizer.OpenVM.bridge_p_large
-ApcOptimizer.OpenVM.bridge_src_ne_dst
 ApcOptimizer.OpenVM.bridge_balanced
 ApcOptimizer.OpenVM.bridge_advPos
+ApcOptimizer.OpenVM.clockStep_arcs_length_lt
+ApcOptimizer.OpenVM.sum_arcs_length_le
+ApcOptimizer.OpenVM.openVmParams_two_lt
 ApcOptimizer.OpenVM.bridge_advTime
 ApcOptimizer.OpenVM.bridge_total_le
 ApcOptimizer.OpenVM.bridge_totalLt
