@@ -11,8 +11,9 @@ documents — not part of the audited surface, and not a substitute for it.
 - [`vm-spec-todo.md`](vm-spec-todo.md) — the consolidated TODO list for `ApcOptimizer/VmSpec/`,
   the one place to look when resuming that work. The list only; the reasoning lives in
   `vm-spec-audit.md`, `vm-spec-wip.md` and `legality-preservation.md`.
-- [`advances-clock-fix.md`](advances-clock-fix.md) — step-by-step instructions for the two changes
-  `Circuit.advancesClock` needs, with the reasoning for why the second one cannot be done per-chip.
+- [`legality-redesign.md`](legality-redesign.md) — the design that makes `Circuit.legalGuest` true
+  of a real APC: window offsets, a positional `statefulSendsMaintain`, and the rank leaving the
+  audited surface. Evidence, implementation order, and what it deliberately leaves open.
 - [`vm-spec-audit.md`](vm-spec-audit.md) — the running list of audit findings against
   `ApcOptimizer/VmSpec/`: what is wrong with the audited surface, what each defect costs the
   VM-level theorem, and which ones are fixed.

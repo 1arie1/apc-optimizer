@@ -37,11 +37,11 @@ points at the OpenVM route.
    `Host.pinsRanks`.~~ Done — `vm-spec-wip.md`, Phase 6.
 4. ~~Check `Circuit.legalGuest` against a whole exported APC.~~ Done — finding G in
    `vm-spec-audit.md`, `ApcOptimizer/VmSpec/Audit/RealApcLegality.lean`. Both multiplicity clauses
-   hold and are proved by static analysis; `Circuit.advancesClock` is false. **Replaced by: fix
-   `Circuit.advancesClock`**, with step-by-step instructions in
-   [`advances-clock-fix.md`](advances-clock-fix.md) — one free change (allow a memory access at
-   exactly `base`) and one real one (take receives out of the clause and bound their timestamps at
-   VM level, where they belong).
+   hold and are proved by static analysis; `Circuit.advancesClock` is false. **Replaced by: make legality
+   true of a real APC**, designed in [`legality-redesign.md`](legality-redesign.md) — memory leaves
+   `advancesClock` for a window-offset clause, `statefulSendsMaintain` becomes positional, and the
+   rank apparatus leaves the audited surface. Reaches `apc2105000Opt`; the residue is the
+   bridge-clause decision (G1/G2).
 5. **Parameterize `openVmHost` by the bus map** rather than hard-wiring `defaultBusMap`.
 6. **Model `HINT_BUFFER`** as a second entry in `Host.inputChips` — `Rv32HintStoreAir`'s other
    opcode, count off operand `a`, many words per instance. Phase 9 reshaped `Host` for exactly
