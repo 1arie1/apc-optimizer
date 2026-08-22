@@ -89,9 +89,20 @@ vmSoundReplacement_append
 vmSoundReplacement_of_forall₂
 
 # `Audit/RealApcLegality.lean` measures the legality clauses against two real APCs. Like every
-# other `VmSpec/` file it is unreachable from the four roots; its own roots are the six
-# `apc2105000*` results and the two lemmas they share.
+# other `VmSpec/` file it is unreachable from the four roots; its own roots are the
+# `apc2105000*` results and the lemmas they share — the lt gadget as powdr's optimizer leaves it
+# (`lt_gadget_offset`), the bitwise table's masking arm (`isByte_of_xorThree`) and the offset
+# tables `apc2105000Opt_hasStepLayout` places its twelve stateful interactions by.
 ApcOptimizer.OpenVM.babyBear_negOne
+ApcOptimizer.OpenVM.babyBear_negOne_ne_one
+ApcOptimizer.OpenVM.babyBear_negOne_ne_zero
+ApcOptimizer.OpenVM.lt_gadget_offset
+ApcOptimizer.OpenVM.xor_three
+ApcOptimizer.OpenVM.isByte_of_xorThree
+ApcOptimizer.OpenVM.optAccepts
+ApcOptimizer.OpenVM.optOffsetUb_dominates
+ApcOptimizer.OpenVM.apc2105000Opt_hasStepLayout
+ApcOptimizer.OpenVM.apc2105000Opt_legalGuest
 ApcOptimizer.OpenVM.allEffects_eq_zero_of_mults_zero
 ApcOptimizer.OpenVM.apc2105000Opt_checkMultiplicities
 ApcOptimizer.OpenVM.apc2105000Opt_legalMultiplicities
