@@ -306,32 +306,59 @@ separate decision, and the natural next piece of work.
   only global invariant this development establishes is `payloadOk`.
 - The G1 decision above.
 
-## Implementation order
+## Implementation status
 
-Each step should build clean on its own.
+Landed (`7e8e37c`, `585de62`, `4911a26`, `b1bcef6`); `lake build` clean and
+`Scripts/check-proof-integrity.sh` passing at each.
 
-1. **Arcs in `advancesClock`.** `Legal.lean` (~line 136): the bridge conjuncts become the arc-list
-   decomposition; drop the memory conjunct. `Implementation/OpenVmChain.lean`: `ClockStep` becomes
-   a list of arcs (~line 42), `clockStep_nonempty` follows. `Audit/OpenVmLegalAudit.lean:
-   stepChip_advancesClock` and `Audit/SoundnessGivesLegality.lean:checkedStepChip` supply
-   singleton lists.
-2. **`Chain.lean`'s index set**: one arc per instance becomes a list per instance, in
-   `bridgeChain`, `bridge_chain_bound` and the counting. The largest single piece.
-3. **The payoff theorems.** `apc2105000Opt` (one arc) and `apc2105000Unopt` (four arcs) satisfy the
-   bridge condition, in `Audit/RealApcLegality.lean`, at `maxWindow > 11`. Replace the prose in
-   that file's header table.
-4. **Positional (5).** `Legal.lean`: restate `statefulSendsMaintain`; delete `lowerRanksMaintain`;
-   move `ranksBounded` to `Implementation/`. Drop `rank`/`rankBound` from `legalGuest`,
-   `openVmHost.legalGuest` (`OpenVm.lean:477`), `Theorems.lean:23` and `Host.realizes.legalGuest`.
-   Rework `Realizes.lean:258` and the two audit chips that discharge the clause.
-5. **The shifted rank.** `OpenVm.lean:332` (`openVmRank`), and split `openVmRankBound` from the
-   connector's own `finalTimestampBounded`, which must stay at `2^29` — that is what
-   `VmConnectorAir` range-checks. Turn `openVmHost_pinsRanks` into the monotonicity statement.
-6. **(2), (3), (4).** `Legal.lean`: fold them into `StepLayout`. Then the placement proofs for both
-   APC stages — the gadget derivations, driven off `satisfiesStateless`.
-7. **Update the docs.** Finding G in `vm-spec-audit.md` (including the G2 correction above, and it
-   mis-names `apc2105000Gated_not_advancesClock` as `apc2105000Opt_not_advancesClock`), the entry
-   in `vm-spec-todo.md`, and this file's status table.
+1. ✅ **Arcs in the chain.** `ClockStep` carries a list of arcs; `BridgeArc` indexes
+   (instance, step). `Chain.lean` needed **no** change — it was already abstract in the arc index.
+   The step count needs no new configuration field: each arc advances by at least one tick and
+   they total less than `maxWindow`, so `windowOk` still covers the arc count.
+2. ✅ **Arcs in the clause**, stated on the sum of arc effects.
+3. ✅ **`StepLayout`.** `Circuit.legalGuest` is `{ sendOnly, polarity, stepLayout, size }`; `rank`,
+   `rankBound`, `Circuit.ranksBounded` and `Circuit.lowerRanksMaintain` are off the audited
+   surface. `Host.pinsRanks` became `Host.ordersRanks`, `openVmRank` gained the shift, and the
+   audit chips were reworked (`stepChip` full layout, `earlyEchoChip` negative, `freshWriteStepChip`
+   for the lookup-justified send).
+
+Not started:
+
+4. **The real-APC theorems.** `apc2105000Opt` (one arc, `d = 11`) and `apc2105000Unopt` (four arcs,
+   `d = 3,3,3,2`) satisfying the bridge condition, then the full placement — the five gadget
+   derivations, driven off `satisfiesStateless`. Evidence and constants are tabulated above. Replace
+   the prose in `Audit/RealApcLegality.lean`'s header table as they land.
+5. **Finding G in `vm-spec-audit.md`**: record the G2 correction (see below), that G1's padding-row
+   half is closed, and that the memory half (G3) is what the placement closes. It also mis-names
+   `apc2105000Gated_not_advancesClock` as `apc2105000Opt_not_advancesClock`; that theorem is now
+   `apc2105000Gated_padding_bridge`.
+
+### Three decisions taken while implementing, not in the design above
+
+- **`openVmTimestamp` reads the execution bridge too** (payload index `1`, against memory's `6`).
+  Without it, `ordered` would have to be scoped by step *and bus*, and then a bridge send could not
+  be ordered against anything. With it, a step's bridge receive sits at offset `0`, its memory
+  accesses in between, and its bridge send at offset `d`, all on one scale — so `ordered` is scoped
+  by step alone.
+- **`ordered` requires the *send* to be stateful.** Otherwise a stateless lookup at multiplicity `1`
+  would demand an ordering against the step's memory interactions, which is false of every real
+  chip (`checkedStepChip` fails it immediately).
+- **`OpenVmParams.rankWindowOk : openVmRankBound < p`** is a new configuration field. The shift
+  needs it and nothing else implies it; it is OpenVM's own `2 ^ (timestamp_max_bits + 1) < p`, the
+  condition that caps `timestamp_max_bits` at `29` for BabyBear.
+
+### Proof idioms that carried the audit chips
+
+Worth reusing for the real-APC theorems:
+
+- `ClockArc.net_singleton` (in `Legal.lean`) reduces a one-step chip's bridge condition to the
+  familiar receive / send / nothing-else triple.
+- `place := fun i => (0, (i.val : ℤ))` — offsets *are* list positions — discharges `ordered` by
+  `simpa using Fin.lt_def.mp hji`, and works whenever a chip's stateful interactions are listed in
+  time order at consecutive offsets. A real APC needs a real table instead (its offsets are
+  `0, 5, 6, 9, 10` and its receives are `δ - 1 - n`), but `ordered` stays a numeric check.
+- `fin_cases i` on the interaction index, then one bullet per interaction, is how `placed`,
+  `ordered` and `sendsOk` are discharged chip by chip.
 
 ## Done when
 
