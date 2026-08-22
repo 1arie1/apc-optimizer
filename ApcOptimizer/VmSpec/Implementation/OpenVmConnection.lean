@@ -595,30 +595,32 @@ theorem openVmGuestRules_eq (busMap : BusMap) (memBusId : Nat) :
   exact hpay m
 
 /-- Guest legality on `openVmHost` is `Circuit.legalGuest` for OpenVM's bus semantics, with
-    `openVmGuestRules defaultBusMap openVmMemBusId` itself as the clock template — so `advancesClock` (needed
-    by the rank-window argument, `openVmHost_advancesClock_unpack`) is just another field of the
-    very same structure, not a separate conjunct to unpack. -/
+    `openVmGuestRules defaultBusMap openVmMemBusId` itself as the clock template — so the step
+    layout (needed by the rank-ordering argument, `openVmHost_stepLayout_unpack`) is just another
+    field of the very same structure, not a separate conjunct to unpack. -/
 theorem openVmHost_legalGuest_unpack (P : OpenVmParams p) (c : Circuit p) :
     (openVmHost P).legalGuest c →
       c.legalGuest ((openVmBusSemantics p defaultBusMap).toGuestRules
           (openVmGuestRules defaultBusMap openVmMemBusId))
-        (openVmRank openVmMemBusId) openVmRankBound (openVmHost P).maxWindow (openVmHost P).maxInteractions :=
+        (openVmHost P).maxWindow (openVmHost P).maxLookback (openVmHost P).maxInteractions :=
   fun h => openVmGuestRules_eq defaultBusMap openVmMemBusId ▸ h
 
-/-- The temporal contract, which the rank-window argument consumes — a field projection now,
+/-- The temporal contract, which the rank-ordering argument consumes — a field projection now,
     not a separate conjunct. -/
-theorem openVmHost_advancesClock_unpack
+theorem openVmHost_stepLayout_unpack
     (P : OpenVmParams p) (c : Circuit p) :
     (openVmHost P).legalGuest c →
-      Circuit.advancesClock c (openVmGuestRules defaultBusMap openVmMemBusId) P.maxWindow :=
-  fun h => h.advancesClock
+      Circuit.hasStepLayout c (openVmGuestRules defaultBusMap openVmMemBusId) P.maxWindow
+        openVmTimestampBound :=
+  fun h => h.stepLayout
 
 /-- **`Host.forcesAccepts` for a concrete OpenVM host**, with no hypotheses: in any satisfying
     OpenVM run within the trace budget, every guest instance's assignment is
     `Circuit.satisfies`-good, not merely algebraically consistent. -/
 theorem openVmHost_forcesAccepts [Fact p.Prime] (P : OpenVmParams p)
-    (hPins : (openVmHost P).pinsRanks
-      (openVmRankModel openVmMemBusId)) :
+    (hOrd : (openVmHost P).ordersRanks (openVmRankModel openVmMemBusId)
+      ((openVmBusSemantics p defaultBusMap).toGuestRules
+        (openVmGuestRules defaultBusMap openVmMemBusId))) :
     (openVmHost P).forcesAccepts
       (openVmBusSemantics p defaultBusMap) :=
   forcesAccepts_of_hostSound (openVmHost_legalGuest_unpack P)
@@ -626,13 +628,15 @@ theorem openVmHost_forcesAccepts [Fact p.Prime] (P : OpenVmParams p)
     ⟨openVmFinalizeIdx P,
       openVmHost_finalize_exempt P,
       openVmHost_statefulChipsMaintain P⟩
-    (openVmBusSemantics_statefulAcceptsOfPayloadOk (openVmGuestRules defaultBusMap openVmMemBusId)) hPins
+    (openVmBusSemantics_statefulAcceptsOfPayloadOk (openVmGuestRules defaultBusMap openVmMemBusId))
+    hOrd
 
 /-- **`openVmHost` realizes OpenVM's bus semantics** — unconditionally. This is the whole VM-side
     obligation of `vmSoundReplacement_of_forall₂`, discharged for a concrete host. -/
 theorem openVmHost_realizes (P : OpenVmParams p)
-    (hPins : (openVmHost P).pinsRanks
-      (openVmRankModel openVmMemBusId)) :
+    (hOrd : (openVmHost P).ordersRanks (openVmRankModel openVmMemBusId)
+      ((openVmBusSemantics p defaultBusMap).toGuestRules
+        (openVmGuestRules defaultBusMap openVmMemBusId))) :
     (openVmHost P).realizes
       (openVmBusSemantics p defaultBusMap) (openVmRankModel openVmMemBusId)
       (openVmGuestRules defaultBusMap openVmMemBusId) where
@@ -644,6 +648,6 @@ theorem openVmHost_realizes (P : OpenVmParams p)
   statefulAcceptsOfPayloadOk :=
     openVmBusSemantics_statefulAcceptsOfPayloadOk (openVmGuestRules defaultBusMap openVmMemBusId)
   absorbsStateless := openVmHost_absorbsStateless P
-  pinsRanks := hPins
+  ordersRanks := hOrd
 
 end ApcOptimizer.OpenVM

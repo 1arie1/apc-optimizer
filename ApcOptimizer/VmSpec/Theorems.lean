@@ -19,12 +19,15 @@ theorem openVm_vmSoundReplacement [Fact p.Prime] {P : OpenVmParams p} {G G' : Gu
     -- TODO(AO): we'll have to prove the `G'` half of this, probably by absorbing an additional
     -- implication into `Circuit.isSoundReplacementOf`.
     (hLegal : ∀ c ∈ G ++ G',
-      c.legalGuest (openVmGuestRules defaultBusMap openVmMemBusId) (openVmRank openVmMemBusId)
-        openVmRankBound P.maxWindow P.maxInteractions)
+      c.legalGuest (openVmGuestRules defaultBusMap openVmMemBusId) P.maxWindow
+        openVmTimestampBound P.maxInteractions)
     -- NB: isSoundReplacementOf must, but does not, depend on some size bounds, since legality does.
     (hSound : List.Forall₂ (fun c c' => c'.isSoundReplacementOf c
       (openVmBusSemantics p defaultBusMap)) G G') :
     VmSoundReplacement (openVmHost P) G G' :=
-  vmSoundReplacement_of_forall₂ (openVmHost_realizes P (openVmHost_pinsRanks P)) hLegal hSound
+  vmSoundReplacement_of_forall₂
+    (openVmHost_realizes P
+      (openVmGuestRules_eq defaultBusMap openVmMemBusId ▸ openVmHost_ordersRanks P))
+    hLegal hSound
 
 end ApcOptimizer.OpenVM

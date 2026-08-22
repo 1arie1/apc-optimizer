@@ -82,10 +82,18 @@ structure Host (p : ℕ) where
   /-- The VM's trace budget: the most guest-chip instances a satisfying assignment may realize,
       in total across all types (see `VmAssignment.withinBudget`). -/
   maxInstances : ℕ
-  /-- The most one guest instance may advance the clock (`Circuit.advancesClock`).
+  /-- The most one guest instance may advance the clock (`Circuit.hasStepLayout`).
 
       Needed to prevent clock overflows, unlocking time-inductive arguments. -/
   maxWindow : ℕ
+  /-- The furthest back in time one guest instance may reach (`Circuit.hasStepLayout`): a memory
+      *receive* names the record an earlier instruction left, so it sits before the step that
+      replaces it, not inside it.
+
+      For OpenVM this is `2 ^ timestamp_max_bits`, the width `AssertLtSubAir` range-checks a
+      memory access's timestamp difference to — and the same constant as the timestamp ceiling,
+      since the gadget is sized so that any difference between two legitimate timestamps fits. -/
+  maxLookback : ℕ
   /-- The most bus interactions one guest instance may carry.
 
       Needed to prevent multiplicity overflows, unlocking counting arguments. -/

@@ -42,11 +42,6 @@ namespace ApcOptimizer.OpenVM
 
 variable {p : ℕ}
 
-/-- The rank OpenVM gives a seven-field memory record: its timestamp. -/
-theorem openVmRank_mem (ptr d0 d1 d2 d3 ts : ZMod p) :
-    openVmRank openVmMemBusId (1, [1, ptr, d0, d1, d2, d3, ts]) = ts.val := by
-  simp [openVmRank]
-
 /-- `openVmPayloadOk` on a register record is exactly "the data limbs are bytes". Both directions
     are used below: a receive hands one over, a send has to produce one. -/
 theorem openVmPayloadOk_mem_iff [Fact (1 < p)] (ptr d0 d1 d2 d3 ts : ZMod p) :
@@ -156,124 +151,6 @@ theorem readEchoChip_limbs [Fact (1 < p)] (hp : 17 < p) (x lo hi : Variable) (pt
     (asg lo).val < 2 ^ 17 ∧ (asg hi).val < 2 ^ 12 :=
   readEcho_limbs hp lo hi (by simp [readEchoChip]) (by simp [readEchoChip]) hacc
 
-/-- **The timestamps really do increase.** Everything OpenVM checks, and nothing more: the two
-    range checks bound the limbs, the algebraic constraint ties them to `t₁ - t₀ - 1`, and the VM's
-    rank window bounds `t₀`. Drop that last piece and the conclusion is false — a small difference
-    says nothing once `t₁` may have wrapped, which is exactly why `AssertLtSubAir` caps
-    `max_bits` at 29 for a 31-bit field.
-
-    Stated against any circuit `c` carrying the access and its gadget, not just `readEchoChip`
-    itself, so `stepChip` can reuse it. -/
-theorem readEcho_timestamps_increase (hp : 2 ^ 30 < p) {c : Circuit p} (x lo hi : Variable)
-    (ptr t₀ t₁ : ZMod p)
-    (hmemCon : assertLtConstraint lo hi t₀ t₁ ∈ c.algebraicConstraints)
-    (hmemRecv : readEchoRecv x ptr t₀ ∈ c.busInteractions)
-    {asg : ChipAssignment p}
-    (halg : c.satisfiesAlgebraic asg)
-    (hlo : (asg lo).val < 2 ^ 17) (hhi : (asg hi).val < 2 ^ 12)
-    (hranks : c.ranksBounded (openVmRank openVmMemBusId) openVmRankBound asg) :
-    t₀.val < t₁.val := by
-  haveI : NeZero p := ⟨by omega⟩
-  haveI : Fact (1 < p) := ⟨by omega⟩
-  -- `t₁ = t₀ + 1 + (lo + 2 ^ 17 * hi)`, the constraint rearranged.
-  have hcon : t₁ = t₀ + 1 + (asg lo + ((2 ^ 17 : ℕ) : ZMod p) * asg hi) := by
-    have h := halg (assertLtConstraint lo hi t₀ t₁) hmemCon
-    show t₁ = _
-    replace h : (t₁ - t₀ - 1) + (-1) * (asg lo + ((2 ^ 17 : ℕ) : ZMod p) * asg hi) = 0 := h
-    linear_combination h
-  -- The same equation over `ℕ`, which is where the wraparound question lives.
-  set n : ℕ := (asg lo).val + 2 ^ 17 * (asg hi).val with hn
-  have hnlt : n < 2 ^ 29 := by rw [hn]; omega
-  have hncast : ((n : ℕ) : ZMod p) = asg lo + ((2 ^ 17 : ℕ) : ZMod p) * asg hi := by
-    rw [hn]
-    push_cast [ZMod.natCast_val, ZMod.cast_id]
-    ring
-  -- `t₀` is in the window: the chip actively receives at it.
-  have ht₀ : t₀.val < 2 ^ 29 := by
-    have hb := hranks (readEchoRecv x ptr t₀) hmemRecv
-      (by exact neg_ne_zero.mpr one_ne_zero)
-    rw [show (((readEchoRecv x ptr t₀).eval asg).busId,
-      ((readEchoRecv x ptr t₀).eval asg).payload)
-        = ((1 : ℕ), [(1 : ZMod p), ptr, asg x, 0, 0, 0, t₀]) from rfl, openVmRank_mem] at hb
-    simpa [openVmRankBound, openVmTimestampBits] using hb
-  -- No wraparound, so the field equation is a natural-number equation.
-  have hcast : ((t₀.val + 1 + n : ℕ) : ZMod p) = t₁ := by
-    push_cast [hncast, ZMod.natCast_val, ZMod.cast_id]
-    linear_combination -hcon
-  have hval : t₁.val = t₀.val + 1 + n := by
-    rw [← hcast, ZMod.val_natCast_of_lt (by omega)]
-  omega
-
-/-- The timestamp-ordering fact, specialized to `readEchoChip` itself. -/
-theorem readEchoChip_timestamps_increase (hp : 2 ^ 30 < p) (x lo hi : Variable)
-    (ptr t₀ t₁ : ZMod p) {asg : ChipAssignment p}
-    (halg : (readEchoChip x lo hi ptr t₀ t₁).satisfiesAlgebraic asg)
-    (hlo : (asg lo).val < 2 ^ 17) (hhi : (asg hi).val < 2 ^ 12)
-    (hranks : (readEchoChip x lo hi ptr t₀ t₁).ranksBounded (openVmRank openVmMemBusId) openVmRankBound asg) :
-    t₀.val < t₁.val :=
-  readEcho_timestamps_increase hp x lo hi ptr t₀ t₁ (by simp [readEchoChip])
-    (by simp [readEchoChip]) halg hlo hhi hranks
-
-/-- **The read-echo discharges its obligation from its own receive.** This is the case
-    `Circuit.statefulSendsMaintain`'s rank hypothesis exists for: nothing algebraic bounds `x`, and
-    the send is byte-valued purely because the strictly-earlier receive was. -/
-theorem readEchoChip_statefulSendsMaintain (hp : 2 ^ 30 < p) (x lo hi : Variable)
-    (ptr t₀ t₁ : ZMod p) :
-    (readEchoChip x lo hi ptr t₀ t₁).statefulSendsMaintain
-      (openVmGuestRules defaultBusMap openVmMemBusId) (openVmRank openVmMemBusId) openVmRankBound := by
-  haveI : NeZero p := ⟨by omega⟩
-  haveI : Fact (1 < p) := ⟨by omega⟩
-  intro asg halg hacc hranks bi hbi hst hmult hlow
-  simp only [readEchoChip, List.mem_cons, List.not_mem_nil, or_false] at hbi
-  obtain ⟨hlo, hhi⟩ := readEchoChip_limbs (by omega) x lo hi ptr t₀ t₁ hacc
-  have hts : t₀.val < t₁.val :=
-    readEchoChip_timestamps_increase hp x lo hi ptr t₀ t₁ halg hlo hhi hranks
-  rcases hbi with rfl | rfl | rfl | rfl
-  · -- The receive: `hmult` claims `-1 = 1`, which needs `p ∣ 2`.
-    exfalso
-    replace hmult : (-1 : ZMod p) = 1 := hmult
-    have h2 : ((2 : ℕ) : ZMod p) = 0 := by push_cast; linear_combination -hmult
-    have hv : (((2 : ℕ) : ZMod p)).val = 2 := ZMod.val_natCast_of_lt (by omega)
-    rw [h2, ZMod.val_zero] at hv
-    omega
-  · -- The send: the receive is active, on the memory bus, at a strictly smaller rank.
-    have hrecv : readEchoRecv x ptr t₀ ∈ (readEchoChip x lo hi ptr t₀ t₁).busInteractions := by
-      simp [readEchoChip]
-    have hlt : openVmRank openVmMemBusId (((readEchoRecv x ptr t₀).eval asg).busId,
-        ((readEchoRecv x ptr t₀).eval asg).payload) <
-        openVmRank openVmMemBusId (((readEchoSend x ptr t₁).eval asg).busId,
-          ((readEchoSend x ptr t₁).eval asg).payload) := by
-      show openVmRank openVmMemBusId (1, [1, ptr, asg x, 0, 0, 0, t₀]) <
-        openVmRank openVmMemBusId (1, [1, ptr, asg x, 0, 0, 0, t₁])
-      rw [openVmRank_mem, openVmRank_mem]
-      exact hts
-    have hx : isByte (asg x) :=
-      ((openVmPayloadOk_mem_iff ptr (asg x) 0 0 0 t₀).mp
-        (hlow (readEchoRecv x ptr t₀) hrecv rfl (by exact neg_ne_zero.mpr one_ne_zero) hlt)).1
-    show openVmPayloadOk defaultBusMap ((1 : ℕ), [(1 : ZMod p), ptr, asg x, 0, 0, 0, t₁])
-    exact (openVmPayloadOk_mem_iff ptr (asg x) 0 0 0 t₁).mpr
-      ⟨hx, isByte_zero, isByte_zero, isByte_zero⟩
-  · simp [assertLtLoLookup, openVmGuestRules, openVmIsStateful, defaultBusMap,
-      OpenVmBusType.isStateful] at hst
-  · simp [assertLtHiLookup, openVmGuestRules, openVmIsStateful, defaultBusMap,
-      OpenVmBusType.isStateful] at hst
-
-/-- **Hence the read-echo chip meets `Circuit.legalGuest`'s bus-facing conditions** —
-    unconditionally, with the timestamp ordering derived from the gadget rather than hypothesized.
-
-    Not literally a `Circuit.legalGuest` instance: that structure's fourth field,
-    `advancesClock`, needs an execution-bridge step this bare access doesn't wrap itself in —
-    `readEchoChip` is deliberately the memory access *in isolation* (see the module docstring).
-    `stepChip_legalGuest` below is the genuine, full example; this is the lemma it's built from. -/
-theorem readEchoChip_legalGuest (hp : 2 ^ 30 < p) (x lo hi : Variable) (ptr t₀ t₁ : ZMod p) :
-    (readEchoChip x lo hi ptr t₀ t₁).statelessSendOnly (openVmGuestRules defaultBusMap openVmMemBusId) ∧
-      (readEchoChip x lo hi ptr t₀ t₁).statefulPolarity (openVmGuestRules defaultBusMap openVmMemBusId) ∧
-      (readEchoChip x lo hi ptr t₀ t₁).statefulSendsMaintain
-        (openVmGuestRules defaultBusMap openVmMemBusId) (openVmRank openVmMemBusId) openVmRankBound :=
-  ⟨readEchoChip_statelessSendOnly x lo hi ptr t₀ t₁,
-    readEchoChip_statefulPolarity x lo hi ptr t₀ t₁,
-    readEchoChip_statefulSendsMaintain hp x lo hi ptr t₀ t₁⟩
-
 --------- The execution-bridge step ---------
 
 /-- The execution-bridge receive: the instruction's incoming state `(pc, t)` (whitepaper §4.5,
@@ -297,59 +174,102 @@ def bridgeSend (pc t : ZMod p) : BusInteraction (Expression p) where
 def stepChip (x lo hi : Variable) (pcFrom pcTo ptr base : ZMod p) : Circuit p where
   algebraicConstraints := [assertLtConstraint lo hi (base + 1) (base + 2)]
   busInteractions :=
-    [bridgeRecv pcFrom base, bridgeSend pcTo (base + 3),
-      readEchoRecv x ptr (base + 1), readEchoSend x ptr (base + 2),
-      assertLtLoLookup lo, assertLtHiLookup hi]
+    [bridgeRecv pcFrom base, readEchoRecv x ptr (base + 1), readEchoSend x ptr (base + 2),
+      bridgeSend pcTo (base + 3), assertLtLoLookup lo, assertLtHiLookup hi]
 
-/-- **`Circuit.advancesClock` accepts a realistic instruction executor.** One bridge receive at
-    `base`, one send three ticks later, and both memory accesses strictly between — with the
-    offsets given as naturals, so nothing here compares field elements. -/
-theorem stepChip_advancesClock (hp : 3 < p) {maxWindow : ℕ} (hw : 3 < maxWindow)
+/-- **`Circuit.hasStepLayout` accepts a realistic instruction executor.** One step, from `base` to
+    `base + 3`, with each interaction's offset its own position in the list — which is exactly how
+    OpenVM lays an executor out, and why `StepLayout.ordered` is satisfiable by one.
+
+    `StepLayout.sendsOk` is where the byte invariant is carried, and for the memory send it is
+    carried by the *receive that precedes it in the same step*: nothing algebraic bounds `x`, and
+    the send is byte-valued purely because the earlier receive was. No timestamp comparison is
+    needed to see that — the offsets do it. -/
+theorem stepChip_hasStepLayout (hp : 3 < p) {maxWindow maxLookback : ℕ} (hw : 3 < maxWindow)
     (x lo hi : Variable) (pcFrom pcTo ptr base : ZMod p) :
-    Circuit.advancesClock (stepChip x lo hi pcFrom pcTo ptr base)
-      (openVmGuestRules defaultBusMap openVmMemBusId) maxWindow := by
+    (stepChip x lo hi pcFrom pcTo ptr base).hasStepLayout
+      (openVmGuestRules defaultBusMap openVmMemBusId) maxWindow maxLookback := by
+  haveI : NeZero p := ⟨by omega⟩
+  haveI : Fact (1 < p) := ⟨by omega⟩
   have hcast3 : ((3 : ℕ) : ZMod p) = (3 : ZMod p) := by push_cast; ring
   have h3 : (3 : ZMod p) ≠ 0 := by
     intro h
     have hv := ZMod.val_natCast_of_lt (show 3 < p by omega)
     rw [hcast3, h, ZMod.val_zero] at hv
     omega
-  refine fun asg _ => ⟨[⟨pcFrom, pcTo, base, 3⟩], by simp, by simpa using hw,
-    ClockArc.net_singleton _ ?_ ?_ ?_ ?_, ?_⟩
-  · intro hcon
-    rw [Prod.ext_iff] at hcon
-    have hb : base = base + ((3 : ℕ) : ZMod p) := by
-      have h2 := hcon.2
-      simp only [List.cons.injEq, and_true] at h2
-      exact h2.2
-    rw [hcast3] at hb
-    exact h3 (by linear_combination -hb)
-  · simp [Circuit.allEffects, stepChip, bridgeRecv, bridgeSend, readEchoRecv, readEchoSend,
-      assertLtLoLookup, assertLtHiLookup, BusInteraction.eval, Expression.eval,
-      openVmGuestRules, h3]
-  · simp [Circuit.allEffects, stepChip, bridgeRecv, bridgeSend, readEchoRecv, readEchoSend,
-      assertLtLoLookup, assertLtHiLookup, BusInteraction.eval, Expression.eval,
-      openVmGuestRules, h3]
-  · rintro ⟨mb, ml⟩ hbus hr hs
-    simp only [openVmGuestRules] at hbus
-    subst hbus
-    simp only [ne_eq, Prod.mk.injEq, true_and, hcast3, openVmGuestRules] at hr hs
-    simp [Circuit.allEffects, stepChip, bridgeRecv, bridgeSend, readEchoRecv, readEchoSend,
-      assertLtLoLookup, assertLtHiLookup, BusInteraction.eval, Expression.eval,
-      Ne.symm hr, Ne.symm hs]
-  · intro bi hbi _ _
-    simp only [stepChip, List.mem_cons, List.not_mem_nil, or_false] at hbi
-    rcases hbi with rfl | rfl | rfl | rfl | rfl | rfl
-    · simp [bridgeRecv, openVmGuestRules] at *
-    · simp [bridgeSend, openVmGuestRules] at *
-    · exact ⟨⟨pcFrom, pcTo, base, 3⟩, by simp, 1, by simp, by simp, by
-        simp [readEchoRecv, openVmGuestRules, BusInteraction.eval, Expression.eval,
-          openVmMemTimestamp]⟩
-    · exact ⟨⟨pcFrom, pcTo, base, 3⟩, by simp, 2, by simp, by simp, by
-        simp [readEchoSend, openVmGuestRules, BusInteraction.eval, Expression.eval,
-          openVmMemTimestamp]⟩
-    · simp [assertLtLoLookup, openVmGuestRules] at *
-    · simp [assertLtHiLookup, openVmGuestRules] at *
+  have h2 : ((2 : ℕ) : ZMod p) ≠ 0 := by
+    intro h
+    have hv := ZMod.val_natCast_of_lt (show 2 < p by omega)
+    rw [h, ZMod.val_zero] at hv
+    omega
+  have hneg : (-1 : ZMod p) ≠ 1 := fun hcon => h2 (by push_cast; linear_combination -hcon)
+  have hnegz : (-1 : ZMod p) ≠ 0 := fun hcon => one_ne_zero (α := ZMod p) (by
+    linear_combination -hcon)
+  intro asg _ _
+  refine ⟨⟨[⟨pcFrom, pcTo, base, 3⟩], fun i => (0, (i.val : ℤ)), by simp, by simpa using hw,
+    ?_, ?_, ?_, ?_⟩⟩
+  · refine ClockArc.net_singleton _ ?_ ?_ ?_ ?_
+    · intro hcon
+      rw [Prod.ext_iff] at hcon
+      have hb : base = base + ((3 : ℕ) : ZMod p) := by
+        have hl := hcon.2
+        simp only [List.cons.injEq, and_true] at hl
+        exact hl.2
+      rw [hcast3] at hb
+      exact h3 (by linear_combination -hb)
+    · simp [Circuit.allEffects, stepChip, bridgeRecv, bridgeSend, readEchoRecv, readEchoSend,
+        assertLtLoLookup, assertLtHiLookup, BusInteraction.eval, Expression.eval,
+        openVmGuestRules, h3]
+    · simp [Circuit.allEffects, stepChip, bridgeRecv, bridgeSend, readEchoRecv, readEchoSend,
+        assertLtLoLookup, assertLtHiLookup, BusInteraction.eval, Expression.eval,
+        openVmGuestRules, h3]
+    · rintro ⟨mb, ml⟩ hbus hr hs
+      simp only [openVmGuestRules] at hbus
+      subst hbus
+      simp only [ne_eq, Prod.mk.injEq, true_and, hcast3, openVmGuestRules] at hr hs
+      simp [Circuit.allEffects, stepChip, bridgeRecv, bridgeSend, readEchoRecv, readEchoSend,
+        assertLtLoLookup, assertLtHiLookup, BusInteraction.eval, Expression.eval,
+        Ne.symm hr, Ne.symm hs]
+  · intro i hst _
+    fin_cases i
+    · exact ⟨⟨pcFrom, pcTo, base, 3⟩, by simp, by norm_num, by norm_num, by
+        simp [stepChip, bridgeRecv, openVmGuestRules, openVmTimestamp, BusInteraction.eval,
+          Expression.eval, openVmMemBusId, openVmExecBusId]⟩
+    · exact ⟨⟨pcFrom, pcTo, base, 3⟩, by simp, by norm_num, by norm_num, by
+        simp [stepChip, readEchoRecv, openVmGuestRules, openVmTimestamp, BusInteraction.eval,
+          Expression.eval, openVmMemBusId]⟩
+    · exact ⟨⟨pcFrom, pcTo, base, 3⟩, by simp, by norm_num, by norm_num, by
+        simp [stepChip, readEchoSend, openVmGuestRules, openVmTimestamp, BusInteraction.eval,
+          Expression.eval, openVmMemBusId]⟩
+    · exact ⟨⟨pcFrom, pcTo, base, 3⟩, by simp, by norm_num, by norm_num, by
+        simp [stepChip, bridgeSend, openVmGuestRules, openVmTimestamp, BusInteraction.eval,
+          Expression.eval, openVmMemBusId, openVmExecBusId]⟩
+    · simp [stepChip, assertLtLoLookup, openVmGuestRules, openVmIsStateful, defaultBusMap,
+        OpenVmBusType.isStateful] at hst
+    · simp [stepChip, assertLtHiLookup, openVmGuestRules, openVmIsStateful, defaultBusMap,
+        OpenVmBusType.isStateful] at hst
+  · exact fun i j hji _ _ _ _ _ => by simpa using Fin.lt_def.mp hji
+  · intro i hst hmult hlow
+    fin_cases i
+    · exact absurd hmult hneg
+    · exact absurd hmult hneg
+    · -- The send echoes the receive one position earlier in the very same step.
+      have hrecv0 := hlow ⟨1, by simp [stepChip]⟩ (by simp [Fin.lt_def]) rfl hnegz rfl
+      replace hrecv0 : openVmPayloadOk defaultBusMap
+        ((1 : ℕ), [(1 : ZMod p), ptr, asg x, 0, 0, 0, base + 1]) := hrecv0
+      have hrecv := hrecv0
+      have hx : isByte (asg x) :=
+        ((openVmPayloadOk_mem_iff ptr (asg x) 0 0 0 (base + 1)).mp hrecv).1
+      show openVmPayloadOk defaultBusMap ((1 : ℕ), [(1 : ZMod p), ptr, asg x, 0, 0, 0, base + 2])
+      exact (openVmPayloadOk_mem_iff ptr (asg x) 0 0 0 (base + 2)).mpr
+        ⟨hx, isByte_zero, isByte_zero, isByte_zero⟩
+    · -- The bridge send: `openVmPayloadOk` asks nothing of an execution-bridge state.
+      simp [stepChip, bridgeSend, openVmGuestRules, openVmPayloadOk, defaultBusMap,
+        BusInteraction.eval, Expression.eval]
+    · simp [stepChip, assertLtLoLookup, openVmGuestRules, openVmIsStateful, defaultBusMap,
+        OpenVmBusType.isStateful] at hst
+    · simp [stepChip, assertLtHiLookup, openVmGuestRules, openVmIsStateful, defaultBusMap,
+        OpenVmBusType.isStateful] at hst
 
 /-- Only the two range checks are stateless; the bridge pair and the memory access are both
     stateful. -/
@@ -361,17 +281,16 @@ theorem stepChip_statelessSendOnly (x lo hi : Variable) (pcFrom pcTo ptr base : 
   rcases hbi with rfl | rfl | rfl | rfl | rfl | rfl
   · simp [bridgeRecv, openVmGuestRules, openVmIsStateful, defaultBusMap,
       OpenVmBusType.isStateful] at hst
-  · simp [bridgeSend, openVmGuestRules, openVmIsStateful, defaultBusMap,
-      OpenVmBusType.isStateful] at hst
   · simp [readEchoRecv, openVmGuestRules, openVmIsStateful, defaultBusMap,
       OpenVmBusType.isStateful] at hst
   · simp [readEchoSend, openVmGuestRules, openVmIsStateful, defaultBusMap,
       OpenVmBusType.isStateful] at hst
+  · simp [bridgeSend, openVmGuestRules, openVmIsStateful, defaultBusMap,
+      OpenVmBusType.isStateful] at hst
   · exact Or.inr rfl
   · exact Or.inr rfl
 
-/-- Every stateful multiplicity — both bridge messages, both memory ones — is literally `-1` or
-    `1`. -/
+/-- The four stateful multiplicities are literally `±1`. -/
 theorem stepChip_statefulPolarity (x lo hi : Variable) (pcFrom pcTo ptr base : ZMod p) :
     (stepChip x lo hi pcFrom pcTo ptr base).statefulPolarity
       (openVmGuestRules defaultBusMap openVmMemBusId) := by
@@ -379,72 +298,9 @@ theorem stepChip_statefulPolarity (x lo hi : Variable) (pcFrom pcTo ptr base : Z
   simp only [stepChip, List.mem_cons, List.not_mem_nil, or_false] at hbi
   rcases hbi with rfl | rfl | rfl | rfl | rfl | rfl
   · exact Or.inr (Or.inr rfl)
-  · exact Or.inr (Or.inl rfl)
   · exact Or.inr (Or.inr rfl)
   · exact Or.inr (Or.inl rfl)
-  · simp [assertLtLoLookup, openVmGuestRules, openVmIsStateful, defaultBusMap,
-      OpenVmBusType.isStateful] at hst
-  · simp [assertLtHiLookup, openVmGuestRules, openVmIsStateful, defaultBusMap,
-      OpenVmBusType.isStateful] at hst
-
-/-- **`stepChip`'s sends all discharge their obligation.** The bridge send is on the execution
-    bridge, where `openVmPayloadOk` is trivially `True`; the memory send is exactly
-    `readEchoChip`'s case, reusing `readEcho_limbs`/`readEcho_timestamps_increase` against
-    `stepChip`'s own membership facts instead of duplicating the derivation. -/
-theorem stepChip_statefulSendsMaintain (hp : 2 ^ 30 < p) (x lo hi : Variable)
-    (pcFrom pcTo ptr base : ZMod p) :
-    (stepChip x lo hi pcFrom pcTo ptr base).statefulSendsMaintain
-      (openVmGuestRules defaultBusMap openVmMemBusId) (openVmRank openVmMemBusId) openVmRankBound := by
-  haveI : NeZero p := ⟨by omega⟩
-  haveI : Fact (1 < p) := ⟨by omega⟩
-  intro asg halg hacc hranks bi hbi hst hmult hlow
-  have hmemLo : assertLtLoLookup lo ∈ (stepChip x lo hi pcFrom pcTo ptr base).busInteractions := by
-    simp [stepChip]
-  have hmemHi : assertLtHiLookup hi ∈ (stepChip x lo hi pcFrom pcTo ptr base).busInteractions := by
-    simp [stepChip]
-  obtain ⟨hlo, hhi⟩ := readEcho_limbs (by omega) lo hi hmemLo hmemHi hacc
-  have hmemCon : assertLtConstraint lo hi (base + 1) (base + 2) ∈
-      (stepChip x lo hi pcFrom pcTo ptr base).algebraicConstraints := by simp [stepChip]
-  have hmemRecv : readEchoRecv x ptr (base + 1) ∈
-      (stepChip x lo hi pcFrom pcTo ptr base).busInteractions := by simp [stepChip]
-  have hts : (base + 1).val < (base + 2).val :=
-    readEcho_timestamps_increase hp x lo hi ptr (base + 1) (base + 2) hmemCon hmemRecv halg hlo
-      hhi hranks
-  simp only [stepChip, List.mem_cons, List.not_mem_nil, or_false] at hbi
-  rcases hbi with rfl | rfl | rfl | rfl | rfl | rfl
-  · -- bridgeRecv: a receive, `hmult` claims `-1 = 1`.
-    exfalso
-    replace hmult : (-1 : ZMod p) = 1 := hmult
-    have h2 : ((2 : ℕ) : ZMod p) = 0 := by push_cast; linear_combination -hmult
-    have hv : (((2 : ℕ) : ZMod p)).val = 2 := ZMod.val_natCast_of_lt (by omega)
-    rw [h2, ZMod.val_zero] at hv
-    omega
-  · -- bridgeSend: the execution bridge accepts everything.
-    simp [openVmGuestRules, openVmPayloadOk, defaultBusMap, bridgeSend, BusInteraction.eval,
-      Expression.eval]
-  · -- readEchoRecv: a receive, same trick.
-    exfalso
-    replace hmult : (-1 : ZMod p) = 1 := hmult
-    have h2 : ((2 : ℕ) : ZMod p) = 0 := by push_cast; linear_combination -hmult
-    have hv : (((2 : ℕ) : ZMod p)).val = 2 := ZMod.val_natCast_of_lt (by omega)
-    rw [h2, ZMod.val_zero] at hv
-    omega
-  · -- readEchoSend: the receive is active, on the memory bus, at a strictly smaller rank.
-    have hlt : openVmRank openVmMemBusId (((readEchoRecv x ptr (base + 1)).eval asg).busId,
-        ((readEchoRecv x ptr (base + 1)).eval asg).payload) <
-        openVmRank openVmMemBusId (((readEchoSend x ptr (base + 2)).eval asg).busId,
-          ((readEchoSend x ptr (base + 2)).eval asg).payload) := by
-      show openVmRank openVmMemBusId (1, [1, ptr, asg x, 0, 0, 0, base + 1]) <
-        openVmRank openVmMemBusId (1, [1, ptr, asg x, 0, 0, 0, base + 2])
-      rw [openVmRank_mem, openVmRank_mem]
-      exact hts
-    have hx : isByte (asg x) :=
-      ((openVmPayloadOk_mem_iff ptr (asg x) 0 0 0 (base + 1)).mp
-        (hlow (readEchoRecv x ptr (base + 1)) hmemRecv rfl
-          (by exact neg_ne_zero.mpr one_ne_zero) hlt)).1
-    show openVmPayloadOk defaultBusMap ((1 : ℕ), [(1 : ZMod p), ptr, asg x, 0, 0, 0, base + 2])
-    exact (openVmPayloadOk_mem_iff ptr (asg x) 0 0 0 (base + 2)).mpr
-      ⟨hx, isByte_zero, isByte_zero, isByte_zero⟩
+  · exact Or.inr (Or.inl rfl)
   · simp [assertLtLoLookup, openVmGuestRules, openVmIsStateful, defaultBusMap,
       OpenVmBusType.isStateful] at hst
   · simp [assertLtHiLookup, openVmGuestRules, openVmIsStateful, defaultBusMap,
@@ -452,67 +308,56 @@ theorem stepChip_statefulSendsMaintain (hp : 2 ^ 30 < p) (x lo hi : Variable)
 
 /-- **The full example `Circuit.legalGuest` exists for: a realistic instruction executor.**
     `stepChip` is `readEchoChip`'s memory access wrapped in the execution-bridge step OpenVM
-    requires around it, and it satisfies all four conditions — this is the file's answer to
+    requires around it, and it satisfies every condition — this is the file's answer to
     "is `Circuit.legalGuest` satisfiable by anything a real VM would actually run". -/
-theorem stepChip_legalGuest (hp : 2 ^ 30 < p) {maxWindow maxInteractions : ℕ} (hw : 3 < maxWindow)
-    (hi6 : 6 ≤ maxInteractions)
+theorem stepChip_legalGuest (hp : 3 < p) {maxWindow maxLookback maxInteractions : ℕ}
+    (hw : 3 < maxWindow) (hi6 : 6 ≤ maxInteractions)
     (x lo hi : Variable) (pcFrom pcTo ptr base : ZMod p) :
-    (stepChip x lo hi pcFrom pcTo ptr base).legalGuest (openVmGuestRules defaultBusMap openVmMemBusId)
-      (openVmRank openVmMemBusId) openVmRankBound maxWindow maxInteractions where
+    (stepChip x lo hi pcFrom pcTo ptr base).legalGuest
+      (openVmGuestRules defaultBusMap openVmMemBusId) maxWindow maxLookback maxInteractions where
   sendOnly := stepChip_statelessSendOnly x lo hi pcFrom pcTo ptr base
   polarity := stepChip_statefulPolarity x lo hi pcFrom pcTo ptr base
-  sendsMaintain := stepChip_statefulSendsMaintain hp x lo hi pcFrom pcTo ptr base
-  advancesClock := stepChip_advancesClock (by omega) hw x lo hi pcFrom pcTo ptr base
+  stepLayout := stepChip_hasStepLayout hp hw x lo hi pcFrom pcTo ptr base
   size := by simpa [stepChip] using hi6
 
-/-- The same access with `AssertLtSubAir` removed: the word is handed back at the timestamp it was
-    found at. -/
-def staleEchoChip (x : Variable) (ptr t : ZMod p) : Circuit p where
+/-- The same interactions with the echo *before* the read: the word is handed on at `base + 2`
+    before it is read at `base + 1`. -/
+def earlyEchoChip (x : Variable) (pcFrom pcTo ptr base : ZMod p) : Circuit p where
   algebraicConstraints := []
-  busInteractions := [readEchoRecv x ptr t, readEchoSend x ptr t]
+  busInteractions :=
+    [bridgeRecv pcFrom base, readEchoSend x ptr (base + 2), readEchoRecv x ptr (base + 1),
+      bridgeSend pcTo (base + 3)]
 
-/-- **And the gadget is doing real work.** Strip it out and the chip is rejected: with the two
-    timestamps equal the rank hypothesis is vacuous, so nothing establishes that the limb is a
-    byte — and indeed nothing in the circuit does. -/
-theorem staleEchoChip_not_legalGuest (hp : 256 < p) {maxWindow maxInteractions : ℕ}
-    (x : Variable) (ptr t : ZMod p)
-    (ht : t.val < openVmRankBound) :
-    ¬ (staleEchoChip x ptr t).legalGuest (openVmGuestRules defaultBusMap openVmMemBusId)
-        (openVmRank openVmMemBusId) openVmRankBound maxWindow maxInteractions := by
+/-- **And the ordering is doing real work.** `stepChip` is legal because its memory send is
+    justified by the receive *preceding* it; swap the two and nothing justifies it. All
+    `StepLayout.sendsOk` can offer the send is the bridge receive before it, of which
+    `openVmPayloadOk` asks nothing — and the circuit has no lookup to fall back on, so the limb
+    is not a byte and no layout exists. -/
+theorem earlyEchoChip_not_legalGuest (hp : 256 < p) {maxWindow maxLookback maxInteractions : ℕ}
+    (x : Variable) (pcFrom pcTo ptr base : ZMod p) :
+    ¬ (earlyEchoChip x pcFrom pcTo ptr base).legalGuest
+        (openVmGuestRules defaultBusMap openVmMemBusId) maxWindow maxLookback maxInteractions := by
   haveI : NeZero p := ⟨by omega⟩
   haveI : Fact (1 < p) := ⟨by omega⟩
   intro h
   set asg : ChipAssignment p := fun _ => ((256 : ℕ) : ZMod p) with hasg
-  have hsend : readEchoSend x ptr t ∈ (staleEchoChip x ptr t).busInteractions := by
-    simp [staleEchoChip]
-  -- Receive and send sit at the same rank, so nothing is below the send's — the rank hypothesis
-  -- is vacuous, and the chip has no lookup to fall back on.
-  have hlow : (staleEchoChip x ptr t).lowerRanksMaintain
-      (openVmGuestRules defaultBusMap openVmMemBusId) (openVmRank openVmMemBusId) asg
-      (openVmRank openVmMemBusId (((readEchoSend x ptr t).eval asg).busId,
-        ((readEchoSend x ptr t).eval asg).payload)) := by
-    intro bj hbj _ _ hlt
-    exfalso
-    revert hlt
-    simp only [staleEchoChip, List.mem_cons, List.not_mem_nil, or_false] at hbj
-    rcases hbj with rfl | rfl <;> exact lt_irrefl _
-  have hranks : (staleEchoChip x ptr t).ranksBounded (openVmRank openVmMemBusId) openVmRankBound asg := by
-    intro bi hbi _
-    simp only [staleEchoChip, List.mem_cons, List.not_mem_nil, or_false] at hbi
-    rcases hbi with rfl | rfl <;>
-      · show openVmRank openVmMemBusId ((1 : ℕ), [(1 : ZMod p), ptr, asg x, 0, 0, 0, t]) < openVmRankBound
-        rw [openVmRank_mem]
-        exact ht
-  have key := h.sendsMaintain asg (by intro c hc; simp [staleEchoChip] at hc)
-    (by intro bj hbj hstj _
-        simp only [staleEchoChip, List.mem_cons, List.not_mem_nil, or_false] at hbj
-        rcases hbj with rfl | rfl
-        · simp [readEchoRecv, openVmGuestRules, openVmIsStateful, defaultBusMap,
-            OpenVmBusType.isStateful] at hstj
-        · simp [readEchoSend, openVmGuestRules, openVmIsStateful, defaultBusMap,
-            OpenVmBusType.isStateful] at hstj)
-    hranks _ hsend rfl rfl hlow
-  have hbyte : isByte (asg x) := ((openVmPayloadOk_mem_iff ptr (asg x) 0 0 0 t).mp key).1
+  obtain ⟨L⟩ := h.stepLayout asg (by intro c hc; simp [earlyEchoChip] at hc)
+    (by
+      intro bi hbi hst _
+      simp only [earlyEchoChip, List.mem_cons, List.not_mem_nil, or_false] at hbi
+      rcases hbi with rfl | rfl | rfl | rfl <;>
+        simp [bridgeRecv, bridgeSend, readEchoRecv, readEchoSend, openVmGuestRules,
+          openVmIsStateful, defaultBusMap, OpenVmBusType.isStateful] at hst)
+  -- The only interaction before the send is the bridge receive, and its payload is unconstrained.
+  have hsend := L.sendsOk ⟨1, by simp [earlyEchoChip]⟩ rfl rfl (fun j hji _ _ _ => by
+    fin_cases j
+    · show openVmPayloadOk defaultBusMap ((0 : ℕ), [pcFrom, base])
+      simp [openVmPayloadOk, defaultBusMap]
+    all_goals exact absurd hji (by simp [Fin.lt_def]))
+  replace hsend : openVmPayloadOk defaultBusMap
+    ((1 : ℕ), [(1 : ZMod p), ptr, asg x, 0, 0, 0, base + 2]) := hsend
+  have hbyte : isByte (asg x) :=
+    ((openVmPayloadOk_mem_iff ptr (asg x) 0 0 0 (base + 2)).mp hsend).1
   replace hbyte : (((256 : ℕ) : ZMod p)).val < 256 := hbyte
   rw [ZMod.val_natCast_of_lt hp] at hbyte
   omega
@@ -559,43 +404,112 @@ theorem freshWriteChip_statefulPolarity (x : Variable) (ptr t : ZMod p) :
       OpenVmBusType.isStateful] at hst
   · exact Or.inr (Or.inl rfl)
 
-/-- **The fresh write discharges its obligation from its own range check.** The chip has no
-    stateful traffic below the send's rank, so `Circuit.lowerRanksMaintain` gives nothing; what
-    carries it is `Circuit.satisfiesStateless` on the bitwise lookup, whose `op = 1` case is
-    exactly `isByte x`. -/
-theorem freshWriteChip_statefulSendsMaintain (hp : 256 < p) (x : Variable) (ptr t : ZMod p) :
-    (freshWriteChip x ptr t).statefulSendsMaintain (openVmGuestRules defaultBusMap openVmMemBusId)
-      (openVmRank openVmMemBusId) openVmRankBound := by
+/-- The whole chip: an execution-bridge step that range-checks a limb and writes it. -/
+def freshWriteStepChip (x : Variable) (pcFrom pcTo ptr base : ZMod p) : Circuit p where
+  algebraicConstraints := []
+  busInteractions :=
+    [bridgeRecv pcFrom base, freshWriteLookup x, freshWriteSend x ptr (base + 2),
+      bridgeSend pcTo (base + 3)]
+
+/-- **The fresh write discharges its obligation from its own range check.** Nothing stateful
+    precedes the send in its step but the bridge receive, of which `openVmPayloadOk` asks nothing;
+    what carries the invariant is `Circuit.satisfiesStateless` — a hypothesis of
+    `Circuit.hasStepLayout` — on the bitwise lookup, whose `op = 1` case is exactly `isByte x`.
+
+    This is the second of the two shapes an OpenVM memory send has: byte-valued because it was
+    read, or byte-valued because it was checked. -/
+theorem freshWriteStepChip_legalGuest (hp : 256 < p) {maxWindow maxLookback maxInteractions : ℕ}
+    (hw : 3 < maxWindow) (hi4 : 4 ≤ maxInteractions)
+    (x : Variable) (pcFrom pcTo ptr base : ZMod p) :
+    (freshWriteStepChip x pcFrom pcTo ptr base).legalGuest
+      (openVmGuestRules defaultBusMap openVmMemBusId) maxWindow maxLookback maxInteractions := by
   haveI : NeZero p := ⟨by omega⟩
   haveI : Fact (1 < p) := ⟨by omega⟩
-  intro asg _ hacc _ bi hbi hst _ _
-  simp only [freshWriteChip, List.mem_cons, List.not_mem_nil, or_false] at hbi
-  rcases hbi with rfl | rfl
-  · simp [freshWriteLookup, openVmGuestRules, openVmIsStateful, defaultBusMap,
-      OpenVmBusType.isStateful] at hst
-  · have hlook : freshWriteLookup x ∈ (freshWriteChip x ptr t).busInteractions := by
-      simp [freshWriteChip]
-    have hacc' := hacc (freshWriteLookup x) hlook rfl one_ne_zero
-    replace hacc' : (match ((1 : ZMod p)).val with
-      | 0 => isByte (asg x) ∧ isByte (asg x) ∧ ((0 : ZMod p)).val = 0
-      | 1 => isByte (asg x) ∧ isByte (asg x) ∧
-               ((0 : ZMod p)).val = Nat.xor (asg x).val (asg x).val
-      | _ => False) := hacc'
-    rw [ZMod.val_one p] at hacc'
-    have hx : isByte (asg x) := hacc'.1
-    show openVmPayloadOk defaultBusMap ((1 : ℕ), [(1 : ZMod p), ptr, asg x, 0, 0, 0, t])
-    exact (openVmPayloadOk_mem_iff ptr (asg x) 0 0 0 t).mpr
-      ⟨hx, isByte_zero, isByte_zero, isByte_zero⟩
-
-/-- **So the lookup-justified write meets the same bus-facing conditions too.** With
-    `readEchoChip_legalGuest` this covers both shapes an OpenVM memory send has — bare, not
-    wrapped in a bridge step, for the same reason (see `readEchoChip_legalGuest`). -/
-theorem freshWriteChip_legalGuest (hp : 256 < p) (x : Variable) (ptr t : ZMod p) :
-    (freshWriteChip x ptr t).statelessSendOnly (openVmGuestRules defaultBusMap openVmMemBusId) ∧
-      (freshWriteChip x ptr t).statefulPolarity (openVmGuestRules defaultBusMap openVmMemBusId) ∧
-      (freshWriteChip x ptr t).statefulSendsMaintain
-        (openVmGuestRules defaultBusMap openVmMemBusId) (openVmRank openVmMemBusId) openVmRankBound :=
-  ⟨freshWriteChip_statelessSendOnly x ptr t, freshWriteChip_statefulPolarity x ptr t,
-    freshWriteChip_statefulSendsMaintain hp x ptr t⟩
-
-end ApcOptimizer.OpenVM
+  have hcast3 : ((3 : ℕ) : ZMod p) = (3 : ZMod p) := by push_cast; ring
+  have h3 : (3 : ZMod p) ≠ 0 := by
+    intro h
+    have hv := ZMod.val_natCast_of_lt (show 3 < p by omega)
+    rw [hcast3, h, ZMod.val_zero] at hv
+    omega
+  have h2 : ((2 : ℕ) : ZMod p) ≠ 0 := by
+    intro h
+    have hv := ZMod.val_natCast_of_lt (show 2 < p by omega)
+    rw [h, ZMod.val_zero] at hv
+    omega
+  have hneg : (-1 : ZMod p) ≠ 1 := fun hcon => h2 (by push_cast; linear_combination -hcon)
+  refine ⟨?_, ?_, ?_, by simpa [freshWriteStepChip] using hi4⟩
+  · intro asg _ bi hbi hst
+    simp only [freshWriteStepChip, List.mem_cons, List.not_mem_nil, or_false] at hbi
+    rcases hbi with rfl | rfl | rfl | rfl
+    · simp [bridgeRecv, openVmGuestRules, openVmIsStateful, defaultBusMap,
+        OpenVmBusType.isStateful] at hst
+    · exact Or.inr rfl
+    · simp [freshWriteSend, openVmGuestRules, openVmIsStateful, defaultBusMap,
+        OpenVmBusType.isStateful] at hst
+    · simp [bridgeSend, openVmGuestRules, openVmIsStateful, defaultBusMap,
+        OpenVmBusType.isStateful] at hst
+  · intro asg _ bi hbi hst
+    simp only [freshWriteStepChip, List.mem_cons, List.not_mem_nil, or_false] at hbi
+    rcases hbi with rfl | rfl | rfl | rfl
+    · exact Or.inr (Or.inr rfl)
+    · simp [freshWriteLookup, openVmGuestRules, openVmIsStateful, defaultBusMap,
+        OpenVmBusType.isStateful] at hst
+    · exact Or.inr (Or.inl rfl)
+    · exact Or.inr (Or.inl rfl)
+  · intro asg _ hacc
+    refine ⟨⟨[⟨pcFrom, pcTo, base, 3⟩], fun i => (0, (i.val : ℤ)), by simp, by simpa using hw,
+      ?_, ?_, ?_, ?_⟩⟩
+    · refine ClockArc.net_singleton _ ?_ ?_ ?_ ?_
+      · intro hcon
+        rw [Prod.ext_iff] at hcon
+        have hb : base = base + ((3 : ℕ) : ZMod p) := by
+          have hl := hcon.2
+          simp only [List.cons.injEq, and_true] at hl
+          exact hl.2
+        rw [hcast3] at hb
+        exact h3 (by linear_combination -hb)
+      · simp [Circuit.allEffects, freshWriteStepChip, bridgeRecv, bridgeSend, freshWriteLookup,
+          freshWriteSend, BusInteraction.eval, Expression.eval, openVmGuestRules, h3]
+      · simp [Circuit.allEffects, freshWriteStepChip, bridgeRecv, bridgeSend, freshWriteLookup,
+          freshWriteSend, BusInteraction.eval, Expression.eval, openVmGuestRules, h3]
+      · rintro ⟨mb, ml⟩ hbus hr hs
+        simp only [openVmGuestRules] at hbus
+        subst hbus
+        simp only [ne_eq, Prod.mk.injEq, true_and, hcast3, openVmGuestRules] at hr hs
+        simp [Circuit.allEffects, freshWriteStepChip, bridgeRecv, bridgeSend, freshWriteLookup,
+          freshWriteSend, BusInteraction.eval, Expression.eval, Ne.symm hr, Ne.symm hs]
+    · intro i hst _
+      fin_cases i
+      · exact ⟨⟨pcFrom, pcTo, base, 3⟩, by simp, by norm_num, by norm_num, by
+          simp [freshWriteStepChip, bridgeRecv, openVmGuestRules, openVmTimestamp,
+            BusInteraction.eval, Expression.eval, openVmMemBusId, openVmExecBusId]⟩
+      · simp [freshWriteStepChip, freshWriteLookup, openVmGuestRules, openVmIsStateful,
+          defaultBusMap, OpenVmBusType.isStateful] at hst
+      · exact ⟨⟨pcFrom, pcTo, base, 3⟩, by simp, by norm_num, by norm_num, by
+          simp [freshWriteStepChip, freshWriteSend, openVmGuestRules, openVmTimestamp,
+            BusInteraction.eval, Expression.eval, openVmMemBusId]⟩
+      · exact ⟨⟨pcFrom, pcTo, base, 3⟩, by simp, by norm_num, by norm_num, by
+          simp [freshWriteStepChip, bridgeSend, openVmGuestRules, openVmTimestamp,
+            BusInteraction.eval, Expression.eval, openVmMemBusId, openVmExecBusId]⟩
+    · exact fun i j hji _ _ _ _ _ => by simpa using Fin.lt_def.mp hji
+    · intro i hst hmult _
+      fin_cases i
+      · exact absurd hmult hneg
+      · simp [freshWriteStepChip, freshWriteLookup, openVmGuestRules, openVmIsStateful,
+          defaultBusMap, OpenVmBusType.isStateful] at hst
+      · -- The limb is a byte because the chip's own bitwise lookup says so.
+        have hlook : freshWriteLookup x ∈ (freshWriteStepChip x pcFrom pcTo ptr base).busInteractions
+          := by simp [freshWriteStepChip]
+        have hacc' := hacc (freshWriteLookup x) hlook rfl one_ne_zero
+        replace hacc' : (match ((1 : ZMod p)).val with
+          | 0 => isByte (asg x) ∧ isByte (asg x) ∧ ((0 : ZMod p)).val = 0
+          | 1 => isByte (asg x) ∧ isByte (asg x) ∧
+                   ((0 : ZMod p)).val = Nat.xor (asg x).val (asg x).val
+          | _ => False) := hacc'
+        rw [ZMod.val_one p] at hacc'
+        show openVmPayloadOk defaultBusMap
+          ((1 : ℕ), [(1 : ZMod p), ptr, asg x, 0, 0, 0, base + 2])
+        exact (openVmPayloadOk_mem_iff ptr (asg x) 0 0 0 (base + 2)).mpr
+          ⟨hacc'.1, isByte_zero, isByte_zero, isByte_zero⟩
+      · simp [freshWriteStepChip, bridgeSend, openVmGuestRules, openVmPayloadOk, defaultBusMap,
+          BusInteraction.eval, Expression.eval]

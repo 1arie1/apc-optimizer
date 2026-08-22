@@ -129,7 +129,7 @@ theorem illegalCircuit_not_statelessSendOnly [Fact p.Prime] (hp : 2 < p) :
     `openVm_vmSoundReplacement` already does. -/
 theorem soundness_not_legalityPreserving [Fact p.Prime] (hp : 2 < p) :
     (illegalCircuit p).isSoundReplacementOf (legalCircuit p) (toyBusSemantics p) ∧
-      ¬ ∃ rank bound maxWindow maxInteractions,
-        (illegalCircuit p).legalGuest (toyGuestRules p) rank bound maxWindow maxInteractions :=
+      ¬ ∃ maxWindow maxLookback maxInteractions,
+        (illegalCircuit p).legalGuest (toyGuestRules p) maxWindow maxLookback maxInteractions :=
   ⟨illegalCircuit_isSoundReplacementOf,
-    fun ⟨_, _, _, _, hleg⟩ => illegalCircuit_not_statelessSendOnly hp hleg.sendOnly⟩
+    fun ⟨_, _, _, hleg⟩ => illegalCircuit_not_statelessSendOnly hp hleg.sendOnly⟩

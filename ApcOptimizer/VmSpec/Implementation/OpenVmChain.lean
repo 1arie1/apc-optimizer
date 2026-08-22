@@ -37,34 +37,6 @@ variable {p : ℕ}
 
 --------- One instance's clock witness ---------
 
-/-- The witness `Circuit.advancesClock` supplies for one instance, packaged as data so that a
-    whole assignment's worth of witnesses can be chosen at once.
-
-    A *list* of arcs, not one: a fused APC is one arc per fused instruction, chained only by bus
-    balance (`agent-docs/legality-redesign.md`, finding G2). -/
-structure ClockStep (p : ℕ) (c : Circuit p) (asg : ChipAssignment p)
-    (execBusId memBusId maxWindow : ℕ) where
-  /-- The instruction steps this instance performs. -/
-  arcs : List (ClockArc p)
-  dPos : ∀ α ∈ arcs, 0 < α.d
-  dSumLt : (arcs.map (·.d)).sum < maxWindow
-  /-- The instance's bridge net is exactly its arcs' — stated on the sum, so cancelling
-      intermediate states need no witness of their own. -/
-  net : ∀ m : BusMessage p, m.1 = execBusId →
-    c.allEffects asg m = (arcs.map (fun α => α.effect execBusId m)).sum
-  mem : ∀ bi ∈ c.busInteractions, bi.busId = memBusId → (bi.eval asg).multiplicity ≠ 0 →
-    ∃ α ∈ arcs, ∃ δ : ℕ, 0 < δ ∧ δ < α.d ∧
-      openVmMemTimestamp ((bi.eval asg).busId, (bi.eval asg).payload) = α.base + (δ : ZMod p)
-
-theorem clockStep_nonempty {c : Circuit p} {asg : ChipAssignment p} {r : GuestBusRules p}
-    {maxWindow : ℕ}
-    (h : Circuit.advancesClock c r maxWindow) (hsat : c.satisfiesAlgebraic asg)
-    (hget : r.getTimestamp = openVmMemTimestamp := by rfl) :
-    Nonempty (ClockStep p c asg r.execBusId r.memBusId maxWindow) := by
-  obtain ⟨arcs, h1, h2, h3, h4⟩ := h asg hsat
-  rw [hget] at h4
-  exact ⟨⟨arcs, h1, h2, h3, h4⟩⟩
-
 --------- Guest nets as sums over instances ---------
 
 /-- `(l.map f).sum` as a `Finset` sum over positions — what turns `GuestAssignment.busEffect`'s
@@ -166,7 +138,7 @@ theorem openVmHost_bridge_isolated (P : OpenVmParams p)
       haveI : Fact (1 < p) := ⟨hp1⟩
       refine ⟨⟨0, 0, 1, ?_⟩, fun m => ?_⟩
       · rw [ZMod.val_one]
-        norm_num [openVmRankBound, openVmTimestampBits]
+        norm_num [openVmTimestampBound, openVmTimestampBits]
       · simp [connector_busStateOf]
     | [c], _ =>
       obtain ⟨r, hr⟩ : (connectorHostChip (p := p) 0).canProduce c :=
@@ -245,7 +217,8 @@ variable {G : Guest p} {maxWindow : ℕ}
     (`ClockStep.arcs`). -/
 abbrev GuestArc (gA : GuestAssignment p G)
     (S : ∀ x : ((s : Fin G.length) × Fin (gA s).length),
-      ClockStep p (G.get x.1) ((gA x.1).get x.2) 0 1 maxWindow) : Type :=
+      StepLayout (G.get x.1) (openVmGuestRules defaultBusMap openVmMemBusId)
+        ((gA x.1).get x.2) maxWindow openVmTimestampBound) : Type :=
   (x : (s : Fin G.length) × Fin (gA s).length) × Fin (S x).arcs.length
 
 /-- The arcs of a run's execution bridge: one per instruction step of each realized guest
@@ -254,12 +227,14 @@ abbrev GuestArc (gA : GuestAssignment p G)
     connector (`none`). -/
 abbrev BridgeArc (gA : GuestAssignment p G)
     (S : ∀ x : ((s : Fin G.length) × Fin (gA s).length),
-      ClockStep p (G.get x.1) ((gA x.1).get x.2) 0 1 maxWindow) (n : ℕ) : Type :=
+      StepLayout (G.get x.1) (openVmGuestRules defaultBusMap openVmMemBusId)
+        ((gA x.1).get x.2) maxWindow openVmTimestampBound) (n : ℕ) : Type :=
   Option (GuestArc gA S ⊕ Fin n)
 
 variable (gA : GuestAssignment p G) {n : ℕ}
   (S : ∀ x : ((s : Fin G.length) × Fin (gA s).length),
-      ClockStep p (G.get x.1) ((gA x.1).get x.2) 0 1 maxWindow)
+      StepLayout (G.get x.1) (openVmGuestRules defaultBusMap openVmMemBusId)
+        ((gA x.1).get x.2) maxWindow openVmTimestampBound)
   (iR : Fin n → InputRead p) (ptrReg : Nat)
   (r : ConnectorBoundary p)
 
@@ -548,39 +523,82 @@ end Bridge
 
 --------- The rank window ---------
 
-/-- **`openVmHost` keeps its runs inside the rank window** — with no hypotheses left.
+/-- The two stateful buses of `defaultBusMap` are the ones `openVmRank` reads a timestamp from. -/
+theorem openVmIsStateful_default {b : Nat} (h : openVmIsStateful defaultBusMap b = true) :
+    b = openVmMemBusId ∨ b = openVmExecBusId := by
+  match b with
+  | 0 => exact Or.inr rfl
+  | 1 => exact Or.inl rfl
+  | 2 | 3 | 4 | 5 | 6 | 7 | _ + 8 =>
+    simp [openVmIsStateful, defaultBusMap, OpenVmBusType.isStateful] at h
 
-    The last undischarged assumption of the VM-level soundness theorem. The arithmetic it needs is
-    `OpenVmParams.windowOk`, already discharged when `P` was built: `P.maxInstances` instances
-    advancing the clock by less than `P.maxWindow` each cannot wrap `ZMod p`. Everything else
-    comes from the VM — `Circuit.advancesClock`, required of every legal guest, and the
-    connector's range-checked final timestamp. -/
-theorem openVmHost_pinsRanks (P : OpenVmParams p) :
-    (openVmHost P).pinsRanks
-      (openVmRankModel openVmMemBusId) := by
+/-- **A placed interaction's rank, read off the chain.** Its step's `base` is `1 + T` for an
+    honest natural `T`, so the timestamp is `1 + T + off` as an integer — and shifting by the
+    maximum lookback moves that into `[0, openVmRankBound)`, where no wraparound can spoof the
+    order. -/
+theorem rank_of_placed {memBusId : Nat} {m : BusMessage p} {T : ℕ} {off : ℤ} {d : ℕ}
+    (hpp : openVmRankBound < p) (hstate : m.1 = memBusId ∨ m.1 = openVmExecBusId)
+    (hlow : -(openVmTimestampBound : ℤ) ≤ off) (hhigh : off ≤ (d : ℤ))
+    (hfit : 1 + T + d ≤ openVmTimestampBound)
+    (hts : openVmTimestamp memBusId m = ((1 + T : ℕ) : ZMod p) + (off : ZMod p)) :
+    (openVmRank memBusId m : ℤ) = 1 + T + off + openVmRankShift := by
+  haveI : NeZero p := ⟨by have := hpp; omega⟩
+  have hz : ((1 + T : ℕ) : ZMod p) + (off : ZMod p) + ((openVmRankShift : ℕ) : ZMod p)
+      = (((1 + T + off + openVmRankShift : ℤ)) : ZMod p) := by push_cast; ring
+  have hrange : 0 ≤ (1 + T + off + openVmRankShift : ℤ) ∧
+      (1 + T + off + openVmRankShift : ℤ) < p := by
+    have h1 : (openVmRankShift : ℤ) = (openVmTimestampBound : ℤ) := rfl
+    have h2 : ((openVmRankBound : ℕ) : ℤ)
+        = (openVmTimestampBound : ℤ) + (openVmRankShift : ℤ) := by
+      simp [openVmRankBound]
+    have h3 : ((openVmRankBound : ℕ) : ℤ) < (p : ℤ) := by exact_mod_cast hpp
+    constructor
+    · omega
+    · have : (1 : ℤ) + T + off ≤ (openVmTimestampBound : ℤ) := by
+        have : ((1 + T + d : ℕ) : ℤ) ≤ (openVmTimestampBound : ℤ) := by exact_mod_cast hfit
+        push_cast at this
+        omega
+      omega
+  simp only [openVmRank, if_pos hstate, hts, hz]
+  rw [ZMod.val_intCast, Int.emod_eq_of_lt hrange.1 hrange.2]
+
+--------- The rank order ---------
+
+/-- **`openVmHost` turns a step's offsets into a rank order** — with no hypotheses left.
+
+    The last undischarged assumption of the VM-level soundness theorem. Two interactions of one
+    instance placed in the same step sit at `1 + T + off` for the *same* `T` — the step's position
+    on the bridge, which the chain walk pins — so the one with the smaller offset has the smaller
+    rank, and `OpenVmParams.rankWindowOk` is what keeps both inside a window too narrow to wrap.
+
+    The arithmetic it needs is `OpenVmParams.windowOk`, already discharged when `P` was built:
+    `P.maxInstances` instances advancing the clock by less than `P.maxWindow` each cannot wrap
+    `ZMod p`. Everything else comes from the VM — `Circuit.hasStepLayout`, required of every legal
+    guest, and the connector's range-checked final timestamp. -/
+theorem openVmHost_ordersRanks [Fact p.Prime] (P : OpenVmParams p) :
+    (openVmHost P).ordersRanks (openVmRankModel openVmMemBusId)
+      (openVmGuestRules defaultBusMap openVmMemBusId) := by
   classical
   have hp := P.windowOk
   have hppos : 0 < p := Nat.lt_of_le_of_lt (Nat.zero_le _) hp
   haveI : NeZero p := ⟨by omega⟩
-  intro G hGuests a hsat t asg hasg bi hbi hmult
-  show openVmRank openVmMemBusId ((bi.eval asg).busId, (bi.eval asg).payload) < openVmRankBound
-  by_cases hbus : bi.busId = 1
-  swap
-  · have hne : ¬ ((bi.eval asg).busId, (bi.eval asg).payload).1 = 1 := hbus
-    simp only [openVmRank, hne, if_false]
-    exact Nat.two_pow_pos _
-  -- The instance we are bounding, as an index into the assignment.
-  obtain ⟨j, rfl⟩ := List.get_of_mem hasg
-  -- A clock witness for every instance, chosen once.
+  intro G hGuests a hsat t asg hasg L i₀ j₀ hActI hActJ hplace hoff
+  -- The instance we are ordering, as an index into the assignment.
+  obtain ⟨jx, hjx⟩ := List.get_of_mem hasg
+  subst hjx
+  -- A layout for every instance, this one's being the very one we were handed.
   have hNonempty : ∀ x : ((s : Fin G.length) × Fin (a.guestAssignments s).length),
-      Nonempty (ClockStep p (G.get x.1) ((a.guestAssignments x.1).get x.2) 0 1 P.maxWindow) :=
-    fun x => clockStep_nonempty
-      (openVmHost_advancesClock_unpack P _
-        (hGuests _ (List.get_mem G x.1)))
-      (hsat.satisfiesGuest x.1 _ (List.get_mem _ _))
-  have S : ∀ x : ((s : Fin G.length) × Fin (a.guestAssignments s).length),
-      ClockStep p (G.get x.1) ((a.guestAssignments x.1).get x.2) 0 1 P.maxWindow :=
-    fun x => Classical.choice (hNonempty x)
+      Nonempty (StepLayout (G.get x.1) (openVmGuestRules defaultBusMap openVmMemBusId)
+        ((a.guestAssignments x.1).get x.2) P.maxWindow openVmTimestampBound) :=
+    fun x => openVmHost_stepLayout_unpack P _ (hGuests _ (List.get_mem G x.1))
+      _ (hsat.satisfiesGuest x.1 _ (List.get_mem _ _))
+      (satisfiesStateless_of_sinks (openVmHost_legalGuest_unpack P) (openVmHost_sinksAreTables P)
+        hGuests hsat x.1 _ (List.get_mem _ _))
+  let S : ∀ x : ((s : Fin G.length) × Fin (a.guestAssignments s).length),
+      StepLayout (G.get x.1) (openVmGuestRules defaultBusMap openVmMemBusId)
+        ((a.guestAssignments x.1).get x.2) P.maxWindow openVmTimestampBound :=
+    fun x => if h : x = ⟨t, jx⟩ then by subst h; exact L else Classical.choice (hNonempty x)
+  have hSL : S ⟨t, jx⟩ = L := by simp only [S, dif_pos]
   -- The connector, the input-chip instances' own witnesses, and the bridge's balance equation.
   obtain ⟨r, iR, -, -, hrnet⟩ :=
     openVmHost_bridge_isolated P hsat.satisfiesHost
@@ -596,28 +614,48 @@ theorem openVmHost_pinsRanks (P : OpenVmParams p) :
     hsat.withinBudget
   have hcountI : (a.hostAssignment (openVmInputChip P)).length ≤ P.maxInputInstances :=
     hsat.satisfiesHost.withinBound (openVmInputChip P)
-  -- The memory access sits strictly inside one of this instance's own steps.
-  obtain ⟨α, hαmem, δ, hδpos, hδlt, hδeq⟩ := (S ⟨t, j⟩).mem bi hbi hbus hmult
-  obtain ⟨k, hk⟩ := List.get_of_mem hαmem
+  -- Both interactions are placed in the same step, so they share its position on the bridge.
+  obtain ⟨αI, hαI, hlowI, hhighI, htsI⟩ := L.placed i₀ hActI.1 hActI.2
+  obtain ⟨αJ, hαJ, hlowJ, hhighJ, htsJ⟩ := L.placed j₀ hActJ.1 hActJ.2
+  rw [hplace] at hαJ
+  have hαeq : αJ = αI := by
+    rw [hαI] at hαJ; exact Option.some_inj.mp hαJ.symm
+  subst hαeq
+  obtain ⟨k, hk⟩ : ∃ k : Fin L.arcs.length, L.arcs.get k = αJ := by
+    obtain ⟨k, hk⟩ := List.getElem?_eq_some_iff.mp hαI
+    exact ⟨⟨(L.place i₀).1, k⟩, hk⟩
   obtain ⟨T, hbase, hfit⟩ :=
     bridge_chain_bound a.guestAssignments S iR P.ptrReg r hbal P.inputWindowOk hcount hcountI hp
-      ⟨⟨t, j⟩, k⟩
-  rw [show guestArc a.guestAssignments S ⟨⟨t, j⟩, k⟩ = α from hk] at hbase hfit
-  have hlt : 1 + T + δ < p := by
-    have := ZMod.val_lt r.finalTimestamp
+      ⟨⟨t, jx⟩, hSL ▸ k⟩
+  have harc : guestArc a.guestAssignments S ⟨⟨t, jx⟩, hSL ▸ k⟩ = αJ := by
+    simp only [guestArc]
+    rw [← hk]
+    congr 1 <;> simp [hSL]
+  rw [harc] at hbase hfit
+  -- Same step, same `T`: the offsets decide.
+  have hfit' : 1 + T + αJ.d ≤ openVmTimestampBound := by
+    have := r.finalTimestampBounded
     omega
-  set asg := (a.guestAssignments t).get j with hasgdef
-  have hts : openVmMemTimestamp ((bi.eval asg).busId, (bi.eval asg).payload)
-      = ((1 + T + δ : ℕ) : ZMod p) := by
-    rw [hδeq, hbase]
-    push_cast
-    ring
-  have hrank : openVmRank openVmMemBusId ((bi.eval asg).busId, (bi.eval asg).payload)
-      = (openVmMemTimestamp ((bi.eval asg).busId, (bi.eval asg).payload)).val := by
-    simp only [openVmRank, openVmMemTimestamp]
-    rw [if_pos (show ((bi.eval asg).busId, (bi.eval asg).payload).1 = 1 from hbus)]
-  rw [hrank, hts, ZMod.val_cast_of_lt hlt]
-  have := r.finalTimestampBounded
+  have hbase' : ∀ (x : Fin (G.get t).busInteractions.length) (off : ℤ),
+      openVmTimestamp openVmMemBusId ((G.get t).msgAt ((a.guestAssignments t).get jx) x)
+          = αJ.base + (off : ZMod p) →
+        openVmTimestamp openVmMemBusId ((G.get t).msgAt ((a.guestAssignments t).get jx) x)
+          = ((1 + T : ℕ) : ZMod p) + (off : ZMod p) := by
+    intro x off h
+    rw [h, hbase]
+  have hstate : ∀ x : Fin (G.get t).busInteractions.length,
+      (G.get t).activeStateful (openVmGuestRules defaultBusMap openVmMemBusId)
+          ((a.guestAssignments t).get jx) x →
+        ((G.get t).msgAt ((a.guestAssignments t).get jx) x).1 = openVmMemBusId ∨
+          ((G.get t).msgAt ((a.guestAssignments t).get jx) x).1 = openVmExecBusId :=
+    fun x hx => openVmIsStateful_default hx.1
+  have hI := rank_of_placed (memBusId := openVmMemBusId) P.rankWindowOk (hstate i₀ hActI)
+    hlowI hhighI hfit' (hbase' i₀ _ htsI)
+  have hJ := rank_of_placed (memBusId := openVmMemBusId) P.rankWindowOk (hstate j₀ hActJ)
+    hlowJ hhighJ hfit' (hbase' j₀ _ htsJ)
+  show (openVmRankModel (p := p) openVmMemBusId).rank _
+    < (openVmRankModel (p := p) openVmMemBusId).rank _
+  simp only [openVmRankModel]
   omega
 
 /-- **`openVmHost`'s input-chip instances run at pairwise distinct times.** Closes `A2`'s residual
@@ -627,7 +665,7 @@ theorem openVmHost_pinsRanks (P : OpenVmParams p) :
     instruction (`InputRead.pcFrom`/`pcTo`), two different realized instances are two
     different non-connector arcs of the very same `VmChain.Chain` — and `Chain.time_injOn`
     already rules out two different arcs sharing a clock reading. -/
-theorem openVmHost_inputTime_injOn (P : OpenVmParams p)
+theorem openVmHost_inputTime_injOn [Fact p.Prime] (P : OpenVmParams p)
     {G : Guest p} (hGuests : (openVmHost P).legalGuests G)
     {a : VmAssignment p ⟨openVmHost P, G⟩} (hsat : VmSat ⟨openVmHost P, G⟩ a) :
     Set.InjOn (fun i => (openVmHost P).getInputTime (openVmInputChip P)
@@ -638,13 +676,15 @@ theorem openVmHost_inputTime_injOn (P : OpenVmParams p)
   have hppos : 0 < p := Nat.lt_of_le_of_lt (Nat.zero_le _) hp
   haveI : NeZero p := ⟨by omega⟩
   have hNonempty : ∀ x : ((s : Fin G.length) × Fin (a.guestAssignments s).length),
-      Nonempty (ClockStep p (G.get x.1) ((a.guestAssignments x.1).get x.2) 0 1 P.maxWindow) :=
-    fun x => clockStep_nonempty
-      (openVmHost_advancesClock_unpack P _
-        (hGuests _ (List.get_mem G x.1)))
-      (hsat.satisfiesGuest x.1 _ (List.get_mem _ _))
+      Nonempty (StepLayout (G.get x.1) (openVmGuestRules defaultBusMap openVmMemBusId)
+        ((a.guestAssignments x.1).get x.2) P.maxWindow openVmTimestampBound) :=
+    fun x => openVmHost_stepLayout_unpack P _ (hGuests _ (List.get_mem G x.1))
+      _ (hsat.satisfiesGuest x.1 _ (List.get_mem _ _))
+      (satisfiesStateless_of_sinks (openVmHost_legalGuest_unpack P) (openVmHost_sinksAreTables P)
+        hGuests hsat x.1 _ (List.get_mem _ _))
   have S : ∀ x : ((s : Fin G.length) × Fin (a.guestAssignments s).length),
-      ClockStep p (G.get x.1) ((a.guestAssignments x.1).get x.2) 0 1 P.maxWindow :=
+      StepLayout (G.get x.1) (openVmGuestRules defaultBusMap openVmMemBusId)
+        ((a.guestAssignments x.1).get x.2) P.maxWindow openVmTimestampBound :=
     fun x => Classical.choice (hNonempty x)
   obtain ⟨r, iR, -, hiRtime, hrnet⟩ :=
     openVmHost_bridge_isolated P hsat.satisfiesHost

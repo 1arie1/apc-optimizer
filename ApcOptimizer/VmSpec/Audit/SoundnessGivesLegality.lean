@@ -422,14 +422,14 @@ def poisonedStepChip (p : ℕ) : Circuit p where
       ⟨rangeBusId, .var multVar, [.const 0, .var widthVar]⟩,
       ⟨rangeBusId, .var multVar, [.const 0, .const 0]⟩ ]
 
-/-- `checkedStepChip` is a chip `openVmHost` will run: all five clauses of `Circuit.legalGuest`,
-    including `Circuit.advancesClock`, at any window above one tick. -/
+/-- `checkedStepChip` is a chip `openVmHost` will run: every clause of `Circuit.legalGuest`,
+    step layout included, at any window above one tick. -/
 private theorem checkedStepChip_legalGuest [Fact p.Prime] (hp : 18 < p)
-    {maxWindow maxInteractions : ℕ} (hw : 1 < maxWindow) (hi : 3 ≤ maxInteractions) :
+    {maxWindow maxLookback maxInteractions : ℕ} (hw : 1 < maxWindow) (hi : 3 ≤ maxInteractions) :
     (checkedStepChip p).legalGuest (openVmGuestRules defaultBusMap openVmMemBusId)
-      (openVmRank openVmMemBusId) openVmRankBound maxWindow maxInteractions := by
+      maxWindow maxLookback maxInteractions := by
   haveI : Fact (1 < p) := ⟨by omega⟩
-  refine ⟨?_, ?_, ?_, ?_, by simp [checkedStepChip]; omega⟩
+  refine ⟨?_, ?_, ?_, by simp [checkedStepChip]; omega⟩
   · intro asg _ bi hbi hst
     simp only [checkedStepChip, List.mem_cons, List.not_mem_nil, or_false] at hbi
     rcases hbi with rfl | rfl | rfl <;>
@@ -440,34 +440,50 @@ private theorem checkedStepChip_legalGuest [Fact p.Prime] (hp : 18 < p)
     rcases hbi with rfl | rfl | rfl <;>
       simp_all [openVmGuestRules, openVmIsStateful, defaultBusMap, OpenVmBusType.isStateful,
         BusInteraction.eval, Expression.eval, openVmExecBusId]
-  · intro asg _ _ _ bi hbi hst hmult _
-    simp only [checkedStepChip, List.mem_cons, List.not_mem_nil, or_false] at hbi
-    rcases hbi with rfl | rfl | rfl <;>
-      simp_all [openVmGuestRules, openVmIsStateful, openVmPayloadOk, defaultBusMap,
-        OpenVmBusType.isStateful, BusInteraction.eval, Expression.eval, openVmExecBusId]
-  · intro asg _
-    refine ⟨[⟨0, 0, 0, 1⟩], by simp, by simpa using hw,
-      ClockArc.net_singleton _ ?_ ?_ ?_ ?_, ?_⟩
-    · intro hcon
-      simp only [Prod.mk.injEq, List.cons.injEq, zero_add, Nat.cast_one, and_true,
-        true_and] at hcon
-      exact absurd hcon (zero_ne_one' (ZMod p))
-    · simp [Circuit.allEffects, checkedStepChip, BusInteraction.eval, Expression.eval,
-        openVmGuestRules, openVmExecBusId]
-    · simp [Circuit.allEffects, checkedStepChip, BusInteraction.eval, Expression.eval,
-        openVmGuestRules, openVmExecBusId]
-    · intro m hm h1 h2
-      simp only [openVmGuestRules] at hm h1 h2
-      have e1 : ¬ ((openVmExecBusId, [(0 : ZMod p), 0]) = m) := fun h => h1 h.symm
-      have e2 : ¬ ((openVmExecBusId, [(0 : ZMod p), 1]) = m) := by
-        intro h; exact h2 (by simpa using h.symm)
-      have e3 : ¬ ((rangeBusId, [(0 : ZMod p), 0]) = m) := by
-        intro h; rw [← h] at hm; simp [rangeBusId] at hm
-      simp [Circuit.allEffects, checkedStepChip, BusInteraction.eval, Expression.eval, e1, e2, e3]
-    · intro bi hbi hmem _
-      simp only [checkedStepChip, List.mem_cons, List.not_mem_nil, or_false] at hbi
-      rcases hbi with rfl | rfl | rfl <;>
-        simp_all [openVmGuestRules, openVmMemBusId, openVmExecBusId, rangeBusId]
+  · -- One step, `(0, 0) → (0, 1)`, with each interaction's offset its own position in the list.
+    intro asg _ _
+    refine ⟨⟨[⟨0, 0, 0, 1⟩], fun i => (0, (i.val : ℤ)), by simp, by simpa using hw, ?_, ?_,
+      ?_, ?_⟩⟩
+    · refine ClockArc.net_singleton _ ?_ ?_ ?_ ?_
+      · intro hcon
+        simp only [Prod.mk.injEq, List.cons.injEq, zero_add, Nat.cast_one, and_true,
+          true_and] at hcon
+        exact absurd hcon (zero_ne_one' (ZMod p))
+      · simp [Circuit.allEffects, checkedStepChip, BusInteraction.eval, Expression.eval,
+          openVmGuestRules, openVmExecBusId]
+      · simp [Circuit.allEffects, checkedStepChip, BusInteraction.eval, Expression.eval,
+          openVmGuestRules, openVmExecBusId]
+      · intro m hm h1 h2
+        simp only [openVmGuestRules] at hm h1 h2
+        have e1 : ¬ ((openVmExecBusId, [(0 : ZMod p), 0]) = m) := fun h => h1 h.symm
+        have e2 : ¬ ((openVmExecBusId, [(0 : ZMod p), 1]) = m) := by
+          intro h; exact h2 (by simpa using h.symm)
+        have e3 : ¬ ((rangeBusId, [(0 : ZMod p), 0]) = m) := by
+          intro h; rw [← h] at hm; simp [rangeBusId] at hm
+        simp [Circuit.allEffects, checkedStepChip, BusInteraction.eval, Expression.eval, e1, e2, e3]
+    · intro i hst _
+      fin_cases i
+      · exact ⟨⟨0, 0, 0, 1⟩, by simp, by simp, by norm_num, by
+          simp [checkedStepChip, openVmGuestRules, openVmTimestamp, BusInteraction.eval,
+            Expression.eval, openVmExecBusId, openVmMemBusId]⟩
+      · exact ⟨⟨0, 0, 0, 1⟩, by simp, by simp, by norm_num, by
+          simp [checkedStepChip, openVmGuestRules, openVmTimestamp, BusInteraction.eval,
+            Expression.eval, openVmExecBusId, openVmMemBusId]⟩
+      · simp [checkedStepChip, openVmGuestRules, openVmIsStateful, defaultBusMap,
+          OpenVmBusType.isStateful, rangeBusId] at hst
+    · exact fun i j hji _ _ _ _ _ => by simpa using Fin.lt_def.mp hji
+    · intro i hst hmult _
+      fin_cases i
+      · exfalso
+        simp only [checkedStepChip, BusInteraction.eval, Expression.eval, List.get] at hmult
+        have h2 : ((2 : ℕ) : ZMod p) = 0 := by push_cast; linear_combination -hmult
+        have hv := ZMod.val_natCast_of_lt (show 2 < p by omega)
+        rw [h2, ZMod.val_zero] at hv
+        omega
+      · simp [checkedStepChip, openVmGuestRules, openVmPayloadOk, defaultBusMap,
+          BusInteraction.eval, Expression.eval, openVmExecBusId]
+      · simp [checkedStepChip, openVmGuestRules, openVmIsStateful, defaultBusMap,
+          OpenVmBusType.isStateful, rangeBusId] at hst
 
 /-- **The residue, against a chip OpenVM would actually run.** `looseRangeCheck` leaves two ways
     out: its lookup is in no table on *any* assignment, so the chip has no satisfying assignment at
@@ -489,9 +505,9 @@ private theorem checkedStepChip_legalGuest [Fact p.Prime] (hp : 18 < p)
     `18 < p` only keeps the out-of-table width, the offending multiplicity `2`, `0` and `1`
     distinct field elements. -/
 theorem openVm_sound_but_illegal [Fact p.Prime] (hp : 18 < p)
-    {maxWindow maxInteractions : ℕ} (hw : 1 < maxWindow) (hi : 3 ≤ maxInteractions) :
+    {maxWindow maxLookback maxInteractions : ℕ} (hw : 1 < maxWindow) (hi : 3 ≤ maxInteractions) :
     (checkedStepChip p).legalGuest (openVmGuestRules defaultBusMap openVmMemBusId)
-        (openVmRank openVmMemBusId) openVmRankBound maxWindow maxInteractions ∧
+        maxWindow maxLookback maxInteractions ∧
       (poisonedStepChip p).isSoundReplacementOf (checkedStepChip p)
         (openVmBusSemantics p defaultBusMap) ∧
       (∃ asg, (poisonedStepChip p).satisfies (openVmBusSemantics p defaultBusMap) asg) ∧

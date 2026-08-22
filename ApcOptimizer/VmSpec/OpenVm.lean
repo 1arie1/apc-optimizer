@@ -320,17 +320,20 @@ noncomputable def outputArrayOf (memBusId : Nat) (contribution : BusState p) : V
   if h : ∃ r : OutputRead p, contribution = busStateOf (r.interactions memBusId)
   then h.choose.words else []
 
-/-- OpenVM's ordering on stateful state: a memory record's timestamp — payload field `6`, right
-    after the four data limbs read by `memoryPayload?` — as an honest natural number, which is what
-    makes `<` well-founded and `maintains_of_stateful_active`'s induction possible. Off the memory
-    bus the rank is `0`; the execution bridge's `openVmPayloadOk` is vacuous, so it needs nothing
-    from the induction.
+/-- The timestamp a stateful message carries: payload index `6` for a memory record
+    `(addr_space, ptr, data…, t)`, right after the four data limbs (whitepaper §4.6), and index `1`
+    for an execution-bridge state `(pc, t)` (§4.5). Off both, `0`.
+
+    Reading the bridge too is what lets `StepLayout` place *every* stateful interaction in a step's
+    window on one scale, so that `StepLayout.ordered` can be stated across buses: a step's bridge
+    receive sits at offset `0`, its memory accesses in between, and its bridge send at offset `d`.
 
     The index is positional rather than `getLast?` so that it agrees with `memoryPayload?` on every
-    payload: a payload too short to be a memory record (`memoryPayload? = none`) gets rank `0`
-    instead of a data limb misread as a timestamp, and a longer one still reads field `6`. -/
-def openVmRank (memBusId : Nat := openVmMemBusId) : BusMessage p → ℕ :=
-  fun m => if m.1 = memBusId then (m.2[6]?.getD 0).val else 0
+    payload: a payload too short to be a memory record (`memoryPayload? = none`) reads `0` instead
+    of a data limb misread as a timestamp, and a longer one still reads field `6`. -/
+def openVmTimestamp (memBusId : Nat := openVmMemBusId) : BusMessage p → ZMod p :=
+  fun m => if m.1 = memBusId then m.2[6]?.getD 0
+    else if m.1 = openVmExecBusId then m.2[1]?.getD 0 else 0
 
 /-- OpenVM's `MemoryConfig.timestamp_max_bits`: "all timestamps must be in the range
     `[0, 2 ^ timestamp_max_bits)`". Capped at `29` by OpenVM itself, and `29` is its default.
@@ -341,10 +344,35 @@ def openVmRank (memBusId : Nat := openVmMemBusId) : BusMessage p → ℕ :=
     hence `29`. -/
 def openVmTimestampBits : ℕ := 29
 
-/-- The `RankModel.bound` that goes with `openVmRank` (see `openVmRankModel`): OpenVM pins every
-    timestamp below this, its connector chip range-checking the final timestamp of a segment. -/
-def openVmRankBound : ℕ := 2 ^ openVmTimestampBits
+/-- The ceiling every timestamp in a segment sits below, and — the same constant, and not by
+    accident — the furthest back a memory access may reach. The lt gadget is sized so that any
+    difference between two legitimate timestamps fits in it, which is why merging accesses can
+    never push one out of its range: both endpoints stay in `[0, openVmTimestampBound)`.
 
+    This is `Circuit.hasStepLayout`'s `maxLookback` for OpenVM, and the bound
+    `ConnectorBoundary.finalTimestampBounded` range-checks. -/
+def openVmTimestampBound : ℕ := 2 ^ openVmTimestampBits
+
+/-- How far `openVmRank` shifts a timestamp before reading it as a natural.
+
+    A memory *receive* names a record from before its own step, so its offset from the step's base
+    is negative and its raw `.val` may have wrapped. Shifting by the maximum lookback moves the
+    whole window `[-maxLookback, maxWindow)` into the non-negative naturals, which is what makes
+    the rank monotone in the offset — the one thing the soundness induction needs of it. -/
+def openVmRankShift : ℕ := openVmTimestampBound
+
+/-- OpenVM's ordering on stateful state: a message's timestamp, shifted into the naturals by
+    `openVmRankShift`, which is what makes `<` well-founded and
+    `maintains_of_stateful_active`'s induction possible. Off the stateful buses the rank is `0`;
+    nothing there needs the induction. -/
+def openVmRank (memBusId : Nat := openVmMemBusId) : BusMessage p → ℕ :=
+  fun m => if m.1 = memBusId ∨ m.1 = openVmExecBusId then
+    ((openVmTimestamp memBusId m) + (openVmRankShift : ZMod p)).val else 0
+
+/-- The `RankModel.bound` that goes with `openVmRank` (see `openVmRankModel`): the timestamp
+    ceiling plus the shift that makes room for a step's lookback. `2 ^ 30` for the default
+    configuration — exactly the headroom OpenVM already reserves for `AssertLtSubAir`. -/
+def openVmRankBound : ℕ := openVmTimestampBound + openVmRankShift
 
 /-- Which OpenVM buses carry VM state: the execution bridge and memory (`OpenVmBusType.isStateful`);
     the four lookup tables do not, and an unmapped id carries nothing. -/
@@ -387,7 +415,7 @@ def openVmGuestRules (busMap : BusMap) (memBusId : Nat) : GuestBusRules p where
   payloadOk := openVmPayloadOk busMap
   execBusId := openVmExecBusId
   memBusId := memBusId
-  getTimestamp := openVmMemTimestamp
+  getTimestamp := openVmTimestamp memBusId
 
 /-- A witness that the connector chip's contribution closes a segment's execution bridge: the
     segment's initial and final `(pc, timestamp)` states.
@@ -401,7 +429,7 @@ structure ConnectorBoundary (p : ℕ) where
   finalPc : ZMod p
   finalTimestamp : ZMod p
   /-- `VmConnectorAir` range-checks every row's `timestamp` to `openVmTimestampBits` bits. -/
-  finalTimestampBounded : finalTimestamp.val < openVmRankBound
+  finalTimestampBounded : finalTimestamp.val < openVmTimestampBound
 
 /-- The bus interactions a `ConnectorBoundary` describes. `ExecutionBus::execute(_, _, prev, next)`
     receives `prev` and sends `next`, and `VmConnectorAir` calls it with `prev` the *final* state
@@ -456,6 +484,11 @@ structure OpenVmParams (p : ℕ) where
   /-- An input-chip instance's own clock advance fits the window too. Pinned rather than
       per-witness, since `inputStepWindow` is a constant (`inputHostChip`). -/
   inputWindowOk : inputStepWindow < maxWindow
+  /-- The rank window fits in the field: a timestamp below the ceiling, shifted by the maximum
+      lookback, is still an honest natural. This is OpenVM's own `2 ^ (timestamp_max_bits + 1) < p`
+      — the condition that caps `timestamp_max_bits` at `29` for BabyBear, and exactly the headroom
+      `AssertLtSubAir` already needs. -/
+  rankWindowOk : openVmRankBound < p
 
 /-- A concrete OpenVM `Host`: `defaultBusMap`'s four stateless lookup tables (default bus ids),
     memory initialization (all-zero) and finalization, the output chip, a `HINT_STOREW` input chip
@@ -472,10 +505,11 @@ structure OpenVmParams (p : ℕ) where
 noncomputable def openVmHost (P : OpenVmParams p) : Host p where
   maxInstances := P.maxInstances
   maxWindow := P.maxWindow
+  maxLookback := openVmTimestampBound
   maxInteractions := P.maxInteractions
   legalGuest c :=
-    c.legalGuest (openVmGuestRules defaultBusMap openVmMemBusId) (openVmRank openVmMemBusId)
-      openVmRankBound P.maxWindow P.maxInteractions
+    c.legalGuest (openVmGuestRules defaultBusMap openVmMemBusId) P.maxWindow
+      openVmTimestampBound P.maxInteractions
   chips :=
     [ pcLookupHostChip, bitwiseLookupHostChip, variableRangeCheckerHostChip,
       tupleRangeCheckerHostChip, memoryInitHostChip,

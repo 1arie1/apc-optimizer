@@ -125,7 +125,6 @@ ApcOptimizer.OpenVM.exists_of_busStateOf_ne_zero
 ApcOptimizer.OpenVM.OutputRead.interactions_busId
 ApcOptimizer.OpenVM.InputRead.interactions_busId
 ApcOptimizer.OpenVM.ConnectorBoundary.interactions_busId
-ApcOptimizer.OpenVM.openVmHost_advancesClock_unpack
 ApcOptimizer.OpenVM.openVmHost_sinksAreTables
 ApcOptimizer.OpenVM.openVmHost_forcesAccepts
 ApcOptimizer.OpenVM.openVmHost_realizes
@@ -186,7 +185,6 @@ VmChain.cycleSet_eq_univ
 VmChain.exists_index_of_ne_conn
 VmChain.Chain.time_injOn
 VmChain.Chain.src_injOn
-ApcOptimizer.OpenVM.clockStep_nonempty
 ApcOptimizer.OpenVM.list_map_sum_eq_sum_fin
 ApcOptimizer.OpenVM.guestNet_eq_sum_inst
 ApcOptimizer.OpenVM.connector_busStateOf
@@ -200,12 +198,19 @@ ApcOptimizer.OpenVM.card_bridgeArc
 ApcOptimizer.OpenVM.bridge_balanced
 ApcOptimizer.OpenVM.bridge_advPos
 ApcOptimizer.OpenVM.clockStep_arcs_length_lt
+ApcOptimizer.OpenVM.readEchoChip_limbs
+ApcOptimizer.OpenVM.stepChip_hasStepLayout
+ApcOptimizer.OpenVM.earlyEchoChip_not_legalGuest
+ApcOptimizer.OpenVM.freshWriteStepChip_legalGuest
+ApcOptimizer.OpenVM.openVmIsStateful_default
+ApcOptimizer.OpenVM.rank_of_placed
+ApcOptimizer.OpenVM.openVmHost_ordersRanks
+ApcOptimizer.OpenVM.openVmHost_stepLayout_unpack
 ApcOptimizer.OpenVM.sum_arcs_length_le
 ApcOptimizer.OpenVM.bridge_advTime
 ApcOptimizer.OpenVM.bridge_total_le
 ApcOptimizer.OpenVM.bridge_totalLt
 ApcOptimizer.OpenVM.bridge_chain_bound
-ApcOptimizer.OpenVM.openVmHost_pinsRanks
 ApcOptimizer.OpenVM.openVmHost_inputTime_injOn
 
 # `OpenVmLegalAudit.lean` checks `Circuit.legalGuest` against both OpenVM memory-send shapes: the
@@ -214,25 +219,15 @@ ApcOptimizer.OpenVM.openVmHost_inputTime_injOn
 # execution-bridge step `Circuit.advancesClock` needs, giving the one instance in the file that
 # is a genuine `Circuit.legalGuest`, not just the three bus-facing conditions.
 # Nothing here feeds a correctness proof — the file exists so the findings cannot silently rot.
-ApcOptimizer.OpenVM.openVmRank_mem
 ApcOptimizer.OpenVM.openVmPayloadOk_mem_iff
 ApcOptimizer.OpenVM.readEchoChip_statelessSendOnly
 ApcOptimizer.OpenVM.readEchoChip_statefulPolarity
 ApcOptimizer.OpenVM.readEcho_limbs
-ApcOptimizer.OpenVM.readEchoChip_limbs
-ApcOptimizer.OpenVM.readEcho_timestamps_increase
-ApcOptimizer.OpenVM.readEchoChip_timestamps_increase
-ApcOptimizer.OpenVM.readEchoChip_statefulSendsMaintain
-ApcOptimizer.OpenVM.readEchoChip_legalGuest
-ApcOptimizer.OpenVM.staleEchoChip_not_legalGuest
 ApcOptimizer.OpenVM.freshWriteChip_statelessSendOnly
 ApcOptimizer.OpenVM.freshWriteChip_statefulPolarity
-ApcOptimizer.OpenVM.freshWriteChip_statefulSendsMaintain
 ApcOptimizer.OpenVM.freshWriteChip_legalGuest
-ApcOptimizer.OpenVM.stepChip_advancesClock
 ApcOptimizer.OpenVM.stepChip_statelessSendOnly
 ApcOptimizer.OpenVM.stepChip_statefulPolarity
-ApcOptimizer.OpenVM.stepChip_statefulSendsMaintain
 ApcOptimizer.OpenVM.stepChip_legalGuest
 
 # `Analysis/SendOnlyPolarity.lean` is a translation-validation checker: nothing in the correctness
