@@ -36,10 +36,12 @@ set_option autoImplicit false
     (`Audit/RealApcLegality.lean`). That constraint is not linear, so no pin rule comes off it; a
     booleanity tier is the natural next one and is not attempted here.
 
-    The third clause of `Circuit.legalGuest`, `statefulSendsMaintain`, is not covered: it is a claim
-    about payload *values* (byte discipline, timestamp ordering) that depends on how a chip computes
-    what it sends, not on the multiplicity alone, and needs semantic reasoning this syntactic pass
-    cannot give. -/
+    The third clause of `Circuit.legalGuest`, `stepLayout`, is not covered. Part of it would yield
+    to a pass of this kind — the arcs are readable off the bridge interactions, and `ordered` is
+    already a numeric check — but `placed` needs the lt gadget recognized in both the shapes powdr
+    leaves it in, and `sendsOk` is a claim about payload *values* (byte discipline) that depends on
+    how a chip computes what it sends. `Audit/RealApcLegality.lean` proves it by hand for one
+    circuit instead. -/
 
 variable {p : ℕ}
 

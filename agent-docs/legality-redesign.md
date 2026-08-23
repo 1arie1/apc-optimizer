@@ -244,14 +244,17 @@ Its 22 memory interactions place three per arc (two reads and a write, offsets `
 two reads at `0, 1`), each receive at `δ - 1 - n` for its own gadget's `δ`. (3) and (4) hold
 within each arc by the same reading as above.
 
-### Not yet checked: (5) for `apc2105000Opt`
+### (5) for `apc2105000Opt` — settled
 
 Four of the five sends are easy — three echo a receive that precedes them (`a__*_0` from idx 0,
 `a__*_1` from idx 4), and idx 11 sends literal zeros. The fifth (idx 9,
 `[1, 44, a__0_2, 0, 0, 0, base+9]`) needs `a__0_2` to be a byte, which is reachable only through
 the bitwise lookup at idx 7 — `[a__0_0, 3, a__0_0 + 3 - 2·a__0_2, 1]`, op `1`, i.e. `z = x XOR y`,
-giving `a__0_2 = a__0_0 AND 3`. That is a real proof against `ApcOptimizer.OpenVM.accepts`'s
-bitwise arm, and it is the open question this design does not settle.
+giving `a__0_2 = a__0_0 AND 3`.
+
+That was the open question this design did not settle; `isByte_of_xorThree` settles it. `2` is a
+unit in BabyBear (`1006632961 * 2 = 1`), so `z = x + 3 - 2·a` together with `z = x XOR 3` pins
+`a = x AND 3` outright — no primality, no case split on `x`.
 
 ## Legality preservation
 
@@ -278,8 +281,12 @@ directions: its `hLegal` quantifies over `G ++ G'`, the optimizer's input *and* 
 | | `Unopt` (000) | `Opt` (039) | `Gated` (040) |
 | --- | --- | --- | --- |
 | `statelessSendOnly` / `statefulPolarity` | proved | proved | true, out of checker reach |
-| `hasStepLayout` (1)–(4) | **true**, four arcs | **true**, one arc | **false** (G1) |
-| `hasStepLayout` (5) | ? | open (the `a__0_2` question) | ? |
+| `hasStepLayout` (1)–(3), (5) | four arcs, not proved | **proved** (`88d8095`) | not proved |
+| `hasStepLayout` (4) | not in the clause as landed — see the implementation status below |||
+
+`Gated` is no longer *false*: its padding row is admissible under the arc form
+(`apc2105000Gated_padding_bridge`), so what is left is a case split on `is_valid`, which needs
+`ZMod babyBear` to be a domain — i.e. primality, which this checkout's `norm_num` cannot supply.
 
 ### The G2 correction
 
@@ -293,10 +300,12 @@ which a per-chip clause may not assume.
 G2 is not a defect of the circuit at all. It is the clause asserting that an instance is one
 instruction step, when a fused APC is four. Arcs are the fix, and G2 closes with them.
 
-**G1 is untouched and does stem from that mechanism**: stage 040's `is_valid` padding row makes the
-all-zero assignment algebraically satisfying, so no bridge witness exists at all. Whether legality
-is stated on `satisfiesAlgebraic`, on `Circuit.satisfies`, or gated on an activity flag is a
-separate decision, and the natural next piece of work.
+**G1 closes too, and not by that mechanism.** Stage 040's `is_valid` padding row makes the all-zero
+assignment algebraically satisfying, and under `Circuit.advancesClock` that was fatal — the clause
+demanded a bridge receive netting `-1`, which an all-zero row cannot supply. Under the arc form the
+empty list is a witness (`apc2105000Gated_padding_bridge`), and `placed`/`ordered`/`sendsOk` are
+then vacuous. So no decision about `satisfiesAlgebraic` vs `Circuit.satisfies` is forced after
+all.
 
 ## Deliberately out of scope
 
@@ -316,19 +325,36 @@ Landed (`7e8e37c`, `585de62`, `4911a26`, `b1bcef6`); `lake build` clean and
    The step count needs no new configuration field: each arc advances by at least one tick and
    they total less than `maxWindow`, so `windowOk` still covers the arc count.
 2. ✅ **Arcs in the clause**, stated on the sum of arc effects.
-3. ✅ **`StepLayout`.** `Circuit.legalGuest` is `{ sendOnly, polarity, stepLayout, size }`; `rank`,
-   `rankBound`, `Circuit.ranksBounded` and `Circuit.lowerRanksMaintain` are off the audited
-   surface. `Host.pinsRanks` became `Host.ordersRanks`, `openVmRank` gained the shift, and the
-   audit chips were reworked (`stepChip` full layout, `earlyEchoChip` negative, `freshWriteStepChip`
-   for the lookup-justified send).
+3. ⚠️ **`StepLayout`, minus condition (4).** `Circuit.legalGuest` is
+   `{ sendOnly, polarity, stepLayout, size }`; `rank`, `rankBound`, `Circuit.ranksBounded` and
+   `Circuit.lowerRanksMaintain` are off the audited surface. `Host.pinsRanks` became
+   `Host.ordersRanks`, `openVmRank` gained the shift, and the audit chips were reworked
+   (`stepChip` full layout, `earlyEchoChip` negative, `freshWriteStepChip` for the
+   lookup-justified send).
+
+   **Condition (4) — the memory-access decomposition — was not implemented.** The landed
+   `StepLayout` is `{ arcs, place, dPos, dSumLt, net, placed, ordered, sendsOk }`, with no access
+   list. So legality as it stands says nothing about memory consistency: a guest may send a record
+   at an address it never received one at, and no clause objects. Nothing downstream noticed,
+   because `payloadOk` is the only global invariant this development establishes — but (4) is also
+   the *one* clause stated on the net, hence the only one that transports through
+   `isSoundReplacementOf` (see **Legality preservation** above), so its absence is what leaves
+   preservation without a lever.
+
+4. ✅ **`apc2105000Opt`** (`88d8095`): one arc, `d = 11`, the twelve stateful interactions placed
+   at the tabulated offsets, `ordered` by a `decide` over positions, `sendsOk` including the
+   `a__0_2` question above. `lt_gadget_offset` is the reusable half — the gadget as powdr's
+   optimizer leaves it.
 
 Not started:
 
-4. **The real-APC theorems.** `apc2105000Opt` (one arc, `d = 11`) and `apc2105000Unopt` (four arcs,
-   `d = 3,3,3,2`) satisfying the bridge condition, then the full placement — the five gadget
-   derivations, driven off `satisfiesStateless`. Evidence and constants are tabulated above. Replace
-   the prose in `Audit/RealApcLegality.lean`'s header table as they land.
-5. **Finding G in `vm-spec-audit.md`**: record the G2 correction (see below), that G1's padding-row
+5. **`apc2105000Unopt`** (four arcs, `d = 3,3,3,2`). Harder than `Opt` in three ways: the
+   multiplicities are opcode-flag sums and `rs2_as_i`, so every clause has to pull pins out of
+   `satisfiesAlgebraic`; four arcs put the bridge condition out of `ClockArc.net_singleton`'s
+   reach, wanting an `allEffects`-as-a-sum-of-indicators lemma so the identity holds termwise; and
+   71 much larger interactions make each `fin_cases` sweep expensive. Its lt gadgets are *easier*,
+   though — the algebraic constraint is still there, so no `15360` inversion.
+6. **Finding G in `vm-spec-audit.md`**: record the G2 correction (see below), that G1's padding-row
    half is closed, and that the memory half (G3) is what the placement closes. It also mis-names
    `apc2105000Gated_not_advancesClock` as `apc2105000Opt_not_advancesClock`; that theorem is now
    `apc2105000Gated_padding_bridge`.
@@ -365,5 +391,5 @@ Worth reusing for the real-APC theorems:
 1. `lake build` clean, no warnings.
 2. `bash Scripts/check-proof-integrity.sh` passes (new lemma names go in the `[ignore]` section of
    `Scripts/unused-theorems.txt` — the `VmSpec/` tree is unreachable from the correctness roots).
-3. Both `apc2105000Opt` and `apc2105000Unopt` satisfy `hasStepLayout` (1)–(4), proved, with the
-   header table in `Audit/RealApcLegality.lean` updated to match.
+3. `hasStepLayout` carries condition (4), and both `apc2105000Opt` and `apc2105000Unopt` satisfy
+   it, with the header table in `Audit/RealApcLegality.lean` updated to match.

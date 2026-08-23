@@ -129,6 +129,7 @@ structure StepLayout {p : ℕ} (c : Circuit p) (r : GuestBusRules p) (asg : Chip
   /-- The instruction steps this instance performs. -/
   arcs : List (ClockArc p)
   /-- Which step an interaction belongs to, and where in that step's window it sits. -/
+  -- TODO(AO): should this `\n` be a `Fin`?
   place : Fin c.busInteractions.length → ℕ × ℤ
   /-- Every step advances the clock. -/
   dPos : ∀ α ∈ arcs, 0 < α.d
