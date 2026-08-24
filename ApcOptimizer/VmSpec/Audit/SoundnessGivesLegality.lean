@@ -442,45 +442,40 @@ private theorem checkedStepChip_legalGuest [Fact p.Prime] (hp : 18 < p)
         BusInteraction.eval, Expression.eval, openVmExecBusId]
   · -- One step, `(0, 0) → (0, 1)`, with each interaction's offset its own position in the list.
     intro asg _ _
-    refine ⟨⟨[⟨0, 0, 0, 1⟩], fun i => (0, (i.val : ℤ)), by simp, by simpa using hw, ?_, ?_,
-      ?_, ?_⟩⟩
-    · refine ClockArc.net_singleton _ ?_ ?_ ?_ ?_
-      · intro hcon
-        simp only [Prod.mk.injEq, List.cons.injEq, zero_add, Nat.cast_one, and_true,
-          true_and] at hcon
-        exact absurd hcon (zero_ne_one' (ZMod p))
-      · simp [Circuit.allEffects, checkedStepChip, BusInteraction.eval, Expression.eval,
-          openVmGuestRules, openVmExecBusId]
-      · simp [Circuit.allEffects, checkedStepChip, BusInteraction.eval, Expression.eval,
-          openVmGuestRules, openVmExecBusId]
-      · intro m hm h1 h2
-        simp only [openVmGuestRules] at hm h1 h2
-        have e1 : ¬ ((openVmExecBusId, [(0 : ZMod p), 0]) = m) := fun h => h1 h.symm
-        have e2 : ¬ ((openVmExecBusId, [(0 : ZMod p), 1]) = m) := by
-          intro h; exact h2 (by simpa using h.symm)
-        have e3 : ¬ ((rangeBusId, [(0 : ZMod p), 0]) = m) := by
-          intro h; rw [← h] at hm; simp [rangeBusId] at hm
-        simp [Circuit.allEffects, checkedStepChip, BusInteraction.eval, Expression.eval, e1, e2, e3]
-    · intro i hst _
+    refine ⟨⟨0, 0, 0, 1, fun i => (i.val : ℤ), by norm_num, hw, ?_, ?_, ?_, ?_, ?_, ?_⟩⟩
+    · simp [Circuit.allEffects, checkedStepChip, BusInteraction.eval, Expression.eval,
+        openVmGuestRules, openVmExecBusId]
+    · simp [Circuit.allEffects, checkedStepChip, BusInteraction.eval, Expression.eval,
+        openVmGuestRules, openVmExecBusId]
+    · intro m hm h1 h2
+      simp only [openVmGuestRules] at hm h1 h2
+      have e1 : ¬ ((openVmExecBusId, [(0 : ZMod p), 0]) = m) := fun h => h1 h.symm
+      have e2 : ¬ ((openVmExecBusId, [(0 : ZMod p), 1]) = m) := by
+        intro h; exact h2 (by simpa using h.symm)
+      have e3 : ¬ ((rangeBusId, [(0 : ZMod p), 0]) = m) := by
+        intro h; rw [← h] at hm; simp [rangeBusId] at hm
+      simp [Circuit.allEffects, checkedStepChip, BusInteraction.eval, Expression.eval, e1, e2, e3]
+    · rintro i ⟨hst, -⟩
       fin_cases i
-      · exact ⟨⟨0, 0, 0, 1⟩, by simp, by simp, by norm_num, by
-          simp [checkedStepChip, openVmGuestRules, openVmTimestamp, BusInteraction.eval,
-            Expression.eval, openVmExecBusId, openVmMemBusId]⟩
-      · exact ⟨⟨0, 0, 0, 1⟩, by simp, by simp, by norm_num, by
-          simp [checkedStepChip, openVmGuestRules, openVmTimestamp, BusInteraction.eval,
-            Expression.eval, openVmExecBusId, openVmMemBusId]⟩
+      · exact ⟨by push_cast; omega, by norm_num, by
+          simp [checkedStepChip, openVmGuestRules, openVmTimestamp, Circuit.msgAt,
+            BusInteraction.eval, Expression.eval, openVmExecBusId, openVmMemBusId]⟩
+      · exact ⟨by push_cast; omega, by norm_num, by
+          simp [checkedStepChip, openVmGuestRules, openVmTimestamp, Circuit.msgAt,
+            BusInteraction.eval, Expression.eval, openVmExecBusId, openVmMemBusId]⟩
       · simp [checkedStepChip, openVmGuestRules, openVmIsStateful, defaultBusMap,
           OpenVmBusType.isStateful, rangeBusId] at hst
-    · exact fun i j hji _ _ _ _ _ => by simpa using Fin.lt_def.mp hji
-    · intro i hst hmult _
+    · exact fun i j hji _ _ => by simpa using Fin.lt_def.mp hji
+    · rintro i ⟨hst, hmult⟩ -
       fin_cases i
       · exfalso
-        simp only [checkedStepChip, BusInteraction.eval, Expression.eval, List.get] at hmult
+        simp only [checkedStepChip, Circuit.multAt, BusInteraction.eval, Expression.eval,
+          List.get] at hmult
         have h2 : ((2 : ℕ) : ZMod p) = 0 := by push_cast; linear_combination -hmult
         have hv := ZMod.val_natCast_of_lt (show 2 < p by omega)
         rw [h2, ZMod.val_zero] at hv
         omega
-      · simp [checkedStepChip, openVmGuestRules, openVmPayloadOk, defaultBusMap,
+      · simp [checkedStepChip, openVmGuestRules, openVmPayloadOk, defaultBusMap, Circuit.msgAt,
           BusInteraction.eval, Expression.eval, openVmExecBusId]
       · simp [checkedStepChip, openVmGuestRules, openVmIsStateful, defaultBusMap,
           OpenVmBusType.isStateful, rangeBusId] at hst

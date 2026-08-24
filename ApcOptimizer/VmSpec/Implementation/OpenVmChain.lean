@@ -207,29 +207,38 @@ theorem openVmHost_bridge_isolated (P : OpenVmParams p)
   rw [hnet, hsum9, Finset.sum_pair hj_ne_k, hinput, hr]
   ring
 
+/-- `-1 ≠ 1` in `ZMod p`, from the rank window: `OpenVmParams.rankWindowOk` puts `2 ^ 30` below
+    `p`. `StepLayout.net` needs it — a step whose two bridge endpoints coincided would have to net
+    both `-1` and `1` there. -/
+theorem openVm_negOne_ne_one (P : OpenVmParams p) : (-1 : ZMod p) ≠ 1 := by
+  have hlt : 2 < p :=
+    lt_trans (by norm_num [openVmRankBound, openVmRankShift, openVmTimestampBound,
+      openVmTimestampBits]) P.rankWindowOk
+  haveI : NeZero p := ⟨by omega⟩
+  intro h
+  have h2 : (2 : ZMod p) = 0 := by
+    have h' := congrArg (fun x : ZMod p => x + 1) h
+    simp only [neg_add_cancel] at h'
+    rw [show (2 : ZMod p) = 1 + 1 by norm_num, ← h']
+  have hval : ((2 : ℕ) : ZMod p).val = 2 := ZMod.val_cast_of_lt hlt
+  rw [show ((2 : ℕ) : ZMod p) = (2 : ZMod p) by push_cast; ring, h2, ZMod.val_zero] at hval
+  omega
+
 --------- The bridge as a chain ---------
 
 section Bridge
 
 variable {G : Guest p} {maxWindow : ℕ}
 
-/-- An instance paired with one of its own instruction steps. A fused APC has several
-    (`ClockStep.arcs`). -/
-abbrev GuestArc (gA : GuestAssignment p G)
-    (S : ∀ x : ((s : Fin G.length) × Fin (gA s).length),
-      StepLayout (G.get x.1) (openVmGuestRules defaultBusMap openVmMemBusId)
-        ((gA x.1).get x.2) maxWindow openVmTimestampBound) : Type :=
-  (x : (s : Fin G.length) × Fin (gA s).length) × Fin (S x).arcs.length
+/-- A realized guest instance, which is one instruction step. -/
+abbrev GuestArc (gA : GuestAssignment p G) : Type :=
+  (s : Fin G.length) × Fin (gA s).length
 
-/-- The arcs of a run's execution bridge: one per instruction step of each realized guest
-    instance, one per realized input-chip instance — an input-chip instance is an instruction
-    executor sharing the same bus (`InputRead.pcFrom`/`pcTo`, whitepaper §4.5) — plus the
-    connector (`none`). -/
-abbrev BridgeArc (gA : GuestAssignment p G)
-    (S : ∀ x : ((s : Fin G.length) × Fin (gA s).length),
-      StepLayout (G.get x.1) (openVmGuestRules defaultBusMap openVmMemBusId)
-        ((gA x.1).get x.2) maxWindow openVmTimestampBound) (n : ℕ) : Type :=
-  Option (GuestArc gA S ⊕ Fin n)
+/-- The arcs of a run's execution bridge: one per realized guest instance, one per realized
+    input-chip instance — an input-chip instance is an instruction executor sharing the same bus
+    (`InputRead.pcFrom`/`pcTo`, whitepaper §4.5) — plus the connector (`none`). -/
+abbrev BridgeArc (gA : GuestAssignment p G) (n : ℕ) : Type :=
+  Option (GuestArc gA ⊕ Fin n)
 
 variable (gA : GuestAssignment p G) {n : ℕ}
   (S : ∀ x : ((s : Fin G.length) × Fin (gA s).length),
@@ -238,67 +247,42 @@ variable (gA : GuestAssignment p G) {n : ℕ}
   (iR : Fin n → InputRead p) (ptrReg : Nat)
   (r : ConnectorBoundary p)
 
-/-- The step a guest arc names. -/
-def guestArc (y : GuestArc gA S) : ClockArc p := (S y.1).arcs.get y.2
-
 /-- The bridge state an arc consumes: an instruction's incoming `(pc, t)` (guest or input-chip
     instance alike), or, for the connector, the segment's final state. -/
-def bridgeSrc : BridgeArc gA S n → BusMessage p
+def bridgeSrc : BridgeArc gA n → BusMessage p
   | none => (0, [r.finalPc, r.finalTimestamp])
-  | some (.inl y) => (0, [(guestArc gA S y).pcFrom, (guestArc gA S y).base])
+  | some (.inl y) => (0, [(S y).pcFrom, (S y).base])
   | some (.inr i) => (0, [(iR i).pcFrom, (iR i).base])
 
 /-- The bridge state an arc produces: an instruction's outgoing `(pc, t + d)`, or, for the
     connector, the segment's initial state at timestamp `1`. -/
-def bridgeDst : BridgeArc gA S n → BusMessage p
+def bridgeDst : BridgeArc gA n → BusMessage p
   | none => (0, [r.initialPc, 1])
   | some (.inl y) =>
-    (0, [(guestArc gA S y).pcTo, (guestArc gA S y).base + ((guestArc gA S y).d : ZMod p)])
+    (0, [(S y).pcTo, (S y).base + ((S y).d : ZMod p)])
   | some (.inr i) => (0, [(iR i).pcTo, (iR i).base + (inputStepWindow : ZMod p)])
 
 /-- How far an arc advances the clock; the connector does not. -/
-def bridgeAdv : BridgeArc gA S n → ℕ
+def bridgeAdv : BridgeArc gA n → ℕ
   | none => 0
-  | some (.inl y) => (guestArc gA S y).d
+  | some (.inl y) => (S y).d
   | some (.inr _) => inputStepWindow
 
-theorem bridgeSrc_busId (e : BridgeArc gA S n) : (bridgeSrc gA S iR r e).1 = 0 := by
+theorem bridgeSrc_busId (e : BridgeArc gA n) : (bridgeSrc gA S iR r e).1 = 0 := by
   cases e with
   | none => rfl
   | some e' => cases e' <;> rfl
 
-theorem bridgeDst_busId (e : BridgeArc gA S n) : (bridgeDst gA S iR r e).1 = 0 := by
+theorem bridgeDst_busId (e : BridgeArc gA n) : (bridgeDst gA S iR r e).1 = 0 := by
   cases e with
   | none => rfl
   | some e' => cases e' <;> rfl
 
-/-- An instance has fewer steps than the window it fits in: every step advances the clock by at
-    least one tick, and they total less than `maxWindow`. -/
-theorem clockStep_arcs_length_lt
-    (x : (s : Fin G.length) × Fin (gA s).length) : (S x).arcs.length < maxWindow := by
-  refine lt_of_le_of_lt ?_ (S x).dSumLt
-  have hlen : ((S x).arcs.map (·.d)).length = (S x).arcs.length := List.length_map _
-  rw [← hlen]
-  refine List.length_le_sum_of_one_le _ (fun i hi => ?_)
-  obtain ⟨α, hα, rfl⟩ := List.mem_map.mp hi
-  exact (S x).dPos α hα
-
-/-- The arcs are the guest instances' steps, the input-chip instances, and one. -/
+/-- The arcs are the guest instances, the input-chip instances, and one. -/
 theorem card_bridgeArc :
-    Fintype.card (BridgeArc gA S n)
-      = (∑ x : ((s : Fin G.length) × Fin (gA s).length), (S x).arcs.length) + n + 1 := by
+    Fintype.card (BridgeArc gA n) = (∑ s : Fin G.length, (gA s).length) + n + 1 := by
   rw [Fintype.card_option, Fintype.card_sum, Fintype.card_sigma, Fintype.card_fin]
   simp
-
-/-- The step count of a whole run, bounded by the instance budget. -/
-theorem sum_arcs_length_le {maxInstances : ℕ}
-    (hcount : (∑ s : Fin G.length, (gA s).length) ≤ maxInstances) :
-    (∑ x : ((s : Fin G.length) × Fin (gA s).length), (S x).arcs.length)
-      ≤ maxInstances * maxWindow := by
-  refine le_trans (Finset.sum_le_card_nsmul _ _ maxWindow
-    (fun x _ => le_of_lt (clockStep_arcs_length_lt gA S x))) ?_
-  rw [smul_eq_mul, Finset.card_univ, Fintype.card_sigma]
-  simpa using Nat.mul_le_mul_right maxWindow hcount
 
 /-- **Bus balance on the execution bridge, counted honestly.** Every bridge state is consumed
     exactly as often as it is produced.
@@ -307,6 +291,7 @@ theorem sum_arcs_length_le {maxInstances : ℕ}
     instance budget, which keeps both counts below `p`. Off bus `0` there is nothing to say: no arc
     touches another bus. -/
 theorem bridge_balanced {maxInstances maxInputInstances : ℕ}
+    (h2 : (-1 : ZMod p) ≠ 1)
     (hbal : ∀ m : BusMessage p, m.1 = 0 →
       gA.busEffect m + (∑ i : Fin n, busStateOf ((iR i).interactions ptrReg 0 1) m)
         + busStateOf (r.interactions 0) m = 0)
@@ -328,22 +313,19 @@ theorem bridge_balanced {maxInstances maxInputInstances : ℕ}
       rw [← h]; exact bridgeDst_busId gA S iR r e
     rw [h1, h2]
   -- The field equation, arc by arc.
-  have hsplit : ∑ e : BridgeArc gA S n,
+  have hsplit : ∑ e : BridgeArc gA n,
       ((if bridgeDst gA S iR r e = m then (1 : ZMod p) else 0)
         - (if bridgeSrc gA S iR r e = m then (1 : ZMod p) else 0)) = 0 := by
     -- One arc's indicator difference is literally its own effect.
-    have hsome : ∀ y : GuestArc gA S,
+    have hsome : ∀ y : GuestArc gA,
         (if bridgeDst gA S iR r (some (.inl y)) = m then (1 : ZMod p) else 0)
           - (if bridgeSrc gA S iR r (some (.inl y)) = m then (1 : ZMod p) else 0)
-        = (guestArc gA S y).effect 0 m := fun _ => rfl
-    -- …and an instance's arcs total its net (`ClockStep.net`).
-    have hguest : ∑ y : GuestArc gA S, (guestArc gA S y).effect 0 m
+        = (S y).effect m := fun _ => rfl
+    -- …and an instance's step is its net (`StepLayout.net`).
+    have hguest : ∑ y : GuestArc gA, (S y).effect m
         = ∑ x : ((s : Fin G.length) × Fin (gA s).length),
-            (G.get x.1).allEffects ((gA x.1).get x.2) m := by
-      rw [← Finset.univ_sigma_univ, Finset.sum_sigma]
-      refine Finset.sum_congr rfl (fun x _ => ?_)
-      rw [(S x).net m hm, list_map_sum_eq_sum_fin]
-      rfl
+            (G.get x.1).allEffects ((gA x.1).get x.2) m :=
+      Finset.sum_congr rfl (fun x _ => ((S x).net h2 m hm).symm)
     have hsome_input : ∀ i : Fin n,
         (if bridgeDst gA S iR r (some (.inr i)) = m then (1 : ZMod p) else 0)
           - (if bridgeSrc gA S iR r (some (.inr i)) = m then (1 : ZMod p) else 0)
@@ -357,26 +339,21 @@ theorem bridge_balanced {maxInstances maxInputInstances : ℕ}
       Finset.sum_congr rfl (fun i _ => hsome_input i), ← guestNet_eq_sum_inst]
     linear_combination hbal m hm
   -- Both counts are below `p`, so it is an equation between naturals.
-  have hcard : ∀ f : BridgeArc gA S n → BusMessage p,
+  have hcard : ∀ f : BridgeArc gA n → BusMessage p,
       ((Finset.univ.filter fun e => f e = m).card : ZMod p)
-        = ∑ e : BridgeArc gA S n, (if f e = m then (1 : ZMod p) else 0) := by
+        = ∑ e : BridgeArc gA n, (if f e = m then (1 : ZMod p) else 0) := by
     intro f
     rw [Finset.card_filter]
     push_cast
     simp
-  have hbound : ∀ f : BridgeArc gA S n → BusMessage p,
+  have hbound : ∀ f : BridgeArc gA n → BusMessage p,
       (Finset.univ.filter fun e => f e = m).card < p := by
     intro f
     refine lt_of_le_of_lt (Finset.card_filter_le _ _) ?_
     rw [Finset.card_univ, card_bridgeArc]
-    have harcs := sum_arcs_length_le gA S hcount
-    have hexp : (maxInstances + maxInputInstances + 1) * (maxWindow + 1)
-        = maxInstances * maxWindow + maxInputInstances * maxWindow
-          + (maxInstances + maxInputInstances + maxWindow + 1) := by ring
-    obtain ⟨A, hA⟩ : ∃ A, maxInstances * maxWindow = A := ⟨_, rfl⟩
-    obtain ⟨B, hB⟩ : ∃ B, maxInputInstances * maxWindow = B := ⟨_, rfl⟩
-    rw [hexp, hA, hB] at hp
-    rw [hA] at harcs
+    have hfit : maxInstances + maxInputInstances + 1
+        ≤ (maxInstances + maxInputInstances + 1) * (maxWindow + 1) :=
+      Nat.le_mul_of_pos_right _ (Nat.succ_pos _)
     omega
   have heq : ((Finset.univ.filter fun e => bridgeSrc gA S iR r e = m).card : ZMod p)
       = ((Finset.univ.filter fun e => bridgeDst gA S iR r e = m).card : ZMod p) := by
@@ -386,16 +363,16 @@ theorem bridge_balanced {maxInstances maxInputInstances : ℕ}
   rw [heq, ZMod.val_cast_of_lt (hbound (bridgeDst gA S iR r))] at h1
   exact h1.symm
 
-theorem bridge_advPos : ∀ e : BridgeArc gA S n, e ≠ none → 0 < bridgeAdv gA S e := by
+theorem bridge_advPos : ∀ e : BridgeArc gA n, e ≠ none → 0 < bridgeAdv gA S e := by
   intro e h
   cases e with
   | none => exact absurd rfl h
   | some e' =>
     cases e' with
-    | inl y => exact (S y.1).dPos _ (List.get_mem _ _)
+    | inl y => exact (S y).dPos
     | inr _ => exact Nat.succ_pos _
 
-theorem bridge_advTime : ∀ e : BridgeArc gA S n, e ≠ none →
+theorem bridge_advTime : ∀ e : BridgeArc gA n, e ≠ none →
     openVmBridgeTimestamp (bridgeDst gA S iR r e)
       = openVmBridgeTimestamp (bridgeSrc gA S iR r e) + ((bridgeAdv gA S e : ℕ) : ZMod p) := by
   intro e h
@@ -411,26 +388,23 @@ theorem bridge_total_le {maxInstances maxInputInstances : ℕ}
     (hIlt : inputStepWindow < maxWindow)
     (hcount : (∑ s : Fin G.length, (gA s).length) ≤ maxInstances)
     (hcountI : n ≤ maxInputInstances) :
-    (∑ e : BridgeArc gA S n, bridgeAdv gA S e) ≤ (maxInstances + maxInputInstances) * maxWindow := by
-  set adv : BridgeArc gA S n → ℕ := bridgeAdv gA S with hadv
+    (∑ e : BridgeArc gA n, bridgeAdv gA S e) ≤ (maxInstances + maxInputInstances) * maxWindow := by
+  set adv : BridgeArc gA n → ℕ := bridgeAdv gA S with hadv
   rw [Fintype.sum_option, Fintype.sum_sum_type]
   have hnone : adv none = 0 := rfl
-  have hsome : ∑ y : GuestArc gA S, adv (some (.inl y))
+  have hsome : ∑ y : GuestArc gA, adv (some (.inl y))
       ≤ (∑ s : Fin G.length, (gA s).length) * maxWindow := by
-    have hstep : ∀ x : ((s : Fin G.length) × Fin (gA s).length),
-        ∑ j : Fin (S x).arcs.length, adv (some (.inl ⟨x, j⟩)) ≤ maxWindow :=
-      fun x => le_of_lt ((list_map_sum_eq_sum_fin (S x).arcs (·.d)) ▸ (S x).dSumLt)
-    rw [← Finset.univ_sigma_univ, Finset.sum_sigma]
-    refine le_trans (Finset.sum_le_card_nsmul _ _ maxWindow (fun x _ => hstep x)) ?_
+    refine le_trans (Finset.sum_le_card_nsmul _ _ maxWindow
+      (fun y _ => le_of_lt (S y).dLt)) ?_
     rw [smul_eq_mul, Finset.card_univ, Fintype.card_sigma]
     simp
   have hinput : ∑ i : Fin n, adv (some (.inr i)) ≤ n * maxWindow := by
     refine le_trans (Finset.sum_le_card_nsmul _ _ maxWindow (fun _ _ => le_of_lt hIlt)) ?_
     rw [smul_eq_mul, Finset.card_univ, Fintype.card_fin]
   calc adv none
-        + (∑ y : GuestArc gA S, adv (some (.inl y))
+        + (∑ y : GuestArc gA, adv (some (.inl y))
           + ∑ i : Fin n, adv (some (.inr i)))
-      = (∑ y : GuestArc gA S, adv (some (.inl y)))
+      = (∑ y : GuestArc gA, adv (some (.inl y)))
           + ∑ i : Fin n, adv (some (.inr i)) := by rw [hnone]; ring
     _ ≤ (∑ s : Fin G.length, (gA s).length) * maxWindow + n * maxWindow :=
         Nat.add_le_add hsome hinput
@@ -443,7 +417,7 @@ theorem bridge_totalLt {maxInstances maxInputInstances : ℕ}
     (hcount : (∑ s : Fin G.length, (gA s).length) ≤ maxInstances)
     (hcountI : n ≤ maxInputInstances)
     (hp : (maxInstances + maxInputInstances + 1) * (maxWindow + 1) < p) :
-    (∑ e : BridgeArc gA S n, bridgeAdv gA S e) < p := by
+    (∑ e : BridgeArc gA n, bridgeAdv gA S e) < p := by
   have hring : (maxInstances + maxInputInstances + 1) * (maxWindow + 1)
       = (maxInstances + maxInputInstances) * maxWindow
         + (maxInstances + maxInputInstances + maxWindow + 1) := by ring
@@ -454,6 +428,7 @@ theorem bridge_totalLt {maxInstances maxInputInstances : ℕ}
 
 /-- **A run's execution bridge, read as a `VmChain.Chain`.** -/
 def bridgeChain {maxInstances maxInputInstances : ℕ}
+    (h2 : (-1 : ZMod p) ≠ 1)
     (hbal : ∀ m : BusMessage p, m.1 = 0 →
       gA.busEffect m + (∑ i : Fin n, busStateOf ((iR i).interactions ptrReg 0 1) m)
         + busStateOf (r.interactions 0) m = 0)
@@ -461,13 +436,13 @@ def bridgeChain {maxInstances maxInputInstances : ℕ}
     (hcount : (∑ s : Fin G.length, (gA s).length) ≤ maxInstances)
     (hcountI : n ≤ maxInputInstances)
     (hp : (maxInstances + maxInputInstances + 1) * (maxWindow + 1) < p) :
-    VmChain.Chain p (BridgeArc gA S n) (BusMessage p) where
+    VmChain.Chain p (BridgeArc gA n) (BusMessage p) where
   src := bridgeSrc gA S iR r
   dst := bridgeDst gA S iR r
   time := openVmBridgeTimestamp
   conn := none
   adv := bridgeAdv gA S
-  balanced := bridge_balanced gA S iR ptrReg r hbal hcount hcountI hp
+  balanced := bridge_balanced gA S iR ptrReg r h2 hbal hcount hcountI hp
   advPos := bridge_advPos gA S
   advTime := bridge_advTime gA S iR r
   advConn := rfl
@@ -478,6 +453,7 @@ def bridgeChain {maxInstances maxInputInstances : ℕ}
     (`ConnectorBoundary.finalTimestampBounded`), so this is what carries that single check to every
     instruction in the run. -/
 theorem bridge_chain_bound {maxInstances maxInputInstances : ℕ}
+    (h2 : (-1 : ZMod p) ≠ 1)
     (hbal : ∀ m : BusMessage p, m.1 = 0 →
       gA.busEffect m + (∑ i : Fin n, busStateOf ((iR i).interactions ptrReg 0 1) m)
         + busStateOf (r.interactions 0) m = 0)
@@ -485,12 +461,12 @@ theorem bridge_chain_bound {maxInstances maxInputInstances : ℕ}
     (hcount : (∑ s : Fin G.length, (gA s).length) ≤ maxInstances)
     (hcountI : n ≤ maxInputInstances)
     (hp : (maxInstances + maxInputInstances + 1) * (maxWindow + 1) < p)
-    (y : GuestArc gA S) :
-    ∃ T : ℕ, (guestArc gA S y).base = ((1 + T : ℕ) : ZMod p) ∧
-      1 + T + (guestArc gA S y).d ≤ r.finalTimestamp.val := by
+    (y : GuestArc gA) :
+    ∃ T : ℕ, (S y).base = ((1 + T : ℕ) : ZMod p) ∧
+      1 + T + (S y).d ≤ r.finalTimestamp.val := by
   have hppos : 0 < p := Nat.lt_of_le_of_lt (Nat.zero_le _) hp
   haveI : NeZero p := ⟨by omega⟩
-  obtain ⟨N, hN⟩ : ∃ N, (∑ e : BridgeArc gA S n, bridgeAdv gA S e) = N := ⟨_, rfl⟩
+  obtain ⟨N, hN⟩ : ∃ N, (∑ e : BridgeArc gA n, bridgeAdv gA S e) = N := ⟨_, rfl⟩
   have htot : N ≤ (maxInstances + maxInputInstances) * maxWindow :=
     hN ▸ bridge_total_le gA S hIlt hcount hcountI
   have h1N : 1 + N < p := by
@@ -502,14 +478,14 @@ theorem bridge_chain_bound {maxInstances maxInputInstances : ℕ}
     rw [hM] at hp' htot
     omega
   obtain ⟨T, hT1, hT2⟩ :=
-    (bridgeChain gA S iR ptrReg r hbal hIlt hcount hcountI hp).arc_position
+    (bridgeChain gA S iR ptrReg r h2 hbal hIlt hcount hcountI hp).arc_position
       (some (.inl y)) (Option.some_ne_none _)
-  have hT1' : T + (guestArc gA S y).d ≤ ∑ e : BridgeArc gA S n, bridgeAdv gA S e := hT1
+  have hT1' : T + (S y).d ≤ ∑ e : BridgeArc gA n, bridgeAdv gA S e := hT1
   rw [hN] at hT1'
-  have hT2' : (guestArc gA S y).base = 1 + (T : ZMod p) := hT2
+  have hT2' : (S y).base = 1 + (T : ZMod p) := hT2
   have hconn : r.finalTimestamp = 1 + ((N : ℕ) : ZMod p) := by
-    have h' : r.finalTimestamp = 1 + ((∑ e : BridgeArc gA S n, bridgeAdv gA S e : ℕ) : ZMod p) :=
-      (bridgeChain gA S iR ptrReg r hbal hIlt hcount hcountI hp).time_conn
+    have h' : r.finalTimestamp = 1 + ((∑ e : BridgeArc gA n, bridgeAdv gA S e : ℕ) : ZMod p) :=
+      (bridgeChain gA S iR ptrReg r h2 hbal hIlt hcount hcountI hp).time_conn
     rwa [hN] at h'
   have hcast : (1 : ZMod p) + ((N : ℕ) : ZMod p) = ((1 + N : ℕ) : ZMod p) := by push_cast; ring
   have hval : r.finalTimestamp.val = 1 + N := by
@@ -582,7 +558,7 @@ theorem openVmHost_ordersRanks [Fact p.Prime] (P : OpenVmParams p) :
   have hp := P.windowOk
   have hppos : 0 < p := Nat.lt_of_le_of_lt (Nat.zero_le _) hp
   haveI : NeZero p := ⟨by omega⟩
-  intro G hGuests a hsat t asg hasg L i₀ j₀ hActI hActJ hplace hoff
+  intro G hGuests a hsat t asg hasg L i₀ j₀ hActI hActJ hoff
   -- The instance we are ordering, as an index into the assignment.
   obtain ⟨jx, hjx⟩ := List.get_of_mem hasg
   subst hjx
@@ -614,31 +590,20 @@ theorem openVmHost_ordersRanks [Fact p.Prime] (P : OpenVmParams p) :
     hsat.withinBudget
   have hcountI : (a.hostAssignment (openVmInputChip P)).length ≤ P.maxInputInstances :=
     hsat.satisfiesHost.withinBound (openVmInputChip P)
-  -- Both interactions are placed in the same step, so they share its position on the bridge.
-  obtain ⟨αI, hαI, hlowI, hhighI, htsI⟩ := L.placed i₀ hActI.1 hActI.2
-  obtain ⟨αJ, hαJ, hlowJ, hhighJ, htsJ⟩ := L.placed j₀ hActJ.1 hActJ.2
-  rw [hplace] at hαJ
-  have hαeq : αJ = αI := by
-    rw [hαI] at hαJ; exact Option.some_inj.mp hαJ.symm
-  subst hαeq
-  obtain ⟨k, hk⟩ : ∃ k : Fin L.arcs.length, L.arcs.get k = αJ := by
-    obtain ⟨k, hk⟩ := List.getElem?_eq_some_iff.mp hαI
-    exact ⟨⟨(L.place i₀).1, k⟩, hk⟩
+  -- Both interactions are placed in the one step, so they share its position on the bridge.
+  obtain ⟨hlowI, hhighI, htsI⟩ := L.placed i₀ hActI
+  obtain ⟨hlowJ, hhighJ, htsJ⟩ := L.placed j₀ hActJ
   obtain ⟨T, hbase, hfit⟩ :=
-    bridge_chain_bound a.guestAssignments S iR P.ptrReg r hbal P.inputWindowOk hcount hcountI hp
-      ⟨⟨t, jx⟩, hSL ▸ k⟩
-  have harc : guestArc a.guestAssignments S ⟨⟨t, jx⟩, hSL ▸ k⟩ = αJ := by
-    simp only [guestArc]
-    rw [← hk]
-    congr 1 <;> simp [hSL]
-  rw [harc] at hbase hfit
-  -- Same step, same `T`: the offsets decide.
-  have hfit' : 1 + T + αJ.d ≤ openVmTimestampBound := by
+    bridge_chain_bound a.guestAssignments S iR P.ptrReg r (openVm_negOne_ne_one P) hbal
+      P.inputWindowOk hcount hcountI hp ⟨t, jx⟩
+  rw [hSL] at hbase hfit
+  -- One step, one `T`: the offsets decide.
+  have hfit' : 1 + T + L.d ≤ openVmTimestampBound := by
     have := r.finalTimestampBounded
     omega
   have hbase' : ∀ (x : Fin (G.get t).busInteractions.length) (off : ℤ),
       openVmTimestamp openVmMemBusId ((G.get t).msgAt ((a.guestAssignments t).get jx) x)
-          = αJ.base + (off : ZMod p) →
+          = L.base + (off : ZMod p) →
         openVmTimestamp openVmMemBusId ((G.get t).msgAt ((a.guestAssignments t).get jx) x)
           = ((1 + T : ℕ) : ZMod p) + (off : ZMod p) := by
     intro x off h
@@ -700,12 +665,13 @@ theorem openVmHost_inputTime_injOn [Fact p.Prime] (P : OpenVmParams p)
     hsat.withinBudget
   have hcountI : (a.hostAssignment (openVmInputChip P)).length ≤ P.maxInputInstances :=
     hsat.satisfiesHost.withinBound (openVmInputChip P)
-  set C := bridgeChain a.guestAssignments S iR P.ptrReg r hbal P.inputWindowOk hcount hcountI hp
+  set C := bridgeChain a.guestAssignments S iR P.ptrReg r (openVm_negOne_ne_one P) hbal
+    P.inputWindowOk hcount hcountI hp
     with hCdef
   rintro i1 - i2 - heq
-  have hne_conn1 : (some (.inr i1) : BridgeArc a.guestAssignments S _) ≠ C.conn :=
+  have hne_conn1 : (some (.inr i1) : BridgeArc a.guestAssignments _) ≠ C.conn :=
     Option.some_ne_none _
-  have hne_conn2 : (some (.inr i2) : BridgeArc a.guestAssignments S _) ≠ C.conn :=
+  have hne_conn2 : (some (.inr i2) : BridgeArc a.guestAssignments _) ≠ C.conn :=
     Option.some_ne_none _
   have htime : C.time (C.src (some (.inr i1))) = C.time (C.src (some (.inr i2))) := by
     show (iR i1).base = (iR i2).base

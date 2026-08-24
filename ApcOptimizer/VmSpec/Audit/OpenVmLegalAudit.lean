@@ -206,55 +206,45 @@ theorem stepChip_hasStepLayout (hp : 3 < p) {maxWindow maxLookback : ℕ} (hw : 
   have hnegz : (-1 : ZMod p) ≠ 0 := fun hcon => one_ne_zero (α := ZMod p) (by
     linear_combination -hcon)
   intro asg _ _
-  refine ⟨⟨[⟨pcFrom, pcTo, base, 3⟩], fun i => (0, (i.val : ℤ)), by simp, by simpa using hw,
-    ?_, ?_, ?_, ?_⟩⟩
-  · refine ClockArc.net_singleton _ ?_ ?_ ?_ ?_
-    · intro hcon
-      rw [Prod.ext_iff] at hcon
-      have hb : base = base + ((3 : ℕ) : ZMod p) := by
-        have hl := hcon.2
-        simp only [List.cons.injEq, and_true] at hl
-        exact hl.2
-      rw [hcast3] at hb
-      exact h3 (by linear_combination -hb)
-    · simp [Circuit.allEffects, stepChip, bridgeRecv, bridgeSend, readEchoRecv, readEchoSend,
-        assertLtLoLookup, assertLtHiLookup, BusInteraction.eval, Expression.eval,
-        openVmGuestRules, h3]
-    · simp [Circuit.allEffects, stepChip, bridgeRecv, bridgeSend, readEchoRecv, readEchoSend,
-        assertLtLoLookup, assertLtHiLookup, BusInteraction.eval, Expression.eval,
-        openVmGuestRules, h3]
-    · rintro ⟨mb, ml⟩ hbus hr hs
-      simp only [openVmGuestRules] at hbus
-      subst hbus
-      simp only [ne_eq, Prod.mk.injEq, true_and, hcast3, openVmGuestRules] at hr hs
-      simp [Circuit.allEffects, stepChip, bridgeRecv, bridgeSend, readEchoRecv, readEchoSend,
-        assertLtLoLookup, assertLtHiLookup, BusInteraction.eval, Expression.eval,
-        Ne.symm hr, Ne.symm hs]
-  · intro i hst _
+  refine ⟨⟨pcFrom, pcTo, base, 3, fun i => (i.val : ℤ), by norm_num, hw, ?_, ?_, ?_, ?_, ?_, ?_⟩⟩
+  · simp [Circuit.allEffects, stepChip, bridgeRecv, bridgeSend, readEchoRecv, readEchoSend,
+      assertLtLoLookup, assertLtHiLookup, BusInteraction.eval, Expression.eval,
+      openVmGuestRules, h3]
+  · simp [Circuit.allEffects, stepChip, bridgeRecv, bridgeSend, readEchoRecv, readEchoSend,
+      assertLtLoLookup, assertLtHiLookup, BusInteraction.eval, Expression.eval,
+      openVmGuestRules, h3]
+  · rintro ⟨mb, ml⟩ hbus hr hs
+    simp only [openVmGuestRules] at hbus
+    subst hbus
+    simp only [ne_eq, Prod.mk.injEq, true_and, hcast3, openVmGuestRules] at hr hs
+    simp [Circuit.allEffects, stepChip, bridgeRecv, bridgeSend, readEchoRecv, readEchoSend,
+      assertLtLoLookup, assertLtHiLookup, BusInteraction.eval, Expression.eval,
+      Ne.symm hr, Ne.symm hs]
+  · rintro i ⟨hst, -⟩
     fin_cases i
-    · exact ⟨⟨pcFrom, pcTo, base, 3⟩, by simp, by norm_num, by norm_num, by
-        simp [stepChip, bridgeRecv, openVmGuestRules, openVmTimestamp, BusInteraction.eval,
+    · exact ⟨by push_cast; omega, by norm_num, by
+        simp [stepChip, bridgeRecv, openVmGuestRules, openVmTimestamp, Circuit.msgAt, BusInteraction.eval,
           Expression.eval, openVmMemBusId, openVmExecBusId]⟩
-    · exact ⟨⟨pcFrom, pcTo, base, 3⟩, by simp, by norm_num, by norm_num, by
-        simp [stepChip, readEchoRecv, openVmGuestRules, openVmTimestamp, BusInteraction.eval,
+    · exact ⟨by push_cast; omega, by norm_num, by
+        simp [stepChip, readEchoRecv, openVmGuestRules, openVmTimestamp, Circuit.msgAt, BusInteraction.eval,
           Expression.eval, openVmMemBusId]⟩
-    · exact ⟨⟨pcFrom, pcTo, base, 3⟩, by simp, by norm_num, by norm_num, by
-        simp [stepChip, readEchoSend, openVmGuestRules, openVmTimestamp, BusInteraction.eval,
+    · exact ⟨by push_cast; omega, by norm_num, by
+        simp [stepChip, readEchoSend, openVmGuestRules, openVmTimestamp, Circuit.msgAt, BusInteraction.eval,
           Expression.eval, openVmMemBusId]⟩
-    · exact ⟨⟨pcFrom, pcTo, base, 3⟩, by simp, by norm_num, by norm_num, by
-        simp [stepChip, bridgeSend, openVmGuestRules, openVmTimestamp, BusInteraction.eval,
+    · exact ⟨by push_cast; omega, by norm_num, by
+        simp [stepChip, bridgeSend, openVmGuestRules, openVmTimestamp, Circuit.msgAt, BusInteraction.eval,
           Expression.eval, openVmMemBusId, openVmExecBusId]⟩
     · simp [stepChip, assertLtLoLookup, openVmGuestRules, openVmIsStateful, defaultBusMap,
         OpenVmBusType.isStateful] at hst
     · simp [stepChip, assertLtHiLookup, openVmGuestRules, openVmIsStateful, defaultBusMap,
         OpenVmBusType.isStateful] at hst
-  · exact fun i j hji _ _ _ _ _ => by simpa using Fin.lt_def.mp hji
-  · intro i hst hmult hlow
+  · exact fun i j hji _ _ => by simpa using Fin.lt_def.mp hji
+  · rintro i ⟨hst, hmult⟩ hlow
     fin_cases i
     · exact absurd hmult hneg
     · exact absurd hmult hneg
     · -- The send echoes the receive one position earlier in the very same step.
-      have hrecv0 := hlow ⟨1, by simp [stepChip]⟩ (by simp [Fin.lt_def]) rfl hnegz rfl
+      have hrecv0 := hlow ⟨1, by simp [stepChip]⟩ (by simp [Fin.lt_def]) ⟨rfl, hnegz⟩
       replace hrecv0 : openVmPayloadOk defaultBusMap
         ((1 : ℕ), [(1 : ZMod p), ptr, asg x, 0, 0, 0, base + 1]) := hrecv0
       have hrecv := hrecv0
@@ -265,7 +255,7 @@ theorem stepChip_hasStepLayout (hp : 3 < p) {maxWindow maxLookback : ℕ} (hw : 
         ⟨hx, isByte_zero, isByte_zero, isByte_zero⟩
     · -- The bridge send: `openVmPayloadOk` asks nothing of an execution-bridge state.
       simp [stepChip, bridgeSend, openVmGuestRules, openVmPayloadOk, defaultBusMap,
-        BusInteraction.eval, Expression.eval]
+        Circuit.msgAt, BusInteraction.eval, Expression.eval]
     · simp [stepChip, assertLtLoLookup, openVmGuestRules, openVmIsStateful, defaultBusMap,
         OpenVmBusType.isStateful] at hst
     · simp [stepChip, assertLtHiLookup, openVmGuestRules, openVmIsStateful, defaultBusMap,
@@ -349,7 +339,7 @@ theorem earlyEchoChip_not_legalGuest (hp : 256 < p) {maxWindow maxLookback maxIn
         simp [bridgeRecv, bridgeSend, readEchoRecv, readEchoSend, openVmGuestRules,
           openVmIsStateful, defaultBusMap, OpenVmBusType.isStateful] at hst)
   -- The only interaction before the send is the bridge receive, and its payload is unconstrained.
-  have hsend := L.sendsOk ⟨1, by simp [earlyEchoChip]⟩ rfl rfl (fun j hji _ _ _ => by
+  have hsend := L.sendsOk ⟨1, by simp [earlyEchoChip]⟩ ⟨rfl, rfl⟩ (fun j hji _ => by
     fin_cases j
     · show openVmPayloadOk defaultBusMap ((0 : ℕ), [pcFrom, base])
       simp [openVmPayloadOk, defaultBusMap]
@@ -457,42 +447,33 @@ theorem freshWriteStepChip_legalGuest (hp : 256 < p) {maxWindow maxLookback maxI
     · exact Or.inr (Or.inl rfl)
     · exact Or.inr (Or.inl rfl)
   · intro asg _ hacc
-    refine ⟨⟨[⟨pcFrom, pcTo, base, 3⟩], fun i => (0, (i.val : ℤ)), by simp, by simpa using hw,
-      ?_, ?_, ?_, ?_⟩⟩
-    · refine ClockArc.net_singleton _ ?_ ?_ ?_ ?_
-      · intro hcon
-        rw [Prod.ext_iff] at hcon
-        have hb : base = base + ((3 : ℕ) : ZMod p) := by
-          have hl := hcon.2
-          simp only [List.cons.injEq, and_true] at hl
-          exact hl.2
-        rw [hcast3] at hb
-        exact h3 (by linear_combination -hb)
-      · simp [Circuit.allEffects, freshWriteStepChip, bridgeRecv, bridgeSend, freshWriteLookup,
-          freshWriteSend, BusInteraction.eval, Expression.eval, openVmGuestRules, h3]
-      · simp [Circuit.allEffects, freshWriteStepChip, bridgeRecv, bridgeSend, freshWriteLookup,
-          freshWriteSend, BusInteraction.eval, Expression.eval, openVmGuestRules, h3]
-      · rintro ⟨mb, ml⟩ hbus hr hs
-        simp only [openVmGuestRules] at hbus
-        subst hbus
-        simp only [ne_eq, Prod.mk.injEq, true_and, hcast3, openVmGuestRules] at hr hs
-        simp [Circuit.allEffects, freshWriteStepChip, bridgeRecv, bridgeSend, freshWriteLookup,
-          freshWriteSend, BusInteraction.eval, Expression.eval, Ne.symm hr, Ne.symm hs]
-    · intro i hst _
+    refine ⟨⟨pcFrom, pcTo, base, 3, fun i => (i.val : ℤ), by norm_num, hw,
+      ?_, ?_, ?_, ?_, ?_, ?_⟩⟩
+    · simp [Circuit.allEffects, freshWriteStepChip, bridgeRecv, bridgeSend, freshWriteLookup,
+        freshWriteSend, BusInteraction.eval, Expression.eval, openVmGuestRules, h3]
+    · simp [Circuit.allEffects, freshWriteStepChip, bridgeRecv, bridgeSend, freshWriteLookup,
+        freshWriteSend, BusInteraction.eval, Expression.eval, openVmGuestRules, h3]
+    · rintro ⟨mb, ml⟩ hbus hr hs
+      simp only [openVmGuestRules] at hbus
+      subst hbus
+      simp only [ne_eq, Prod.mk.injEq, true_and, hcast3, openVmGuestRules] at hr hs
+      simp [Circuit.allEffects, freshWriteStepChip, bridgeRecv, bridgeSend, freshWriteLookup,
+        freshWriteSend, BusInteraction.eval, Expression.eval, Ne.symm hr, Ne.symm hs]
+    · rintro i ⟨hst, -⟩
       fin_cases i
-      · exact ⟨⟨pcFrom, pcTo, base, 3⟩, by simp, by norm_num, by norm_num, by
-          simp [freshWriteStepChip, bridgeRecv, openVmGuestRules, openVmTimestamp,
+      · exact ⟨by push_cast; omega, by norm_num, by
+          simp [freshWriteStepChip, bridgeRecv, openVmGuestRules, openVmTimestamp, Circuit.msgAt,
             BusInteraction.eval, Expression.eval, openVmMemBusId, openVmExecBusId]⟩
       · simp [freshWriteStepChip, freshWriteLookup, openVmGuestRules, openVmIsStateful,
           defaultBusMap, OpenVmBusType.isStateful] at hst
-      · exact ⟨⟨pcFrom, pcTo, base, 3⟩, by simp, by norm_num, by norm_num, by
+      · exact ⟨by push_cast; omega, by norm_num, by
           simp [freshWriteStepChip, freshWriteSend, openVmGuestRules, openVmTimestamp,
-            BusInteraction.eval, Expression.eval, openVmMemBusId]⟩
-      · exact ⟨⟨pcFrom, pcTo, base, 3⟩, by simp, by norm_num, by norm_num, by
-          simp [freshWriteStepChip, bridgeSend, openVmGuestRules, openVmTimestamp,
+            Circuit.msgAt, BusInteraction.eval, Expression.eval, openVmMemBusId]⟩
+      · exact ⟨by push_cast; omega, by norm_num, by
+          simp [freshWriteStepChip, bridgeSend, openVmGuestRules, openVmTimestamp, Circuit.msgAt,
             BusInteraction.eval, Expression.eval, openVmMemBusId, openVmExecBusId]⟩
-    · exact fun i j hji _ _ _ _ _ => by simpa using Fin.lt_def.mp hji
-    · intro i hst hmult _
+    · exact fun i j hji _ _ => by simpa using Fin.lt_def.mp hji
+    · rintro i ⟨hst, hmult⟩ -
       fin_cases i
       · exact absurd hmult hneg
       · simp [freshWriteStepChip, freshWriteLookup, openVmGuestRules, openVmIsStateful,
@@ -512,4 +493,4 @@ theorem freshWriteStepChip_legalGuest (hp : 256 < p) {maxWindow maxLookback maxI
         exact (openVmPayloadOk_mem_iff ptr (asg x) 0 0 0 (base + 2)).mpr
           ⟨hacc'.1, isByte_zero, isByte_zero, isByte_zero⟩
       · simp [freshWriteStepChip, bridgeSend, openVmGuestRules, openVmPayloadOk, defaultBusMap,
-          BusInteraction.eval, Expression.eval]
+          Circuit.msgAt, BusInteraction.eval, Expression.eval]

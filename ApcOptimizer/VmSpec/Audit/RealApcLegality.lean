@@ -22,7 +22,7 @@ set_option maxRecDepth 8000
     | --- | --- | --- | --- |
     | `statelessSendOnly` | **true** | **true** | true, out of checker reach |
     | `statefulPolarity` | **true** | **true** | true, out of checker reach |
-    | `hasStepLayout` | four arcs, not proved | **true**, one arc | not proved (needs primality) |
+    | `hasStepLayout` | four steps, so **false** | **true**, one step | **false**, padding row |
 
     Every "true" above is discharged by `Audit/SendOnlyPolarity.lean`'s decidable checker and its
     soundness theorem — a `Bool` and a `rfl`, with no case analysis over the circuit written by
@@ -37,10 +37,16 @@ set_option maxRecDepth 8000
     linear, so no pin rule comes off it either. Stage `039` is that same circuit one pass earlier —
     identical bus interactions and constraints, multiplicities the literal `±1`.
 
-    It also puts `hasStepLayout` behind a case split on `is_valid`, which needs `ZMod babyBear`
-    to be a domain. The padding row that gate introduces is *not* a reason to prefer `039` any
-    more: `StepLayout` decomposes the bridge net into a list of steps, and the all-zero row is the
-    empty list (`apc2105000Gated_padding_bridge`).
+    The padding row that gate introduces also makes `040` fail `hasStepLayout` outright
+    (`apc2105000Gated_not_hasStepLayout`): the all-zero assignment is algebraically satisfying and
+    nets `0` on the bridge, where a step's receive must net `-1`. Closing that is a change to the
+    circuit — pin `is_valid` — not to the clause.
+
+    `apc2105000Unopt` fails for an unrelated reason: it is four instruction steps whose
+    intermediate bridge states do not cancel, because powdr leaves `from_state__timestamp_0..3`
+    algebraically unrelated until its substitution pass runs. Adding
+    `from_state__timestamp_{i+1} = from_state__timestamp_i + d_i` collapses it to the one step
+    `039` already has.
 
     **What a real APC's memory traffic looks like, and why the clause admits it.** Every memory
     *receive* sits at a free `*_prev_timestamp_*` column — the record an earlier instruction left,
@@ -172,7 +178,7 @@ theorem apc2105000Gated_checkMultiplicities_fails :
     checkMultiplicities apcRules.isStateful apc2105000Gated = false := by decide
 
 /-- **The optimized APC has no padding row**: its multiplicities are literals, and one of them is
-    nonzero under every assignment — so unlike `apc2105000Gated_padding_bridge`'s row, no
+    nonzero under every assignment — so unlike `apc2105000Gated_not_hasStepLayout`'s row, no
     assignment makes this circuit silent. -/
 theorem apc2105000Opt_no_padding_row (asg : ChipAssignment babyBear) :
     ¬ ∀ bi ∈ apc2105000Opt.busInteractions, (bi.eval asg).multiplicity = 0 := by
@@ -331,87 +337,85 @@ theorem apc2105000Opt_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWindow) :
       simp_all [optOffsets, optOffsetUb, apc2105000Opt, apcRules, openVmGuestRules,
         openVmIsStateful, defaultBusMap, OpenVmBusType.isStateful, BusInteraction.eval,
         Expression.eval, babyBear_negOne_ne_one]
-  refine ⟨⟨[⟨2105000, 2105016 + 2013265920 * (192 * asg ⟨"cmp_result_3", some 126⟩),
-      asg ⟨"from_state__timestamp_0", some 1⟩, 11⟩],
-    fun i => (0, (optOffsets n0 nw0 nr1 nw1 nr3).getD i.val 0),
-    by simp, by simpa using hw, ?_, ?_, ?_, ?_⟩⟩
-  · -- The bridge: one receive at `base`, one send eleven ticks later, nothing else on bus `0`.
-    have h11 : ((11 : ℕ) : ZMod babyBear) = 11 := by push_cast; ring
-    have h11' : (11 : ZMod babyBear) ≠ 0 := by decide
-    refine ClockArc.net_singleton _ ?_ ?_ ?_ ?_
-    · intro hcon
-      rw [Prod.ext_iff] at hcon
-      have hb := hcon.2
-      simp only [List.cons.injEq, and_true, h11] at hb
-      exact h11' (by linear_combination -hb.2)
-    · simp [Circuit.allEffects, apc2105000Opt, BusInteraction.eval, Expression.eval,
-        openVmGuestRules, h11', babyBear_negOne]
-    · simp [Circuit.allEffects, apc2105000Opt, BusInteraction.eval, Expression.eval,
-        openVmGuestRules, h11', babyBear_negOne]
-    · rintro ⟨mb, ml⟩ hbus hr hs
-      simp only [openVmGuestRules] at hbus
-      subst hbus
-      simp only [ne_eq, Prod.mk.injEq, true_and, h11, openVmGuestRules] at hr hs
-      simp [Circuit.allEffects, apc2105000Opt, BusInteraction.eval, Expression.eval,
-        Ne.symm hr, Ne.symm hs]
+  have h11 : ((11 : ℕ) : ZMod babyBear) = 11 := by push_cast; ring
+  have h11' : (11 : ZMod babyBear) ≠ 0 := by decide
+  refine ⟨⟨2105000, 2105016 + 2013265920 * (192 * asg ⟨"cmp_result_3", some 126⟩),
+    asg ⟨"from_state__timestamp_0", some 1⟩, 11,
+    fun i => (optOffsets n0 nw0 nr1 nw1 nr3).getD i.val 0,
+    by norm_num, hw, ?_, ?_, ?_, ?_, ?_, ?_⟩⟩
+  · -- The bridge receive, at `base`.
+    simp [Circuit.allEffects, apc2105000Opt, BusInteraction.eval, Expression.eval,
+      openVmGuestRules, h11', babyBear_negOne]
+  · -- The bridge send, eleven ticks later.
+    simp [Circuit.allEffects, apc2105000Opt, BusInteraction.eval, Expression.eval,
+      openVmGuestRules, h11', babyBear_negOne]
+  · -- Nothing else on bus `0`.
+    rintro ⟨mb, ml⟩ hbus hr hs
+    simp only [openVmGuestRules] at hbus
+    subst hbus
+    simp only [ne_eq, Prod.mk.injEq, true_and, h11, openVmGuestRules] at hr hs
+    simp [Circuit.allEffects, apc2105000Opt, BusInteraction.eval, Expression.eval,
+      Ne.symm hr, Ne.symm hs]
   · -- The placement, offset by offset.
-    intro i hst hm
+    rintro i ⟨hst, hm⟩
     fin_cases i
-    · exact ⟨_, rfl, by simp [optOffsets, openVmTimestampBound, openVmTimestampBits]; omega,
+    · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits]; omega,
         by simp [optOffsets]; omega,
         by simpa [optOffsets, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
-          openVmGuestRules, openVmTimestamp] using ht0⟩
-    · exact ⟨_, rfl, by simp [optOffsets, openVmTimestampBound, openVmTimestampBits],
+          openVmGuestRules, openVmTimestamp, Circuit.msgAt] using ht0⟩
+    · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits],
         by simp [optOffsets],
         by simp [optOffsets, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
-          openVmGuestRules, openVmTimestamp]⟩
-    · exact ⟨_, rfl, by simp [optOffsets, openVmTimestampBound, openVmTimestampBits]; omega,
+          openVmGuestRules, openVmTimestamp, Circuit.msgAt]⟩
+    · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits]; omega,
         by simp [optOffsets]; omega,
         by simpa [optOffsets, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
-          openVmGuestRules, openVmTimestamp] using htw0⟩
-    · exact ⟨_, rfl, by simp [optOffsets, openVmTimestampBound, openVmTimestampBits],
+          openVmGuestRules, openVmTimestamp, Circuit.msgAt] using htw0⟩
+    · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits],
         by simp [optOffsets],
         by simp [optOffsets, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
-          openVmGuestRules, openVmTimestamp, openVmMemBusId, openVmExecBusId]⟩
-    · exact ⟨_, rfl, by simp [optOffsets, openVmTimestampBound, openVmTimestampBits]; omega,
+          openVmGuestRules, openVmTimestamp, Circuit.msgAt, openVmMemBusId,
+          openVmExecBusId]⟩
+    · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits]; omega,
         by simp [optOffsets]; omega,
         by simpa [optOffsets, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
-          openVmGuestRules, openVmTimestamp] using htr1⟩
-    · exact ⟨_, rfl, by simp [optOffsets, openVmTimestampBound, openVmTimestampBits]; omega,
+          openVmGuestRules, openVmTimestamp, Circuit.msgAt] using htr1⟩
+    · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits]; omega,
         by simp [optOffsets]; omega,
         by simpa [optOffsets, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
-          openVmGuestRules, openVmTimestamp] using htw1⟩
-    · exact ⟨_, rfl, by simp [optOffsets, openVmTimestampBound, openVmTimestampBits],
+          openVmGuestRules, openVmTimestamp, Circuit.msgAt] using htw1⟩
+    · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits],
         by simp [optOffsets],
         by simp [optOffsets, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
-          openVmGuestRules, openVmTimestamp]⟩
+          openVmGuestRules, openVmTimestamp, Circuit.msgAt]⟩
     · simp [apc2105000Opt, apcRules, openVmGuestRules, openVmIsStateful, defaultBusMap,
         OpenVmBusType.isStateful] at hst
-    · exact ⟨_, rfl, by simp [optOffsets, openVmTimestampBound, openVmTimestampBits],
+    · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits],
         by simp [optOffsets],
         by simp [optOffsets, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
-          openVmGuestRules, openVmTimestamp]⟩
-    · exact ⟨_, rfl, by simp [optOffsets, openVmTimestampBound, openVmTimestampBits],
+          openVmGuestRules, openVmTimestamp, Circuit.msgAt]⟩
+    · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits],
         by simp [optOffsets],
         by simp [optOffsets, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
-          openVmGuestRules, openVmTimestamp]⟩
-    · exact ⟨_, rfl, by simp [optOffsets, openVmTimestampBound, openVmTimestampBits]; omega,
+          openVmGuestRules, openVmTimestamp, Circuit.msgAt]⟩
+    · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits]; omega,
         by simp [optOffsets]; omega,
         by simpa [optOffsets, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
-          openVmGuestRules, openVmTimestamp] using htr3⟩
-    · exact ⟨_, rfl, by simp [optOffsets, openVmTimestampBound, openVmTimestampBits],
+          openVmGuestRules, openVmTimestamp, Circuit.msgAt] using htr3⟩
+    · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits],
         by simp [optOffsets],
         by simp [optOffsets, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
-          openVmGuestRules, openVmTimestamp]⟩
-    · exact ⟨_, rfl, by simp [optOffsets, openVmTimestampBound, openVmTimestampBits],
+          openVmGuestRules, openVmTimestamp, Circuit.msgAt]⟩
+    · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits],
         by simp [optOffsets],
         by simp [optOffsets, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
-          openVmGuestRules, openVmTimestamp, openVmMemBusId, openVmExecBusId]⟩
+          openVmGuestRules, openVmTimestamp, Circuit.msgAt, openVmMemBusId,
+          openVmExecBusId]⟩
     all_goals
       simp [apc2105000Opt, apcRules, openVmGuestRules, openVmIsStateful, defaultBusMap,
         OpenVmBusType.isStateful] at hst
   · -- The ordering: numeric, via `optOffsetUb`.
-    intro i j hji hsi hsj hmj hmi _
+    rintro i j hji ⟨hsi, hmi⟩ ⟨hsj, hmj⟩
     obtain ⟨hmem, heq⟩ := hsendIdx i hsi hmi
     show (optOffsets n0 nw0 nr1 nw1 nr3).getD j.val 0
       < (optOffsets n0 nw0 nr1 nw1 nr3).getD i.val 0
@@ -419,13 +423,13 @@ theorem apc2105000Opt_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWindow) :
     exact lt_of_le_of_lt (hub j hsj hmj)
       (optOffsetUb_dominates i.val hmem j.val (Fin.lt_def.mp hji))
   · -- The five memory sends: four echoes and one masked value.
-    intro i hst hmult hlow
+    rintro i ⟨hst, hmult⟩ hlow
     fin_cases i
-    · simp [apc2105000Opt, BusInteraction.eval, Expression.eval,
+    · simp [apc2105000Opt, Circuit.multAt, BusInteraction.eval, Expression.eval,
         babyBear_negOne_ne_one] at hmult
-    · have h0 := hlow ⟨0, by decide⟩ (by simp [Fin.lt_def]) rfl
-        (by simp [apc2105000Opt, BusInteraction.eval, Expression.eval,
-          babyBear_negOne_ne_zero]) rfl
+    · have h0 := hlow ⟨0, by decide⟩ (by simp [Fin.lt_def]) ⟨rfl,
+        by simp [apc2105000Opt, Circuit.multAt, BusInteraction.eval, Expression.eval,
+          babyBear_negOne_ne_zero]⟩
       replace h0 : openVmPayloadOk defaultBusMap ((1 : ℕ), [(1 : ZMod babyBear), 40,
         asg ⟨"a__0_0", some 19⟩, asg ⟨"a__1_0", some 20⟩, asg ⟨"a__2_0", some 21⟩,
         asg ⟨"a__3_0", some 22⟩, asg ⟨"reads_aux__0__base__prev_timestamp_0", some 6⟩]) := h0
@@ -433,18 +437,18 @@ theorem apc2105000Opt_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWindow) :
         asg ⟨"a__0_0", some 19⟩, asg ⟨"a__1_0", some 20⟩, asg ⟨"a__2_0", some 21⟩,
         asg ⟨"a__3_0", some 22⟩, asg ⟨"from_state__timestamp_0", some 1⟩])
       exact (openVmPayloadOk_mem_iff _ _ _ _ _ _).mpr ((openVmPayloadOk_mem_iff _ _ _ _ _ _).mp h0)
-    · simp [apc2105000Opt, BusInteraction.eval, Expression.eval,
+    · simp [apc2105000Opt, Circuit.multAt, BusInteraction.eval, Expression.eval,
         babyBear_negOne_ne_one] at hmult
-    · simp [apc2105000Opt, BusInteraction.eval, Expression.eval,
+    · simp [apc2105000Opt, Circuit.multAt, BusInteraction.eval, Expression.eval,
         babyBear_negOne_ne_one] at hmult
-    · simp [apc2105000Opt, BusInteraction.eval, Expression.eval,
+    · simp [apc2105000Opt, Circuit.multAt, BusInteraction.eval, Expression.eval,
         babyBear_negOne_ne_one] at hmult
-    · simp [apc2105000Opt, BusInteraction.eval, Expression.eval,
+    · simp [apc2105000Opt, Circuit.multAt, BusInteraction.eval, Expression.eval,
         babyBear_negOne_ne_one] at hmult
     · -- the word read at address 44 is written on to address 56
-      have h4 := hlow ⟨4, by decide⟩ (by simp [Fin.lt_def]) rfl
-        (by simp [apc2105000Opt, BusInteraction.eval, Expression.eval,
-          babyBear_negOne_ne_zero]) rfl
+      have h4 := hlow ⟨4, by decide⟩ (by simp [Fin.lt_def]) ⟨rfl,
+        by simp [apc2105000Opt, Circuit.multAt, BusInteraction.eval, Expression.eval,
+          babyBear_negOne_ne_zero]⟩
       replace h4 : openVmPayloadOk defaultBusMap ((1 : ℕ), [(1 : ZMod babyBear), 44,
         asg ⟨"a__0_1", some 55⟩, asg ⟨"a__1_1", some 56⟩, asg ⟨"a__2_1", some 57⟩,
         asg ⟨"a__3_1", some 58⟩, asg ⟨"reads_aux__0__base__prev_timestamp_1", some 42⟩]) := h4
@@ -455,9 +459,9 @@ theorem apc2105000Opt_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWindow) :
     · simp [apc2105000Opt, apcRules, openVmGuestRules, openVmIsStateful, defaultBusMap,
         OpenVmBusType.isStateful] at hst
     · -- the word read at address 40 is written on to address 52
-      have h0 := hlow ⟨0, by decide⟩ (by simp [Fin.lt_def]) rfl
-        (by simp [apc2105000Opt, BusInteraction.eval, Expression.eval,
-          babyBear_negOne_ne_zero]) rfl
+      have h0 := hlow ⟨0, by decide⟩ (by simp [Fin.lt_def]) ⟨rfl,
+        by simp [apc2105000Opt, Circuit.multAt, BusInteraction.eval, Expression.eval,
+          babyBear_negOne_ne_zero]⟩
       replace h0 : openVmPayloadOk defaultBusMap ((1 : ℕ), [(1 : ZMod babyBear), 40,
         asg ⟨"a__0_0", some 19⟩, asg ⟨"a__1_0", some 20⟩, asg ⟨"a__2_0", some 21⟩,
         asg ⟨"a__3_0", some 22⟩, asg ⟨"reads_aux__0__base__prev_timestamp_0", some 6⟩]) := h0
@@ -469,7 +473,7 @@ theorem apc2105000Opt_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWindow) :
       show openVmPayloadOk defaultBusMap ((1 : ℕ), [(1 : ZMod babyBear), 44,
         asg ⟨"a__0_2", some 91⟩, 0, 0, 0, asg ⟨"from_state__timestamp_0", some 1⟩ + 9])
       exact (openVmPayloadOk_mem_iff _ _ _ _ _ _).mpr ⟨ha02, isByte_zero, isByte_zero, isByte_zero⟩
-    · simp [apc2105000Opt, BusInteraction.eval, Expression.eval,
+    · simp [apc2105000Opt, Circuit.multAt, BusInteraction.eval, Expression.eval,
         babyBear_negOne_ne_one] at hmult
     · show openVmPayloadOk defaultBusMap ((1 : ℕ), [(1 : ZMod babyBear), 0, 0, 0, 0, 0,
         asg ⟨"from_state__timestamp_0", some 1⟩ + 10])
@@ -477,7 +481,7 @@ theorem apc2105000Opt_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWindow) :
         ⟨isByte_zero, isByte_zero, isByte_zero, isByte_zero⟩
     · -- the bridge send: `openVmPayloadOk` asks nothing of an execution-bridge state
       simp [apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules, openVmGuestRules,
-        openVmPayloadOk, defaultBusMap]
+        openVmPayloadOk, defaultBusMap, Circuit.msgAt]
     all_goals
       simp [apc2105000Opt, apcRules, openVmGuestRules, openVmIsStateful, defaultBusMap,
         OpenVmBusType.isStateful] at hst
@@ -532,22 +536,24 @@ theorem apc2105000Gated_mults_zero_on_padding :
     | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl <;>
     simp [BusInteraction.eval, Expression.eval]
 
-/-- **The padding row is a no-op instance, and the clause now says so.** `StepLayout` decomposes
-    an instance's bridge net into a *list* of steps, and the empty list is a legal witness: it nets
-    zero, which is exactly what a row with `is_valid = 0` puts on the bridge.
+/-- **Finding G1, still open: the padding row has no step layout.** powdr's optimizer replaces each
+    fused instruction's pinned opcode-flag sum with one fresh `is_valid` column carrying only
+    `is_valid * (is_valid - 1) = 0`, so the all-zero assignment is algebraically satisfying and the
+    circuit nets `0` on every message of every bus. `StepLayout` asks for a bridge receive netting
+    `-1` on *every* algebraically-satisfying assignment, and this row cannot supply one.
 
-    This is the half of finding G1 the arc form closes. The clause used to demand a bridge receive
-    netting `-1` on *every* algebraically-satisfying assignment, which the all-zero row has no way
-    to supply — so stage `040` failed the clause outright. It no longer does; what still fails, for
-    `040` and `039` alike, is the memory conjunct (finding G3). -/
-theorem apc2105000Gated_padding_bridge {maxWindow : ℕ} (hw : 0 < maxWindow) :
-    ∃ arcs : List (ClockArc babyBear),
-      (∀ α ∈ arcs, 0 < α.d) ∧ (arcs.map (·.d)).sum < maxWindow ∧
-      ∀ m : BusMessage babyBear, m.1 = openVmExecBusId →
-        apc2105000Gated.allEffects (fun _ => 0) m
-          = (arcs.map (fun α => α.effect openVmExecBusId m)).sum := by
-  refine ⟨[], by simp, by simpa using hw, fun m _ => ?_⟩
-  simpa using allEffects_eq_zero_of_mults_zero apc2105000Gated_mults_zero_on_padding m
+    The unoptimized APC has no such row (`apc2105000Unopt_zero_not_satisfiesAlgebraic`) — same
+    block, same semantics, so **the optimization is what breaks legality**, which makes this the
+    `PreservesLegality` gap of `agent-docs/legality-preservation.md` observed in the wild rather
+    than constructed. Closing it is a change to the *circuit* (pin `is_valid`), not to the
+    clause. -/
+theorem apc2105000Gated_not_hasStepLayout {maxWindow maxLookback : ℕ} :
+    ¬ apc2105000Gated.hasStepLayout apcRules maxWindow maxLookback := by
+  intro h
+  obtain ⟨L⟩ := h (fun _ => 0) apc2105000Gated_satisfiesAlgebraic_zero
+    (fun bi hbi _ hmult => absurd (apc2105000Gated_mults_zero_on_padding bi hbi) hmult)
+  exact babyBear_negOne_ne_zero
+    (L.recv.symm.trans (allEffects_eq_zero_of_mults_zero apc2105000Gated_mults_zero_on_padding _))
 
 /-- **The unoptimized APC has no padding row either**: it pins each fused instruction's opcode-flag
     sum to `1` (`1 - (add + sub + xor + or + and) = 0`, one per instruction). -/

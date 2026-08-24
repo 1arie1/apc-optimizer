@@ -62,10 +62,58 @@ def Circuit.satisfiesStateless (c : Circuit p) (r : GuestBusRules p) (asg : Chip
   ∀ bi ∈ c.busInteractions, r.isStateful bi.busId = false →
     (bi.eval asg).multiplicity ≠ 0 → r.accepts (bi.eval asg)
 
-/-- One instruction step, as an execution-bridge arc: it consumes `(pcFrom, base)` and produces
-    `(pcTo, base + d)`. -/
-structure ClockArc (p : ℕ) where
-  /-- The `pc` the instruction starts at. -/
+/-- The message the `i`th interaction writes under `asg`: its bus and payload, dropping the
+    multiplicity. -/
+def Circuit.msgAt (c : Circuit p) (asg : ChipAssignment p)
+    (i : Fin c.busInteractions.length) : BusMessage p :=
+  (((c.busInteractions.get i).eval asg).busId, ((c.busInteractions.get i).eval asg).payload)
+
+/-- The multiplicity the `i`th interaction writes under `asg`. -/
+def Circuit.multAt (c : Circuit p) (asg : ChipAssignment p)
+    (i : Fin c.busInteractions.length) : ZMod p :=
+  ((c.busInteractions.get i).eval asg).multiplicity
+
+/-- The `i`th interaction is on a stateful bus and actually happens. -/
+def Circuit.activeStateful (c : Circuit p) (r : GuestBusRules p) (asg : ChipAssignment p)
+    (i : Fin c.busInteractions.length) : Prop :=
+  r.isStateful (c.busInteractions.get i).busId = true ∧ c.multAt asg i ≠ 0
+
+/-- …and is a *send*. -/
+def Circuit.statefulSend (c : Circuit p) (r : GuestBusRules p) (asg : ChipAssignment p)
+    (i : Fin c.busInteractions.length) : Prop :=
+  r.isStateful (c.busInteractions.get i).busId = true ∧ c.multAt asg i = 1
+
+/-- **How a guest instance's stateful traffic is laid out in time**, under one assignment.
+
+    The instance performs one instruction **step**, advancing the clock by fewer than `maxWindow`
+    ticks: it receives `(pcFrom, base)` from the execution bridge, sends
+    `(pcTo, base + d)` back, and puts nothing else there (`recv`, `send`, `other` — OpenVM
+    whitepaper §4.5, an executor "adds a message `(pc_from, t_from)` to the receive set and a
+    message `(pc_to, t_to)` to the send set exactly once", and "must also constrain that
+    `t_from < t_to`").
+
+    Every stateful interaction it makes sits at an integer **offset** (`place`) from that step's
+    `base`, somewhere in `[-maxLookback, d]`: inside the step, or up to `maxLookback` ticks before
+    it, which is where a memory *receive* lives — it names the record an earlier instruction left,
+    and OpenVM's `AssertLtSubAir` range-checks the difference to `timestamp_max_bits` bits, so it
+    cannot be further back than that. (§4.2 puts guest-state timestamps at `t_from < t < t_to`; the
+    lookback is where a real chip differs, and `placed` is the honest version.)
+
+    Offsets are integers, so comparing them is wraparound-free. That is what makes `ordered` and
+    `sendsOk` per-chip checkable: the timestamps themselves are `ZMod p` elements whose `.val`
+    order is not what any AIR constrains.
+
+    A **fused** APC is one instance covering several instructions, and it is laid out by this
+    clause only once its intermediate bridge states cancel. Powdr pins each fused instruction's
+    `pc` to a literal, so consecutive ones already chain there; the missing half is the timestamps.
+    With `from_state__timestamp_{i+1} = from_state__timestamp_i + d_i` the six intermediate
+    messages of a four-instruction APC cancel against each other (their multiplicities are the
+    per-block opcode-flag sums, each pinned to `1`) and the net is the single pair above. Without
+    those equations the timestamps are free — each occurs only in its own lt gadget — the instance
+    genuinely nets one step per fused instruction, and it is *not* legal by this clause. -/
+structure StepLayout {p : ℕ} (c : Circuit p) (r : GuestBusRules p) (asg : ChipAssignment p)
+    (maxWindow maxLookback : ℕ) where
+  /-- The `pc` the step starts at. -/
   pcFrom : ZMod p
   /-- The `pc` it hands on. -/
   pcTo : ZMod p
@@ -73,105 +121,33 @@ structure ClockArc (p : ℕ) where
   base : ZMod p
   /-- How far it advances the clock. -/
   d : ℕ
-
-/-- What one step puts on the execution bridge: `1` at the state it produces, `-1` at the state it
-    consumes. -/
-def ClockArc.effect (execBusId : ℕ) (α : ClockArc p) (m : BusMessage p) : ZMod p :=
-  (if (execBusId, [α.pcTo, α.base + (α.d : ZMod p)]) = m then (1 : ZMod p) else 0)
-    - (if (execBusId, [α.pcFrom, α.base]) = m then (1 : ZMod p) else 0)
-
-/-- The bridge condition of `StepLayout` for a **single**-step instance, in the shape a
-    hand-written executor proves it: one receive at `base`, one send `d` ticks later, and nothing
-    else on the bridge. A repackaging — `ClockArc.effect` is exactly that difference of
-    indicators — kept here so that the familiar three-condition form stays visible to a reader. -/
-theorem ClockArc.net_singleton {c : Circuit p} {asg : ChipAssignment p} {execBusId : ℕ}
-    (α : ClockArc p)
-    (hne : ((execBusId, [α.pcFrom, α.base]) : BusMessage p)
-      ≠ (execBusId, [α.pcTo, α.base + (α.d : ZMod p)]))
-    (hrecv : c.allEffects asg (execBusId, [α.pcFrom, α.base]) = -1)
-    (hsend : c.allEffects asg (execBusId, [α.pcTo, α.base + (α.d : ZMod p)]) = 1)
-    (hother : ∀ m : BusMessage p, m.1 = execBusId →
-      m ≠ (execBusId, [α.pcFrom, α.base]) →
-      m ≠ (execBusId, [α.pcTo, α.base + (α.d : ZMod p)]) → c.allEffects asg m = 0) :
-    ∀ m : BusMessage p, m.1 = execBusId →
-      c.allEffects asg m = ([α].map (fun β => β.effect execBusId m)).sum := by
-  intro m hm
-  simp only [List.map_cons, List.map_nil, List.sum_cons, List.sum_nil, add_zero, ClockArc.effect]
-  by_cases hd : ((execBusId, [α.pcTo, α.base + (α.d : ZMod p)]) : BusMessage p) = m <;>
-    by_cases hs : ((execBusId, [α.pcFrom, α.base]) : BusMessage p) = m
-  · exact absurd (hs.trans hd.symm) hne
-  · rw [if_pos hd, if_neg hs, sub_zero, ← hd]; exact hsend
-  · rw [if_neg hd, if_pos hs, zero_sub, ← hs]; exact hrecv
-  · rw [if_neg hd, if_neg hs, sub_zero]
-    exact hother m hm (fun h => hs h.symm) (fun h => hd h.symm)
-
-/-- **How a guest instance's stateful traffic is laid out in time**, under one assignment.
-
-    The instance performs a sequence of instruction **steps** (`arcs`), totalling fewer than
-    `maxWindow` ticks. Every stateful interaction it makes belongs to one of them (`place`, first
-    component) and sits at an integer **offset** from that step's `base` (`place`, second
-    component), somewhere in `[-maxLookback, d]`: at the step itself, or up to `maxLookback` ticks
-    before it, which is where a memory *receive* lives — it names the record an earlier
-    instruction left, and OpenVM's `AssertLtSubAir` range-checks the difference to
-    `timestamp_max_bits` bits, so it cannot be further back than that.
-
-    Offsets are integers, so comparing them is wraparound-free. That is what makes `ordered` and
-    `sendsOk` per-chip checkable: the timestamps themselves are `ZMod p` elements whose `.val`
-    order is not what any AIR constrains.
-
-    For OpenVM (whitepaper §4.5): every instruction executor AIR "must constrain that it adds a
-    message `(pc_from, t_from)` to the receive set and a message `(pc_to, t_to)` to the send set
-    exactly once for each instruction that appears in the AIR trace", and "must also constrain
-    that `t_from < t_to`". §4.2 adds that the timestamps at which it touches guest state satisfy
-    `t_from < t_{i,j} < t_to`. -/
-structure StepLayout {p : ℕ} (c : Circuit p) (r : GuestBusRules p) (asg : ChipAssignment p)
-    (maxWindow maxLookback : ℕ) where
-  /-- The instruction steps this instance performs. -/
-  arcs : List (ClockArc p)
-  /-- Which step an interaction belongs to, and where in that step's window it sits. -/
-  -- TODO(AO): should this `\n` be a `Fin`?
-  place : Fin c.busInteractions.length → ℕ × ℤ
-  /-- Every step advances the clock. -/
-  dPos : ∀ α ∈ arcs, 0 < α.d
-  /-- The steps fit in the window together. -/
-  dSumLt : (arcs.map (·.d)).sum < maxWindow
-  /-- **The instance's bridge net is exactly what its steps put there.**
-
-      Stated on the *sum* rather than on the exact net, which is what lets one witness serve every
-      assignment: a fused APC is one step per fused instruction, and nothing algebraic chains them
-      (powdr pins each instruction's `pc` to a literal but leaves its `from_state__timestamp`
-      free). Where an assignment happens to chain two steps, the state between them cancels inside
-      the sum; where it does not, the two stand as separate arcs. So the same clause holds of an
-      APC before and after powdr's substitution pass collapses it.
-
-      The empty list is allowed, and means the instance is a no-op — it nets zero on the bridge,
-      and `placed` then leaves it no room for other stateful traffic either. That is exactly what
-      an AIR's padding row is. -/
-  net : ∀ m : BusMessage p, m.1 = r.execBusId →
-    c.allEffects asg m = (arcs.map (fun α => α.effect r.execBusId m)).sum
-  /-- Every active stateful interaction sits in the window of the step it is placed in. -/
-  placed : ∀ i : Fin c.busInteractions.length,
-    r.isStateful (c.busInteractions.get i).busId = true →
-    (((c.busInteractions.get i).eval asg).multiplicity ≠ 0) →
-      ∃ α ∈ arcs[(place i).1]?,
-        -(maxLookback : ℤ) ≤ (place i).2 ∧ (place i).2 ≤ (α.d : ℤ) ∧
-          r.getTimestamp (((c.busInteractions.get i).eval asg).busId,
-            ((c.busInteractions.get i).eval asg).payload)
-            = α.base + ((place i).2 : ZMod p)
-  /-- **A send dominates everything before it in its own step.**
+  /-- Where in the step's window each interaction sits. -/
+  place : Fin c.busInteractions.length → ℤ
+  /-- The step advances the clock. -/
+  dPos : 0 < d
+  /-- …and fits in the window. -/
+  dLt : d < maxWindow
+  /-- **The instance receives the state its step consumes**, exactly once. -/
+  recv : c.allEffects asg (r.execBusId, [pcFrom, base]) = -1
+  /-- **…and sends the state it produces**, `d` ticks later, exactly once. -/
+  send : c.allEffects asg (r.execBusId, [pcTo, base + (d : ZMod p)]) = 1
+  /-- **…and puts nothing else on the bridge**, which is what makes those two "exactly once". -/
+  other : ∀ m : BusMessage p, m.1 = r.execBusId →
+    m ≠ (r.execBusId, [pcFrom, base]) →
+    m ≠ (r.execBusId, [pcTo, base + (d : ZMod p)]) →
+      c.allEffects asg m = 0
+  /-- Every active stateful interaction sits in the step's window. -/
+  placed : ∀ i : Fin c.busInteractions.length, c.activeStateful r asg i →
+    -(maxLookback : ℤ) ≤ place i ∧ place i ≤ (d : ℤ) ∧
+      r.getTimestamp (c.msgAt asg i) = base + ((place i : ℤ) : ZMod p)
+  /-- **A send dominates everything before it.**
 
       Only sends are constrained: a receive may sit at a larger offset than an earlier send, and in
-      a real optimized APC one does. Same-step is what makes this true of a *fused* instance, whose
-      steps are not ordered relative to each other by anything algebraic. -/
+      a real optimized APC one does (its second read is at offset `1 - n`, after a write at `0`). -/
   ordered : ∀ i j : Fin c.busInteractions.length, j < i →
-    r.isStateful (c.busInteractions.get i).busId = true →
-    r.isStateful (c.busInteractions.get j).busId = true →
-    (((c.busInteractions.get j).eval asg).multiplicity ≠ 0) →
-    (((c.busInteractions.get i).eval asg).multiplicity = 1) →
-    (place j).1 = (place i).1 →
-      (place j).2 < (place i).2
+    c.statefulSend r asg i → c.activeStateful r asg j → place j < place i
   /-- **What a guest chip sends on a stateful bus is Ok** (`GuestBusRules.payloadOk`), given that
-      everything it already touched *earlier in its own step* is.
+      everything it already touched is.
 
       This is the induction step that carries the memory-byte invariant: a send is justified by the
       receives that precede it, and `ordered` is what makes "precedes" an honest order on time. The
@@ -181,24 +157,54 @@ structure StepLayout {p : ℕ} (c : Circuit p) (r : GuestBusRules p) (asg : Chip
       OpenVM §3.2.5, elements of address spaces 1 (registers) and 2 (user memory) "are constrained
       to lie in `[0, 2^8)`". In §4.6: a message appears "if and only if at timestamp `t` the data
       memory had values `data`" at that address. -/
-  sendsOk : ∀ i : Fin c.busInteractions.length,
-    r.isStateful (c.busInteractions.get i).busId = true →
-    (((c.busInteractions.get i).eval asg).multiplicity = 1) →
-    (∀ j : Fin c.busInteractions.length, j < i →
-      r.isStateful (c.busInteractions.get j).busId = true →
-      (((c.busInteractions.get j).eval asg).multiplicity ≠ 0) →
-      (place j).1 = (place i).1 →
-        r.payloadOk (((c.busInteractions.get j).eval asg).busId,
-          ((c.busInteractions.get j).eval asg).payload)) →
-      r.payloadOk (((c.busInteractions.get i).eval asg).busId,
-        ((c.busInteractions.get i).eval asg).payload)
+  sendsOk : ∀ i : Fin c.busInteractions.length, c.statefulSend r asg i →
+    (∀ j : Fin c.busInteractions.length, j < i → c.activeStateful r asg j →
+      r.payloadOk (c.msgAt asg j)) →
+    r.payloadOk (c.msgAt asg i)
 
-/-- **Every assignment a guest chip admits lays out as a sequence of instruction steps.**
+/-- What the step puts on the execution bridge: `1` at the state it produces, `-1` at the state it
+    consumes. Reads only `pcFrom`, `pcTo`, `base` and `d`. -/
+def StepLayout.effect {c : Circuit p} {r : GuestBusRules p} {asg : ChipAssignment p}
+    {maxWindow maxLookback : ℕ} (L : StepLayout c r asg maxWindow maxLookback)
+    (m : BusMessage p) : ZMod p :=
+  (if (r.execBusId, [L.pcTo, L.base + (L.d : ZMod p)]) = m then (1 : ZMod p) else 0)
+    - (if (r.execBusId, [L.pcFrom, L.base]) = m then (1 : ZMod p) else 0)
+
+/-- A step's two bridge endpoints are distinct: were they equal, `recv` and `send` would make the
+    same net both `-1` and `1`. -/
+theorem StepLayout.endpoints_ne {c : Circuit p} {r : GuestBusRules p} {asg : ChipAssignment p}
+    {maxWindow maxLookback : ℕ} (L : StepLayout c r asg maxWindow maxLookback)
+    (h2 : (-1 : ZMod p) ≠ 1) :
+    ((r.execBusId, [L.pcFrom, L.base]) : BusMessage p)
+      ≠ (r.execBusId, [L.pcTo, L.base + (L.d : ZMod p)]) := by
+  intro h
+  have hr := L.recv
+  rw [h, L.send] at hr
+  exact h2 hr.symm
+
+/-- **The instance's bridge net is exactly what its step puts there.** The `recv`/`send`/`other`
+    triple repackaged as a single equation, which is the form the chain argument consumes. -/
+theorem StepLayout.net {c : Circuit p} {r : GuestBusRules p} {asg : ChipAssignment p}
+    {maxWindow maxLookback : ℕ} (L : StepLayout c r asg maxWindow maxLookback)
+    (h2 : (-1 : ZMod p) ≠ 1) :
+    ∀ m : BusMessage p, m.1 = r.execBusId → c.allEffects asg m = L.effect m := by
+  intro m hm
+  simp only [StepLayout.effect]
+  by_cases hd : ((r.execBusId, [L.pcTo, L.base + (L.d : ZMod p)]) : BusMessage p) = m <;>
+    by_cases hs : ((r.execBusId, [L.pcFrom, L.base]) : BusMessage p) = m
+  · exact absurd (hs.trans hd.symm) (L.endpoints_ne h2)
+  · rw [if_pos hd, if_neg hs, sub_zero, ← hd]; exact L.send
+  · rw [if_neg hd, if_pos hs, zero_sub, ← hs]; exact L.recv
+  · rw [if_neg hd, if_neg hs, sub_zero]
+    exact L.other m hm (fun h => hs h.symm) (fun h => hd h.symm)
+
+/-- **Every assignment a guest chip admits lays out as one instruction step.**
 
     The `satisfiesStateless` hypothesis is not decoration: a real APC's timestamp-difference bound
     survives powdr's optimizer only as a range-check *payload* (the lt gadget's algebraic
-    constraint is substituted away), so nothing about a memory receive's offset is derivable from
-    the algebraic constraints alone. Being a hypothesis, it only weakens the clause.
+    constraint is substituted away, and `15360 = -1/2^17` in BabyBear), so nothing about a memory
+    receive's offset is derivable from the algebraic constraints alone. Being a hypothesis, it only
+    weakens the clause.
 
     Needed to avoid timestamp overflow, and to give the soundness argument's induction something to
     descend on. -/

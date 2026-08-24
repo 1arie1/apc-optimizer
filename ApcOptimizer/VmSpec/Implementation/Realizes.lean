@@ -304,8 +304,8 @@ theorem maintains_of_stateful_active [Fact p.Prime] {host : Host p} {bs : BusSem
     rcases (hlegal u).polarity asg'' (hsat.satisfiesGuest u asg'' hasg'') bi'' hbi'' hst'' with
       h0 | h1 | hm1
     · exact Or.inl h0
-    · -- A send has to vouch for itself, given everything it touched earlier in its own step —
-      -- which the induction hypothesis supplies, because a step's offsets order ranks.
+    · -- A send has to vouch for itself, given everything it touched earlier — which the induction
+      -- hypothesis supplies, because a step's offsets order ranks.
       have hacc : (G.get u).satisfiesStateless (bs.toGuestRules r0) asg'' :=
         satisfiesStateless_of_sinks hunpack hsinks hGuests hsat u asg'' hasg''
       obtain ⟨L⟩ := (hlegal u).stepLayout asg'' (hsat.satisfiesGuest u asg'' hasg'') hacc
@@ -319,11 +319,12 @@ theorem maintains_of_stateful_active [Fact p.Prime] {host : Host p} {bs : BusSem
         rw [Circuit.msgAt, hi]; exact hmsg''
       refine absurd ?_ hno
       rw [← hmsgi]
-      refine L.sendsOk i hsti hmulti (fun j hji hstj hmultj hplace => ?_)
-      refine ih _ ?_ u asg'' hasg'' _ (List.get_mem _ _) hstj hmultj rfl
-      have hoff := L.ordered i j hji hsti hstj hmultj hmulti hplace
-      have hlt := hOrders u asg'' hasg'' L i j ⟨hsti, by rw [hmulti]; exact one_ne_zero⟩
-        ⟨hstj, hmultj⟩ hplace hoff
+      have hsendi : (G.get u).statefulSend (bs.toGuestRules r0) asg'' i := ⟨hsti, hmulti⟩
+      refine L.sendsOk i hsendi (fun j hji hactj => ?_)
+      refine ih _ ?_ u asg'' hasg'' _ (List.get_mem _ _) hactj.1 hactj.2 rfl
+      have hoff := L.ordered i j hji hsendi hactj
+      have hlt := hOrders u asg'' hasg'' L i j ⟨hsti, by rw [hsendi.2]; exact one_ne_zero⟩
+        hactj hoff
       rwa [hmsgi, hrank] at hlt
     · exact Or.inr hm1
   -- Every *non-exempt* host chip is silent too — same argument as before, just narrowed.
