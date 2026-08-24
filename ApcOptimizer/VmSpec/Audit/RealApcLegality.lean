@@ -595,4 +595,285 @@ theorem apc2105000Unopt_zero_not_satisfiesAlgebraic :
   simp only [Expression.eval] at this
   exact absurd this (by decide)
 
+--------- The gated APC, with `is_valid` pinned: proved, closing finding G1 in full ---------
+
+/-- **`apc2105000Gated` fails `hasStepLayout` only because `is_valid` is unpinned** — pin it, and
+    every clause the checkers proved for `apc2105000Opt` carries over verbatim: `apc2105000Gated`
+    is `apc2105000Opt`'s own algebraic constraints and bus interactions, each multiplicity
+    additionally scaled by `is_valid`, which folds away to the literal it already was. -/
+def gatedPinRules : List (PinRule babyBear) :=
+  apc2105000GatedPinned.algebraicConstraints.filterMap pinRuleOf
+
+theorem gatedPinRules_hold (asg : ChipAssignment babyBear)
+    (halg : apc2105000GatedPinned.satisfiesAlgebraic asg) :
+    ∀ q ∈ gatedPinRules, q.1.eval asg = q.2 := by
+  intro q hq
+  obtain ⟨con, hcon, hpin⟩ := List.mem_filterMap.mp hq
+  exact pinRuleOf_eval (by rw [hpin]) (halg con hcon)
+
+theorem gatedIsValid {asg : ChipAssignment babyBear}
+    (halg : apc2105000GatedPinned.satisfiesAlgebraic asg) :
+    asg ⟨"is_valid", some 137⟩ = 1 :=
+  gatedPinRules_hold asg halg (.var ⟨"is_valid", some 137⟩, 1) (by decide)
+
+theorem gatedIsValid_ne_zero {asg : ChipAssignment babyBear}
+    (halg : apc2105000GatedPinned.satisfiesAlgebraic asg) :
+    asg ⟨"is_valid", some 137⟩ ≠ 0 := by
+  rw [gatedIsValid halg]; exact (show (1 : ZMod babyBear) ≠ 0 by decide)
+
+/-- **The strengthened check passes, `is_valid` pinned.** Same shape as `apc2105000Unopt`'s: every
+    multiplicity is a literal times `is_valid`, legal only because the pin says `is_valid = 1`. -/
+theorem apc2105000GatedPinned_checkMultiplicitiesWith :
+    checkMultiplicitiesWith apcRules.isStateful apc2105000GatedPinned = true := by decide
+
+theorem apc2105000GatedPinned_legalMultiplicities :
+    apc2105000GatedPinned.statelessSendOnly apcRules ∧
+      apc2105000GatedPinned.statefulPolarity apcRules :=
+  checkMultiplicitiesWith_sound apc2105000GatedPinned_checkMultiplicitiesWith rfl
+
+theorem gatedAccepts {asg : ChipAssignment babyBear}
+    (hacc : apc2105000GatedPinned.satisfiesStateless apcRules asg)
+    (k : ℕ) (hk : k < apc2105000GatedPinned.busInteractions.length)
+    (m : BusInteraction (ZMod babyBear))
+    (hm : (apc2105000GatedPinned.busInteractions[k]).eval asg = m)
+    (hst : apcRules.isStateful m.busId = false) (hmult : m.multiplicity ≠ 0) :
+    accepts defaultBusMap m := by
+  subst hm; exact hacc _ (List.getElem_mem hk) hst hmult
+
+theorem gatedBaseLin : Expression.toLin optVars gatedPinRules optBaseE = some optBaseF := by decide
+
+theorem gatedBridgeCheck :
+    bridgeCheck optVars gatedPinRules 0 apc2105000GatedPinned 11 1
+        (.const 2105000)
+        optBaseE
+        (.add (.const 2105016) (.mul (.const 2013265920)
+          (.mul (.const 192) (.var ⟨"cmp_result_3", some 126⟩))))
+      = true := by decide
+
+theorem gatedByteCheck :
+    byteCheckAll optVars gatedPinRules apc2105000GatedPinned.busInteractions optWitnesses = true := by
+  decide
+
+/-- **A pinned gated APC has a step layout.** Identical in shape to `apc2105000Opt_hasStepLayout`
+    — same offsets, same gadgets, same byte witnesses — since pinning `is_valid` is exactly what
+    collapses `apc2105000GatedPinned` back to `apc2105000Opt`'s multiplicities. -/
+theorem apc2105000GatedPinned_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWindow) :
+    apc2105000GatedPinned.hasStepLayout apcRules maxWindow openVmTimestampBound := by
+  haveI : Fact (1 < babyBear) := ⟨by decide⟩
+  intro asg halg hacc
+  have hiv := gatedIsValid halg
+  have hivne := gatedIsValid_ne_zero halg
+  obtain ⟨n0, hn0, ht0⟩ : ∃ n : ℕ, n < 2 ^ 29 ∧
+      asg ⟨"reads_aux__0__base__prev_timestamp_0", some 6⟩
+        = asg ⟨"from_state__timestamp_0", some 1⟩ + ((((-1) - (n : ℤ)) : ℤ) : ZMod babyBear) := by
+    have hacc13 := gatedAccepts hacc 13 (by decide) _ rfl rfl
+      (show asg ⟨"is_valid", some 137⟩ ≠ 0 from hivne)
+    have hacc14 := gatedAccepts hacc 14 (by decide) _ rfl rfl
+      (show asg ⟨"is_valid", some 137⟩ ≠ 0 from hivne)
+    simp only [apc2105000GatedPinned, apc2105000Gated, BusInteraction.eval] at hacc13 hacc14
+    obtain ⟨hb, ht⟩ := lookback_of_gadget (vs := optVars) (rules := gatedPinRules)
+      (baseE := optBaseE) (baseF := optBaseF) (k := (-1))
+      (tsE := .var ⟨"reads_aux__0__base__prev_timestamp_0", some 6⟩)
+      (loE := payloadOf apc2105000GatedPinned 13 0) (hiE := payloadOf apc2105000GatedPinned 14 0)
+      (gatedPinRules_hold asg halg) gatedBaseLin (by decide)
+      hacc13
+      hacc14
+    rw [Recipe.place_eq] at ht
+    exact ⟨_, hb, ht⟩
+  obtain ⟨nw0, hnw0, htw0⟩ : ∃ n : ℕ, n < 2 ^ 29 ∧
+      asg ⟨"writes_aux__base__prev_timestamp_0", some 12⟩
+        = asg ⟨"from_state__timestamp_0", some 1⟩ + (((1 - (n : ℤ)) : ℤ) : ZMod babyBear) := by
+    have hacc15 := gatedAccepts hacc 15 (by decide) _ rfl rfl
+      (show asg ⟨"is_valid", some 137⟩ ≠ 0 from hivne)
+    have hacc16 := gatedAccepts hacc 16 (by decide) _ rfl rfl
+      (show asg ⟨"is_valid", some 137⟩ ≠ 0 from hivne)
+    simp only [apc2105000GatedPinned, apc2105000Gated, BusInteraction.eval] at hacc15 hacc16
+    obtain ⟨hb, ht⟩ := lookback_of_gadget (vs := optVars) (rules := gatedPinRules)
+      (baseE := optBaseE) (baseF := optBaseF) (k := 1)
+      (tsE := .var ⟨"writes_aux__base__prev_timestamp_0", some 12⟩)
+      (loE := payloadOf apc2105000GatedPinned 15 0) (hiE := payloadOf apc2105000GatedPinned 16 0)
+      (gatedPinRules_hold asg halg) gatedBaseLin (by decide)
+      hacc15
+      hacc16
+    rw [Recipe.place_eq] at ht
+    exact ⟨_, hb, ht⟩
+  obtain ⟨nr1, hnr1, htr1⟩ : ∃ n : ℕ, n < 2 ^ 29 ∧
+      asg ⟨"reads_aux__0__base__prev_timestamp_1", some 42⟩
+        = asg ⟨"from_state__timestamp_0", some 1⟩ + (((2 - (n : ℤ)) : ℤ) : ZMod babyBear) := by
+    have hacc17 := gatedAccepts hacc 17 (by decide) _ rfl rfl
+      (show asg ⟨"is_valid", some 137⟩ ≠ 0 from hivne)
+    have hacc18 := gatedAccepts hacc 18 (by decide) _ rfl rfl
+      (show asg ⟨"is_valid", some 137⟩ ≠ 0 from hivne)
+    simp only [apc2105000GatedPinned, apc2105000Gated, BusInteraction.eval] at hacc17 hacc18
+    obtain ⟨hb, ht⟩ := lookback_of_gadget (vs := optVars) (rules := gatedPinRules)
+      (baseE := optBaseE) (baseF := optBaseF) (k := 2)
+      (tsE := .var ⟨"reads_aux__0__base__prev_timestamp_1", some 42⟩)
+      (loE := payloadOf apc2105000GatedPinned 17 0) (hiE := payloadOf apc2105000GatedPinned 18 0)
+      (gatedPinRules_hold asg halg) gatedBaseLin (by decide)
+      hacc17
+      hacc18
+    rw [Recipe.place_eq] at ht
+    exact ⟨_, hb, ht⟩
+  obtain ⟨nw1, hnw1, htw1⟩ : ∃ n : ℕ, n < 2 ^ 29 ∧
+      asg ⟨"writes_aux__base__prev_timestamp_1", some 48⟩
+        = asg ⟨"from_state__timestamp_0", some 1⟩ + (((4 - (n : ℤ)) : ℤ) : ZMod babyBear) := by
+    have hacc19 := gatedAccepts hacc 19 (by decide) _ rfl rfl
+      (show asg ⟨"is_valid", some 137⟩ ≠ 0 from hivne)
+    have hacc20 := gatedAccepts hacc 20 (by decide) _ rfl rfl
+      (show asg ⟨"is_valid", some 137⟩ ≠ 0 from hivne)
+    simp only [apc2105000GatedPinned, apc2105000Gated, BusInteraction.eval] at hacc19 hacc20
+    obtain ⟨hb, ht⟩ := lookback_of_gadget (vs := optVars) (rules := gatedPinRules)
+      (baseE := optBaseE) (baseF := optBaseF) (k := 4)
+      (tsE := .var ⟨"writes_aux__base__prev_timestamp_1", some 48⟩)
+      (loE := payloadOf apc2105000GatedPinned 19 0) (hiE := payloadOf apc2105000GatedPinned 20 0)
+      (gatedPinRules_hold asg halg) gatedBaseLin (by decide)
+      hacc19
+      hacc20
+    rw [Recipe.place_eq] at ht
+    exact ⟨_, hb, ht⟩
+  obtain ⟨nr3, hnr3, htr3⟩ : ∃ n : ℕ, n < 2 ^ 29 ∧
+      asg ⟨"reads_aux__1__base__prev_timestamp_3", some 115⟩
+        = asg ⟨"from_state__timestamp_0", some 1⟩ + (((9 - (n : ℤ)) : ℤ) : ZMod babyBear) := by
+    have hacc21 := gatedAccepts hacc 21 (by decide) _ rfl rfl
+      (show asg ⟨"is_valid", some 137⟩ ≠ 0 from hivne)
+    have hacc22 := gatedAccepts hacc 22 (by decide) _ rfl rfl
+      (show asg ⟨"is_valid", some 137⟩ ≠ 0 from hivne)
+    simp only [apc2105000GatedPinned, apc2105000Gated, BusInteraction.eval] at hacc21 hacc22
+    obtain ⟨hb, ht⟩ := lookback_of_gadget (vs := optVars) (rules := gatedPinRules)
+      (baseE := optBaseE) (baseF := optBaseF) (k := 9)
+      (tsE := .var ⟨"reads_aux__1__base__prev_timestamp_3", some 115⟩)
+      (loE := payloadOf apc2105000GatedPinned 21 0) (hiE := payloadOf apc2105000GatedPinned 22 0)
+      (gatedPinRules_hold asg halg) gatedBaseLin (by decide)
+      hacc21
+      hacc22
+    rw [Recipe.place_eq] at ht
+    exact ⟨_, hb, ht⟩
+  have hbit : accepts (p := babyBear) defaultBusMap
+      { busId := 6, multiplicity := 1,
+        payload := [asg ⟨"a__0_0", some 19⟩, 3,
+          asg ⟨"a__0_0", some 19⟩ + 3 + 2013265920 * (2 * asg ⟨"a__0_2", some 91⟩), 1] } :=
+    gatedAccepts hacc 7 (by decide) _ (by simp [apc2105000GatedPinned, apc2105000Gated,
+      BusInteraction.eval, Expression.eval, hiv]) rfl (show (1 : ZMod babyBear) ≠ 0 by decide)
+  replace hbit : isByte (asg ⟨"a__0_0", some 19⟩) ∧ isByte (3 : ZMod babyBear) ∧
+      (asg ⟨"a__0_0", some 19⟩ + 3 + 2013265920 * (2 * asg ⟨"a__0_2", some 91⟩)).val
+        = Nat.xor (asg ⟨"a__0_0", some 19⟩).val (3 : ZMod babyBear).val := hbit
+  have ha02 : isByte (asg ⟨"a__0_2", some 91⟩) :=
+    isByte_of_xorThree hbit.1
+      (by rw [hbit.2.2, show (3 : ZMod babyBear).val = 3 from by decide])
+      (by linear_combination (2 * asg ⟨"a__0_2", some 91⟩) * babyBear_negOne)
+  have hub : ∀ i : Fin apc2105000GatedPinned.busInteractions.length,
+      apcRules.isStateful (apc2105000GatedPinned.busInteractions.get i).busId = true →
+      ((apc2105000GatedPinned.busInteractions.get i).eval asg).multiplicity ≠ 0 →
+      (optOffsets n0 nw0 nr1 nw1 nr3).getD i.val 0 ≤ optOffsetUb.getD i.val 0 := by
+    intro i hst _
+    fin_cases i <;>
+      simp [optOffsets, optOffsetUb, apc2105000GatedPinned, apc2105000Gated, apcRules,
+        openVmGuestRules, openVmIsStateful, defaultBusMap, OpenVmBusType.isStateful] at hst ⊢
+  have hsendIdx : ∀ i : Fin apc2105000GatedPinned.busInteractions.length,
+      apcRules.isStateful (apc2105000GatedPinned.busInteractions.get i).busId = true →
+      ((apc2105000GatedPinned.busInteractions.get i).eval asg).multiplicity = 1 →
+      i.val ∈ [1, 6, 8, 9, 11, 12] ∧
+      (optOffsets n0 nw0 nr1 nw1 nr3).getD i.val 0 = optOffsetUb.getD i.val 0 := by
+    intro i hst hm
+    fin_cases i <;>
+      simp_all [optOffsets, optOffsetUb, apc2105000GatedPinned, apc2105000Gated, apcRules,
+        openVmGuestRules, openVmIsStateful, defaultBusMap, OpenVmBusType.isStateful,
+        BusInteraction.eval, Expression.eval, babyBear_negOne_ne_one]
+  -- The bridge, by static analysis: `gatedBridgeCheck` is a `decide`.
+  obtain ⟨hrecv, hsend, hother⟩ := bridgeCheck_sound gatedBridgeCheck (gatedPinRules_hold asg halg)
+  refine ⟨_, _, _, 11, fun i => (optOffsets n0 nw0 nr1 nw1 nr3).getD i.val 0,
+    by norm_num, hw, hrecv, hsend, hother, ?_, ?_, ?_⟩
+  · -- The placement, offset by offset.
+    rintro i ⟨hst, hm⟩
+    fin_cases i
+    · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits]; omega,
+        by simp [optOffsets]; omega,
+        by simpa [optOffsets, optBaseE, apc2105000GatedPinned, apc2105000Gated,
+          BusInteraction.eval, Expression.eval, apcRules, openVmGuestRules, openVmTimestamp,
+          Circuit.msgAt] using ht0⟩
+    · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits],
+        by simp [optOffsets],
+        by simp [optOffsets, optBaseE, apc2105000GatedPinned, apc2105000Gated,
+          BusInteraction.eval, Expression.eval, apcRules, openVmGuestRules, openVmTimestamp,
+          Circuit.msgAt]⟩
+    · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits]; omega,
+        by simp [optOffsets]; omega,
+        by simpa [optOffsets, optBaseE, apc2105000GatedPinned, apc2105000Gated,
+          BusInteraction.eval, Expression.eval, apcRules, openVmGuestRules, openVmTimestamp,
+          Circuit.msgAt] using htw0⟩
+    · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits],
+        by simp [optOffsets],
+        by simp [optOffsets, optBaseE, apc2105000GatedPinned, apc2105000Gated,
+          BusInteraction.eval, Expression.eval, apcRules, openVmGuestRules, openVmTimestamp,
+          Circuit.msgAt, openVmMemBusId, openVmExecBusId]⟩
+    · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits]; omega,
+        by simp [optOffsets]; omega,
+        by simpa [optOffsets, optBaseE, apc2105000GatedPinned, apc2105000Gated,
+          BusInteraction.eval, Expression.eval, apcRules, openVmGuestRules, openVmTimestamp,
+          Circuit.msgAt] using htr1⟩
+    · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits]; omega,
+        by simp [optOffsets]; omega,
+        by simpa [optOffsets, optBaseE, apc2105000GatedPinned, apc2105000Gated,
+          BusInteraction.eval, Expression.eval, apcRules, openVmGuestRules, openVmTimestamp,
+          Circuit.msgAt] using htw1⟩
+    · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits],
+        by simp [optOffsets],
+        by simp [optOffsets, optBaseE, apc2105000GatedPinned, apc2105000Gated,
+          BusInteraction.eval, Expression.eval, apcRules, openVmGuestRules, openVmTimestamp,
+          Circuit.msgAt]⟩
+    · simp [apc2105000GatedPinned, apc2105000Gated, apcRules, openVmGuestRules, openVmIsStateful,
+        defaultBusMap, OpenVmBusType.isStateful] at hst
+    · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits],
+        by simp [optOffsets],
+        by simp [optOffsets, optBaseE, apc2105000GatedPinned, apc2105000Gated,
+          BusInteraction.eval, Expression.eval, apcRules, openVmGuestRules, openVmTimestamp,
+          Circuit.msgAt]⟩
+    · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits],
+        by simp [optOffsets],
+        by simp [optOffsets, optBaseE, apc2105000GatedPinned, apc2105000Gated,
+          BusInteraction.eval, Expression.eval, apcRules, openVmGuestRules, openVmTimestamp,
+          Circuit.msgAt]⟩
+    · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits]; omega,
+        by simp [optOffsets]; omega,
+        by simpa [optOffsets, optBaseE, apc2105000GatedPinned, apc2105000Gated,
+          BusInteraction.eval, Expression.eval, apcRules, openVmGuestRules, openVmTimestamp,
+          Circuit.msgAt] using htr3⟩
+    · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits],
+        by simp [optOffsets],
+        by simp [optOffsets, optBaseE, apc2105000GatedPinned, apc2105000Gated,
+          BusInteraction.eval, Expression.eval, apcRules, openVmGuestRules, openVmTimestamp,
+          Circuit.msgAt]⟩
+    · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits],
+        by simp [optOffsets],
+        by simp [optOffsets, optBaseE, apc2105000GatedPinned, apc2105000Gated,
+          BusInteraction.eval, Expression.eval, apcRules, openVmGuestRules, openVmTimestamp,
+          Circuit.msgAt, openVmMemBusId, openVmExecBusId]⟩
+    all_goals
+      simp [apc2105000GatedPinned, apc2105000Gated, apcRules, openVmGuestRules, openVmIsStateful,
+        defaultBusMap, OpenVmBusType.isStateful] at hst
+  · -- The ordering: numeric, via `optOffsetUb`.
+    rintro i j hji ⟨hsi, hmi⟩ ⟨hsj, hmj⟩
+    obtain ⟨hmem, heq⟩ := hsendIdx i hsi hmi
+    show (optOffsets n0 nw0 nr1 nw1 nr3).getD j.val 0
+      < (optOffsets n0 nw0 nr1 nw1 nr3).getD i.val 0
+    rw [heq]
+    exact lt_of_le_of_lt (hub j hsj hmj)
+      (optOffsetUb_dominates i.val hmem j.val (Fin.lt_def.mp hji))
+  · -- The byte invariant, by static analysis: only the masked write is left by hand.
+    refine byteCheck_sendsOk (gatedPinRules_hold asg halg) gatedByteCheck ?_
+    intro i hi hsend hlow
+    fin_cases i
+    all_goals try exact absurd hi (by decide)
+    show openVmPayloadOk defaultBusMap ((1 : ℕ), [(1 : ZMod babyBear), 44,
+      asg ⟨"a__0_2", some 91⟩, 0, 0, 0, asg ⟨"from_state__timestamp_0", some 1⟩ + 9])
+    exact (openVmPayloadOk_mem_iff _ _ _ _ _ _).mpr ⟨ha02, isByte_zero, isByte_zero, isByte_zero⟩
+
+theorem apc2105000GatedPinned_legalGuest {maxWindow maxInteractions : ℕ} (hw : 11 < maxWindow)
+    (hi : 23 ≤ maxInteractions) :
+    apc2105000GatedPinned.legalGuest apcRules maxWindow openVmTimestampBound maxInteractions where
+  sendOnly := apc2105000GatedPinned_legalMultiplicities.1
+  polarity := apc2105000GatedPinned_legalMultiplicities.2
+  stepLayout := apc2105000GatedPinned_hasStepLayout hw
+  size := by simpa [apc2105000GatedPinned, apc2105000Gated] using hi
+
 end ApcOptimizer.OpenVM

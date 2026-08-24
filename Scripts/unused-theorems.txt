@@ -156,6 +156,17 @@ ApcOptimizer.OpenVM.byteCheckAll_get
 ApcOptimizer.OpenVM.byteCheckOne_sound
 ApcOptimizer.OpenVM.byteCheck_sendsOk
 ApcOptimizer.OpenVM.optByteCheck
+ApcOptimizer.OpenVM.gatedPinRules_hold
+ApcOptimizer.OpenVM.gatedIsValid
+ApcOptimizer.OpenVM.gatedIsValid_ne_zero
+ApcOptimizer.OpenVM.apc2105000GatedPinned_checkMultiplicitiesWith
+ApcOptimizer.OpenVM.apc2105000GatedPinned_legalMultiplicities
+ApcOptimizer.OpenVM.gatedAccepts
+ApcOptimizer.OpenVM.gatedBaseLin
+ApcOptimizer.OpenVM.gatedBridgeCheck
+ApcOptimizer.OpenVM.gatedByteCheck
+ApcOptimizer.OpenVM.apc2105000GatedPinned_hasStepLayout
+ApcOptimizer.OpenVM.apc2105000GatedPinned_legalGuest
 ApcOptimizer.OpenVM.openVm_negOne_ne_one
 StepLayout.endpoints_ne
 StepLayout.net

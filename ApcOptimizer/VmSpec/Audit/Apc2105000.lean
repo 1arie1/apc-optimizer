@@ -383,4 +383,30 @@ def apc2105000Gated : Circuit babyBear where
     , { busId := 3, multiplicity := .var ⟨"is_valid", some 137⟩,
         payload := [.add (.add (.mul (.const 15360) (.var ⟨"reads_aux__1__base__prev_timestamp_3", some 115⟩)) (.mul (.const 15360) (.var ⟨"reads_aux__1__base__timestamp_lt_aux__lower_decomp__0_3", some 116⟩))) (.mul (.const 2013265920) (.add (.mul (.const 15360) (.var ⟨"from_state__timestamp_0", some 1⟩)) (.const 138240))), .const 12] } ]
 
+
+/-- `apc2105000Unopt` with its four fused instructions' bridge timestamps chained: block `i + 1`'s
+    start is block `i`'s own start plus its own duration (`3, 3, 3` ticks, read off the literal
+    delta each block's own bridge send already carries). Defined by appending to
+    `apc2105000Unopt` rather than restating it. -/
+def apc2105000UnoptChained : Circuit babyBear :=
+  { apc2105000Unopt with
+    algebraicConstraints := apc2105000Unopt.algebraicConstraints ++
+      [ .add (.var ⟨"from_state__timestamp_1", some 37⟩)
+          (.mul (.const 2013265920)
+            (.add (.var ⟨"from_state__timestamp_0", some 1⟩) (.const 3)))
+      , .add (.var ⟨"from_state__timestamp_2", some 73⟩)
+          (.mul (.const 2013265920)
+            (.add (.var ⟨"from_state__timestamp_1", some 37⟩) (.const 3)))
+      , .add (.var ⟨"from_state__timestamp_3", some 109⟩)
+          (.mul (.const 2013265920)
+            (.add (.var ⟨"from_state__timestamp_2", some 73⟩) (.const 3))) ] }
+
+/-- `apc2105000Gated` with `is_valid` pinned to `1`, closing off the padding row that makes
+    `apc2105000Gated_not_hasStepLayout` false. Defined by appending to `apc2105000Gated` rather
+    than restating it. -/
+def apc2105000GatedPinned : Circuit babyBear :=
+  { apc2105000Gated with
+    algebraicConstraints := apc2105000Gated.algebraicConstraints ++
+      [ .add (.var ⟨"is_valid", some 137⟩) (.mul (.const 2013265920) (.const 1)) ] }
+
 end ApcOptimizer.OpenVM
