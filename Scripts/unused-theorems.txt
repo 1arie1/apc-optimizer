@@ -239,6 +239,10 @@ ApcOptimizer.OpenVM.memSendsOk_of_sendsOk
 ApcOptimizer.OpenVM.defaultBusMap_mem_unique
 ApcOptimizer.OpenVM.maintainsInvariants_off_mem
 
+# `Audit/RealApcLegality.lean`'s `memOrdered` for the unoptimized APC: a `decide` over the
+# offset-upper-bound table, mirroring `optOffsetUb_dominates`.
+ApcOptimizer.OpenVM.unoptOffsetUb_dominates
+
 # `Audit/SendOnlyPolarity.lean`'s constant-propagation tier: its root is
 # `checkMultiplicitiesWith_sound`, used by `Audit/RealApcLegality.lean`, and the rest feed it.
 Expression.signedPart_sq

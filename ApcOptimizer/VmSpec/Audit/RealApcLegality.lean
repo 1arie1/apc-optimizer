@@ -1870,3 +1870,34 @@ theorem apc2105000UnoptChained_memSendsOk {asg : ChipAssignment babyBear}
       asg ⟨"a__0_2", some 91⟩, asg ⟨"a__1_2", some 92⟩, asg ⟨"a__2_2", some 93⟩,
       asg ⟨"a__3_2", some 94⟩, asg ⟨"from_state__timestamp_2", some 73⟩ + 2])
     exact (openVmPayloadOk_mem_iff _ _ _ _ _ _).mpr ⟨h0, h1, h2, h3⟩
+
+--------- The unoptimized APC, timestamps chained: the ordering ---------
+
+/-- Where each of `apc2105000UnoptChained`'s `71` interactions sits, as an upper bound on its
+    offset from `from_state__timestamp_0`: the four fused steps' local offsets (mirroring
+    `apc2105000Opt`'s `optOffsetUb`, one memory gadget's receive/send pair per instruction, two
+    for the branch's `rs1`/`rs2`), shifted by each instruction's own `3`-tick advance
+    (`chainedTimes`). Stateless positions, and the inactive `rs2` gadgets `rs2_as_i = 0` disables,
+    get a placeholder far below every real offset — `memOrdered`'s domination check never reads
+    them for anything but a `<`, and they are never `activeStateful` either way. -/
+def unoptOffsetUb : List ℤ :=
+  -- instr 0 (shift 0)
+  [-1000, -1000, -1000, -1000, -1000, -1000, -1000, -1, 0, -1000, -1000, -1000, -1000, -1000,
+   -1000, 1, 2, -1000, -1000, -1000] ++
+  -- instr 1 (shift 3)
+  [-1000, -1000, -1000, -1000, -1000, -1000, -1000, 2, 3, -1000, -1000, -1000, -1000, -1000,
+   -1000, 4, 5, -1000, -1000, -1000] ++
+  -- instr 2 (shift 6)
+  [-1000, -1000, -1000, -1000, -1000, -1000, -1000, 5, 6, -1000, -1000, -1000, -1000, -1000,
+   -1000, 7, 8, -1000, -1000, -1000] ++
+  -- instr 3 / branch (shift 9)
+  [-1000, -1000, 8, 9, -1000, -1000, 9, 10, -1000, -1000, -1000]
+
+/-- Each of `apc2105000UnoptChained`'s eight memory sends dominates every position before it —
+    the whole of `memOrdered` for this circuit, `decide` over `71` positions. Unlike
+    `apc2105000Opt`, several sends share an upper bound with an *earlier, different* send's own
+    predecessor (e.g. positions `36` and `47` both cap out at `5`) — harmless, since domination is
+    only ever asked of a send against what precedes *it*, never between two unrelated positions. -/
+theorem unoptOffsetUb_dominates :
+    ∀ b ∈ [8, 16, 28, 36, 48, 56, 63, 67], ∀ k < b, unoptOffsetUb.getD k 0 < unoptOffsetUb.getD b 0 := by
+  decide
