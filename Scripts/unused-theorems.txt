@@ -167,6 +167,12 @@ ApcOptimizer.OpenVM.gatedBridgeCheck
 ApcOptimizer.OpenVM.gatedByteCheck
 ApcOptimizer.OpenVM.apc2105000GatedPinned_hasStepLayout
 ApcOptimizer.OpenVM.apc2105000GatedPinned_legalGuest
+ApcOptimizer.OpenVM.apc2105000UnoptChained_checkMultiplicitiesWith
+ApcOptimizer.OpenVM.apc2105000UnoptChained_legalMultiplicities
+ApcOptimizer.OpenVM.chainedTimes
+ApcOptimizer.OpenVM.unoptPinRules_hold
+ApcOptimizer.OpenVM.unoptBusEntries
+ApcOptimizer.OpenVM.apc2105000UnoptChained_bridge
 ApcOptimizer.OpenVM.openVm_negOne_ne_one
 StepLayout.endpoints_ne
 StepLayout.net

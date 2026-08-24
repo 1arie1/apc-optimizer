@@ -876,4 +876,178 @@ theorem apc2105000GatedPinned_legalGuest {maxWindow maxInteractions : ℕ} (hw :
   stepLayout := apc2105000GatedPinned_hasStepLayout hw
   size := by simpa [apc2105000GatedPinned, apc2105000Gated] using hi
 
-end ApcOptimizer.OpenVM
+--------- The unoptimized APC, timestamps chained: the bridge, closing finding G2 ---------
+
+/-- **The strengthened check still passes**: the three chaining constraints are not pin-rule
+    shaped (their right side is `from_state__timestamp_i + 3`, a variable plus a constant, not a
+    literal), so `pinRuleOf` extracts nothing new from them — the check runs on exactly
+    `apc2105000Unopt`'s own 27 rules. -/
+theorem apc2105000UnoptChained_checkMultiplicitiesWith :
+    checkMultiplicitiesWith apcRules.isStateful apc2105000UnoptChained = true := by decide
+
+theorem apc2105000UnoptChained_legalMultiplicities :
+    apc2105000UnoptChained.statelessSendOnly apcRules ∧
+      apc2105000UnoptChained.statefulPolarity apcRules :=
+  checkMultiplicitiesWith_sound apc2105000UnoptChained_checkMultiplicitiesWith rfl
+
+/-- **The three chaining hypotheses, unpacked from `satisfiesAlgebraic`.** The constraints
+    themselves; `pinRuleOf`'s reach ends at literals, so this is by hand. -/
+theorem chainedTimes {asg : ChipAssignment babyBear}
+    (halg : apc2105000UnoptChained.satisfiesAlgebraic asg) :
+    asg ⟨"from_state__timestamp_1", some 37⟩
+        = asg ⟨"from_state__timestamp_0", some 1⟩ + 3 ∧
+      asg ⟨"from_state__timestamp_2", some 73⟩
+        = asg ⟨"from_state__timestamp_1", some 37⟩ + 3 ∧
+      asg ⟨"from_state__timestamp_3", some 109⟩
+        = asg ⟨"from_state__timestamp_2", some 73⟩ + 3 := by
+  have h1 := halg
+    (.add (.var ⟨"from_state__timestamp_1", some 37⟩)
+      (.mul (.const 2013265920)
+        (.add (.var ⟨"from_state__timestamp_0", some 1⟩) (.const 3))))
+    (by simp [apc2105000UnoptChained])
+  have h2 := halg
+    (.add (.var ⟨"from_state__timestamp_2", some 73⟩)
+      (.mul (.const 2013265920)
+        (.add (.var ⟨"from_state__timestamp_1", some 37⟩) (.const 3))))
+    (by simp [apc2105000UnoptChained])
+  have h3 := halg
+    (.add (.var ⟨"from_state__timestamp_3", some 109⟩)
+      (.mul (.const 2013265920)
+        (.add (.var ⟨"from_state__timestamp_2", some 73⟩) (.const 3))))
+    (by simp [apc2105000UnoptChained])
+  simp only [Expression.eval] at h1 h2 h3
+  refine ⟨by linear_combination h1 - (asg ⟨"from_state__timestamp_0", some 1⟩ + 3) * babyBear_negOne,
+    by linear_combination h2 - (asg ⟨"from_state__timestamp_1", some 37⟩ + 3) * babyBear_negOne,
+    by linear_combination h3 - (asg ⟨"from_state__timestamp_2", some 73⟩ + 3) * babyBear_negOne⟩
+
+/-- The variables the unoptimized (chained) APC's bridge payloads mention. -/
+def unoptVars : List Variable :=
+  [⟨"from_state__timestamp_0", some 1⟩, ⟨"from_state__timestamp_1", some 37⟩,
+   ⟨"from_state__timestamp_2", some 73⟩, ⟨"from_state__timestamp_3", some 109⟩,
+   ⟨"cmp_result_3", some 126⟩]
+
+/-- The pin rules `apc2105000Unopt`'s own constraints supply -- identical to
+    `apc2105000UnoptChained`'s, since the three chaining constraints extract none (their right
+    side is not a literal). -/
+def unoptPinRules : List (PinRule babyBear) :=
+  apc2105000Unopt.algebraicConstraints.filterMap pinRuleOf
+
+theorem unoptPinRules_hold (asg : ChipAssignment babyBear)
+    (halg : apc2105000UnoptChained.satisfiesAlgebraic asg) :
+    ∀ q ∈ unoptPinRules, q.1.eval asg = q.2 := by
+  intro q hq
+  obtain ⟨con, hcon, hpin⟩ := List.mem_filterMap.mp hq
+  exact pinRuleOf_eval (by rw [hpin]) (halg con (List.mem_append_left _ hcon))
+
+/-- **The bridge's traffic, normalized.** Eight entries: a receive/send pair per fused
+    instruction, in order. Each send's payload already carries the literal `pc` of the *next*
+    instruction's receive (powdr's own constant-folding of `pc_i + 4`) — only the timestamp still
+    needs `chainedTimes` to see the pairs coincide. -/
+theorem unoptBusEntries :
+    busEntries unoptVars unoptPinRules 0 apc2105000UnoptChained.busInteractions = some
+      [ (-1, [⟨2105000, [0, 0, 0, 0, 0]⟩, ⟨0, [1, 0, 0, 0, 0]⟩])
+      , (1, [⟨2105004, [0, 0, 0, 0, 0]⟩, ⟨3, [1, 0, 0, 0, 0]⟩])
+      , (-1, [⟨2105004, [0, 0, 0, 0, 0]⟩, ⟨0, [0, 1, 0, 0, 0]⟩])
+      , (1, [⟨2105008, [0, 0, 0, 0, 0]⟩, ⟨3, [0, 1, 0, 0, 0]⟩])
+      , (-1, [⟨2105008, [0, 0, 0, 0, 0]⟩, ⟨0, [0, 0, 1, 0, 0]⟩])
+      , (1, [⟨2105012, [0, 0, 0, 0, 0]⟩, ⟨3, [0, 0, 1, 0, 0]⟩])
+      , (-1, [⟨2105012, [0, 0, 0, 0, 0]⟩, ⟨0, [0, 0, 0, 1, 0]⟩])
+      , (1, [⟨2105016, [0, 0, 0, 0, 2013265729]⟩, ⟨2, [0, 0, 0, 1, 0]⟩]) ] := by decide
+
+/-- **The bridge, closing finding G2.** With the timestamps chained, the six intermediate
+    bridge messages (the sends and receives *between* the four fused instructions) are pairwise
+    literally the same message — same pinned `pc` (visible already in `unoptBusEntries`), same
+    timestamp by `chainedTimes` — so their `+1`/`-1` contributions cancel inside the entry sum,
+    leaving one receive and one send exactly as `StepLayout` wants. -/
+theorem apc2105000UnoptChained_bridge {asg : ChipAssignment babyBear}
+    (halg : apc2105000UnoptChained.satisfiesAlgebraic asg) :
+    apc2105000UnoptChained.allEffects asg
+        (0, [2105000, asg ⟨"from_state__timestamp_0", some 1⟩]) = -1 ∧
+      apc2105000UnoptChained.allEffects asg
+        (0, [2105016 + 2013265920 * (192 * asg ⟨"cmp_result_3", some 126⟩),
+          asg ⟨"from_state__timestamp_0", some 1⟩ + 11]) = 1 ∧
+      ∀ m : BusMessage babyBear, m.1 = 0 →
+        m ≠ (0, [2105000, asg ⟨"from_state__timestamp_0", some 1⟩]) →
+        m ≠ (0, [2105016 + 2013265920 * (192 * asg ⟨"cmp_result_3", some 126⟩),
+          asg ⟨"from_state__timestamp_0", some 1⟩ + 11]) →
+        apc2105000UnoptChained.allEffects asg m = 0 := by
+  obtain ⟨ht01, ht12, ht23⟩ := chainedTimes halg
+  have hsum : ∀ m : BusMessage babyBear, m.1 = 0 →
+      apc2105000UnoptChained.allEffects asg m
+        = (if ([(2105000 : ZMod babyBear), asg ⟨"from_state__timestamp_0", some 1⟩] : List (ZMod babyBear)) = m.2 then (-1 : ZMod babyBear) else 0)
+          + ((if ([(2105004 : ZMod babyBear), 3 + asg ⟨"from_state__timestamp_0", some 1⟩] : List (ZMod babyBear)) = m.2 then (1 : ZMod babyBear) else 0)
+          + ((if ([(2105004 : ZMod babyBear), asg ⟨"from_state__timestamp_1", some 37⟩] : List (ZMod babyBear)) = m.2 then (-1 : ZMod babyBear) else 0)
+          + ((if ([(2105008 : ZMod babyBear), 3 + asg ⟨"from_state__timestamp_1", some 37⟩] : List (ZMod babyBear)) = m.2 then (1 : ZMod babyBear) else 0)
+          + ((if ([(2105008 : ZMod babyBear), asg ⟨"from_state__timestamp_2", some 73⟩] : List (ZMod babyBear)) = m.2 then (-1 : ZMod babyBear) else 0)
+          + ((if ([(2105012 : ZMod babyBear), 3 + asg ⟨"from_state__timestamp_2", some 73⟩] : List (ZMod babyBear)) = m.2 then (1 : ZMod babyBear) else 0)
+          + ((if ([(2105012 : ZMod babyBear), asg ⟨"from_state__timestamp_3", some 109⟩] : List (ZMod babyBear)) = m.2 then (-1 : ZMod babyBear) else 0)
+          + (if ([(2105016 + 2013265729 * asg ⟨"cmp_result_3", some 126⟩ : ZMod babyBear), 2 + asg ⟨"from_state__timestamp_3", some 109⟩] : List (ZMod babyBear)) = m.2 then (1 : ZMod babyBear) else 0)))))))
+       := by
+    intro m hm
+    have h := allEffects_eq_entrySum (unoptPinRules_hold asg halg) apc2105000UnoptChained 0
+      unoptBusEntries m hm
+    simp only [BusEntry.payloadAt, LinForm.eval, unoptVars, List.zipWith, List.map,
+      List.sum_cons, List.sum_nil, zero_mul, add_zero, zero_add, one_mul] at h
+    exact h
+  have ht3 : asg ⟨"from_state__timestamp_3", some 109⟩
+      = asg ⟨"from_state__timestamp_0", some 1⟩ + 9 := by
+    rw [ht23, ht12, ht01]; ring
+  have h11 : (11 : ZMod babyBear) ≠ 0 := by decide
+  have hcmp : (2013265729 : ZMod babyBear) = 2013265920 * 192 := by decide
+  have htarget7 :
+      ([(2105016 + 2013265729 * asg ⟨"cmp_result_3", some 126⟩ : ZMod babyBear),
+          2 + asg ⟨"from_state__timestamp_3", some 109⟩] : List (ZMod babyBear))
+        = [2105016 + 2013265920 * (192 * asg ⟨"cmp_result_3", some 126⟩),
+            asg ⟨"from_state__timestamp_0", some 1⟩ + 11] := by
+    rw [ht3, hcmp]; ring_nf
+  -- Two `if`-guarded terms whose payloads coincide and multiplicities cancel contribute nothing,
+  -- regardless of whether `m` matches them.
+  have cancel : ∀ (m : BusMessage babyBear) (p1 p2 : List (ZMod babyBear)) (a rest : ZMod babyBear),
+      p1 = p2 →
+      (if p1 = m.2 then a else 0) + ((if p2 = m.2 then -a else 0) + rest) = rest := by
+    intro m p1 p2 a rest hp
+    rw [hp]; by_cases h : p2 = m.2 <;> simp [h]
+  have hp12 : ([(2105004 : ZMod babyBear), 3 + asg ⟨"from_state__timestamp_0", some 1⟩] : List (ZMod babyBear))
+      = [2105004, asg ⟨"from_state__timestamp_1", some 37⟩] := by rw [ht01]; ring_nf
+  have hp34 : ([(2105008 : ZMod babyBear), 3 + asg ⟨"from_state__timestamp_1", some 37⟩] : List (ZMod babyBear))
+      = [2105008, asg ⟨"from_state__timestamp_2", some 73⟩] := by rw [ht12]; ring_nf
+  have hp56 : ([(2105012 : ZMod babyBear), 3 + asg ⟨"from_state__timestamp_2", some 73⟩] : List (ZMod babyBear))
+      = [2105012, asg ⟨"from_state__timestamp_3", some 109⟩] := by rw [ht23]; ring_nf
+  refine ⟨?_, ?_, ?_⟩
+  · have h0 := hsum (0, [2105000, asg ⟨"from_state__timestamp_0", some 1⟩]) rfl
+    rw [h0, cancel _ _ _ 1 _ hp12, cancel _ _ _ 1 _ hp34, cancel _ _ _ 1 _ hp56]
+    have hne7 : ([(2105016 + 2013265729 * asg ⟨"cmp_result_3", some 126⟩ : ZMod babyBear),
+        2 + asg ⟨"from_state__timestamp_3", some 109⟩] : List (ZMod babyBear))
+          ≠ ((0, [2105000, asg ⟨"from_state__timestamp_0", some 1⟩]) : BusMessage babyBear).2 := by
+      intro hc
+      simp only [List.cons.injEq] at hc
+      exact h11 (by linear_combination hc.2.1 - ht3)
+    simp [hne7]
+  · have h0 := hsum (0, [2105016 + 2013265920 * (192 * asg ⟨"cmp_result_3", some 126⟩),
+        asg ⟨"from_state__timestamp_0", some 1⟩ + 11]) rfl
+    rw [h0, cancel _ _ _ 1 _ hp12, cancel _ _ _ 1 _ hp34, cancel _ _ _ 1 _ hp56]
+    have hne0 : ([(2105000 : ZMod babyBear), asg ⟨"from_state__timestamp_0", some 1⟩] : List (ZMod babyBear))
+          ≠ ((0, [2105016 + 2013265920 * (192 * asg ⟨"cmp_result_3", some 126⟩),
+              asg ⟨"from_state__timestamp_0", some 1⟩ + 11]) : BusMessage babyBear).2 := by
+      intro hc
+      simp only [List.cons.injEq] at hc
+      exact h11 (by linear_combination -hc.2.1)
+    simp only [hne0, if_false]
+    rw [show ([(2105016 + 2013265729 * asg ⟨"cmp_result_3", some 126⟩ : ZMod babyBear),
+        2 + asg ⟨"from_state__timestamp_3", some 109⟩] : List (ZMod babyBear))
+          = ((0, [2105016 + 2013265920 * (192 * asg ⟨"cmp_result_3", some 126⟩),
+              asg ⟨"from_state__timestamp_0", some 1⟩ + 11]) : BusMessage babyBear).2
+        from htarget7]
+    simp
+  · intro m hm hne0 hne1
+    have h0 := hsum m hm
+    rw [h0, cancel _ _ _ 1 _ hp12, cancel _ _ _ 1 _ hp34, cancel _ _ _ 1 _ hp56]
+    have hn0 : ([(2105000 : ZMod babyBear), asg ⟨"from_state__timestamp_0", some 1⟩] : List (ZMod babyBear)) ≠ m.2 :=
+      fun hc => hne0 (by rw [show m = (0, m.2) from by
+        rcases m with ⟨mb, ml⟩; simp only at hm; simp [hm], hc])
+    have hn7 : ([(2105016 + 2013265729 * asg ⟨"cmp_result_3", some 126⟩ : ZMod babyBear),
+        2 + asg ⟨"from_state__timestamp_3", some 109⟩] : List (ZMod babyBear)) ≠ m.2 := by
+      rw [htarget7]
+      exact fun hc => hne1 (by rw [show m = (0, m.2) from by
+        rcases m with ⟨mb, ml⟩; simp only at hm; simp [hm], hc])
+    simp [hn0, hn7]
