@@ -1051,3 +1051,167 @@ theorem apc2105000UnoptChained_bridge {asg : ChipAssignment babyBear}
       exact fun hc => hne1 (by rw [show m = (0, m.2) from by
         rcases m with ⟨mb, ml⟩; simp only at hm; simp [hm], hc])
     simp [hn0, hn7]
+
+--------- The unoptimized APC, timestamps chained: the memory placement ---------
+
+/-- **The pins `apc2105000Unopt`'s own constraints supply, read directly rather than through
+    `pinRuleOf`.** One-hot flags force `rs2_as_i = 0` on all three arithmetic slots (this basic
+    block's second operand is always an immediate), the four `pc_i` and `imm_3`, and each slot's
+    flag sum is `1`. -/
+theorem unoptPins {asg : ChipAssignment babyBear}
+    (halg : apc2105000UnoptChained.satisfiesAlgebraic asg) :
+    (asg ⟨"opcode_add_flag_0", some 31⟩ + asg ⟨"opcode_sub_flag_0", some 32⟩
+        + asg ⟨"opcode_xor_flag_0", some 33⟩ + asg ⟨"opcode_or_flag_0", some 34⟩
+        + asg ⟨"opcode_and_flag_0", some 35⟩ = 1) ∧
+    (asg ⟨"opcode_add_flag_1", some 67⟩ + asg ⟨"opcode_sub_flag_1", some 68⟩
+        + asg ⟨"opcode_xor_flag_1", some 69⟩ + asg ⟨"opcode_or_flag_1", some 70⟩
+        + asg ⟨"opcode_and_flag_1", some 71⟩ = 1) ∧
+    (asg ⟨"opcode_add_flag_2", some 103⟩ + asg ⟨"opcode_sub_flag_2", some 104⟩
+        + asg ⟨"opcode_xor_flag_2", some 105⟩ + asg ⟨"opcode_or_flag_2", some 106⟩
+        + asg ⟨"opcode_and_flag_2", some 107⟩ = 1) ∧
+    (asg ⟨"opcode_beq_flag_3", some 128⟩ + asg ⟨"opcode_bne_flag_3", some 129⟩ = 1) ∧
+    asg ⟨"from_state__pc_0", some 0⟩ = 2105000 ∧
+    asg ⟨"from_state__pc_1", some 36⟩ = 2105004 ∧
+    asg ⟨"from_state__pc_2", some 72⟩ = 2105008 ∧
+    asg ⟨"from_state__pc_3", some 108⟩ = 2105012 ∧
+    asg ⟨"rs2_as_0", some 5⟩ = 0 ∧
+    asg ⟨"rs2_as_1", some 41⟩ = 0 ∧
+    asg ⟨"rs2_as_2", some 77⟩ = 0 := by
+  have hfs0 := halg
+    (.add (.mul (.const 2013265920)
+        (.add (.add (.add (.add (.add (.const 0) (.var ⟨"opcode_add_flag_0", some 31⟩))
+          (.var ⟨"opcode_sub_flag_0", some 32⟩)) (.var ⟨"opcode_xor_flag_0", some 33⟩))
+          (.var ⟨"opcode_or_flag_0", some 34⟩)) (.var ⟨"opcode_and_flag_0", some 35⟩)))
+      (.const 1)) (List.mem_append_left _ (by decide))
+  have hfs1 := halg
+    (.add (.mul (.const 2013265920)
+        (.add (.add (.add (.add (.add (.const 0) (.var ⟨"opcode_add_flag_1", some 67⟩))
+          (.var ⟨"opcode_sub_flag_1", some 68⟩)) (.var ⟨"opcode_xor_flag_1", some 69⟩))
+          (.var ⟨"opcode_or_flag_1", some 70⟩)) (.var ⟨"opcode_and_flag_1", some 71⟩)))
+      (.const 1)) (List.mem_append_left _ (by decide))
+  have hfs2 := halg
+    (.add (.mul (.const 2013265920)
+        (.add (.add (.add (.add (.add (.const 0) (.var ⟨"opcode_add_flag_2", some 103⟩))
+          (.var ⟨"opcode_sub_flag_2", some 104⟩)) (.var ⟨"opcode_xor_flag_2", some 105⟩))
+          (.var ⟨"opcode_or_flag_2", some 106⟩)) (.var ⟨"opcode_and_flag_2", some 107⟩)))
+      (.const 1)) (List.mem_append_left _ (by decide))
+  have hfs3 := halg
+    (.add (.mul (.const 2013265920)
+        (.add (.add (.const 0) (.var ⟨"opcode_beq_flag_3", some 128⟩))
+          (.var ⟨"opcode_bne_flag_3", some 129⟩))) (.const 1))
+    (List.mem_append_left _ (by decide))
+  have hpc0 := halg
+    (.add (.var ⟨"from_state__pc_0", some 0⟩) (.mul (.const 2013265920) (.const 2105000)))
+    (List.mem_append_left _ (by decide))
+  have hpc1 := halg
+    (.add (.var ⟨"from_state__pc_1", some 36⟩) (.mul (.const 2013265920) (.const 2105004)))
+    (List.mem_append_left _ (by decide))
+  have hpc2 := halg
+    (.add (.var ⟨"from_state__pc_2", some 72⟩) (.mul (.const 2013265920) (.const 2105008)))
+    (List.mem_append_left _ (by decide))
+  have hpc3 := halg
+    (.add (.var ⟨"from_state__pc_3", some 108⟩) (.mul (.const 2013265920) (.const 2105012)))
+    (List.mem_append_left _ (by decide))
+  have hrs0 := halg
+    (.add (.var ⟨"rs2_as_0", some 5⟩) (.mul (.const 2013265920) (.const 0)))
+    (List.mem_append_left _ (by decide))
+  have hrs1 := halg
+    (.add (.var ⟨"rs2_as_1", some 41⟩) (.mul (.const 2013265920) (.const 0)))
+    (List.mem_append_left _ (by decide))
+  have hrs2 := halg
+    (.add (.var ⟨"rs2_as_2", some 77⟩) (.mul (.const 2013265920) (.const 0)))
+    (List.mem_append_left _ (by decide))
+  simp only [Expression.eval] at hfs0 hfs1 hfs2 hfs3 hpc0 hpc1 hpc2 hpc3 hrs0 hrs1 hrs2
+  rw [babyBear_negOne] at hfs0 hfs1 hfs2 hfs3 hpc0 hpc1 hpc2 hpc3 hrs0 hrs1 hrs2
+  refine ⟨by linear_combination -hfs0, by linear_combination -hfs1,
+    by linear_combination -hfs2, by linear_combination -hfs3,
+    by linear_combination hpc0, by linear_combination hpc1,
+    by linear_combination hpc2, by linear_combination hpc3,
+    by linear_combination hrs0, by linear_combination hrs1, by linear_combination hrs2⟩
+
+/-- **The raw `AssertLtSubAir`, before powdr's substitution pass removes it** — reshaped into
+    `lt_gadget_offset`'s `15360`-scaled form. Unlike the optimized APC (`lookback_of_gadget`), the
+    unoptimized one still carries the gadget's own constraint, so this is a straight substitution
+    rather than an inversion. -/
+theorem rawGadget_heq {ts prev lo hi : ZMod babyBear} {k : ℤ}
+    (hraw : prev = ts + ((k : ℤ) : ZMod babyBear) - lo - 131072 * hi) :
+    hi = 15360 * prev + 15360 * lo - 15360 * ts - 15360 * ((k : ℤ) : ZMod babyBear) := by
+  have h15 : (15360 : ZMod babyBear) * 131072 = -1 := by decide
+  linear_combination (-15360 : ZMod babyBear) * hraw + hi * h15
+
+/-- One interaction of `apc2105000UnoptChained`, unpacked from `Circuit.satisfiesStateless`. -/
+theorem unoptAccepts {asg : ChipAssignment babyBear}
+    (hacc : apc2105000UnoptChained.satisfiesStateless apcRules asg)
+    (k : ℕ) (hk : k < apc2105000UnoptChained.busInteractions.length)
+    (m : BusInteraction (ZMod babyBear))
+    (hm : (apc2105000UnoptChained.busInteractions[k]).eval asg = m)
+    (hst : apcRules.isStateful m.busId = false) (hmult : m.multiplicity ≠ 0) :
+    accepts defaultBusMap m := by
+  subst hm; exact hacc _ (List.getElem_mem hk) hst hmult
+
+/-- The raw gadget constraint, gate-cancelled and reshaped into `lt_gadget_offset`'s form: `δ` is
+    the read's own send offset (`0` for `rs1`, `1` for arc `3`'s `rs2`, `2` for the write), so
+    `lt_gadget_offset`'s `k` is `δ - 1`, matching `apc2105000Opt`'s convention on the same reads. -/
+theorem gadgetLookback_raw {gate ts prev lo hi : ZMod babyBear} {δ : ℤ}
+    (hgate : gate = 1)
+    (hcon : gate * (ts + ((δ : ℤ) : ZMod babyBear) - prev - 1 - (lo + 131072 * hi)) = 0) :
+    hi = 15360 * prev + 15360 * lo - 15360 * ts - 15360 * (((δ - 1 : ℤ) : ℤ) : ZMod babyBear) := by
+  rw [hgate, one_mul] at hcon
+  refine rawGadget_heq (k := δ - 1) ?_
+  push_cast
+  linear_combination -hcon
+
+/-- A one-hot flag sum, in the exact left-folded `0 + a + b + c + d + e` shape
+    `Expression.eval` produces, is nonzero once it is known to be `1`. -/
+theorem sum5_eq1_ne_zero {a b c d e : ZMod babyBear} (h : a + b + c + d + e = 1) :
+    (0 + a + b + c + d + e : ZMod babyBear) ≠ 0 := by
+  rw [show (0 + a + b + c + d + e : ZMod babyBear) = 1 from by linear_combination h]
+  decide
+
+/-- On bus `3` (`variableRangeChecker`), `accepts` never inspects `multiplicity`, so a fact about
+    one multiplicity transports to any other. Unlike the memory bus, this arm of
+    `OpenVmSemantics.accepts` does not branch on it. -/
+theorem accepts_congr_mult3 {m1 m2 x k : ZMod babyBear}
+    (h : accepts (p := babyBear) defaultBusMap ⟨3, m1, [x, k]⟩) :
+    accepts (p := babyBear) defaultBusMap ⟨3, m2, [x, k]⟩ := h
+
+set_option maxRecDepth 32000 in
+/-- Instr `0`'s `rs1` read: send offset `0`. -/
+theorem unoptLookback_r1_0 {asg : ChipAssignment babyBear}
+    (halg : apc2105000UnoptChained.satisfiesAlgebraic asg)
+    (hacc : apc2105000UnoptChained.satisfiesStateless apcRules asg) :
+    ∃ n : ℕ, n < 2 ^ 29 ∧
+      asg ⟨"reads_aux__0__base__prev_timestamp_0", some 6⟩
+        = asg ⟨"from_state__timestamp_0", some 1⟩
+          + ((((-1) - (n : ℤ)) : ℤ) : ZMod babyBear) := by
+  have hgate := (unoptPins halg).1
+  have hcon := halg
+    (.mul (.add (.add (.add (.add (.add (.const 0) (.var ⟨"opcode_add_flag_0", some 31⟩))
+        (.var ⟨"opcode_sub_flag_0", some 32⟩)) (.var ⟨"opcode_xor_flag_0", some 33⟩))
+        (.var ⟨"opcode_or_flag_0", some 34⟩)) (.var ⟨"opcode_and_flag_0", some 35⟩))
+      (.add (.add (.add (.add (.var ⟨"from_state__timestamp_0", some 1⟩) (.const 0))
+        (.mul (.const 2013265920) (.var ⟨"reads_aux__0__base__prev_timestamp_0", some 6⟩)))
+        (.mul (.const 2013265920) (.const 1)))
+        (.mul (.const 2013265920) (.add (.add (.const 0)
+          (.mul (.var ⟨"reads_aux__0__base__timestamp_lt_aux__lower_decomp__0_0", some 7⟩)
+            (.const 1)))
+          (.mul (.var ⟨"reads_aux__0__base__timestamp_lt_aux__lower_decomp__1_0", some 8⟩)
+            (.const 131072))))))
+    (List.mem_append_left _ (by decide))
+  simp only [Expression.eval] at hcon
+  rw [babyBear_negOne] at hcon
+  have heq := gadgetLookback_raw (δ := 0)
+    (ts := asg ⟨"from_state__timestamp_0", some 1⟩)
+    (prev := asg ⟨"reads_aux__0__base__prev_timestamp_0", some 6⟩)
+    (lo := asg ⟨"reads_aux__0__base__timestamp_lt_aux__lower_decomp__0_0", some 7⟩)
+    (hi := asg ⟨"reads_aux__0__base__timestamp_lt_aux__lower_decomp__1_0", some 8⟩)
+    hgate (by linear_combination hcon)
+  have hlo := accepts_congr_mult3 (m2 := 1)
+    (unoptAccepts hacc 5 (by decide) _ rfl rfl (sum5_eq1_ne_zero hgate))
+  have hhi := accepts_congr_mult3 (m2 := 1)
+    (unoptAccepts hacc 6 (by decide) _ rfl rfl (sum5_eq1_ne_zero hgate))
+  simp only [Expression.eval] at hlo hhi
+  obtain ⟨n, -, hn29, hplace⟩ := lt_gadget_offset (-1)
+    (asg ⟨"reads_aux__0__base__prev_timestamp_0", some 6⟩)
+    (asg ⟨"from_state__timestamp_0", some 1⟩) hlo hhi (by push_cast at heq ⊢; linear_combination heq)
+  exact ⟨n, hn29, hplace⟩
