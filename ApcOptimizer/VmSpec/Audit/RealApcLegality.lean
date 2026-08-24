@@ -2,6 +2,7 @@ import ApcOptimizer.VmSpec.Audit.Apc2105000
 import ApcOptimizer.VmSpec.Audit.SendOnlyPolarity
 import ApcOptimizer.VmSpec.Audit.BridgeCheck
 import ApcOptimizer.VmSpec.Audit.PlaceCheck
+import ApcOptimizer.VmSpec.Audit.ByteCheck
 import ApcOptimizer.VmSpec.Audit.OpenVmLegalAudit
 import Mathlib.Tactic.LinearCombination
 import Mathlib.Tactic.NormNum
@@ -281,7 +282,10 @@ def optVars : List Variable :=
    ⟨"writes_aux__base__prev_timestamp_1", some 48⟩,
    ⟨"writes_aux__base__timestamp_lt_aux__lower_decomp__0_1", some 49⟩,
    ⟨"reads_aux__1__base__prev_timestamp_3", some 115⟩,
-   ⟨"reads_aux__1__base__timestamp_lt_aux__lower_decomp__0_3", some 116⟩]
+   ⟨"reads_aux__1__base__timestamp_lt_aux__lower_decomp__0_3", some 116⟩,
+   ⟨"a__0_0", some 19⟩, ⟨"a__1_0", some 20⟩, ⟨"a__2_0", some 21⟩, ⟨"a__3_0", some 22⟩,
+   ⟨"a__0_1", some 55⟩, ⟨"a__1_1", some 56⟩, ⟨"a__2_1", some 57⟩, ⟨"a__3_1", some 58⟩,
+   ⟨"a__0_2", some 91⟩]
 
 /-- The step's base, as an expression and as a normal form. -/
 def optBaseE : Expression babyBear := .var ⟨"from_state__timestamp_0", some 1⟩
@@ -315,6 +319,18 @@ theorem optBridgeCheck :
         (.add (.const 2105016) (.mul (.const 2013265920)
           (.mul (.const 192) (.var ⟨"cmp_result_3", some 126⟩))))
       = true := by decide
+
+/-- Why each of `apc2105000Opt`'s interactions is `payloadOk`, position by position: six memory
+    receives and the bridge receive are not sends; three memory sends echo the read that preceded
+    them; one writes literal zeros; the bridge send is not on the memory bus; ten lookups are not
+    stateful. Only the masked write at position `9` is left to the caller — it is a byte because
+    the bitwise table says so, which is where a decidable check stops. -/
+def optWitnesses : List ByteWitness :=
+  [.notSend, .echo 0, .notSend, .notSend, .notSend, .notSend, .echo 4, .notSend,
+   .echo 0, .external, .notSend, .limbs, .notMemory] ++ List.replicate 10 .notSend
+
+theorem optByteCheck :
+    byteCheckAll optVars optPinRules apc2105000Opt.busInteractions optWitnesses = true := by decide
 
 /-- **A real optimized APC has a step layout.** One arc — `(2105000, t) → (2105016 - 192·cmp,
     t + 11)` — and the twelve stateful interactions placed at `optOffsets`, read off the five
@@ -489,73 +505,15 @@ theorem apc2105000Opt_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWindow) :
     rw [heq]
     exact lt_of_le_of_lt (hub j hsj hmj)
       (optOffsetUb_dominates i.val hmem j.val (Fin.lt_def.mp hji))
-  · -- The five memory sends: four echoes and one masked value.
-    rintro i ⟨hst, hmult⟩ hlow
+  · -- The byte invariant, by static analysis: only the masked write is left by hand.
+    refine byteCheck_sendsOk (optPinRules_hold asg halg) optByteCheck ?_
+    intro i hi hsend hlow
     fin_cases i
-    · simp [apc2105000Opt, Circuit.multAt, BusInteraction.eval, Expression.eval,
-        babyBear_negOne_ne_one] at hmult
-    · have h0 := hlow ⟨0, by decide⟩ (by simp [Fin.lt_def]) ⟨rfl,
-        by simp [apc2105000Opt, Circuit.multAt, BusInteraction.eval, Expression.eval,
-          babyBear_negOne_ne_zero]⟩
-      replace h0 : openVmPayloadOk defaultBusMap ((1 : ℕ), [(1 : ZMod babyBear), 40,
-        asg ⟨"a__0_0", some 19⟩, asg ⟨"a__1_0", some 20⟩, asg ⟨"a__2_0", some 21⟩,
-        asg ⟨"a__3_0", some 22⟩, asg ⟨"reads_aux__0__base__prev_timestamp_0", some 6⟩]) := h0
-      show openVmPayloadOk defaultBusMap ((1 : ℕ), [(1 : ZMod babyBear), 40,
-        asg ⟨"a__0_0", some 19⟩, asg ⟨"a__1_0", some 20⟩, asg ⟨"a__2_0", some 21⟩,
-        asg ⟨"a__3_0", some 22⟩, asg ⟨"from_state__timestamp_0", some 1⟩])
-      exact (openVmPayloadOk_mem_iff _ _ _ _ _ _).mpr ((openVmPayloadOk_mem_iff _ _ _ _ _ _).mp h0)
-    · simp [apc2105000Opt, Circuit.multAt, BusInteraction.eval, Expression.eval,
-        babyBear_negOne_ne_one] at hmult
-    · simp [apc2105000Opt, Circuit.multAt, BusInteraction.eval, Expression.eval,
-        babyBear_negOne_ne_one] at hmult
-    · simp [apc2105000Opt, Circuit.multAt, BusInteraction.eval, Expression.eval,
-        babyBear_negOne_ne_one] at hmult
-    · simp [apc2105000Opt, Circuit.multAt, BusInteraction.eval, Expression.eval,
-        babyBear_negOne_ne_one] at hmult
-    · -- the word read at address 44 is written on to address 56
-      have h4 := hlow ⟨4, by decide⟩ (by simp [Fin.lt_def]) ⟨rfl,
-        by simp [apc2105000Opt, Circuit.multAt, BusInteraction.eval, Expression.eval,
-          babyBear_negOne_ne_zero]⟩
-      replace h4 : openVmPayloadOk defaultBusMap ((1 : ℕ), [(1 : ZMod babyBear), 44,
-        asg ⟨"a__0_1", some 55⟩, asg ⟨"a__1_1", some 56⟩, asg ⟨"a__2_1", some 57⟩,
-        asg ⟨"a__3_1", some 58⟩, asg ⟨"reads_aux__0__base__prev_timestamp_1", some 42⟩]) := h4
-      show openVmPayloadOk defaultBusMap ((1 : ℕ), [(1 : ZMod babyBear), 56,
-        asg ⟨"a__0_1", some 55⟩, asg ⟨"a__1_1", some 56⟩, asg ⟨"a__2_1", some 57⟩,
-        asg ⟨"a__3_1", some 58⟩, asg ⟨"from_state__timestamp_0", some 1⟩ + 5])
-      exact (openVmPayloadOk_mem_iff _ _ _ _ _ _).mpr ((openVmPayloadOk_mem_iff _ _ _ _ _ _).mp h4)
-    · simp [apc2105000Opt, apcRules, openVmGuestRules, openVmIsStateful, defaultBusMap,
-        OpenVmBusType.isStateful] at hst
-    · -- the word read at address 40 is written on to address 52
-      have h0 := hlow ⟨0, by decide⟩ (by simp [Fin.lt_def]) ⟨rfl,
-        by simp [apc2105000Opt, Circuit.multAt, BusInteraction.eval, Expression.eval,
-          babyBear_negOne_ne_zero]⟩
-      replace h0 : openVmPayloadOk defaultBusMap ((1 : ℕ), [(1 : ZMod babyBear), 40,
-        asg ⟨"a__0_0", some 19⟩, asg ⟨"a__1_0", some 20⟩, asg ⟨"a__2_0", some 21⟩,
-        asg ⟨"a__3_0", some 22⟩, asg ⟨"reads_aux__0__base__prev_timestamp_0", some 6⟩]) := h0
-      show openVmPayloadOk defaultBusMap ((1 : ℕ), [(1 : ZMod babyBear), 52,
-        asg ⟨"a__0_0", some 19⟩, asg ⟨"a__1_0", some 20⟩, asg ⟨"a__2_0", some 21⟩,
-        asg ⟨"a__3_0", some 22⟩, asg ⟨"from_state__timestamp_0", some 1⟩ + 6])
-      exact (openVmPayloadOk_mem_iff _ _ _ _ _ _).mpr ((openVmPayloadOk_mem_iff _ _ _ _ _ _).mp h0)
-    · -- the fresh write at address 44, byte-valued because the bitwise table masked it
-      show openVmPayloadOk defaultBusMap ((1 : ℕ), [(1 : ZMod babyBear), 44,
-        asg ⟨"a__0_2", some 91⟩, 0, 0, 0, asg ⟨"from_state__timestamp_0", some 1⟩ + 9])
-      exact (openVmPayloadOk_mem_iff _ _ _ _ _ _).mpr ⟨ha02, isByte_zero, isByte_zero, isByte_zero⟩
-    · simp [apc2105000Opt, Circuit.multAt, BusInteraction.eval, Expression.eval,
-        babyBear_negOne_ne_one] at hmult
-    · show openVmPayloadOk defaultBusMap ((1 : ℕ), [(1 : ZMod babyBear), 0, 0, 0, 0, 0,
-        asg ⟨"from_state__timestamp_0", some 1⟩ + 10])
-      exact (openVmPayloadOk_mem_iff _ _ _ _ _ _).mpr
-        ⟨isByte_zero, isByte_zero, isByte_zero, isByte_zero⟩
-    · -- the bridge send: `openVmPayloadOk` asks nothing of an execution-bridge state
-      simp [apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules, openVmGuestRules,
-        openVmPayloadOk, defaultBusMap, Circuit.msgAt]
-    all_goals
-      simp [apc2105000Opt, apcRules, openVmGuestRules, openVmIsStateful, defaultBusMap,
-        OpenVmBusType.isStateful] at hst
+    all_goals try exact absurd hi (by decide)
+    show openVmPayloadOk defaultBusMap ((1 : ℕ), [(1 : ZMod babyBear), 44,
+      asg ⟨"a__0_2", some 91⟩, 0, 0, 0, asg ⟨"from_state__timestamp_0", some 1⟩ + 9])
+    exact (openVmPayloadOk_mem_iff _ _ _ _ _ _).mpr ⟨ha02, isByte_zero, isByte_zero, isByte_zero⟩
 
-/-- **A real optimized APC is a legal OpenVM guest.** All four clauses, for a circuit nobody wrote
-    by hand: the two multiplicity ones by `Audit/SendOnlyPolarity.lean`'s checker, the layout by
-    `apc2105000Opt_hasStepLayout`, the size by counting. -/
 theorem apc2105000Opt_legalGuest {maxWindow maxInteractions : ℕ} (hw : 11 < maxWindow)
     (hi : 23 ≤ maxInteractions) :
     apc2105000Opt.legalGuest apcRules maxWindow openVmTimestampBound maxInteractions where

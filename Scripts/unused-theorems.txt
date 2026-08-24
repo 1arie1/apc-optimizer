@@ -150,6 +150,12 @@ gadgetIdentity_sound
 ApcOptimizer.OpenVM.openVmReadsTimestampAt
 ApcOptimizer.OpenVM.lookback_of_gadget
 ApcOptimizer.OpenVM.optBaseLin
+ApcOptimizer.OpenVM.isByte_of_isByteConst
+ApcOptimizer.OpenVM.memShape_eval
+ApcOptimizer.OpenVM.byteCheckAll_get
+ApcOptimizer.OpenVM.byteCheckOne_sound
+ApcOptimizer.OpenVM.byteCheck_sendsOk
+ApcOptimizer.OpenVM.optByteCheck
 ApcOptimizer.OpenVM.openVm_negOne_ne_one
 StepLayout.endpoints_ne
 StepLayout.net
