@@ -155,13 +155,7 @@ structure StepLayout {p : ℕ} (c : Circuit p) (r : GuestBusRules p) (asg : Chip
       r.payloadOk (c.msgAt asg j)) →
     r.payloadOk (c.msgAt asg i)
 
-/-- **Every assignment a guest chip admits lays out as one instruction step.**
-
-    The `satisfiesStateless` hypothesis is not decoration: a real APC's timestamp-difference bound
-    survives powdr's optimizer only as a range-check *payload* (the lt gadget's algebraic
-    constraint is substituted away, and `15360 = -1/2^17` in BabyBear), so nothing about a memory
-    receive's offset is derivable from the algebraic constraints alone. Being a hypothesis, it only
-    weakens the clause.
+/-- Every assignment a guest chip admits lays out as one instruction step.
 
     Needed to avoid timestamp overflow, and to give the soundness argument's induction something to
     descend on. -/
