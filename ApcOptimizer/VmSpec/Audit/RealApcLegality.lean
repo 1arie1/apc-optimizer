@@ -1,5 +1,6 @@
 import ApcOptimizer.VmSpec.Audit.Apc2105000
 import ApcOptimizer.VmSpec.Audit.SendOnlyPolarity
+import ApcOptimizer.VmSpec.Audit.BridgeCheck
 import ApcOptimizer.VmSpec.Audit.OpenVmLegalAudit
 import Mathlib.Tactic.LinearCombination
 import Mathlib.Tactic.NormNum
@@ -215,6 +216,36 @@ def optOffsetUb : List ℤ := [-1, 0, 1, 0, 2, 4, 5, 0, 6, 9, 9, 10, 11]
 theorem optOffsetUb_dominates :
     ∀ b ∈ [1, 6, 8, 9, 11, 12], ∀ k < b, optOffsetUb.getD k 0 < optOffsetUb.getD b 0 := by decide
 
+/-- The variables the optimized APC's execution-bridge payloads mention. -/
+def optVars : List Variable :=
+  [⟨"from_state__timestamp_0", some 1⟩, ⟨"cmp_result_3", some 126⟩]
+
+/-- The pin rules the optimized APC's own constraints supply. -/
+def optPinRules : List (PinRule babyBear) :=
+  apc2105000Opt.algebraicConstraints.filterMap pinRuleOf
+
+theorem optPinRules_hold (asg : ChipAssignment babyBear)
+    (halg : apc2105000Opt.satisfiesAlgebraic asg) : ∀ q ∈ optPinRules, q.1.eval asg = q.2 := by
+  intro q hq
+  obtain ⟨con, hcon, hpin⟩ := List.mem_filterMap.mp hq
+  exact pinRuleOf_eval (by rw [hpin]) (halg con hcon)
+
+/-- **The bridge half of the layout, by static analysis.** No case analysis over the circuit is
+    written by hand: `bridgeCheck` normalizes the two bus-`0` payloads, sees the receive first and
+    the send last with nothing between them, reads `d = 11` off the timestamps, and separates the
+    two endpoints at payload position `1` — they carry the same coefficient on
+    `from_state__timestamp_0` and differ by the constant `11`.
+
+    The three expressions name the endpoints, and the checker verifies them against the traffic, so
+    `bridgeCheck_sound` hands back facts about exactly these messages. -/
+theorem optBridgeCheck :
+    bridgeCheck optVars optPinRules 0 apc2105000Opt 11 1
+        (.const 2105000)
+        (.var ⟨"from_state__timestamp_0", some 1⟩)
+        (.add (.const 2105016) (.mul (.const 2013265920)
+          (.mul (.const 192) (.var ⟨"cmp_result_3", some 126⟩))))
+      = true := by decide
+
 /-- **A real optimized APC has a step layout.** One arc — `(2105000, t) → (2105016 - 192·cmp,
     t + 11)` — and the twelve stateful interactions placed at `optOffsets`, read off the five
     surviving lt gadgets (`lt_gadget_offset`). Its five memory sends are byte-valued: four echo a
@@ -227,7 +258,7 @@ theorem optOffsetUb_dominates :
 theorem apc2105000Opt_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWindow) :
     apc2105000Opt.hasStepLayout apcRules maxWindow openVmTimestampBound := by
   haveI : Fact (1 < babyBear) := ⟨by decide⟩
-  intro asg _ hacc
+  intro asg halg hacc
   obtain ⟨n0, hn0, ht0⟩ := lt_gadget_offset (-1)
     (asg ⟨"reads_aux__0__base__prev_timestamp_0", some 6⟩)
     (asg ⟨"from_state__timestamp_0", some 1⟩)
@@ -337,25 +368,10 @@ theorem apc2105000Opt_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWindow) :
       simp_all [optOffsets, optOffsetUb, apc2105000Opt, apcRules, openVmGuestRules,
         openVmIsStateful, defaultBusMap, OpenVmBusType.isStateful, BusInteraction.eval,
         Expression.eval, babyBear_negOne_ne_one]
-  have h11 : ((11 : ℕ) : ZMod babyBear) = 11 := by push_cast; ring
-  have h11' : (11 : ZMod babyBear) ≠ 0 := by decide
-  refine ⟨⟨2105000, 2105016 + 2013265920 * (192 * asg ⟨"cmp_result_3", some 126⟩),
-    asg ⟨"from_state__timestamp_0", some 1⟩, 11,
-    fun i => (optOffsets n0 nw0 nr1 nw1 nr3).getD i.val 0,
-    by norm_num, hw, ?_, ?_, ?_, ?_, ?_, ?_⟩⟩
-  · -- The bridge receive, at `base`.
-    simp [Circuit.allEffects, apc2105000Opt, BusInteraction.eval, Expression.eval,
-      openVmGuestRules, h11', babyBear_negOne]
-  · -- The bridge send, eleven ticks later.
-    simp [Circuit.allEffects, apc2105000Opt, BusInteraction.eval, Expression.eval,
-      openVmGuestRules, h11', babyBear_negOne]
-  · -- Nothing else on bus `0`.
-    rintro ⟨mb, ml⟩ hbus hr hs
-    simp only [openVmGuestRules] at hbus
-    subst hbus
-    simp only [ne_eq, Prod.mk.injEq, true_and, h11, openVmGuestRules] at hr hs
-    simp [Circuit.allEffects, apc2105000Opt, BusInteraction.eval, Expression.eval,
-      Ne.symm hr, Ne.symm hs]
+  -- The bridge, by static analysis: `optBridgeCheck` is a `decide`.
+  obtain ⟨hrecv, hsend, hother⟩ := bridgeCheck_sound optBridgeCheck (optPinRules_hold asg halg)
+  refine ⟨_, _, _, 11, fun i => (optOffsets n0 nw0 nr1 nw1 nr3).getD i.val 0,
+    by norm_num, hw, hrecv, hsend, hother, ?_, ?_, ?_⟩
   · -- The placement, offset by offset.
     rintro i ⟨hst, hm⟩
     fin_cases i
