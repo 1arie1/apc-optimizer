@@ -229,7 +229,15 @@ ApcOptimizer.OpenVM.unoptWriteIsByte_0
 ApcOptimizer.OpenVM.unoptWriteIsByte_1
 ApcOptimizer.OpenVM.unoptWriteIsByte_2
 ApcOptimizer.OpenVM.unoptByteCheck
-ApcOptimizer.OpenVM.apc2105000UnoptChained_sendsOk
+ApcOptimizer.OpenVM.apc2105000UnoptChained_memSendsOk
+
+# `Legal.lean`'s `memOrdered`/`memSendsOk` restriction to the memory bus (added alongside
+# `GuestBusRules.memPayloadOnly`, which settles every other stateful bus outright): the general
+# adapter from the old cross-bus `sendsOk` shape, and OpenVM's proof that its bus semantics
+# always has some multiplicity maintaining invariants off the memory bus.
+ApcOptimizer.OpenVM.memSendsOk_of_sendsOk
+ApcOptimizer.OpenVM.defaultBusMap_mem_unique
+ApcOptimizer.OpenVM.maintainsInvariants_off_mem
 
 # `Audit/SendOnlyPolarity.lean`'s constant-propagation tier: its root is
 # `checkMultiplicitiesWith_sound`, used by `Audit/RealApcLegality.lean`, and the rest feed it.

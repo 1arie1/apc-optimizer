@@ -102,8 +102,9 @@ namespace ApcOptimizer.OpenVM
     bus type: `= 1` on the four lookup buses, `= ±1` on the execution bridge and memory, and
     memory's byte conjunct is `openVmPayloadOk` verbatim. -/
 theorem legalOnAccepted_of_guaranteesInvariants {busMap : BusMap} {memBusId : Nat} {c : Circuit p}
+    (hmem : ∀ b, busMap b = some .memory → b = memBusId)
     (h : c.guaranteesInvariants (openVmBusSemantics p busMap)) :
-    c.legalOnAccepted (openVmBusSemantics p busMap) (openVmGuestRules busMap memBusId) := by
+    c.legalOnAccepted (openVmBusSemantics p busMap) (openVmGuestRules busMap memBusId hmem) := by
   have key : ∀ asg, c.satisfies (openVmBusSemantics p busMap) asg →
       ∀ bi ∈ c.busInteractions, bi.multiplicity.eval asg ≠ 0 →
         maintainsInvariants busMap (bi.eval asg) :=
@@ -158,10 +159,11 @@ theorem legalOnAccepted_of_guaranteesInvariants {busMap : BusMap} {memBusId : Na
     inherits every bus-shape clause of legality on accepted assignments — no per-pass argument
     needed, it is `Circuit.isSoundReplacementOf`'s second conjunct. -/
 theorem legalOnAccepted_of_isSoundReplacementOf {busMap : BusMap} {memBusId : Nat}
+    (hmem : ∀ b, busMap b = some .memory → b = memBusId)
     {c c' : Circuit p} (hGI : c.guaranteesInvariants (openVmBusSemantics p busMap))
     (hSound : c'.isSoundReplacementOf c (openVmBusSemantics p busMap)) :
-    c'.legalOnAccepted (openVmBusSemantics p busMap) (openVmGuestRules busMap memBusId) :=
-  legalOnAccepted_of_guaranteesInvariants (hSound.2 hGI)
+    c'.legalOnAccepted (openVmBusSemantics p busMap) (openVmGuestRules busMap memBusId hmem) :=
+  legalOnAccepted_of_guaranteesInvariants hmem (hSound.2 hGI)
 
 --------- What it does not transport ---------
 
@@ -308,7 +310,8 @@ theorem legalOnAccepted_not_statelessSendOnly [Fact p.Prime] (hp : 18 < p) :
   have hSound : (looseRangeCheck p).isSoundReplacementOf (deadRangeCheck p)
       (openVmBusSemantics p defaultBusMap) :=
     ⟨fun asg _ => ⟨asg, hdeadSat asg, sideEffects_eq asg asg⟩, fun _ => hlooseGI⟩
-  refine ⟨hdeadGI, ?_, hSound, legalOnAccepted_of_isSoundReplacementOf hdeadGI hSound, ?_⟩
+  refine ⟨hdeadGI, ?_, hSound,
+    legalOnAccepted_of_isSoundReplacementOf defaultBusMap_mem_unique hdeadGI hSound, ?_⟩
   · intro asg _ bi hbi _
     simp only [deadRangeCheck, List.mem_singleton] at hbi
     exact Or.inl (hbi ▸ rfl)
@@ -465,20 +468,16 @@ private theorem checkedStepChip_legalGuest [Fact p.Prime] (hp : 18 < p)
             BusInteraction.eval, Expression.eval, openVmExecBusId, openVmMemBusId]⟩
       · simp [checkedStepChip, openVmGuestRules, openVmIsStateful, defaultBusMap,
           OpenVmBusType.isStateful, rangeBusId] at hst
-    · exact fun i j hji _ _ => by simpa using Fin.lt_def.mp hji
-    · rintro i ⟨hst, hmult⟩ -
-      fin_cases i
-      · exfalso
-        simp only [checkedStepChip, Circuit.multAt, BusInteraction.eval, Expression.eval,
-          List.get] at hmult
-        have h2 : ((2 : ℕ) : ZMod p) = 0 := by push_cast; linear_combination -hmult
-        have hv := ZMod.val_natCast_of_lt (show 2 < p by omega)
-        rw [h2, ZMod.val_zero] at hv
-        omega
-      · simp [checkedStepChip, openVmGuestRules, openVmPayloadOk, defaultBusMap, Circuit.msgAt,
-          BusInteraction.eval, Expression.eval, openVmExecBusId]
-      · simp [checkedStepChip, openVmGuestRules, openVmIsStateful, defaultBusMap,
-          OpenVmBusType.isStateful, rangeBusId] at hst
+    · -- `checkedStepChip` never touches the memory bus, so `memOrdered` is vacuous.
+      exact fun i j _ _ hbmem _ _ => by
+        fin_cases i <;>
+          simp [checkedStepChip, openVmGuestRules, openVmExecBusId, openVmMemBusId,
+            rangeBusId] at hbmem
+    · -- Same reason: no `i` here is ever on the memory bus, so `memSendsOk` is vacuous too.
+      exact fun i _ hbmem _ => by
+        fin_cases i <;>
+          simp [checkedStepChip, openVmGuestRules, openVmExecBusId, openVmMemBusId,
+            rangeBusId] at hbmem
 
 /-- **The residue, against a chip OpenVM would actually run.** `looseRangeCheck` leaves two ways
     out: its lookup is in no table on *any* assignment, so the chip has no satisfying assignment at

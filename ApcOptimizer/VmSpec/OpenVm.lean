@@ -408,14 +408,32 @@ def openVmMemTimestamp (m : BusMessage p) : ZMod p := m.2[6]?.getD 0
 
     `execBusId` is fixed at `openVmExecBusId` because that is `defaultBusMap`'s own convention
     (see `StepLayout`'s uses throughout this file); `getTimestamp` is
-    `openVmMemTimestamp`. -/
-def openVmGuestRules (busMap : BusMap) (memBusId : Nat) : GuestBusRules p where
+    `openVmMemTimestamp`.
+
+    `hmem` — `memBusId` is the *only* id `busMap` sends to `.memory` — defaults to
+    `defaultBusMap_mem_unique`, so every call site using `defaultBusMap`/`openVmMemBusId` (all but
+    a couple, genuinely generic over the bus map) needs no change. -/
+def openVmGuestRules (busMap : BusMap) (memBusId : Nat)
+    (hmem : ∀ b, busMap b = some .memory → b = memBusId := by exact defaultBusMap_mem_unique) :
+    GuestBusRules p where
   isStateful := openVmIsStateful busMap
   accepts := ApcOptimizer.OpenVM.accepts busMap
   payloadOk := openVmPayloadOk busMap
   execBusId := openVmExecBusId
   memBusId := memBusId
   getTimestamp := openVmTimestamp memBusId
+  memPayloadOnly := fun m hst hne => by
+    simp only [openVmIsStateful] at hst
+    cases hbm : busMap m.1 with
+    | none => rw [hbm] at hst; exact absurd hst (by decide)
+    | some t =>
+      cases t with
+      | memory => exact absurd (hmem m.1 hbm) hne
+      | executionBridge => simp [openVmPayloadOk, hbm]
+      | pcLookup => simp [openVmPayloadOk, hbm]
+      | variableRangeChecker => simp [openVmPayloadOk, hbm]
+      | bitwiseLookup => simp [openVmPayloadOk, hbm]
+      | tupleRangeChecker _ _ => simp [openVmPayloadOk, hbm]
 
 /-- A witness that the connector chip's contribution closes a segment's execution bridge: the
     segment's initial and final `(pc, timestamp)` states.

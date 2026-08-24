@@ -87,6 +87,24 @@ theorem allEffects_eq_zero_of_mults_zero {p : ℕ} {c : Circuit p} {asg : ChipAs
   obtain ⟨bi, hbi, rfl⟩ := List.mem_map.mp hy1
   exact h bi hbi
 
+/-- **`StepLayout.memSendsOk`, from the unrestricted (all-buses) shape `ByteCheck.lean`
+    produces.** A proof of the old, cross-bus `sendsOk` is strictly more than `memSendsOk` asks
+    for, so this just plugs `memPayloadOnly` in for whichever `j` the memory-scoped hypothesis
+    doesn't cover. -/
+theorem memSendsOk_of_sendsOk {p : ℕ} {r : GuestBusRules p} {c : Circuit p}
+    {asg : ChipAssignment p}
+    (hsendsOk : ∀ i : Fin c.busInteractions.length, c.statefulSend r asg i →
+      (∀ j : Fin c.busInteractions.length, j < i → c.activeStateful r asg j →
+        r.payloadOk (c.msgAt asg j)) → r.payloadOk (c.msgAt asg i)) :
+    ∀ i : Fin c.busInteractions.length, c.statefulSend r asg i →
+      (c.busInteractions.get i).busId = r.memBusId →
+      (∀ j : Fin c.busInteractions.length, j < i → c.activeStateful r asg j →
+        (c.busInteractions.get j).busId = r.memBusId → r.payloadOk (c.msgAt asg j)) →
+      r.payloadOk (c.msgAt asg i) :=
+  fun i hsend _ hlow => hsendsOk i hsend (fun j hji hactj =>
+    if hjmem : (c.busInteractions.get j).busId = r.memBusId then hlow j hji hactj hjmem
+    else r.memPayloadOnly _ hactj.1 hjmem)
+
 --------- The gadgets a placement is read off ---------
 
 /-- `-1` is neither `0` nor `1`: what rules a memory *receive* out of `StepLayout.ordered`'s and
@@ -498,8 +516,9 @@ theorem apc2105000Opt_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWindow) :
     all_goals
       simp [apc2105000Opt, apcRules, openVmGuestRules, openVmIsStateful, defaultBusMap,
         OpenVmBusType.isStateful] at hst
-  · -- The ordering: numeric, via `optOffsetUb`.
-    rintro i j hji ⟨hsi, hmi⟩ ⟨hsj, hmj⟩
+  · -- The ordering: numeric, via `optOffsetUb`. Restricted to the memory bus, but both extra
+    -- hypotheses go unused — `optOffsetUb_dominates` never needed them.
+    rintro i j hji ⟨hsi, hmi⟩ _ ⟨hsj, hmj⟩ _
     obtain ⟨hmem, heq⟩ := hsendIdx i hsi hmi
     show (optOffsets n0 nw0 nr1 nw1 nr3).getD j.val 0
       < (optOffsets n0 nw0 nr1 nw1 nr3).getD i.val 0
@@ -507,7 +526,7 @@ theorem apc2105000Opt_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWindow) :
     exact lt_of_le_of_lt (hub j hsj hmj)
       (optOffsetUb_dominates i.val hmem j.val (Fin.lt_def.mp hji))
   · -- The byte invariant, by static analysis: only the masked write is left by hand.
-    refine byteCheck_sendsOk (optPinRules_hold asg halg) optByteCheck ?_
+    refine memSendsOk_of_sendsOk (byteCheck_sendsOk (optPinRules_hold asg halg) optByteCheck ?_)
     intro i hi hsend hlow
     fin_cases i
     all_goals try exact absurd hi (by decide)
@@ -852,8 +871,9 @@ theorem apc2105000GatedPinned_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWind
     all_goals
       simp [apc2105000GatedPinned, apc2105000Gated, apcRules, openVmGuestRules, openVmIsStateful,
         defaultBusMap, OpenVmBusType.isStateful] at hst
-  · -- The ordering: numeric, via `optOffsetUb`.
-    rintro i j hji ⟨hsi, hmi⟩ ⟨hsj, hmj⟩
+  · -- The ordering: numeric, via `optOffsetUb`. Restricted to the memory bus, but both extra
+    -- hypotheses go unused — `optOffsetUb_dominates` never needed them.
+    rintro i j hji ⟨hsi, hmi⟩ _ ⟨hsj, hmj⟩ _
     obtain ⟨hmem, heq⟩ := hsendIdx i hsi hmi
     show (optOffsets n0 nw0 nr1 nw1 nr3).getD j.val 0
       < (optOffsets n0 nw0 nr1 nw1 nr3).getD i.val 0
@@ -861,7 +881,7 @@ theorem apc2105000GatedPinned_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWind
     exact lt_of_le_of_lt (hub j hsj hmj)
       (optOffsetUb_dominates i.val hmem j.val (Fin.lt_def.mp hji))
   · -- The byte invariant, by static analysis: only the masked write is left by hand.
-    refine byteCheck_sendsOk (gatedPinRules_hold asg halg) gatedByteCheck ?_
+    refine memSendsOk_of_sendsOk (byteCheck_sendsOk (gatedPinRules_hold asg halg) gatedByteCheck ?_)
     intro i hi hsend hlow
     fin_cases i
     all_goals try exact absurd hi (by decide)
@@ -1816,20 +1836,22 @@ theorem unoptByteCheck :
     byteCheckAll unoptByteVars unoptPinRules apc2105000UnoptChained.busInteractions unoptWitnesses
       = true := by decide
 
-/-- **`StepLayout.sendsOk`, by static analysis.** `byteCheckAll` accounts for every echoed read
-    and every interaction that isn't a genuine memory send; the three ALU writes are left to the
-    caller, closed by `unoptWriteIsByte_0/1/2`. -/
-theorem apc2105000UnoptChained_sendsOk {asg : ChipAssignment babyBear}
+/-- **`StepLayout.memSendsOk`, by static analysis.** `byteCheckAll` accounts for every echoed
+    read and every interaction that isn't a genuine memory send; the three ALU writes are left to
+    the caller, closed by `unoptWriteIsByte_0/1/2`. -/
+theorem apc2105000UnoptChained_memSendsOk {asg : ChipAssignment babyBear}
     (halg : apc2105000UnoptChained.satisfiesAlgebraic asg)
     (hacc : apc2105000UnoptChained.satisfiesStateless apcRules asg) :
     ∀ i : Fin apc2105000UnoptChained.busInteractions.length,
       apc2105000UnoptChained.statefulSend apcRules asg i →
+      (apc2105000UnoptChained.busInteractions.get i).busId = apcRules.memBusId →
       (∀ j : Fin apc2105000UnoptChained.busInteractions.length, j < i →
         apc2105000UnoptChained.activeStateful apcRules asg j →
+        (apc2105000UnoptChained.busInteractions.get j).busId = apcRules.memBusId →
         apcRules.payloadOk (apc2105000UnoptChained.msgAt asg j)) →
       apcRules.payloadOk (apc2105000UnoptChained.msgAt asg i) := by
   haveI : Fact (1 < babyBear) := ⟨by decide⟩
-  refine byteCheck_sendsOk (unoptPinRules_hold asg halg) unoptByteCheck ?_
+  refine memSendsOk_of_sendsOk (byteCheck_sendsOk (unoptPinRules_hold asg halg) unoptByteCheck ?_)
   intro i hi hsend hlow
   fin_cases i
   all_goals try exact absurd hi (by decide)

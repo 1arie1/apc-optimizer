@@ -153,8 +153,11 @@ theorem openVmHost_sinksAreTables (P : OpenVmParams p) :
 
     `payloadOk` hands over some multiplicity at which the payload maintains the invariants; which
     one is irrelevant, and the proof simply names it. -/
-theorem openVmBusSemantics_statefulAcceptsOfPayloadOk (r0 : GuestBusRules p) :
-    (openVmBusSemantics p defaultBusMap).statefulAcceptsOfPayloadOk r0 := by
+theorem openVmBusSemantics_statefulAcceptsOfPayloadOk (r0 : GuestBusRules p)
+    (hmem : ∀ m : BusMessage p, (openVmBusSemantics p defaultBusMap).isStateful m.1 = true →
+      m.1 ≠ r0.memBusId →
+      ∃ mult : ZMod p, (openVmBusSemantics p defaultBusMap).maintainsInvariants ⟨m.1, mult, m.2⟩) :
+    (openVmBusSemantics p defaultBusMap).statefulAcceptsOfPayloadOk r0 hmem := by
   rintro msg hst ⟨mult, hmaint⟩
   set msg' : BusInteraction (ZMod p) := ⟨msg.busId, mult, msg.payload⟩ with hmsg'
   have hbus : msg.busId = msg'.busId := rfl
@@ -565,9 +568,11 @@ theorem openVmHost_absorbsStateless (P : OpenVmParams p) :
     shared function), and `payloadOk` agrees up to naming a multiplicity — on memory, any works and
     the byte condition is the content; elsewhere, the polarity clause is satisfiable and so says
     nothing. -/
-theorem openVmGuestRules_eq (busMap : BusMap) (memBusId : Nat) :
-    openVmGuestRules (p := p) busMap memBusId
-      = (openVmBusSemantics p busMap).toGuestRules (openVmGuestRules busMap memBusId) := by
+theorem openVmGuestRules_eq (busMap : BusMap) (memBusId : Nat)
+    (hmem : ∀ b, busMap b = some .memory → b = memBusId := by exact defaultBusMap_mem_unique) :
+    openVmGuestRules (p := p) busMap memBusId hmem
+      = (openVmBusSemantics p busMap).toGuestRules (openVmGuestRules busMap memBusId hmem)
+          (maintainsInvariants_off_mem hmem) := by
   have hpay : ∀ m : BusMessage p, openVmPayloadOk busMap m =
       ∃ mult : ZMod p, ApcOptimizer.OpenVM.maintainsInvariants busMap ⟨m.1, mult, m.2⟩ := by
     intro m
@@ -589,10 +594,18 @@ theorem openVmGuestRules_eq (busMap : BusMap) (memBusId : Nat) :
       | pcLookup | variableRangeChecker | bitwiseLookup | tupleRangeChecker _ _ =>
         simp only [ApcOptimizer.OpenVM.maintainsInvariants, hbm]
         exact ⟨fun _ => ⟨1, rfl⟩, fun _ => trivial⟩
-  show GuestBusRules.mk _ _ _ _ _ _ = GuestBusRules.mk _ _ _ _ _ _
+  show GuestBusRules.mk _ _ _ _ _ _ _ = GuestBusRules.mk _ _ _ _ _ _ _
   congr 1
   funext m
   exact hpay m
+
+/-- Off the memory bus, `openVmBusSemantics p defaultBusMap` always has some multiplicity
+    maintaining its invariants — `openVmGuestRules_eq`'s own `toGuestRules` argument, named once
+    so every downstream `toGuestRules`/`statefulAcceptsOfPayloadOk` call reuses it. -/
+def openVmDefaultHmem : ∀ m : BusMessage p,
+    (openVmBusSemantics p defaultBusMap).isStateful m.1 = true → m.1 ≠ openVmMemBusId →
+      ∃ mult : ZMod p, (openVmBusSemantics p defaultBusMap).maintainsInvariants ⟨m.1, mult, m.2⟩ :=
+  maintainsInvariants_off_mem defaultBusMap_mem_unique
 
 /-- Guest legality on `openVmHost` is `Circuit.legalGuest` for OpenVM's bus semantics, with
     `openVmGuestRules defaultBusMap openVmMemBusId` itself as the clock template — so the step
@@ -601,7 +614,7 @@ theorem openVmGuestRules_eq (busMap : BusMap) (memBusId : Nat) :
 theorem openVmHost_legalGuest_unpack (P : OpenVmParams p) (c : Circuit p) :
     (openVmHost P).legalGuest c →
       c.legalGuest ((openVmBusSemantics p defaultBusMap).toGuestRules
-          (openVmGuestRules defaultBusMap openVmMemBusId))
+          (openVmGuestRules defaultBusMap openVmMemBusId) openVmDefaultHmem)
         (openVmHost P).maxWindow (openVmHost P).maxLookback (openVmHost P).maxInteractions :=
   fun h => openVmGuestRules_eq defaultBusMap openVmMemBusId ▸ h
 
@@ -620,7 +633,7 @@ theorem openVmHost_stepLayout_unpack
 theorem openVmHost_forcesAccepts [Fact p.Prime] (P : OpenVmParams p)
     (hOrd : (openVmHost P).ordersRanks (openVmRankModel openVmMemBusId)
       ((openVmBusSemantics p defaultBusMap).toGuestRules
-        (openVmGuestRules defaultBusMap openVmMemBusId))) :
+        (openVmGuestRules defaultBusMap openVmMemBusId) openVmDefaultHmem)) :
     (openVmHost P).forcesAccepts
       (openVmBusSemantics p defaultBusMap) :=
   forcesAccepts_of_hostSound (openVmHost_legalGuest_unpack P)
@@ -628,7 +641,8 @@ theorem openVmHost_forcesAccepts [Fact p.Prime] (P : OpenVmParams p)
     ⟨openVmFinalizeIdx P,
       openVmHost_finalize_exempt P,
       openVmHost_statefulChipsMaintain P⟩
-    (openVmBusSemantics_statefulAcceptsOfPayloadOk (openVmGuestRules defaultBusMap openVmMemBusId))
+    (openVmBusSemantics_statefulAcceptsOfPayloadOk
+      (openVmGuestRules defaultBusMap openVmMemBusId) openVmDefaultHmem)
     hOrd
 
 /-- **`openVmHost` realizes OpenVM's bus semantics** — unconditionally. This is the whole VM-side
@@ -636,17 +650,19 @@ theorem openVmHost_forcesAccepts [Fact p.Prime] (P : OpenVmParams p)
 theorem openVmHost_realizes (P : OpenVmParams p)
     (hOrd : (openVmHost P).ordersRanks (openVmRankModel openVmMemBusId)
       ((openVmBusSemantics p defaultBusMap).toGuestRules
-        (openVmGuestRules defaultBusMap openVmMemBusId))) :
+        (openVmGuestRules defaultBusMap openVmMemBusId) openVmDefaultHmem)) :
     (openVmHost P).realizes
       (openVmBusSemantics p defaultBusMap) (openVmRankModel openVmMemBusId)
       (openVmGuestRules defaultBusMap openVmMemBusId) where
+  hmem := openVmDefaultHmem
   legalGuest := openVmHost_legalGuest_unpack P
   sinksAreTables := openVmHost_sinksAreTables P
   statefulChipsMaintain := ⟨openVmFinalizeIdx P,
     openVmHost_finalize_exempt P,
     openVmHost_statefulChipsMaintain P⟩
   statefulAcceptsOfPayloadOk :=
-    openVmBusSemantics_statefulAcceptsOfPayloadOk (openVmGuestRules defaultBusMap openVmMemBusId)
+    openVmBusSemantics_statefulAcceptsOfPayloadOk
+      (openVmGuestRules defaultBusMap openVmMemBusId) openVmDefaultHmem
   absorbsStateless := openVmHost_absorbsStateless P
   ordersRanks := hOrd
 

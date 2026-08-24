@@ -71,6 +71,7 @@ def toyGuestRules (p : ℕ) : GuestBusRules p where
   execBusId := 0
   memBusId := 0
   getTimestamp _ := 0
+  memPayloadOnly := fun _ hst _ => absurd hst (by decide)
 
 /-- The original chip: one interaction on the stateless bus, multiplicity fixed at the literal `1`.
     Legal by inspection — `statelessSendOnly` is forced by the constant. -/

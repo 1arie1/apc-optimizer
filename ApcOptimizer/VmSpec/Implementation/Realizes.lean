@@ -35,13 +35,17 @@ variable {p : ℕ}
     `BusSemantics` itself has no notion of — a template borrowed wholesale, since `Circuit.legalGuest`'s
     `sendOnly`/`polarity`/`size` never look at them, only `stepLayout` does. In practice `r0` is
     `openVmGuestRules`'s own value, so `openVmGuestRules_eq` gets them for free. -/
-def BusSemantics.toGuestRules (bs : BusSemantics p) (r0 : GuestBusRules p) : GuestBusRules p where
+def BusSemantics.toGuestRules (bs : BusSemantics p) (r0 : GuestBusRules p)
+    (hmem : ∀ m : BusMessage p, bs.isStateful m.1 = true → m.1 ≠ r0.memBusId →
+      ∃ mult : ZMod p, bs.maintainsInvariants ⟨m.1, mult, m.2⟩) :
+    GuestBusRules p where
   isStateful := bs.isStateful
   accepts := bs.accepts
   payloadOk m := ∃ mult : ZMod p, bs.maintainsInvariants ⟨m.1, mult, m.2⟩
   execBusId := r0.execBusId
   memBusId := r0.memBusId
   getTimestamp := r0.getTimestamp
+  memPayloadOnly := hmem
 
 /-- On a stateful bus, acceptance follows from the payload being good — which is the contract
     `GuestBusRules.payloadOk` is named for, now stated directly rather than through a message whose
@@ -50,15 +54,19 @@ def BusSemantics.toGuestRules (bs : BusSemantics p) (r0 : GuestBusRules p) : Gue
     This is what lets a receive inherit its acceptance from whoever sent the same tuple. For
     OpenVM it holds by inspection: memory `accepts` asks that received data in a byte-checked
     address space be bytes, and memory `maintainsInvariants` asks exactly that of any message. -/
-def BusSemantics.statefulAcceptsOfPayloadOk (bs : BusSemantics p) (r0 : GuestBusRules p) : Prop :=
+def BusSemantics.statefulAcceptsOfPayloadOk (bs : BusSemantics p) (r0 : GuestBusRules p)
+    (hmem : ∀ m : BusMessage p, bs.isStateful m.1 = true → m.1 ≠ r0.memBusId →
+      ∃ mult : ZMod p, bs.maintainsInvariants ⟨m.1, mult, m.2⟩) : Prop :=
   ∀ msg : BusInteraction (ZMod p), bs.isStateful msg.busId = true →
-    (bs.toGuestRules r0).payloadOk (msg.busId, msg.payload) → bs.accepts msg
+    (bs.toGuestRules r0 hmem).payloadOk (msg.busId, msg.payload) → bs.accepts msg
 
 /-- `Host.statefulChipsMaintain` still speaks of a whole message; this is the one-line bridge to
     `GuestBusRules.payloadOk`, which forgets its multiplicity. -/
-theorem payloadOk_of_exists {bs : BusSemantics p} {r0 : GuestBusRules p} {m : BusMessage p}
+theorem payloadOk_of_exists {bs : BusSemantics p} {r0 : GuestBusRules p}
+    {hmem : ∀ m : BusMessage p, bs.isStateful m.1 = true → m.1 ≠ r0.memBusId →
+      ∃ mult : ZMod p, bs.maintainsInvariants ⟨m.1, mult, m.2⟩} {m : BusMessage p}
     (h : ∃ msg : BusInteraction (ZMod p), msg.busId = m.1 ∧ msg.payload = m.2 ∧
-      bs.maintainsInvariants msg) : (bs.toGuestRules r0).payloadOk m := by
+      bs.maintainsInvariants msg) : (bs.toGuestRules r0 hmem).payloadOk m := by
   obtain ⟨msg, h1, h2, h3⟩ := h
   exact ⟨msg.multiplicity, by cases msg; cases h1; cases h2; exact h3⟩
 
@@ -158,11 +166,15 @@ def Host.ordersRanks (host : Host p) (rm : RankModel p) (r : GuestBusRules p) : 
     on `rm`. -/
 structure Host.realizes (host : Host p) (bs : BusSemantics p) (rm : RankModel p)
     (r0 : GuestBusRules p) : Prop where
+  /-- Off the memory bus, `bs` always has *some* multiplicity maintaining its invariants — what
+      `bs.toGuestRules`'s `memPayloadOnly` field rests on (`Legal.lean`). -/
+  hmem : ∀ m : BusMessage p, bs.isStateful m.1 = true → m.1 ≠ r0.memBusId →
+    ∃ mult : ZMod p, bs.maintainsInvariants ⟨m.1, mult, m.2⟩
   /-- The host's `Host.legalGuest` field is at least `Circuit.legalGuest` for `bs`, at this
       argument's own `rm.rank` and `rm.bound` and the host's own sizes. -/
   legalGuest : ∀ c : Circuit p,
     host.legalGuest c →
-      c.legalGuest (bs.toGuestRules r0) host.maxWindow host.maxLookback host.maxInteractions
+      c.legalGuest (bs.toGuestRules r0 hmem) host.maxWindow host.maxLookback host.maxInteractions
   sinksAreTables : host.sinksAreTables bs
   /-- One host-chip type is carved out and derivable instead of assumed — for `openVmHost`,
       `memoryFinalizeHostChip` (see `Host.exemptChip`). Existential rather than two separate data
@@ -171,9 +183,9 @@ structure Host.realizes (host : Host p) (bs : BusSemantics p) (rm : RankModel p)
       itself proving a `Prop`, where `obtain`ing the witness is unrestricted. -/
   statefulChipsMaintain : ∃ idx : Fin host.chips.length,
     host.exemptChip bs idx ∧ host.statefulChipsMaintain bs idx
-  statefulAcceptsOfPayloadOk : bs.statefulAcceptsOfPayloadOk r0
+  statefulAcceptsOfPayloadOk : bs.statefulAcceptsOfPayloadOk r0 hmem
   absorbsStateless : host.absorbsStateless bs
-  ordersRanks : host.ordersRanks rm (bs.toGuestRules r0)
+  ordersRanks : host.ordersRanks rm (bs.toGuestRules r0 hmem)
 
 /-- The host chips realize `bs`'s acceptance: in any satisfying VM built on this host whose guest
     chips are small enough not to wrap `ZMod p`, every guest instance's assignment is
@@ -204,16 +216,19 @@ def Host.forcesAccepts (host : Host p) (bs : BusSemantics p) : Prop :=
     whose own derivation depends on it. -/
 theorem satisfiesStateless_of_sinks [Fact p.Prime] {host : Host p} {bs : BusSemantics p}
     {r0 : GuestBusRules p}
+    {hmem : ∀ m : BusMessage p, bs.isStateful m.1 = true → m.1 ≠ r0.memBusId →
+      ∃ mult : ZMod p, bs.maintainsInvariants ⟨m.1, mult, m.2⟩}
     {G : Guest p} {a : VmAssignment p ⟨host, G⟩}
     (hunpack : ∀ c : Circuit p,
       host.legalGuest c →
-        c.legalGuest (bs.toGuestRules r0) host.maxWindow host.maxLookback host.maxInteractions)
+        c.legalGuest (bs.toGuestRules r0 hmem) host.maxWindow host.maxLookback
+          host.maxInteractions)
     (hsinks : host.sinksAreTables bs) (hGuests : host.legalGuests G)
     (hsat : VmSat ⟨host, G⟩ a)
     (t : Fin G.length) (asg : ChipAssignment p) (hasg : asg ∈ a.guestAssignments t) :
-    (G.get t).satisfiesStateless (bs.toGuestRules r0) asg := by
+    (G.get t).satisfiesStateless (bs.toGuestRules r0 hmem) asg := by
   have hlegal : ∀ s : Fin G.length,
-      (G.get s).legalGuest (bs.toGuestRules r0) host.maxWindow host.maxLookback
+      (G.get s).legalGuest (bs.toGuestRules r0 hmem) host.maxWindow host.maxLookback
         host.maxInteractions :=
     fun s => hunpack _ (hGuests _ (List.get_mem G s))
   have hSize : ∀ c ∈ G, c.busInteractions.length ≤ host.maxInteractions :=
@@ -258,33 +273,36 @@ theorem satisfiesStateless_of_sinks [Fact p.Prime] {host : Host p} {bs : BusSema
     `guestNet_add_ne_zero_of_uniform` needs. -/
 theorem maintains_of_stateful_active [Fact p.Prime] {host : Host p} {bs : BusSemantics p}
     {rm : RankModel p} {r0 : GuestBusRules p}
+    {hmem : ∀ m : BusMessage p, bs.isStateful m.1 = true → m.1 ≠ r0.memBusId →
+      ∃ mult : ZMod p, bs.maintainsInvariants ⟨m.1, mult, m.2⟩}
     {G : Guest p} {a : VmAssignment p ⟨host, G⟩}
     (hunpack : ∀ c : Circuit p,
       host.legalGuest c →
-        c.legalGuest (bs.toGuestRules r0) host.maxWindow host.maxLookback host.maxInteractions)
+        c.legalGuest (bs.toGuestRules r0 hmem) host.maxWindow host.maxLookback
+          host.maxInteractions)
     (hsinks : host.sinksAreTables bs)
     (hstateful : ∃ idx : Fin host.chips.length,
       host.exemptChip bs idx ∧ host.statefulChipsMaintain bs idx)
     (hGuests : host.legalGuests G)
     (hsat : VmSat ⟨host, G⟩ a)
-    (hOrders : a.ordersRanks rm (bs.toGuestRules r0) host.maxWindow host.maxLookback)
+    (hOrders : a.ordersRanks rm (bs.toGuestRules r0 hmem) host.maxWindow host.maxLookback)
     {t : Fin G.length} {asg : ChipAssignment p} (hasg : asg ∈ a.guestAssignments t)
     {bi : BusInteraction (Expression p)} (hbi : bi ∈ (G.get t).busInteractions)
     (hst : bs.isStateful bi.busId = true) (hmult : (bi.eval asg).multiplicity ≠ 0) :
-    (bs.toGuestRules r0).payloadOk ((bi.eval asg).busId, (bi.eval asg).payload) := by
+    (bs.toGuestRules r0 hmem).payloadOk ((bi.eval asg).busId, (bi.eval asg).payload) := by
   obtain ⟨idx, hexempt, hstateful⟩ := hstateful
   have hSize : ∀ c ∈ G, c.busInteractions.length ≤ host.maxInteractions :=
     fun c hc => (hunpack c (hGuests c hc)).size
   have hBudget : host.maxInteractions * host.maxInstances + 1 < p := host.noMultOverflow
   have hlegal : ∀ s : Fin G.length,
-      (G.get s).legalGuest (bs.toGuestRules r0) host.maxWindow host.maxLookback
+      (G.get s).legalGuest (bs.toGuestRules r0 hmem) host.maxWindow host.maxLookback
         host.maxInteractions :=
     fun s => hunpack _ (hGuests _ (List.get_mem G s))
   suffices key : ∀ r : ℕ, ∀ (s : Fin G.length) (asg' : ChipAssignment p),
       asg' ∈ a.guestAssignments s → ∀ bi' ∈ (G.get s).busInteractions,
       bs.isStateful bi'.busId = true → (bi'.eval asg').multiplicity ≠ 0 →
       rm.rank ((bi'.eval asg').busId, (bi'.eval asg').payload) = r →
-      (bs.toGuestRules r0).payloadOk ((bi'.eval asg').busId, (bi'.eval asg').payload) by
+      (bs.toGuestRules r0 hmem).payloadOk ((bi'.eval asg').busId, (bi'.eval asg').payload) by
     exact key _ t asg hasg bi hbi hst hmult rfl
   intro r
   induction r using Nat.strong_induction_on with
@@ -292,8 +310,8 @@ theorem maintains_of_stateful_active [Fact p.Prime] {host : Host p} {bs : BusSem
   intro s asg' hasg' bi' hbi' hst' hmult' hrank
   by_contra hcon
   -- The payload is not good.
-  have hno : ¬ (bs.toGuestRules r0).payloadOk ((bi'.eval asg').busId, (bi'.eval asg').payload) :=
-    hcon
+  have hno : ¬ (bs.toGuestRules r0 hmem).payloadOk
+      ((bi'.eval asg').busId, (bi'.eval asg').payload) := hcon
   -- Hence no guest *sends* it, so every guest multiplicity at this message is `0` or `-1`.
   have huni : ∀ u : Fin G.length, ∀ asg'' ∈ a.guestAssignments u,
       (G.get u).uniformAt asg'' ((bi'.eval asg').busId, (bi'.eval asg').payload) (-1) := by
@@ -303,28 +321,32 @@ theorem maintains_of_stateful_active [Fact p.Prime] {host : Host p} {bs : BusSem
     rcases (hlegal u).polarity asg'' (hsat.satisfiesGuest u asg'' hasg'') bi'' hbi'' hst'' with
       h0 | h1 | hm1
     · exact Or.inl h0
-    · -- A send has to vouch for itself, given everything it touched earlier — which the induction
-      -- hypothesis supplies, because a step's offsets order ranks.
-      have hacc : (G.get u).satisfiesStateless (bs.toGuestRules r0) asg'' :=
-        satisfiesStateless_of_sinks hunpack hsinks hGuests hsat u asg'' hasg''
-      obtain ⟨L⟩ := (hlegal u).stepLayout asg'' (hsat.satisfiesGuest u asg'' hasg'') hacc
+    · -- A send has to vouch for itself, given everything it touched earlier that is *also on the
+      -- memory bus* — which the induction hypothesis supplies, because a step's offsets order
+      -- ranks. Off the memory bus, `memPayloadOnly` settles it outright: no induction needed.
       obtain ⟨i, hi⟩ := List.get_of_mem hbi''
-      have hsti : (bs.toGuestRules r0).isStateful
+      have hsti : (bs.toGuestRules r0 hmem).isStateful
           ((G.get u).busInteractions.get i).busId = true := by rw [hi]; exact hst''
       have hmulti : (((G.get u).busInteractions.get i).eval asg'').multiplicity = 1 := by
         rw [hi]; exact h1
       have hmsgi : (G.get u).msgAt asg'' i
           = ((bi'.eval asg').busId, (bi'.eval asg').payload) := by
         rw [Circuit.msgAt, hi]; exact hmsg''
+      have hsendi : (G.get u).statefulSend (bs.toGuestRules r0 hmem) asg'' i := ⟨hsti, hmulti⟩
       refine absurd ?_ hno
       rw [← hmsgi]
-      have hsendi : (G.get u).statefulSend (bs.toGuestRules r0) asg'' i := ⟨hsti, hmulti⟩
-      refine L.sendsOk i hsendi (fun j hji hactj => ?_)
-      refine ih _ ?_ u asg'' hasg'' _ (List.get_mem _ _) hactj.1 hactj.2 rfl
-      have hoff := L.ordered i j hji hsendi hactj
-      have hlt := hOrders u asg'' hasg'' L i j ⟨hsti, by rw [hsendi.2]; exact one_ne_zero⟩
-        hactj hoff
-      rwa [hmsgi, hrank] at hlt
+      by_cases hbmem :
+          ((G.get u).busInteractions.get i).busId = (bs.toGuestRules r0 hmem).memBusId
+      · have hacc : (G.get u).satisfiesStateless (bs.toGuestRules r0 hmem) asg'' :=
+          satisfiesStateless_of_sinks hunpack hsinks hGuests hsat u asg'' hasg''
+        obtain ⟨L⟩ := (hlegal u).stepLayout asg'' (hsat.satisfiesGuest u asg'' hasg'') hacc
+        refine L.memSendsOk i hsendi hbmem (fun j hji hactj hjmem => ?_)
+        refine ih _ ?_ u asg'' hasg'' _ (List.get_mem _ _) hactj.1 hactj.2 rfl
+        have hoff := L.memOrdered i j hji hsendi hbmem hactj hjmem
+        have hlt := hOrders u asg'' hasg'' L i j ⟨hsti, by rw [hsendi.2]; exact one_ne_zero⟩
+          hactj hoff
+        rwa [hmsgi, hrank] at hlt
+      · exact (bs.toGuestRules r0 hmem).memPayloadOnly _ hsti hbmem
     · exact Or.inr hm1
   -- Every *non-exempt* host chip is silent too — same argument as before, just narrowed.
   have hzero : ∀ u : Fin host.chips.length, u ≠ idx →
@@ -371,14 +393,17 @@ theorem maintains_of_stateful_active [Fact p.Prime] {host : Host p} {bs : BusSem
     assumption about acceptance placed on the guest chips themselves. -/
 theorem forcesAccepts_of_hostSound [Fact p.Prime] {host : Host p} {bs : BusSemantics p}
     {rm : RankModel p} {r0 : GuestBusRules p}
+    {hmem : ∀ m : BusMessage p, bs.isStateful m.1 = true → m.1 ≠ r0.memBusId →
+      ∃ mult : ZMod p, bs.maintainsInvariants ⟨m.1, mult, m.2⟩}
     (hunpack : ∀ c : Circuit p,
       host.legalGuest c →
-        c.legalGuest (bs.toGuestRules r0) host.maxWindow host.maxLookback host.maxInteractions)
+        c.legalGuest (bs.toGuestRules r0 hmem) host.maxWindow host.maxLookback
+          host.maxInteractions)
     (hsinks : host.sinksAreTables bs)
     (hstateful : ∃ idx : Fin host.chips.length,
       host.exemptChip bs idx ∧ host.statefulChipsMaintain bs idx)
-    (hbs : bs.statefulAcceptsOfPayloadOk r0)
-    (hord : host.ordersRanks rm (bs.toGuestRules r0)) :
+    (hbs : bs.statefulAcceptsOfPayloadOk r0 hmem)
+    (hord : host.ordersRanks rm (bs.toGuestRules r0 hmem)) :
     host.forcesAccepts bs := by
   intro G hGuests a hsat t asg hasg
   have hRanks := hord G hGuests a hsat

@@ -29,6 +29,12 @@ structure GuestBusRules (p : ℕ) where
   memBusId : Nat
   /-- How to get the timestamp for a memory access. -/
   getTimestamp : BusMessage p → ZMod p
+  /-- Off the memory bus, a stateful message's payload carries no invariant at all — `payloadOk`
+      is the memory-byte invariant specifically, not a general property of every stateful bus.
+      This is what lets `StepLayout.memOrdered`/`memSendsOk` restrict their reach to the memory
+      bus without losing anything: an execution-bridge (or other stateful, non-memory) message is
+      `payloadOk` unconditionally. -/
+  memPayloadOnly : ∀ m : BusMessage p, isStateful m.1 = true → m.1 ≠ memBusId → payloadOk m
 
 /-- Whether a circuit's **algebraic** constraints alone force property `P` on every message it
     writes to a bus of the given statefulness. -/
@@ -138,21 +144,31 @@ structure StepLayout {p : ℕ} (c : Circuit p) (r : GuestBusRules p) (asg : Chip
   placed : ∀ i : Fin c.busInteractions.length, c.activeStateful r asg i →
     -(maxLookback : ℤ) ≤ place i ∧ place i ≤ (d : ℤ) ∧
       r.getTimestamp (c.msgAt asg i) = base + ((place i : ℤ) : ZMod p)
-  /-- Every send is placed *after* prior interactons. -/
-  ordered : ∀ i j : Fin c.busInteractions.length, j < i →
-    c.statefulSend r asg i → c.activeStateful r asg j → place j < place i
-  /-- Each send is Ok, given that prior interactions are Ok.
+  /-- Every *memory* send is placed *after* prior *memory* interactions. Restricted to the memory
+      bus, not every stateful one: `memPayloadOnly` already settles the execution bridge (and any
+      other stateful, non-memory bus) unconditionally, so ordering them buys nothing, and — for a
+      circuit chaining several unfused instruction steps — insisting on it would force a total
+      order on messages that are only coincidentally simultaneous in time (two steps' own
+      bookkeeping can legitimately land on the same field timestamp without either justifying the
+      other's memory byte invariant). -/
+  memOrdered : ∀ i j : Fin c.busInteractions.length, j < i →
+    c.statefulSend r asg i → (c.busInteractions.get i).busId = r.memBusId →
+    c.activeStateful r asg j → (c.busInteractions.get j).busId = r.memBusId →
+    place j < place i
+  /-- Each memory send is Ok, given that prior memory interactions are Ok.
 
       This is the induction that carries the memory-byte invariant: a send is justified by the
-      receives that precede it. The induction is on timestamps, but `ordered` couples that to
-      syntactic index for the sends.
+      receives that precede it. The induction is on timestamps, but `memOrdered` couples that to
+      syntactic index for the sends. Restricted to the memory bus for the same reason
+      `memOrdered` is — `memPayloadOnly` already settles every other stateful bus.
 
       OpenVM §3.2.5, elements of address spaces 1 (registers) and 2 (user memory) "are constrained
       to lie in `[0, 2^8)`". In §4.6: a message appears "if and only if at timestamp `t` the data
       memory had values `data`" at that address. -/
-  sendsOk : ∀ i : Fin c.busInteractions.length, c.statefulSend r asg i →
+  memSendsOk : ∀ i : Fin c.busInteractions.length, c.statefulSend r asg i →
+    (c.busInteractions.get i).busId = r.memBusId →
     (∀ j : Fin c.busInteractions.length, j < i → c.activeStateful r asg j →
-      r.payloadOk (c.msgAt asg j)) →
+      (c.busInteractions.get j).busId = r.memBusId → r.payloadOk (c.msgAt asg j)) →
     r.payloadOk (c.msgAt asg i)
 
 /-- Every assignment a guest chip admits lays out as one instruction step.
