@@ -86,6 +86,28 @@ Layered, each layer a decidable check plus a soundness theorem, in the style of
   names its witness (`n = lo.val + 131072 * hi.val`), which is what makes the offset computable
   rather than merely existential.
 
+- **`Audit/ByteCheck.lean`** — `sendsOk`, OpenVM's byte invariant. Four justifications are
+  decided: the interaction is not a stateful send; it is not on the memory bus, where
+  `openVmPayloadOk` asks nothing; its data limbs are literal bytes; or its data limbs are an
+  *earlier* interaction's, so `sendsOk`'s own hypothesis supplies them — a memory send echoing the
+  read it just did. A fifth (`external`) is left to the caller, and is decidably vacuous at every
+  other index, so the caller's case analysis collapses to one `try`.
+
+  `apc2105000Opt`'s sixty-line `sendsOk` bullet is now eight: a `decide` over `optWitnesses`, and
+  the masked write at position `9`.
+
+### What is checked, and what is still by hand
+
+For `apc2105000Opt`:
+
+| clause | how |
+| --- | --- |
+| `recv` / `send` / `other` | `optBridgeCheck`, a `decide` |
+| the five lt gadgets | `gadgetIdentity` (a `decide`) + `lookback_of_gadget` |
+| `placed` | by hand — thirteen one-line bullets; the recipe machinery is proved but not wired |
+| `ordered` | by hand — `optOffsetUb_dominates`, a `decide`; likewise not wired |
+| `sendsOk` | `optByteCheck`, a `decide`, plus one case |
+
 ### Next, in cost order
 1. **Wiring `placed`/`ordered` through the recipes on `apc2105000Opt`.** The machinery is proved;
    what is left is `optRecipes` plus replacing the thirteen `placed` bullets and the `ordered` one.
@@ -99,15 +121,13 @@ Layered, each layer a decidable check plus a soundness theorem, in the style of
    `[·, 17]`/`[·, 12]` whose high limb satisfies `gadgetIdentity` — would make the recipe list
    itself derivable instead of written out.
 
-3. **`sendsOk`** — the byte invariant, and the largest piece. Three shapes appear in
-   `apc2105000Opt`: a send echoing a preceding receive's data limbs (syntactic payload equality), a
-   send directly range-checked (bus-fact lookup), and a send needing real reasoning (`a__0_2`, via
-   `isByte_of_xorThree`). Most of the machinery exists in
-   `Implementation/OptimizerPasses/BusPairCancelJustify.lean` — `denseByteJustifiedW` has literal /
-   direct-bus-bound / deep-constraint / domain / affine / basis tiers, and its deep tier already
-   enumerates one-hot flags, which is the ALU shape. Missing: the assumption set (conditional
-   byte-ness: "given these receives are bytes, prove this send is"), output reshaping, and an
-   `Expression`↔`DenseExpr` bridge.
+3. **A tier for the `external` byte case** — the one shape `ByteCheck` does not decide: a limb
+   that is a byte because a lookup table says so (`a__0_2`, via `isByte_of_xorThree`). Most of the
+   machinery exists in `Implementation/OptimizerPasses/BusPairCancelJustify.lean` —
+   `denseByteJustifiedW` has literal / direct-bus-bound / deep-constraint / domain / affine / basis
+   tiers, and its deep tier already enumerates one-hot flags, which is the ALU shape. Missing: the
+   assumption set (conditional byte-ness), output reshaping, and an `Expression`↔`DenseExpr`
+   bridge.
 
 ### What the analysis cannot become
 
