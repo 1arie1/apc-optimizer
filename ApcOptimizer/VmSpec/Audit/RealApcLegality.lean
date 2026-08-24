@@ -1168,6 +1168,12 @@ theorem sum5_eq1_ne_zero {a b c d e : ZMod babyBear} (h : a + b + c + d + e = 1)
   rw [show (0 + a + b + c + d + e : ZMod babyBear) = 1 from by linear_combination h]
   decide
 
+/-- The two-flag (branch) analogue of `sum5_eq1_ne_zero`. -/
+theorem sum2_eq1_ne_zero {a b : ZMod babyBear} (h : a + b = 1) :
+    (0 + a + b : ZMod babyBear) ≠ 0 := by
+  rw [show (0 + a + b : ZMod babyBear) = 1 from by linear_combination h]
+  decide
+
 /-- On bus `3` (`variableRangeChecker`), `accepts` never inspects `multiplicity`, so a fact about
     one multiplicity transports to any other. Unlike the memory bus, this arm of
     `OpenVmSemantics.accepts` does not branch on it. -/
@@ -1214,4 +1220,266 @@ theorem unoptLookback_r1_0 {asg : ChipAssignment babyBear}
   obtain ⟨n, -, hn29, hplace⟩ := lt_gadget_offset (-1)
     (asg ⟨"reads_aux__0__base__prev_timestamp_0", some 6⟩)
     (asg ⟨"from_state__timestamp_0", some 1⟩) hlo hhi (by push_cast at heq ⊢; linear_combination heq)
+  exact ⟨n, hn29, hplace⟩
+set_option maxRecDepth 32000 in
+/-- Instr `0`'s write: send offset `2`. -/
+theorem unoptLookback_w_0 {asg : ChipAssignment babyBear}
+    (halg : apc2105000UnoptChained.satisfiesAlgebraic asg)
+    (hacc : apc2105000UnoptChained.satisfiesStateless apcRules asg) :
+    ∃ n : ℕ, n < 2 ^ 29 ∧
+      asg ⟨"writes_aux__base__prev_timestamp_0", some 12⟩
+        = asg ⟨"from_state__timestamp_0", some 1⟩
+          + ((((1 - (n : ℤ)) : ℤ)) : ZMod babyBear) := by
+  have hgate := (unoptPins halg).1
+  have hcon := halg
+    (.mul (.add ((.add ((.add ((.add ((.add (.const 0) (.var ⟨"opcode_add_flag_0", some 31⟩))) (.var ⟨"opcode_sub_flag_0", some 32⟩))) (.var ⟨"opcode_xor_flag_0", some 33⟩))) (.var ⟨"opcode_or_flag_0", some 34⟩))) (.var ⟨"opcode_and_flag_0", some 35⟩))
+      (.add (.add (.add (.add (.var ⟨"from_state__timestamp_0", some 1⟩) (.const 2))
+        (.mul (.const 2013265920) (.var ⟨"writes_aux__base__prev_timestamp_0", some 12⟩)))
+        (.mul (.const 2013265920) (.const 1)))
+        (.mul (.const 2013265920) (.add (.add (.const 0)
+          (.mul (.var ⟨"writes_aux__base__timestamp_lt_aux__lower_decomp__0_0", some 13⟩) (.const 1)))
+          (.mul (.var ⟨"writes_aux__base__timestamp_lt_aux__lower_decomp__1_0", some 14⟩) (.const 131072))))))
+    (List.mem_append_left _ (by decide))
+  simp only [Expression.eval] at hcon
+  rw [babyBear_negOne] at hcon
+  have heq := gadgetLookback_raw (δ := 2)
+    (ts := asg ⟨"from_state__timestamp_0", some 1⟩)
+    (prev := asg ⟨"writes_aux__base__prev_timestamp_0", some 12⟩)
+    (lo := asg ⟨"writes_aux__base__timestamp_lt_aux__lower_decomp__0_0", some 13⟩)
+    (hi := asg ⟨"writes_aux__base__timestamp_lt_aux__lower_decomp__1_0", some 14⟩)
+    hgate (by linear_combination hcon)
+  have hlo := accepts_congr_mult3 (m2 := 1)
+    (unoptAccepts hacc 13 (by decide) _ rfl rfl (sum5_eq1_ne_zero hgate))
+  have hhi := accepts_congr_mult3 (m2 := 1)
+    (unoptAccepts hacc 14 (by decide) _ rfl rfl (sum5_eq1_ne_zero hgate))
+  simp only [Expression.eval] at hlo hhi
+  obtain ⟨n, -, hn29, hplace⟩ := lt_gadget_offset (1)
+    (asg ⟨"writes_aux__base__prev_timestamp_0", some 12⟩)
+    (asg ⟨"from_state__timestamp_0", some 1⟩) hlo hhi (by push_cast at heq ⊢; linear_combination heq)
+  exact ⟨n, hn29, hplace⟩
+
+
+set_option maxRecDepth 32000 in
+/-- Instr `1`'s `rs1` read: send offset `0`. -/
+theorem unoptLookback_r1_1 {asg : ChipAssignment babyBear}
+    (halg : apc2105000UnoptChained.satisfiesAlgebraic asg)
+    (hacc : apc2105000UnoptChained.satisfiesStateless apcRules asg) :
+    ∃ n : ℕ, n < 2 ^ 29 ∧
+      asg ⟨"reads_aux__0__base__prev_timestamp_1", some 42⟩
+        = asg ⟨"from_state__timestamp_1", some 37⟩
+          + ((((-1 - (n : ℤ)) : ℤ)) : ZMod babyBear) := by
+  have hgate := (unoptPins halg).2.1
+  have hcon := halg
+    (.mul (.add ((.add ((.add ((.add ((.add (.const 0) (.var ⟨"opcode_add_flag_1", some 67⟩))) (.var ⟨"opcode_sub_flag_1", some 68⟩))) (.var ⟨"opcode_xor_flag_1", some 69⟩))) (.var ⟨"opcode_or_flag_1", some 70⟩))) (.var ⟨"opcode_and_flag_1", some 71⟩))
+      (.add (.add (.add (.add (.var ⟨"from_state__timestamp_1", some 37⟩) (.const 0))
+        (.mul (.const 2013265920) (.var ⟨"reads_aux__0__base__prev_timestamp_1", some 42⟩)))
+        (.mul (.const 2013265920) (.const 1)))
+        (.mul (.const 2013265920) (.add (.add (.const 0)
+          (.mul (.var ⟨"reads_aux__0__base__timestamp_lt_aux__lower_decomp__0_1", some 43⟩) (.const 1)))
+          (.mul (.var ⟨"reads_aux__0__base__timestamp_lt_aux__lower_decomp__1_1", some 44⟩) (.const 131072))))))
+    (List.mem_append_left _ (by decide))
+  simp only [Expression.eval] at hcon
+  rw [babyBear_negOne] at hcon
+  have heq := gadgetLookback_raw (δ := 0)
+    (ts := asg ⟨"from_state__timestamp_1", some 37⟩)
+    (prev := asg ⟨"reads_aux__0__base__prev_timestamp_1", some 42⟩)
+    (lo := asg ⟨"reads_aux__0__base__timestamp_lt_aux__lower_decomp__0_1", some 43⟩)
+    (hi := asg ⟨"reads_aux__0__base__timestamp_lt_aux__lower_decomp__1_1", some 44⟩)
+    hgate (by linear_combination hcon)
+  have hlo := accepts_congr_mult3 (m2 := 1)
+    (unoptAccepts hacc 25 (by decide) _ rfl rfl (sum5_eq1_ne_zero hgate))
+  have hhi := accepts_congr_mult3 (m2 := 1)
+    (unoptAccepts hacc 26 (by decide) _ rfl rfl (sum5_eq1_ne_zero hgate))
+  simp only [Expression.eval] at hlo hhi
+  obtain ⟨n, -, hn29, hplace⟩ := lt_gadget_offset (-1)
+    (asg ⟨"reads_aux__0__base__prev_timestamp_1", some 42⟩)
+    (asg ⟨"from_state__timestamp_1", some 37⟩) hlo hhi (by push_cast at heq ⊢; linear_combination heq)
+  exact ⟨n, hn29, hplace⟩
+
+
+set_option maxRecDepth 32000 in
+/-- Instr `1`'s write: send offset `2`. -/
+theorem unoptLookback_w_1 {asg : ChipAssignment babyBear}
+    (halg : apc2105000UnoptChained.satisfiesAlgebraic asg)
+    (hacc : apc2105000UnoptChained.satisfiesStateless apcRules asg) :
+    ∃ n : ℕ, n < 2 ^ 29 ∧
+      asg ⟨"writes_aux__base__prev_timestamp_1", some 48⟩
+        = asg ⟨"from_state__timestamp_1", some 37⟩
+          + ((((1 - (n : ℤ)) : ℤ)) : ZMod babyBear) := by
+  have hgate := (unoptPins halg).2.1
+  have hcon := halg
+    (.mul (.add ((.add ((.add ((.add ((.add (.const 0) (.var ⟨"opcode_add_flag_1", some 67⟩))) (.var ⟨"opcode_sub_flag_1", some 68⟩))) (.var ⟨"opcode_xor_flag_1", some 69⟩))) (.var ⟨"opcode_or_flag_1", some 70⟩))) (.var ⟨"opcode_and_flag_1", some 71⟩))
+      (.add (.add (.add (.add (.var ⟨"from_state__timestamp_1", some 37⟩) (.const 2))
+        (.mul (.const 2013265920) (.var ⟨"writes_aux__base__prev_timestamp_1", some 48⟩)))
+        (.mul (.const 2013265920) (.const 1)))
+        (.mul (.const 2013265920) (.add (.add (.const 0)
+          (.mul (.var ⟨"writes_aux__base__timestamp_lt_aux__lower_decomp__0_1", some 49⟩) (.const 1)))
+          (.mul (.var ⟨"writes_aux__base__timestamp_lt_aux__lower_decomp__1_1", some 50⟩) (.const 131072))))))
+    (List.mem_append_left _ (by decide))
+  simp only [Expression.eval] at hcon
+  rw [babyBear_negOne] at hcon
+  have heq := gadgetLookback_raw (δ := 2)
+    (ts := asg ⟨"from_state__timestamp_1", some 37⟩)
+    (prev := asg ⟨"writes_aux__base__prev_timestamp_1", some 48⟩)
+    (lo := asg ⟨"writes_aux__base__timestamp_lt_aux__lower_decomp__0_1", some 49⟩)
+    (hi := asg ⟨"writes_aux__base__timestamp_lt_aux__lower_decomp__1_1", some 50⟩)
+    hgate (by linear_combination hcon)
+  have hlo := accepts_congr_mult3 (m2 := 1)
+    (unoptAccepts hacc 33 (by decide) _ rfl rfl (sum5_eq1_ne_zero hgate))
+  have hhi := accepts_congr_mult3 (m2 := 1)
+    (unoptAccepts hacc 34 (by decide) _ rfl rfl (sum5_eq1_ne_zero hgate))
+  simp only [Expression.eval] at hlo hhi
+  obtain ⟨n, -, hn29, hplace⟩ := lt_gadget_offset (1)
+    (asg ⟨"writes_aux__base__prev_timestamp_1", some 48⟩)
+    (asg ⟨"from_state__timestamp_1", some 37⟩) hlo hhi (by push_cast at heq ⊢; linear_combination heq)
+  exact ⟨n, hn29, hplace⟩
+
+
+set_option maxRecDepth 32000 in
+/-- Instr `2`'s `rs1` read: send offset `0`. -/
+theorem unoptLookback_r1_2 {asg : ChipAssignment babyBear}
+    (halg : apc2105000UnoptChained.satisfiesAlgebraic asg)
+    (hacc : apc2105000UnoptChained.satisfiesStateless apcRules asg) :
+    ∃ n : ℕ, n < 2 ^ 29 ∧
+      asg ⟨"reads_aux__0__base__prev_timestamp_2", some 78⟩
+        = asg ⟨"from_state__timestamp_2", some 73⟩
+          + ((((-1 - (n : ℤ)) : ℤ)) : ZMod babyBear) := by
+  have hgate := (unoptPins halg).2.2.1
+  have hcon := halg
+    (.mul (.add ((.add ((.add ((.add ((.add (.const 0) (.var ⟨"opcode_add_flag_2", some 103⟩))) (.var ⟨"opcode_sub_flag_2", some 104⟩))) (.var ⟨"opcode_xor_flag_2", some 105⟩))) (.var ⟨"opcode_or_flag_2", some 106⟩))) (.var ⟨"opcode_and_flag_2", some 107⟩))
+      (.add (.add (.add (.add (.var ⟨"from_state__timestamp_2", some 73⟩) (.const 0))
+        (.mul (.const 2013265920) (.var ⟨"reads_aux__0__base__prev_timestamp_2", some 78⟩)))
+        (.mul (.const 2013265920) (.const 1)))
+        (.mul (.const 2013265920) (.add (.add (.const 0)
+          (.mul (.var ⟨"reads_aux__0__base__timestamp_lt_aux__lower_decomp__0_2", some 79⟩) (.const 1)))
+          (.mul (.var ⟨"reads_aux__0__base__timestamp_lt_aux__lower_decomp__1_2", some 80⟩) (.const 131072))))))
+    (List.mem_append_left _ (by decide))
+  simp only [Expression.eval] at hcon
+  rw [babyBear_negOne] at hcon
+  have heq := gadgetLookback_raw (δ := 0)
+    (ts := asg ⟨"from_state__timestamp_2", some 73⟩)
+    (prev := asg ⟨"reads_aux__0__base__prev_timestamp_2", some 78⟩)
+    (lo := asg ⟨"reads_aux__0__base__timestamp_lt_aux__lower_decomp__0_2", some 79⟩)
+    (hi := asg ⟨"reads_aux__0__base__timestamp_lt_aux__lower_decomp__1_2", some 80⟩)
+    hgate (by linear_combination hcon)
+  have hlo := accepts_congr_mult3 (m2 := 1)
+    (unoptAccepts hacc 45 (by decide) _ rfl rfl (sum5_eq1_ne_zero hgate))
+  have hhi := accepts_congr_mult3 (m2 := 1)
+    (unoptAccepts hacc 46 (by decide) _ rfl rfl (sum5_eq1_ne_zero hgate))
+  simp only [Expression.eval] at hlo hhi
+  obtain ⟨n, -, hn29, hplace⟩ := lt_gadget_offset (-1)
+    (asg ⟨"reads_aux__0__base__prev_timestamp_2", some 78⟩)
+    (asg ⟨"from_state__timestamp_2", some 73⟩) hlo hhi (by push_cast at heq ⊢; linear_combination heq)
+  exact ⟨n, hn29, hplace⟩
+
+
+set_option maxRecDepth 32000 in
+/-- Instr `2`'s write: send offset `2`. -/
+theorem unoptLookback_w_2 {asg : ChipAssignment babyBear}
+    (halg : apc2105000UnoptChained.satisfiesAlgebraic asg)
+    (hacc : apc2105000UnoptChained.satisfiesStateless apcRules asg) :
+    ∃ n : ℕ, n < 2 ^ 29 ∧
+      asg ⟨"writes_aux__base__prev_timestamp_2", some 84⟩
+        = asg ⟨"from_state__timestamp_2", some 73⟩
+          + ((((1 - (n : ℤ)) : ℤ)) : ZMod babyBear) := by
+  have hgate := (unoptPins halg).2.2.1
+  have hcon := halg
+    (.mul (.add ((.add ((.add ((.add ((.add (.const 0) (.var ⟨"opcode_add_flag_2", some 103⟩))) (.var ⟨"opcode_sub_flag_2", some 104⟩))) (.var ⟨"opcode_xor_flag_2", some 105⟩))) (.var ⟨"opcode_or_flag_2", some 106⟩))) (.var ⟨"opcode_and_flag_2", some 107⟩))
+      (.add (.add (.add (.add (.var ⟨"from_state__timestamp_2", some 73⟩) (.const 2))
+        (.mul (.const 2013265920) (.var ⟨"writes_aux__base__prev_timestamp_2", some 84⟩)))
+        (.mul (.const 2013265920) (.const 1)))
+        (.mul (.const 2013265920) (.add (.add (.const 0)
+          (.mul (.var ⟨"writes_aux__base__timestamp_lt_aux__lower_decomp__0_2", some 85⟩) (.const 1)))
+          (.mul (.var ⟨"writes_aux__base__timestamp_lt_aux__lower_decomp__1_2", some 86⟩) (.const 131072))))))
+    (List.mem_append_left _ (by decide))
+  simp only [Expression.eval] at hcon
+  rw [babyBear_negOne] at hcon
+  have heq := gadgetLookback_raw (δ := 2)
+    (ts := asg ⟨"from_state__timestamp_2", some 73⟩)
+    (prev := asg ⟨"writes_aux__base__prev_timestamp_2", some 84⟩)
+    (lo := asg ⟨"writes_aux__base__timestamp_lt_aux__lower_decomp__0_2", some 85⟩)
+    (hi := asg ⟨"writes_aux__base__timestamp_lt_aux__lower_decomp__1_2", some 86⟩)
+    hgate (by linear_combination hcon)
+  have hlo := accepts_congr_mult3 (m2 := 1)
+    (unoptAccepts hacc 53 (by decide) _ rfl rfl (sum5_eq1_ne_zero hgate))
+  have hhi := accepts_congr_mult3 (m2 := 1)
+    (unoptAccepts hacc 54 (by decide) _ rfl rfl (sum5_eq1_ne_zero hgate))
+  simp only [Expression.eval] at hlo hhi
+  obtain ⟨n, -, hn29, hplace⟩ := lt_gadget_offset (1)
+    (asg ⟨"writes_aux__base__prev_timestamp_2", some 84⟩)
+    (asg ⟨"from_state__timestamp_2", some 73⟩) hlo hhi (by push_cast at heq ⊢; linear_combination heq)
+  exact ⟨n, hn29, hplace⟩
+
+set_option maxRecDepth 32000 in
+/-- Instr `3`'s `rs1` read: send offset `0`. -/
+theorem unoptLookback_r1_3 {asg : ChipAssignment babyBear}
+    (halg : apc2105000UnoptChained.satisfiesAlgebraic asg)
+    (hacc : apc2105000UnoptChained.satisfiesStateless apcRules asg) :
+    ∃ n : ℕ, n < 2 ^ 29 ∧
+      asg ⟨"reads_aux__0__base__prev_timestamp_3", some 112⟩
+        = asg ⟨"from_state__timestamp_3", some 109⟩
+          + ((((-1 - (n : ℤ)) : ℤ)) : ZMod babyBear) := by
+  have hgate := (unoptPins halg).2.2.2.1
+  have hcon := halg
+    (.mul (.add (.add (.const 0) (.var ⟨"opcode_beq_flag_3", some 128⟩)) (.var ⟨"opcode_bne_flag_3", some 129⟩))
+      (.add (.add (.add (.add (.var ⟨"from_state__timestamp_3", some 109⟩) (.const 0))
+        (.mul (.const 2013265920) (.var ⟨"reads_aux__0__base__prev_timestamp_3", some 112⟩)))
+        (.mul (.const 2013265920) (.const 1)))
+        (.mul (.const 2013265920) (.add (.add (.const 0)
+          (.mul (.var ⟨"reads_aux__0__base__timestamp_lt_aux__lower_decomp__0_3", some 113⟩) (.const 1)))
+          (.mul (.var ⟨"reads_aux__0__base__timestamp_lt_aux__lower_decomp__1_3", some 114⟩) (.const 131072))))))
+    (List.mem_append_left _ (by decide))
+  simp only [Expression.eval] at hcon
+  rw [babyBear_negOne] at hcon
+  have heq := gadgetLookback_raw (δ := 0)
+    (ts := asg ⟨"from_state__timestamp_3", some 109⟩)
+    (prev := asg ⟨"reads_aux__0__base__prev_timestamp_3", some 112⟩)
+    (lo := asg ⟨"reads_aux__0__base__timestamp_lt_aux__lower_decomp__0_3", some 113⟩)
+    (hi := asg ⟨"reads_aux__0__base__timestamp_lt_aux__lower_decomp__1_3", some 114⟩)
+    hgate (by linear_combination hcon)
+  have hlo := accepts_congr_mult3 (m2 := 1)
+    (unoptAccepts hacc 60 (by decide) _ rfl rfl (sum2_eq1_ne_zero hgate))
+  have hhi := accepts_congr_mult3 (m2 := 1)
+    (unoptAccepts hacc 61 (by decide) _ rfl rfl (sum2_eq1_ne_zero hgate))
+  simp only [Expression.eval] at hlo hhi
+  obtain ⟨n, -, hn29, hplace⟩ := lt_gadget_offset (-1)
+    (asg ⟨"reads_aux__0__base__prev_timestamp_3", some 112⟩)
+    (asg ⟨"from_state__timestamp_3", some 109⟩) hlo hhi (by push_cast at heq ⊢; linear_combination heq)
+  exact ⟨n, hn29, hplace⟩
+
+set_option maxRecDepth 32000 in
+/-- Instr `3`'s `rs2` read: send offset `1`. -/
+theorem unoptLookback_r2_3 {asg : ChipAssignment babyBear}
+    (halg : apc2105000UnoptChained.satisfiesAlgebraic asg)
+    (hacc : apc2105000UnoptChained.satisfiesStateless apcRules asg) :
+    ∃ n : ℕ, n < 2 ^ 29 ∧
+      asg ⟨"reads_aux__1__base__prev_timestamp_3", some 115⟩
+        = asg ⟨"from_state__timestamp_3", some 109⟩
+          + ((((0 - (n : ℤ)) : ℤ)) : ZMod babyBear) := by
+  have hgate := (unoptPins halg).2.2.2.1
+  have hcon := halg
+    (.mul (.add (.add (.const 0) (.var ⟨"opcode_beq_flag_3", some 128⟩)) (.var ⟨"opcode_bne_flag_3", some 129⟩))
+      (.add (.add (.add (.add (.var ⟨"from_state__timestamp_3", some 109⟩) (.const 1))
+        (.mul (.const 2013265920) (.var ⟨"reads_aux__1__base__prev_timestamp_3", some 115⟩)))
+        (.mul (.const 2013265920) (.const 1)))
+        (.mul (.const 2013265920) (.add (.add (.const 0)
+          (.mul (.var ⟨"reads_aux__1__base__timestamp_lt_aux__lower_decomp__0_3", some 116⟩) (.const 1)))
+          (.mul (.var ⟨"reads_aux__1__base__timestamp_lt_aux__lower_decomp__1_3", some 117⟩) (.const 131072))))))
+    (List.mem_append_left _ (by decide))
+  simp only [Expression.eval] at hcon
+  rw [babyBear_negOne] at hcon
+  have heq := gadgetLookback_raw (δ := 1)
+    (ts := asg ⟨"from_state__timestamp_3", some 109⟩)
+    (prev := asg ⟨"reads_aux__1__base__prev_timestamp_3", some 115⟩)
+    (lo := asg ⟨"reads_aux__1__base__timestamp_lt_aux__lower_decomp__0_3", some 116⟩)
+    (hi := asg ⟨"reads_aux__1__base__timestamp_lt_aux__lower_decomp__1_3", some 117⟩)
+    hgate (by linear_combination hcon)
+  have hlo := accepts_congr_mult3 (m2 := 1)
+    (unoptAccepts hacc 64 (by decide) _ rfl rfl (sum2_eq1_ne_zero hgate))
+  have hhi := accepts_congr_mult3 (m2 := 1)
+    (unoptAccepts hacc 65 (by decide) _ rfl rfl (sum2_eq1_ne_zero hgate))
+  simp only [Expression.eval] at hlo hhi
+  obtain ⟨n, -, hn29, hplace⟩ := lt_gadget_offset (0)
+    (asg ⟨"reads_aux__1__base__prev_timestamp_3", some 115⟩)
+    (asg ⟨"from_state__timestamp_3", some 109⟩) hlo hhi (by push_cast at heq ⊢; linear_combination heq)
   exact ⟨n, hn29, hplace⟩
