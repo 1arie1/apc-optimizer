@@ -1,6 +1,7 @@
 import ApcOptimizer.VmSpec.Audit.Apc2105000
 import ApcOptimizer.VmSpec.Audit.SendOnlyPolarity
 import ApcOptimizer.VmSpec.Audit.BridgeCheck
+import ApcOptimizer.VmSpec.Audit.PlaceCheck
 import ApcOptimizer.VmSpec.Audit.OpenVmLegalAudit
 import Mathlib.Tactic.LinearCombination
 import Mathlib.Tactic.NormNum
@@ -109,14 +110,15 @@ theorem lt_gadget_offset (δ : ℤ) (prev base : ZMod babyBear) {lo hi : ZMod ba
     (hhi : accepts (p := babyBear) defaultBusMap
       { busId := 3, multiplicity := 1, payload := [hi, 12] })
     (heq : hi = 15360 * prev + 15360 * lo - 15360 * base - 15360 * ((δ : ℤ) : ZMod babyBear)) :
-    ∃ n : ℕ, n < 2 ^ 29 ∧ prev = base + (((δ - (n : ℤ)) : ℤ) : ZMod babyBear) := by
+    ∃ n : ℕ, n = lo.val + 131072 * hi.val ∧ n < 2 ^ 29 ∧
+      prev = base + (((δ - (n : ℤ)) : ℤ) : ZMod babyBear) := by
   have hlo' : lo.val < 2 ^ 17 := by
     have := (show (17 : ZMod babyBear).val ≤ 17 ∧ lo.val < 2 ^ (17 : ZMod babyBear).val from hlo).2
     rwa [show (17 : ZMod babyBear).val = 17 from by decide] at this
   have hhi' : hi.val < 2 ^ 12 := by
     have := (show (12 : ZMod babyBear).val ≤ 17 ∧ hi.val < 2 ^ (12 : ZMod babyBear).val from hhi).2
     rwa [show (12 : ZMod babyBear).val = 12 from by decide] at this
-  refine ⟨lo.val + 131072 * hi.val, by omega, ?_⟩
+  refine ⟨lo.val + 131072 * hi.val, rfl, by omega, ?_⟩
   have hlo'' : ((lo.val : ℕ) : ZMod babyBear) = lo := by simp
   have hhi'' : ((hi.val : ℕ) : ZMod babyBear) = hi := by simp
   push_cast [hlo'', hhi'']
@@ -188,6 +190,55 @@ theorem apc2105000Opt_no_padding_row (asg : ChipAssignment babyBear) :
   simp only [apc2105000Opt, BusInteraction.eval, Expression.eval, List.get] at hne
   exact absurd hne (by decide)
 
+/-- Which payload position OpenVM keeps a timestamp in: field `6` of a memory record, field `1` of
+    an execution-bridge state. -/
+def openVmTsPos : TimestampPos :=
+  fun b => if b = openVmMemBusId then some 6 else if b = openVmExecBusId then some 1 else none
+
+theorem openVmReadsTimestampAt : ReadsTimestampAt (p := babyBear) apcRules openVmTsPos := by
+  intro m j hj
+  simp only [openVmTsPos] at hj
+  by_cases hmem : m.1 = openVmMemBusId
+  · rw [if_pos hmem] at hj
+    cases hj
+    simp [apcRules, openVmGuestRules, openVmTimestamp, hmem, List.getD_eq_getElem?_getD]
+  · rw [if_neg hmem] at hj
+    by_cases hexec : m.1 = openVmExecBusId
+    · rw [if_pos hexec] at hj
+      cases hj
+      simp [apcRules, openVmGuestRules, openVmTimestamp, hexec,
+        List.getD_eq_getElem?_getD]
+    · rw [if_neg hexec] at hj; cases hj
+
+/-- **The lt gadget, as a `Recipe`.** OpenVM's `AssertLtSubAir` writes the distance `n` between a
+    memory receive's timestamp and the step's base as two limbs, `lo + 2 ^ 17 * hi`, range-checks
+    them to `17` and `12` bits, and range-checks `hi` as the payload
+    `15360 * (ts + lo - base - k)` — `15360` being `-1 / 2 ^ 17` in BabyBear, which is what the
+    optimizer leaves once the gadget's own constraint is substituted away.
+
+    The arithmetic is checked (`gadgetIdentity`); the two lookups are supplied. What comes back is
+    exactly what `Recipe.lookback` needs: the reach is bounded, and the timestamp sits at the
+    offset the recipe computes. -/
+theorem lookback_of_gadget {vs : List Variable} {rules : List (PinRule babyBear)}
+    {baseE : Expression babyBear} {baseF : LinForm babyBear} {k : ℤ}
+    {tsE loE hiE : Expression babyBear} {asg : ChipAssignment babyBear}
+    (hrules : ∀ q ∈ rules, q.1.eval asg = q.2)
+    (hbase : Expression.toLin vs rules baseE = some baseF)
+    (hid : gadgetIdentity vs rules 15360 baseF k tsE loE hiE = true)
+    (hlo : accepts (p := babyBear) defaultBusMap
+      { busId := 3, multiplicity := 1, payload := [loE.eval asg, 17] })
+    (hhi : accepts (p := babyBear) defaultBusMap
+      { busId := 3, multiplicity := 1, payload := [hiE.eval asg, 12] }) :
+    (Recipe.lookback k 131072 loE hiE).back asg < openVmTimestampBound ∧
+      tsE.eval asg
+        = baseE.eval asg
+          + ((((Recipe.lookback k 131072 loE hiE).place asg : ℤ)) : ZMod babyBear) := by
+  obtain ⟨n, hneq, hn, ht⟩ := lt_gadget_offset k (tsE.eval asg) (baseE.eval asg) hlo hhi
+    (by rw [gadgetIdentity_sound hrules hbase hid]; ring)
+  refine ⟨?_, ?_⟩
+  · simpa [Recipe.back, openVmTimestampBound, openVmTimestampBits, ← hneq] using hn
+  · simpa [Recipe.place, ← hneq] using ht
+
 /-- One interaction of `apc2105000Opt`, unpacked from `Circuit.satisfiesStateless`. The message is
     given explicitly and matched against the list entry by `rfl`, which leaves the side conditions
     as `decide`s on concrete field elements. -/
@@ -216,9 +267,26 @@ def optOffsetUb : List ℤ := [-1, 0, 1, 0, 2, 4, 5, 0, 6, 9, 9, 10, 11]
 theorem optOffsetUb_dominates :
     ∀ b ∈ [1, 6, 8, 9, 11, 12], ∀ k < b, optOffsetUb.getD k 0 < optOffsetUb.getD b 0 := by decide
 
-/-- The variables the optimized APC's execution-bridge payloads mention. -/
+/-- The variables the optimized APC's stateful payloads and lt gadgets mention: the step's base,
+    the branch flag the outgoing `pc` depends on, and each gadget's `prev_timestamp` and low
+    decomposition limb. -/
 def optVars : List Variable :=
-  [⟨"from_state__timestamp_0", some 1⟩, ⟨"cmp_result_3", some 126⟩]
+  [⟨"from_state__timestamp_0", some 1⟩, ⟨"cmp_result_3", some 126⟩,
+   ⟨"reads_aux__0__base__prev_timestamp_0", some 6⟩,
+   ⟨"reads_aux__0__base__timestamp_lt_aux__lower_decomp__0_0", some 7⟩,
+   ⟨"writes_aux__base__prev_timestamp_0", some 12⟩,
+   ⟨"writes_aux__base__timestamp_lt_aux__lower_decomp__0_0", some 13⟩,
+   ⟨"reads_aux__0__base__prev_timestamp_1", some 42⟩,
+   ⟨"reads_aux__0__base__timestamp_lt_aux__lower_decomp__0_1", some 43⟩,
+   ⟨"writes_aux__base__prev_timestamp_1", some 48⟩,
+   ⟨"writes_aux__base__timestamp_lt_aux__lower_decomp__0_1", some 49⟩,
+   ⟨"reads_aux__1__base__prev_timestamp_3", some 115⟩,
+   ⟨"reads_aux__1__base__timestamp_lt_aux__lower_decomp__0_3", some 116⟩]
+
+/-- The step's base, as an expression and as a normal form. -/
+def optBaseE : Expression babyBear := .var ⟨"from_state__timestamp_0", some 1⟩
+
+def optBaseF : LinForm babyBear := LinForm.varF optVars ⟨"from_state__timestamp_0", some 1⟩
 
 /-- The pin rules the optimized APC's own constraints supply. -/
 def optPinRules : List (PinRule babyBear) :=
@@ -238,10 +306,12 @@ theorem optPinRules_hold (asg : ChipAssignment babyBear)
 
     The three expressions name the endpoints, and the checker verifies them against the traffic, so
     `bridgeCheck_sound` hands back facts about exactly these messages. -/
+theorem optBaseLin : Expression.toLin optVars optPinRules optBaseE = some optBaseF := by decide
+
 theorem optBridgeCheck :
     bridgeCheck optVars optPinRules 0 apc2105000Opt 11 1
         (.const 2105000)
-        (.var ⟨"from_state__timestamp_0", some 1⟩)
+        optBaseE
         (.add (.const 2105016) (.mul (.const 2013265920)
           (.mul (.const 192) (.var ⟨"cmp_result_3", some 126⟩))))
       = true := by decide
@@ -259,85 +329,66 @@ theorem apc2105000Opt_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWindow) :
     apc2105000Opt.hasStepLayout apcRules maxWindow openVmTimestampBound := by
   haveI : Fact (1 < babyBear) := ⟨by decide⟩
   intro asg halg hacc
-  obtain ⟨n0, hn0, ht0⟩ := lt_gadget_offset (-1)
-    (asg ⟨"reads_aux__0__base__prev_timestamp_0", some 6⟩)
-    (asg ⟨"from_state__timestamp_0", some 1⟩)
-    (optAccepts hacc 13 (by decide)
-      { busId := 3, multiplicity := 1,
-        payload := [asg ⟨"reads_aux__0__base__timestamp_lt_aux__lower_decomp__0_0", some 7⟩, 17] }
-      rfl rfl (show (1 : ZMod babyBear) ≠ 0 by decide))
-    (optAccepts hacc 14 (by decide)
-      { busId := 3, multiplicity := 1,
-        payload := [15360 * asg ⟨"reads_aux__0__base__prev_timestamp_0", some 6⟩
-          + 15360 * asg ⟨"reads_aux__0__base__timestamp_lt_aux__lower_decomp__0_0", some 7⟩
-          + 15360 + 2013265920 * (15360 * asg ⟨"from_state__timestamp_0", some 1⟩), 12] }
-      rfl rfl (show (1 : ZMod babyBear) ≠ 0 by decide))
-    (by push_cast
-        linear_combination (15360 * asg ⟨"from_state__timestamp_0", some 1⟩) * babyBear_negOne)
-  obtain ⟨nw0, hnw0, htw0⟩ := lt_gadget_offset 1
-    (asg ⟨"writes_aux__base__prev_timestamp_0", some 12⟩)
-    (asg ⟨"from_state__timestamp_0", some 1⟩)
-    (optAccepts hacc 15 (by decide)
-      { busId := 3, multiplicity := 1,
-        payload := [asg ⟨"writes_aux__base__timestamp_lt_aux__lower_decomp__0_0", some 13⟩, 17] }
-      rfl rfl (show (1 : ZMod babyBear) ≠ 0 by decide))
-    (optAccepts hacc 16 (by decide)
-      { busId := 3, multiplicity := 1,
-        payload := [15360 * asg ⟨"writes_aux__base__prev_timestamp_0", some 12⟩
-          + 15360 * asg ⟨"writes_aux__base__timestamp_lt_aux__lower_decomp__0_0", some 13⟩
-          + 2013265920 * (15360 * asg ⟨"from_state__timestamp_0", some 1⟩ + 15360), 12] }
-      rfl rfl (show (1 : ZMod babyBear) ≠ 0 by decide))
-    (by push_cast
-        linear_combination (15360 * asg ⟨"from_state__timestamp_0", some 1⟩ + 15360)
-          * babyBear_negOne)
-  obtain ⟨nr1, hnr1, htr1⟩ := lt_gadget_offset 2
-    (asg ⟨"reads_aux__0__base__prev_timestamp_1", some 42⟩)
-    (asg ⟨"from_state__timestamp_0", some 1⟩)
-    (optAccepts hacc 17 (by decide)
-      { busId := 3, multiplicity := 1,
-        payload := [asg ⟨"reads_aux__0__base__timestamp_lt_aux__lower_decomp__0_1", some 43⟩, 17] }
-      rfl rfl (show (1 : ZMod babyBear) ≠ 0 by decide))
-    (optAccepts hacc 18 (by decide)
-      { busId := 3, multiplicity := 1,
-        payload := [15360 * asg ⟨"reads_aux__0__base__prev_timestamp_1", some 42⟩
-          + 15360 * asg ⟨"reads_aux__0__base__timestamp_lt_aux__lower_decomp__0_1", some 43⟩
-          + 2013265920 * (15360 * asg ⟨"from_state__timestamp_0", some 1⟩ + 30720), 12] }
-      rfl rfl (show (1 : ZMod babyBear) ≠ 0 by decide))
-    (by push_cast
-        linear_combination (15360 * asg ⟨"from_state__timestamp_0", some 1⟩ + 30720)
-          * babyBear_negOne)
-  obtain ⟨nw1, hnw1, htw1⟩ := lt_gadget_offset 4
-    (asg ⟨"writes_aux__base__prev_timestamp_1", some 48⟩)
-    (asg ⟨"from_state__timestamp_0", some 1⟩)
-    (optAccepts hacc 19 (by decide)
-      { busId := 3, multiplicity := 1,
-        payload := [asg ⟨"writes_aux__base__timestamp_lt_aux__lower_decomp__0_1", some 49⟩, 17] }
-      rfl rfl (show (1 : ZMod babyBear) ≠ 0 by decide))
-    (optAccepts hacc 20 (by decide)
-      { busId := 3, multiplicity := 1,
-        payload := [15360 * asg ⟨"writes_aux__base__prev_timestamp_1", some 48⟩
-          + 15360 * asg ⟨"writes_aux__base__timestamp_lt_aux__lower_decomp__0_1", some 49⟩
-          + 2013265920 * (15360 * asg ⟨"from_state__timestamp_0", some 1⟩ + 61440), 12] }
-      rfl rfl (show (1 : ZMod babyBear) ≠ 0 by decide))
-    (by push_cast
-        linear_combination (15360 * asg ⟨"from_state__timestamp_0", some 1⟩ + 61440)
-          * babyBear_negOne)
-  obtain ⟨nr3, hnr3, htr3⟩ := lt_gadget_offset 9
-    (asg ⟨"reads_aux__1__base__prev_timestamp_3", some 115⟩)
-    (asg ⟨"from_state__timestamp_0", some 1⟩)
-    (optAccepts hacc 21 (by decide)
-      { busId := 3, multiplicity := 1,
-        payload := [asg ⟨"reads_aux__1__base__timestamp_lt_aux__lower_decomp__0_3", some 116⟩, 17] }
-      rfl rfl (show (1 : ZMod babyBear) ≠ 0 by decide))
-    (optAccepts hacc 22 (by decide)
-      { busId := 3, multiplicity := 1,
-        payload := [15360 * asg ⟨"reads_aux__1__base__prev_timestamp_3", some 115⟩
-          + 15360 * asg ⟨"reads_aux__1__base__timestamp_lt_aux__lower_decomp__0_3", some 116⟩
-          + 2013265920 * (15360 * asg ⟨"from_state__timestamp_0", some 1⟩ + 138240), 12] }
-      rfl rfl (show (1 : ZMod babyBear) ≠ 0 by decide))
-    (by push_cast
-        linear_combination (15360 * asg ⟨"from_state__timestamp_0", some 1⟩ + 138240)
-          * babyBear_negOne)
+  obtain ⟨n0, hn0, ht0⟩ : ∃ n : ℕ, n < 2 ^ 29 ∧
+      asg ⟨"reads_aux__0__base__prev_timestamp_0", some 6⟩
+        = asg ⟨"from_state__timestamp_0", some 1⟩ + ((((-1) - (n : ℤ)) : ℤ) : ZMod babyBear) := by
+    obtain ⟨hb, ht⟩ := lookback_of_gadget (vs := optVars) (rules := optPinRules)
+      (baseE := optBaseE) (baseF := optBaseF) (k := (-1))
+      (tsE := .var ⟨"reads_aux__0__base__prev_timestamp_0", some 6⟩)
+      (loE := payloadOf apc2105000Opt 13 0) (hiE := payloadOf apc2105000Opt 14 0)
+      (optPinRules_hold asg halg) optBaseLin (by decide)
+      (optAccepts hacc 13 (by decide) _ rfl rfl (show (1 : ZMod babyBear) ≠ 0 by decide))
+      (optAccepts hacc 14 (by decide) _ rfl rfl (show (1 : ZMod babyBear) ≠ 0 by decide))
+    rw [Recipe.place_eq] at ht
+    exact ⟨_, hb, ht⟩
+  obtain ⟨nw0, hnw0, htw0⟩ : ∃ n : ℕ, n < 2 ^ 29 ∧
+      asg ⟨"writes_aux__base__prev_timestamp_0", some 12⟩
+        = asg ⟨"from_state__timestamp_0", some 1⟩ + (((1 - (n : ℤ)) : ℤ) : ZMod babyBear) := by
+    obtain ⟨hb, ht⟩ := lookback_of_gadget (vs := optVars) (rules := optPinRules)
+      (baseE := optBaseE) (baseF := optBaseF) (k := 1)
+      (tsE := .var ⟨"writes_aux__base__prev_timestamp_0", some 12⟩)
+      (loE := payloadOf apc2105000Opt 15 0) (hiE := payloadOf apc2105000Opt 16 0)
+      (optPinRules_hold asg halg) optBaseLin (by decide)
+      (optAccepts hacc 15 (by decide) _ rfl rfl (show (1 : ZMod babyBear) ≠ 0 by decide))
+      (optAccepts hacc 16 (by decide) _ rfl rfl (show (1 : ZMod babyBear) ≠ 0 by decide))
+    rw [Recipe.place_eq] at ht
+    exact ⟨_, hb, ht⟩
+  obtain ⟨nr1, hnr1, htr1⟩ : ∃ n : ℕ, n < 2 ^ 29 ∧
+      asg ⟨"reads_aux__0__base__prev_timestamp_1", some 42⟩
+        = asg ⟨"from_state__timestamp_0", some 1⟩ + (((2 - (n : ℤ)) : ℤ) : ZMod babyBear) := by
+    obtain ⟨hb, ht⟩ := lookback_of_gadget (vs := optVars) (rules := optPinRules)
+      (baseE := optBaseE) (baseF := optBaseF) (k := 2)
+      (tsE := .var ⟨"reads_aux__0__base__prev_timestamp_1", some 42⟩)
+      (loE := payloadOf apc2105000Opt 17 0) (hiE := payloadOf apc2105000Opt 18 0)
+      (optPinRules_hold asg halg) optBaseLin (by decide)
+      (optAccepts hacc 17 (by decide) _ rfl rfl (show (1 : ZMod babyBear) ≠ 0 by decide))
+      (optAccepts hacc 18 (by decide) _ rfl rfl (show (1 : ZMod babyBear) ≠ 0 by decide))
+    rw [Recipe.place_eq] at ht
+    exact ⟨_, hb, ht⟩
+  obtain ⟨nw1, hnw1, htw1⟩ : ∃ n : ℕ, n < 2 ^ 29 ∧
+      asg ⟨"writes_aux__base__prev_timestamp_1", some 48⟩
+        = asg ⟨"from_state__timestamp_0", some 1⟩ + (((4 - (n : ℤ)) : ℤ) : ZMod babyBear) := by
+    obtain ⟨hb, ht⟩ := lookback_of_gadget (vs := optVars) (rules := optPinRules)
+      (baseE := optBaseE) (baseF := optBaseF) (k := 4)
+      (tsE := .var ⟨"writes_aux__base__prev_timestamp_1", some 48⟩)
+      (loE := payloadOf apc2105000Opt 19 0) (hiE := payloadOf apc2105000Opt 20 0)
+      (optPinRules_hold asg halg) optBaseLin (by decide)
+      (optAccepts hacc 19 (by decide) _ rfl rfl (show (1 : ZMod babyBear) ≠ 0 by decide))
+      (optAccepts hacc 20 (by decide) _ rfl rfl (show (1 : ZMod babyBear) ≠ 0 by decide))
+    rw [Recipe.place_eq] at ht
+    exact ⟨_, hb, ht⟩
+  obtain ⟨nr3, hnr3, htr3⟩ : ∃ n : ℕ, n < 2 ^ 29 ∧
+      asg ⟨"reads_aux__1__base__prev_timestamp_3", some 115⟩
+        = asg ⟨"from_state__timestamp_0", some 1⟩ + (((9 - (n : ℤ)) : ℤ) : ZMod babyBear) := by
+    obtain ⟨hb, ht⟩ := lookback_of_gadget (vs := optVars) (rules := optPinRules)
+      (baseE := optBaseE) (baseF := optBaseF) (k := 9)
+      (tsE := .var ⟨"reads_aux__1__base__prev_timestamp_3", some 115⟩)
+      (loE := payloadOf apc2105000Opt 21 0) (hiE := payloadOf apc2105000Opt 22 0)
+      (optPinRules_hold asg halg) optBaseLin (by decide)
+      (optAccepts hacc 21 (by decide) _ rfl rfl (show (1 : ZMod babyBear) ≠ 0 by decide))
+      (optAccepts hacc 22 (by decide) _ rfl rfl (show (1 : ZMod babyBear) ≠ 0 by decide))
+    rw [Recipe.place_eq] at ht
+    exact ⟨_, hb, ht⟩
   have hbit : accepts (p := babyBear) defaultBusMap
       { busId := 6, multiplicity := 1,
         payload := [asg ⟨"a__0_0", some 19⟩, 3,
@@ -377,54 +428,54 @@ theorem apc2105000Opt_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWindow) :
     fin_cases i
     · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits]; omega,
         by simp [optOffsets]; omega,
-        by simpa [optOffsets, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
+        by simpa [optOffsets, optBaseE, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
           openVmGuestRules, openVmTimestamp, Circuit.msgAt] using ht0⟩
     · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits],
         by simp [optOffsets],
-        by simp [optOffsets, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
+        by simp [optOffsets, optBaseE, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
           openVmGuestRules, openVmTimestamp, Circuit.msgAt]⟩
     · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits]; omega,
         by simp [optOffsets]; omega,
-        by simpa [optOffsets, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
+        by simpa [optOffsets, optBaseE, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
           openVmGuestRules, openVmTimestamp, Circuit.msgAt] using htw0⟩
     · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits],
         by simp [optOffsets],
-        by simp [optOffsets, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
+        by simp [optOffsets, optBaseE, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
           openVmGuestRules, openVmTimestamp, Circuit.msgAt, openVmMemBusId,
           openVmExecBusId]⟩
     · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits]; omega,
         by simp [optOffsets]; omega,
-        by simpa [optOffsets, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
+        by simpa [optOffsets, optBaseE, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
           openVmGuestRules, openVmTimestamp, Circuit.msgAt] using htr1⟩
     · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits]; omega,
         by simp [optOffsets]; omega,
-        by simpa [optOffsets, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
+        by simpa [optOffsets, optBaseE, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
           openVmGuestRules, openVmTimestamp, Circuit.msgAt] using htw1⟩
     · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits],
         by simp [optOffsets],
-        by simp [optOffsets, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
+        by simp [optOffsets, optBaseE, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
           openVmGuestRules, openVmTimestamp, Circuit.msgAt]⟩
     · simp [apc2105000Opt, apcRules, openVmGuestRules, openVmIsStateful, defaultBusMap,
         OpenVmBusType.isStateful] at hst
     · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits],
         by simp [optOffsets],
-        by simp [optOffsets, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
+        by simp [optOffsets, optBaseE, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
           openVmGuestRules, openVmTimestamp, Circuit.msgAt]⟩
     · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits],
         by simp [optOffsets],
-        by simp [optOffsets, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
+        by simp [optOffsets, optBaseE, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
           openVmGuestRules, openVmTimestamp, Circuit.msgAt]⟩
     · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits]; omega,
         by simp [optOffsets]; omega,
-        by simpa [optOffsets, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
+        by simpa [optOffsets, optBaseE, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
           openVmGuestRules, openVmTimestamp, Circuit.msgAt] using htr3⟩
     · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits],
         by simp [optOffsets],
-        by simp [optOffsets, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
+        by simp [optOffsets, optBaseE, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
           openVmGuestRules, openVmTimestamp, Circuit.msgAt]⟩
     · exact ⟨by simp [optOffsets, openVmTimestampBound, openVmTimestampBits],
         by simp [optOffsets],
-        by simp [optOffsets, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
+        by simp [optOffsets, optBaseE, apc2105000Opt, BusInteraction.eval, Expression.eval, apcRules,
           openVmGuestRules, openVmTimestamp, Circuit.msgAt, openVmMemBusId,
           openVmExecBusId]⟩
     all_goals

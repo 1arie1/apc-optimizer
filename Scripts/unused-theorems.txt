@@ -139,6 +139,17 @@ entrySum_eq
 allEffects_eq_entrySum
 ApcOptimizer.OpenVM.optPinRules_hold
 ApcOptimizer.OpenVM.optBridgeCheck
+Recipe.place_mem
+Recipe.place_eq
+placeCheckAll_get
+placeCheckOne_sound
+recipe_placed
+recipe_ordered
+placeCheck_placed
+gadgetIdentity_sound
+ApcOptimizer.OpenVM.openVmReadsTimestampAt
+ApcOptimizer.OpenVM.lookback_of_gadget
+ApcOptimizer.OpenVM.optBaseLin
 ApcOptimizer.OpenVM.openVm_negOne_ne_one
 StepLayout.endpoints_ne
 StepLayout.net
