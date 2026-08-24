@@ -69,30 +69,37 @@ Layered, each layer a decidable check plus a soundness theorem, in the style of
 
   `apc2105000Opt`'s `recv`/`send`/`other` are now `optBridgeCheck`, a `decide`.
 
+- **`Audit/PlaceCheck.lean`** — `StepLayout.place` depends on the assignment (a receive's offset is
+  `k - n` for whatever distance its lt gadget range-checks), so a checker cannot name it. It names
+  a **`Recipe`** per interaction instead: how to *compute* the offset, and — read off the same
+  constructor, so the two cannot disagree — the interval that computation stays inside.
+  `Recipe.fits`/`Recipe.below` decide `placed` and `ordered` (`recipe_placed`, `recipe_ordered`);
+  `placeCheckAll` verifies a `fixed` offset against the timestamp's normal form.
+
+  `gadgetIdentity` is the lt gadget's arithmetic as a linear identity between normal forms, so
+  `LinForm` decides it — and it checks the expression powdr *emitted* (`payloadOf` names the limbs
+  by position in the circuit) rather than a shape restated by hand. `lookback_of_gadget` composes
+  it with the two range-check lookups and `lt_gadget_offset`.
+
+  `apc2105000Opt`'s five gadgets go through it: five `decide`s in place of five hand-written
+  `linear_combination`s and five transcribed high-limb payloads. `lt_gadget_offset` additionally
+  names its witness (`n = lo.val + 131072 * hi.val`), which is what makes the offset computable
+  rather than merely existential.
+
 ### Next, in cost order
+1. **Wiring `placed`/`ordered` through the recipes on `apc2105000Opt`.** The machinery is proved;
+   what is left is `optRecipes` plus replacing the thirteen `placed` bullets and the `ordered` one.
+   Deliberately *not* done: for this circuit it is a wash. Each bullet is already one line, and the
+   per-index case analysis that `placeCheck_placed`'s `hlook`/`hbk` obligations need is the same
+   size as the one it would replace. The recipes pay off on a circuit that has *no* hand proof yet
+   — which is where the machinery should first be pointed.
 
-1. **Constant-offset placement.** For an interaction whose timestamp form is `baseForm + k`,
-   `linShiftedBy` already decides it. Covers every *send* and the bridge receive — 7 of the 12
-   stateful interactions of `apc2105000Opt`. Needs a `tsPos : Nat → Option ℕ` parameter (payload
-   index of the timestamp, per bus) and a hypothesis tying it to `GuestBusRules.getTimestamp`.
+2. **Finding the gadget rather than being told where it is.** `lookback_of_gadget` takes the two
+   range-check indices from the caller. Searching for them — a bus-3 pair with payloads
+   `[·, 17]`/`[·, 12]` whose high limb satisfies `gadgetIdentity` — would make the recipe list
+   itself derivable instead of written out.
 
-2. **`ordered`.** Interval arithmetic over slots: a constant offset is its own upper bound, a
-   lookback offset `k - n` is bounded above by `k`. `optOffsetUb_dominates` is that check by hand
-   already, and it is a `decide`.
-
-3. **The lt-gadget recognizer** — the interesting one, and the first place the analysis stops
-   being generic. A memory *receive*'s timestamp is a free `*_prev_timestamp_*` variable, so its
-   offset is `k - n` with `n` bounded only by the gadget. The recognizer must find the two
-   range-check interactions (`[lo, 17]`, `[hi, 12]`) and check that `hi` normalizes to
-   `15360 * (prev + lo - base - k)` — a *linear identity between forms*, so `LinForm` decides it —
-   then apply `lt_gadget_offset`, which is already proved.
-
-   Note the offset is then **assignment-dependent**: `place` cannot be a closed term, because `n`
-   comes from the gadget. So the checker's output is a *slot* (`at k` or `lookback k`), and the
-   layout is built by instantiating slots per assignment. `optOffsets` is that instantiation
-   written by hand.
-
-4. **`sendsOk`** — the byte invariant, and the largest piece. Three shapes appear in
+3. **`sendsOk`** — the byte invariant, and the largest piece. Three shapes appear in
    `apc2105000Opt`: a send echoing a preceding receive's data limbs (syntactic payload equality), a
    send directly range-checked (bus-fact lookup), and a send needing real reasoning (`a__0_2`, via
    `isByte_of_xorThree`). Most of the machinery exists in
