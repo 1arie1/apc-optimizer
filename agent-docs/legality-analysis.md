@@ -21,10 +21,13 @@ ordered a send dominates everything before it
 sendsOk a send's payload is Ok given that what precedes it is
 ```
 
-Two support lemmas in `Legal.lean`: `StepLayout.endpoints_ne` (the endpoints differ, since equal
-ones would net both `-1` and `1`) and `StepLayout.net` (the triple as the single equation
-`Chain.lean` consumes). Only two theorems consume the clause: `openVmHost_ordersRanks` (via the
-bridge fields and `placed`) and `maintains_of_stateful_active` (via `ordered` and `sendsOk`).
+Two support lemmas, `StepLayout.endpoints_ne` (the endpoints differ, since equal ones would net
+both `-1` and `1`) and `StepLayout.net` (the triple as the single equation the bridge argument
+consumes), live in `Implementation/OpenVmChain.lean` rather than `Legal.lean`: neither appears in
+`StepLayout`'s own fields or in `Circuit.legalGuest`, so they don't change what the audited clause
+means, only what `OpenVmChain.lean` — their one consumer — finds convenient. Only two theorems
+consume the clause itself: `openVmHost_ordersRanks` (via the bridge fields and `placed`) and
+`maintains_of_stateful_active` (via `ordered` and `sendsOk`).
 
 ## Status against the three APC stages
 

@@ -224,6 +224,45 @@ theorem openVm_negOne_ne_one (P : OpenVmParams p) : (-1 : ZMod p) ≠ 1 := by
   rw [show ((2 : ℕ) : ZMod p) = (2 : ZMod p) by push_cast; ring, h2, ZMod.val_zero] at hval
   omega
 
+/-- What a step puts on the execution bridge: `1` at the state it produces, `-1` at the state it
+    consumes. Reads only `pcFrom`, `pcTo`, `base` and `d`, and is only ever used against
+    `openVm_negOne_ne_one`'s `h2` below — it is not part of what `Circuit.legalGuest` means, only
+    a convenience for restating `StepLayout.net` as one equation. -/
+def _root_.StepLayout.effect {c : Circuit p} {r : GuestBusRules p} {asg : ChipAssignment p}
+    {maxWindow maxLookback : ℕ} (L : StepLayout c r asg maxWindow maxLookback)
+    (m : BusMessage p) : ZMod p :=
+  (if (r.execBusId, [L.pcTo, L.base + (L.d : ZMod p)]) = m then (1 : ZMod p) else 0)
+    - (if (r.execBusId, [L.pcFrom, L.base]) = m then (1 : ZMod p) else 0)
+
+/-- A step's two bridge endpoints are distinct: were they equal, `recv` and `send` would make the
+    same net both `-1` and `1`. -/
+theorem _root_.StepLayout.endpoints_ne {c : Circuit p} {r : GuestBusRules p} {asg : ChipAssignment p}
+    {maxWindow maxLookback : ℕ} (L : StepLayout c r asg maxWindow maxLookback)
+    (h2 : (-1 : ZMod p) ≠ 1) :
+    ((r.execBusId, [L.pcFrom, L.base]) : BusMessage p)
+      ≠ (r.execBusId, [L.pcTo, L.base + (L.d : ZMod p)]) := by
+  intro h
+  have hr := L.recv
+  rw [h, L.send] at hr
+  exact h2 hr.symm
+
+/-- **A step's bridge net is exactly what it puts there.** The `recv`/`send`/`other` triple
+    repackaged as a single equation, which is the form the bridge-balance argument below
+    consumes. -/
+theorem _root_.StepLayout.net {c : Circuit p} {r : GuestBusRules p} {asg : ChipAssignment p}
+    {maxWindow maxLookback : ℕ} (L : StepLayout c r asg maxWindow maxLookback)
+    (h2 : (-1 : ZMod p) ≠ 1) :
+    ∀ m : BusMessage p, m.1 = r.execBusId → c.allEffects asg m = L.effect m := by
+  intro m hm
+  simp only [StepLayout.effect]
+  by_cases hd : ((r.execBusId, [L.pcTo, L.base + (L.d : ZMod p)]) : BusMessage p) = m <;>
+    by_cases hs : ((r.execBusId, [L.pcFrom, L.base]) : BusMessage p) = m
+  · exact absurd (hs.trans hd.symm) (L.endpoints_ne h2)
+  · rw [if_pos hd, if_neg hs, sub_zero, ← hd]; exact L.send
+  · rw [if_neg hd, if_pos hs, zero_sub, ← hs]; exact L.recv
+  · rw [if_neg hd, if_neg hs, sub_zero]
+    exact L.other m hm (fun h => hs h.symm) (fun h => hd h.symm)
+
 --------- The bridge as a chain ---------
 
 section Bridge

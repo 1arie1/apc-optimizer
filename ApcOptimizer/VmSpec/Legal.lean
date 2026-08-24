@@ -155,42 +155,6 @@ structure StepLayout {p : ℕ} (c : Circuit p) (r : GuestBusRules p) (asg : Chip
       r.payloadOk (c.msgAt asg j)) →
     r.payloadOk (c.msgAt asg i)
 
-/-- What the step puts on the execution bridge: `1` at the state it produces, `-1` at the state it
-    consumes. Reads only `pcFrom`, `pcTo`, `base` and `d`. -/
-def StepLayout.effect {c : Circuit p} {r : GuestBusRules p} {asg : ChipAssignment p}
-    {maxWindow maxLookback : ℕ} (L : StepLayout c r asg maxWindow maxLookback)
-    (m : BusMessage p) : ZMod p :=
-  (if (r.execBusId, [L.pcTo, L.base + (L.d : ZMod p)]) = m then (1 : ZMod p) else 0)
-    - (if (r.execBusId, [L.pcFrom, L.base]) = m then (1 : ZMod p) else 0)
-
-/-- A step's two bridge endpoints are distinct: were they equal, `recv` and `send` would make the
-    same net both `-1` and `1`. -/
-theorem StepLayout.endpoints_ne {c : Circuit p} {r : GuestBusRules p} {asg : ChipAssignment p}
-    {maxWindow maxLookback : ℕ} (L : StepLayout c r asg maxWindow maxLookback)
-    (h2 : (-1 : ZMod p) ≠ 1) :
-    ((r.execBusId, [L.pcFrom, L.base]) : BusMessage p)
-      ≠ (r.execBusId, [L.pcTo, L.base + (L.d : ZMod p)]) := by
-  intro h
-  have hr := L.recv
-  rw [h, L.send] at hr
-  exact h2 hr.symm
-
-/-- **The instance's bridge net is exactly what its step puts there.** The `recv`/`send`/`other`
-    triple repackaged as a single equation, which is the form the chain argument consumes. -/
-theorem StepLayout.net {c : Circuit p} {r : GuestBusRules p} {asg : ChipAssignment p}
-    {maxWindow maxLookback : ℕ} (L : StepLayout c r asg maxWindow maxLookback)
-    (h2 : (-1 : ZMod p) ≠ 1) :
-    ∀ m : BusMessage p, m.1 = r.execBusId → c.allEffects asg m = L.effect m := by
-  intro m hm
-  simp only [StepLayout.effect]
-  by_cases hd : ((r.execBusId, [L.pcTo, L.base + (L.d : ZMod p)]) : BusMessage p) = m <;>
-    by_cases hs : ((r.execBusId, [L.pcFrom, L.base]) : BusMessage p) = m
-  · exact absurd (hs.trans hd.symm) (L.endpoints_ne h2)
-  · rw [if_pos hd, if_neg hs, sub_zero, ← hd]; exact L.send
-  · rw [if_neg hd, if_pos hs, zero_sub, ← hs]; exact L.recv
-  · rw [if_neg hd, if_neg hs, sub_zero]
-    exact L.other m hm (fun h => hs h.symm) (fun h => hd h.symm)
-
 /-- **Every assignment a guest chip admits lays out as one instruction step.**
 
     The `satisfiesStateless` hypothesis is not decoration: a real APC's timestamp-difference bound
