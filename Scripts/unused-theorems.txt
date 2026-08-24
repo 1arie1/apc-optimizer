@@ -171,11 +171,43 @@ ApcOptimizer.OpenVM.apc2105000UnoptChained_checkMultiplicitiesWith
 ApcOptimizer.OpenVM.apc2105000UnoptChained_legalMultiplicities
 ApcOptimizer.OpenVM.chainedTimes
 ApcOptimizer.OpenVM.unoptPinRules_hold
-ApcOptimizer.OpenVM.unoptBusEntries
+ApcOptimizer.OpenVM.unoptLinRules_sized
+ApcOptimizer.OpenVM.unoptLinRules_hold
+ApcOptimizer.OpenVM.unoptBridgeCheckL
 ApcOptimizer.OpenVM.apc2105000UnoptChained_bridge
 ApcOptimizer.OpenVM.openVm_negOne_ne_one
 StepLayout.endpoints_ne
 StepLayout.net
+# `Audit/LinForm.lean`'s linear-pin extension (`Expression.toLinL` and friends), and
+# `Audit/BridgeCheck.lean`'s `bridgeCheckL` built on it — the bridge check for a fused APC whose
+# timestamps are chained by a linear (not constant) relation. Root is `unoptBridgeCheckL` above.
+lookupLinPin_mem
+Expression.toLinL_sized
+Expression.toLinL_eval
+payloadLinL_eval
+busEntryL_eval
+entrySumL_eq
+allEffects_eq_entrySumL
+bridgeCheckL_sound
+# `Audit/RealApcLegality.lean`'s memory-gadget lookbacks for the unoptimized APC: the raw
+# (pre-substitution) `AssertLtSubAir` reshaped into `lt_gadget_offset`'s form, one per genuine
+# memory access. `rs2_as_0/1/2` are pinned to `0` (unoptPins), so the other two arithmetic-slot
+# reads are unconditionally inactive and need no lookback of their own.
+ApcOptimizer.OpenVM.unoptPins
+ApcOptimizer.OpenVM.rawGadget_heq
+ApcOptimizer.OpenVM.unoptAccepts
+ApcOptimizer.OpenVM.gadgetLookback_raw
+ApcOptimizer.OpenVM.sum5_eq1_ne_zero
+ApcOptimizer.OpenVM.sum2_eq1_ne_zero
+ApcOptimizer.OpenVM.accepts_congr_mult3
+ApcOptimizer.OpenVM.unoptLookback_r1_0
+ApcOptimizer.OpenVM.unoptLookback_w_0
+ApcOptimizer.OpenVM.unoptLookback_r1_1
+ApcOptimizer.OpenVM.unoptLookback_w_1
+ApcOptimizer.OpenVM.unoptLookback_r1_2
+ApcOptimizer.OpenVM.unoptLookback_w_2
+ApcOptimizer.OpenVM.unoptLookback_r1_3
+ApcOptimizer.OpenVM.unoptLookback_r2_3
 
 # `Audit/SendOnlyPolarity.lean`'s constant-propagation tier: its root is
 # `checkMultiplicitiesWith_sound`, used by `Audit/RealApcLegality.lean`, and the rest feed it.
