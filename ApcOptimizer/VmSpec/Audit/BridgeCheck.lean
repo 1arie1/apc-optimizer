@@ -205,3 +205,95 @@ theorem bridgeCheck_sound {vs : List Variable} {rules : List (PinRule p)} {b : �
             if_neg (fun hc => hr (Prod.ext hm (by rw [← hc]; exact hrp))),
             if_neg (fun hc => hs (Prod.ext hm (by rw [← hc]; exact hsp)))]
           ring
+
+--------- The check, with linear pins ---------
+
+/-- **`bridgeCheck`, with linear pins in scope for the normalization.** Otherwise identical:
+    receive, cancelling pairs, send, on payloads `[pc, timestamp]`. This is what lets a *fused*
+    APC's own bridge check see that a later step's receive timestamp is the same message as the
+    previous step's send, when that fact is `from_state__timestamp_{i+1} = from_state__timestamp_i
+    + d_i` rather than a literal. -/
+def bridgeCheckL (vs : List Variable) (rules : List (PinRule p)) (linRules : List (LinPinRule p))
+    (b : ℕ) (c : Circuit p) (d : ℕ) (distPos : ℕ) (pcFromE baseE pcToE : Expression p) : Bool :=
+  match busEntriesL vs rules linRules b c.busInteractions with
+  | none => false
+  | some [] => false
+  | some (recvE :: t) =>
+    match unsnoc t with
+    | none => false
+    | some (mid, sendE) =>
+      pairsCancel mid
+        && (recvE.1 == -1) && (sendE.1 == 1)
+        && (recvE.2.length == 2) && (sendE.2.length == 2)
+        && payloadDistinctAt recvE.2 sendE.2 distPos
+        && (Expression.toLinL vs rules linRules pcFromE == recvE.2[0]?)
+        && (Expression.toLinL vs rules linRules baseE == recvE.2[1]?)
+        && (Expression.toLinL vs rules linRules pcToE == sendE.2[0]?)
+        && (match recvE.2[1]?, sendE.2[1]? with
+            | some fr, some fs => linShiftedBy fr fs ((d : ℕ) : ZMod p)
+            | _, _ => false)
+
+/-- **Soundness of the bridge check, with linear pins.** As `bridgeCheck_sound`, with the extra
+    hypotheses `Expression.toLinL` needs of `linRules`. -/
+theorem bridgeCheckL_sound {vs : List Variable} {rules : List (PinRule p)}
+    {linRules : List (LinPinRule p)} {b : ℕ}
+    {c : Circuit p} {d distPos : ℕ} {pcFromE baseE pcToE : Expression p}
+    (h : bridgeCheckL vs rules linRules b c d distPos pcFromE baseE pcToE = true)
+    {asg : ChipAssignment p} (hrules : ∀ q ∈ rules, q.1.eval asg = q.2)
+    (hlinSized : ∀ q ∈ linRules, q.2.Sized vs.length)
+    (hlinRules : ∀ q ∈ linRules, asg q.1 = q.2.eval vs asg) :
+    c.allEffects asg (b, [pcFromE.eval asg, baseE.eval asg]) = -1 ∧
+    c.allEffects asg (b, [pcToE.eval asg, baseE.eval asg + ((d : ℕ) : ZMod p)]) = 1 ∧
+    ∀ m : BusMessage p, m.1 = b → m ≠ (b, [pcFromE.eval asg, baseE.eval asg]) →
+      m ≠ (b, [pcToE.eval asg, baseE.eval asg + ((d : ℕ) : ZMod p)]) → c.allEffects asg m = 0 := by
+  simp only [bridgeCheckL] at h
+  cases hes : busEntriesL vs rules linRules b c.busInteractions with
+  | none => rw [hes] at h; cases h
+  | some es =>
+    rw [hes] at h
+    match es, h with
+    | recvE :: t, h =>
+      dsimp only at h
+      cases hu : unsnoc t with
+      | none => rw [hu] at h; cases h
+      | some q =>
+        obtain ⟨mid, sendE⟩ := q
+        rw [hu] at h
+        simp only [Bool.and_eq_true, beq_iff_eq] at h
+        obtain ⟨⟨⟨⟨⟨⟨⟨⟨⟨hmid, hrm⟩, hsm⟩, hrl⟩, hsl⟩, hdist⟩, hpcF⟩, hbase⟩, hpcT⟩, hshift⟩ := h
+        obtain ⟨fr0, fr1, hrE⟩ := List.length_eq_two.mp hrl
+        obtain ⟨fs0, fs1, hsE⟩ := List.length_eq_two.mp hsl
+        rw [hrE] at hpcF hbase
+        rw [hsE] at hpcT
+        rw [hrE, hsE] at hshift
+        simp only [List.getElem?_cons_succ, List.getElem?_cons_zero] at hpcF hbase hpcT hshift
+        have hvF := Expression.toLinL_eval hrules hlinSized hlinRules hpcF
+        have hvB := Expression.toLinL_eval hrules hlinSized hlinRules hbase
+        have hvT := Expression.toLinL_eval hrules hlinSized hlinRules hpcT
+        have hsplit : (recvE :: t) = recvE :: (mid ++ [sendE]) := by rw [unsnoc_eq hu]
+        have hrp : BusEntry.payloadAt vs recvE asg = [pcFromE.eval asg, baseE.eval asg] := by
+          simp [BusEntry.payloadAt, hrE, hvF, hvB]
+        have hsp : BusEntry.payloadAt vs sendE asg
+            = [pcToE.eval asg, baseE.eval asg + ((d : ℕ) : ZMod p)] := by
+          simp [BusEntry.payloadAt, hsE, hvT, hvB, eval_of_linShiftedBy hshift]
+        have hne : BusEntry.payloadAt vs recvE asg ≠ BusEntry.payloadAt vs sendE asg :=
+          payloadAt_ne_of_distinctAt (vs := vs) (asg := asg) hdist
+        have hsum : ∀ m : BusMessage p, m.1 = b →
+            c.allEffects asg m
+              = (if BusEntry.payloadAt vs recvE asg = m.2 then recvE.1 else 0)
+                + (if BusEntry.payloadAt vs sendE asg = m.2 then sendE.1 else 0) := by
+          intro m hm
+          rw [allEffects_eq_entrySumL hrules hlinSized hlinRules c b hes m hm, hsplit,
+            List.map_cons, List.sum_cons, List.map_append, List.sum_append, List.map_cons,
+            List.map_nil, List.sum_cons, List.sum_nil, add_zero, pairsCancel_sum vs asg m.2 mid hmid]
+          ring
+        refine ⟨?_, ?_, ?_⟩
+        · rw [hsum _ rfl, if_pos hrp, if_neg (fun hc => hne (hrp.trans hc.symm)), hrm]
+          ring
+        · rw [hsum _ rfl, if_neg (fun hc => hne (hc.trans hsp.symm)), if_pos hsp, hsm]
+          ring
+        · intro m hm hr hs
+          rw [hsum m hm,
+            if_neg (fun hc => hr (Prod.ext hm (by rw [← hc]; exact hrp))),
+            if_neg (fun hc => hs (Prod.ext hm (by rw [← hc]; exact hsp)))]
+          ring
