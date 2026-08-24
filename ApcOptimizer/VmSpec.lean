@@ -41,41 +41,74 @@ import ApcOptimizer.VmSpec.Implementation.Validation
     * `VmSpec/Legal.lean` — `Circuit.legalGuest`, what a VM requires of a guest chip. This is a
       *hypothesis* of the theorems rather than part of the spec, so the risk it carries is the
       opposite one: too strong and the theorem is vacuous rather than wrong.
-    * `VmSpec/OpenVm.lean` — the modelled OpenVM: its host chips, and `Circuit.advancesClock`. The
-      chips decide which real runs `CanProduce` can represent, so a chip that is too restrictive
-      silently narrows the claim.
+    * `VmSpec/OpenVm.lean` — the modelled OpenVM: its host chips, laid out to satisfy `StepLayout`
+      (`Legal.lean`). The chips decide which real runs `CanProduce` can represent, so a chip that
+      is too restrictive silently narrows the claim.
 
     ### Audited — files that audit the audit surface
 
-    `VmSpec/Audit/` (its own README has the fuller pitch): nothing in `Basic.lean`/`Legal.lean`/
-    `OpenVm.lean`/`Theorems.lean` depends on this folder, and nothing in it proves a new claim about
-    a run — each file is evidence that those files' hypotheses are checkable and non-vacuous, not an
-    ingredient of the soundness argument. It still lives directly under `VmSpec/`, so the directory
-    rule still applies: a mistake here is a mistake in what gets audited, just not a mistake that can
-    make a theorem *wrong*, only vacuous or (for the checker) unsound.
+    `VmSpec/Audit/`: nothing in `Basic.lean`/`Legal.lean`/`OpenVm.lean`/`Theorems.lean` depends on
+    this folder, and nothing in it proves a new claim about a run — each file is either evidence
+    that those files' hypotheses are checkable and non-vacuous, or a decidable checker that a
+    candidate circuit satisfies them, not an ingredient of the soundness argument. It still lives
+    directly under `VmSpec/`, so the directory rule still applies: a mistake here is a mistake in
+    what gets audited, just not a mistake that can make a theorem *wrong*, only vacuous or (for a
+    checker) unsound.
+
+    For a checker file, that means only its *exposed soundness statement* needs auditing — that a
+    `true` result from some `Bool`-valued function really does give the legality clause it claims
+    to — never the function itself: a bug there can only make the checker fail to fire (return
+    `false` where it could have returned `true`), never wrongly certify an illegal circuit, because
+    `decide` has Lean's kernel re-derive the proof from the computation rather than trust it. This
+    is `SendOnlyPolarity.lean`'s pattern, and every checker below follows it.
 
     * `Audit/OpenVmLegalAudit.lean` — real OpenVM circuit shapes shown to satisfy the audited
       hypotheses, so that "too strong and the theorem is vacuous" is a checkable worry rather than a
       standing one.
     * `Audit/SendOnlyPolarity.lean` — a decidable, syntactic check that a candidate circuit's
       bus-interaction multiplicities satisfy `Circuit.statelessSendOnly`/`Circuit.statefulPolarity`.
-      It proves no new claim, only that a `Bool` a checker computes implies the existing legality
-      clauses. What needs auditing is the *statement* of `checkMultiplicities_sound` — that a `true`
-      result really does give `statelessSendOnly`/`statefulPolarity` — exactly as a pass's
-      correctness statement is audited in `ApcOptimizer/Implementation/OptimizerPasses/`; the
-      checker itself (`Expression.foldConst`, `checkMultiplicities`) needs no audit, only that
-      theorem to be true of it.
-    * `Audit/RealApcLegality.lean` — the legality clauses measured against two *real* APCs, the
-      keccak block at pc `2105000` before and after powdr's optimizer (`Audit/Apc2105000.lean`,
-      emitted from the dumps by `Scripts/emit-apc-lean.py`). Both multiplicity clauses hold of the
-      optimized circuit; `Circuit.advancesClock` is proved *false* of it, on the all-zero padding
-      row the optimizer's fresh `is_valid` column makes algebraically satisfying. The unoptimized
-      circuit pins its opcode-flag sums to `1` and so has no such row — the same block, and the
-      optimization is what broke legality.
+      What needs auditing is the *statement* of `checkMultiplicities_sound`/
+      `checkMultiplicitiesWith_sound` — that a `true` result really does give
+      `statelessSendOnly`/`statefulPolarity` — exactly as a pass's correctness statement is audited
+      in `ApcOptimizer/Implementation/OptimizerPasses/`; the checker itself (`Expression.foldConst`,
+      `checkMultiplicities`, `pinRuleOf`, `checkMultiplicitiesWith`) needs no audit.
+    * `Audit/LinForm.lean` — normalizes `Expression p` to a constant plus a coefficient vector over
+      a fixed variable list, and re-reads a circuit's traffic on one bus as a sum over normalized
+      entries. Every checker below builds on it without restating it, so what needs auditing is
+      `Expression.toLin_eval` (the normal form denotes the expression, given the pin rules hold) and
+      `allEffects_eq_entrySum` (the entry sum is the circuit's net); the normalizer itself
+      (`Expression.toLin`, `busEntries`) does not.
+    * `Audit/BridgeCheck.lean`, `Audit/PlaceCheck.lean`, `Audit/ByteCheck.lean` — decidable checks
+      for `StepLayout`'s three remaining shapes: the execution-bridge receive/send/nothing-else
+      triple, the placement and ordering of stateful interactions (via a per-interaction `Recipe`,
+      since a memory receive's offset depends on the assignment — the gadget bound it reaches back
+      by), and the byte invariant a memory send must satisfy. What needs auditing is each checker's
+      exposed statement — `bridgeCheck_sound`; `recipe_placed`, `recipe_ordered` and
+      `gadgetIdentity_sound` (the last is generic linear-identity checking, not OpenVM-specific —
+      `RealApcLegality.lean`'s `lookback_of_gadget` is what ties it to `AssertLtSubAir`); and
+      `byteCheck_sendsOk` — not the walk, matching, or arithmetic that produces the `Bool`.
+    * `Audit/RealApcLegality.lean` — the legality clauses measured against three *real* stages of
+      one APC, the keccak block at pc `2105000` in powdr's optimizer pipeline
+      (`Audit/Apc2105000.lean`, emitted from the stage dumps by `Scripts/emit-apc-lean.py`). Both
+      multiplicity clauses hold at every stage. `hasStepLayout` holds only of the
+      trivially-simplified stage, proved almost entirely through the checkers above
+      (`apc2105000Opt_hasStepLayout`); it is false of the optimizer's final output, on the all-zero
+      padding row its fresh `is_valid` column makes algebraically satisfying
+      (`apc2105000Gated_not_hasStepLayout`), and false of the unoptimized stage, whose four fused
+      instructions' bridge states do not cancel without powdr's substitution pass. Same block at
+      every stage, so each falsity is a statement about the optimizer, not about the block.
     * `Audit/LegalityPreservation.lean` — a formal counterexample: a per-chip
       `Circuit.isSoundReplacementOf` that violates `Circuit.statelessSendOnly` outright, showing
       legality of the optimizer's output cannot be derived from soundness and has to be assumed or
       separately established, as `openVm_vmSoundReplacement` already does.
+    * `Audit/SoundnessGivesLegality.lean` — how much of `Circuit.legalGuest` a chip-level soundness
+      proof already gives for free, and where the residue is real. OpenVM's own
+      `maintainsInvariants` (`OpenVmSemantics.lean`) transports the three bus-shape clauses of
+      `Circuit.legalGuest` on *accepted* assignments (`Circuit.legalOnAccepted`,
+      `legalOnAccepted_of_isSoundReplacementOf`); `legalOnAccepted_not_statelessSendOnly` and
+      `openVm_sound_but_illegal` show the gap between that and full legality is real under the
+      *actual* semantics, sharper than `LegalityPreservation.lean`'s toy witness. `StepLayout` has
+      no counterpart in `Spec.lean` at all, so none of it transports.
 
     ### Not audited — the argument
 

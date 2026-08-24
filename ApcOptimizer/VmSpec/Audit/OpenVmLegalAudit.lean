@@ -6,28 +6,27 @@ set_option autoImplicit false
 /-! **Auditing `Circuit.legalGuest` against real OpenVM circuit shapes.**
 
     A memory send in OpenVM carries byte-valued limbs for exactly one of two reasons, and the file
-    checks that `Circuit.statefulSendsMaintain` accepts both.
+    checks that `StepLayout` accepts both.
 
     **Read-echo.** Every OpenVM memory access receives the cell's previous record (multiplicity
     `-1`, `[address space, pointer, four data limbs, previous timestamp]`) and sends the *same
     data* back at a fresh timestamp (`+1`). The sent limbs are bytes only because the received ones
     were; no algebraic constraint and no lookup bounds them. `readEchoChip` is that shape in
-    isolation, and it is where the rank hypothesis earns its keep — the send at `t₁` discharges its
-    obligation from the receive at `t₀`, and only because `t₀ < t₁`.
+    isolation, and it is where `StepLayout.sendsOk`/`.ordered` earn their keep — the send
+    discharges its obligation from the receive, and only because `StepLayout.place` puts the
+    receive strictly before the send.
 
-    That last inequality is *derived here, not assumed*, and the derivation is the point.
-    Legality here is stated against `openVmGuestRules`, so what a stateful send has to produce is
-    `openVmPayloadOk` — the byte condition, written out — rather than anything about a
-    `BusSemantics`.
+    That ordering is *derived here, not assumed*, and the derivation is the point. Legality here is
+    stated against `openVmGuestRules`, so what a stateful send has to produce is `openVmPayloadOk`
+    — the byte condition, written out — rather than anything about a `BusSemantics`.
 
     `MemoryOfflineChecker` does not constrain `prev_timestamp < timestamp` directly: it attaches an
     `AssertLtSubAir`, which range-checks the limbs of `timestamp - prev_timestamp - 1` — two limbs
     of 17 and 12 bits, at the default `timestamp_max_bits = 29`. `readEchoChip` carries exactly
-    that gadget (`assertLtLoLookup`, `assertLtHiLookup`, `assertLtConstraint`), and a small
-    difference orders the two timestamps *only* inside OpenVM's rank window
-    (`openVmRankBound`) — otherwise `t₁` may simply have wrapped. So the derivation consumes all
-    three of `Circuit.statefulSendsMaintain`'s hypotheses. `staleEchoChip_not_legalGuest` drops the
-    gadget and shows the chip is then rejected, so none of this is decorative.
+    that gadget (`assertLtLoLookup`, `assertLtHiLookup`, `assertLtConstraint`), and the range check
+    is what places the receive at a negative offset inside `stepChip`'s window rather than leaving
+    it free. `earlyEchoChip_not_legalGuest` puts the echo *before* the read instead of after and
+    shows the chip is then rejected, so none of this is decorative.
 
     **Fresh write.** A value the chip computes and writes is byte-valued because of a
     bitwise-lookup range check — OpenVM's own `op = 1, x = y` idiom, since `xor x x = 0` holds for
@@ -169,8 +168,8 @@ def bridgeSend (pc t : ZMod p) : BusInteraction (Expression p) where
 /-- A whole instruction executor: `readEchoChip`'s memory access wrapped in the execution-bridge
     step it belongs to. Timestamps are laid out as OpenVM lays them out — the step runs from `base`
     to `base + 3`, and the access reads at `base + 1` and writes at `base + 2`, strictly inside
-    (whitepaper §4.2). This is the shape `Circuit.advancesClock` describes, and the chip below is
-    the check that the predicate is satisfiable by a realistic one. -/
+    (whitepaper §4.2). This is `StepLayout`'s shape, and the chip below is the check that the
+    predicate is satisfiable by a realistic one. -/
 def stepChip (x lo hi : Variable) (pcFrom pcTo ptr base : ZMod p) : Circuit p where
   algebraicConstraints := [assertLtConstraint lo hi (base + 1) (base + 2)]
   busInteractions :=

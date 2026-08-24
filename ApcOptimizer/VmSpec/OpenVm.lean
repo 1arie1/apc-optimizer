@@ -190,8 +190,8 @@ def wordValue (limbs : Vector (ZMod p) 4) : ZMod p :=
 
 /-- How far a `HINT_STOREW` instance advances the execution-bridge clock: one tick per memory
     access — the pointer-register peek and the word write — plus one, so both sit *strictly*
-    inside `(base, base + inputStepWindow)`, the layout `Circuit.advancesClock` demands of a guest
-    instruction and `Audit/OpenVmLegalAudit.lean`'s `stepChip` exhibits. -/
+    inside `(base, base + inputStepWindow)`, the window `StepLayout.placed` allows and
+    `Audit/OpenVmLegalAudit.lean`'s `stepChip` exhibits. -/
 def inputStepWindow : ℕ := 3
 
 /-- A witness that an input-chip instance's contribution is a legal `HINT_STOREW`: which pointer
@@ -238,7 +238,7 @@ structure InputRead (p : ℕ) where
 def InputRead.ptr (r : InputRead p) : ZMod p := wordValue r.ptrLimbs
 
 /-- The bus interactions an `InputRead` describes: one execution-bridge step
-    (`Circuit.advancesClock`'s shape, mirrored exactly — see `ClockStep`), receiving `(pcFrom,
+    (`StepLayout`'s `recv`/`send`/`other` shape, mirrored exactly), receiving `(pcFrom,
     base)` and sending `(pcTo, base + inputStepWindow)`; then peek `ptrReg` (a full four-limb
     register word, whatever was there at `ptrTime`) at `base + 1`, then write `r.byte` (in the low
     limb, the rest zeroed — see the module docstring) at `r.ptr` at `base + 2`, overwriting
@@ -397,8 +397,8 @@ def openVmBridgeTimestamp (m : BusMessage p) : ZMod p := m.2[1]?.getD 0
 /-- The timestamp a memory message carries: payload index `6` of `(addr_space, ptr, data…, t)`,
     right after the four data limbs (whitepaper §4.6).
 
-    Agrees with `openVmRank` on the memory bus. This is `Circuit.legalGuest`/`Circuit.advancesClock`
-    (`Legal.lean`)'s `getTimestamp` for OpenVM. -/
+    Agrees with `openVmRank` on the memory bus. This is `GuestBusRules.getTimestamp`
+    (`Legal.lean`) for OpenVM. -/
 def openVmMemTimestamp (m : BusMessage p) : ZMod p := m.2[6]?.getD 0
 
 /-- This aggregates OpenVM's rules about how guests use buses.
@@ -407,7 +407,7 @@ def openVmMemTimestamp (m : BusMessage p) : ZMod p := m.2[6]?.getD 0
     `OpenVmSemantics.lean` rather than restate it here. So, we are trusting their table definitions.
 
     `execBusId` is fixed at `openVmExecBusId` because that is `defaultBusMap`'s own convention
-    (see `Circuit.advancesClock`'s uses throughout this file); `getTimestamp` is
+    (see `StepLayout`'s uses throughout this file); `getTimestamp` is
     `openVmMemTimestamp`. -/
 def openVmGuestRules (busMap : BusMap) (memBusId : Nat) : GuestBusRules p where
   isStateful := openVmIsStateful busMap
@@ -470,8 +470,9 @@ structure OpenVmParams (p : ℕ) where
       (`HostAssignment.satisfies`). One instance is one `HINT_STOREW`, hence one input datum: an
       N-word chunk costs N instances of this budget. -/
   maxInputInstances : ℕ
-  /-- The `Circuit.advancesClock` bound. A property of the chips being run rather than of OpenVM —
-      a fused APC advances by its whole basic block, not by one instruction's `timestamp_delta`. -/
+  /-- The `StepLayout` window bound: `StepLayout.dLt`. A property of the chips being run rather
+      than of OpenVM — a fused APC advances by its whole basic block, not by one instruction's
+      `timestamp_delta`. -/
   maxWindow : ℕ
   /-- The most bus interactions a guest chip may carry. -/
   maxInteractions : ℕ

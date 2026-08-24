@@ -16,7 +16,7 @@ set_option autoImplicit false
     * `Circuit.isSoundReplacementOf` only has to reproduce a stateful bus's *net* multiplicity
       (`Circuit.sideEffects`), and only on assignments that are `Circuit.satisfies`-good — algebraic
       constraints *and* bus acceptance. A stateless bus does not even appear in `sideEffects`.
-    * `Circuit.statelessSendOnly` (and `statefulPolarity`, `statefulSendsMaintain` with it) is a
+    * `Circuit.statelessSendOnly` (and `statefulPolarity`, `StepLayout.sendsOk` with it) is a
       claim about *every* algebraically-satisfying assignment, dropping the acceptance requirement
       entirely — because that is what a real AIR needs: no constraint system evaluates
       `legalGuest`, so a chip has to be built so the property holds identically, not merely on the
@@ -44,7 +44,7 @@ set_option autoImplicit false
     legality-preservation argument — parallel to, not derived from, its existing
     `isSoundReplacementOf`/`isCompleteReplacementOf` proof. No pass in
     `ApcOptimizer/Implementation/OptimizerPasses/` carries one today; `legalGuest` and
-    `advancesClock` postdate all of them. See `agent-docs/legality-preservation.md` for the fuller
+    `StepLayout` postdate all of them. See `agent-docs/legality-preservation.md` for the fuller
     discussion. -/
 
 variable {p : ℕ}

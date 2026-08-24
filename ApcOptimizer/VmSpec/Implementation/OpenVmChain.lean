@@ -8,7 +8,7 @@ set_option autoImplicit false
 
     The run's execution-bridge traffic is read as a `VmChain.Chain` (`Chain.lean`): one arc per
     realized guest instance, consuming the `(pc, t)` it receives and producing the `(pc', t + d)`
-    it sends — `Circuit.advancesClock`, which `openVmHost.legalGuest` requires; one arc per
+    it sends — `StepLayout`'s `recv`/`send`, which `openVmHost.legalGuest` requires; one arc per
     realized input-chip instance, doing exactly the same (`InputRead.pcFrom`/`pcTo` — the
     input chip is an instruction executor too, whitepaper §4.5); plus one arc for the connector,
     which produces `(pc₀, 1)` and consumes the segment's final state. Bus balance on bus `0` is
@@ -18,9 +18,9 @@ set_option autoImplicit false
     The chain then places every instance at a known distance before the connector, so its start
     timestamp is `1 + T` for an honest natural `T` and the whole instruction fits below the final
     timestamp — which `ConnectorBoundary.finalTimestampBounded` range-checks. Every memory access
-    of a *guest* instance sits strictly inside its own step (`Circuit.advancesClock` again), so it
-    inherits the bound; nothing here claims the same for an input-chip instance's own memory
-    accesses (see the lower tier's own note in `agent-docs/vm-spec-audit.md`), since
+    of a *guest* instance sits in its own step's window, `[-maxLookback, d]` (`StepLayout.placed`
+    again), so it inherits the bound; nothing here claims the same for an input-chip instance's own
+    memory accesses (see the lower tier's own note in `agent-docs/vm-spec-audit.md`), since
     `Host.pinsRanks` only bounds guest ranks.
 
     The one arithmetic input is `OpenVmParams.windowOk` — a field of the host's own configuration,

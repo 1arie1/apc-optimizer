@@ -33,9 +33,8 @@ variable {p : ℕ}
 
     `r0` supplies the clock-facing fields (`execBusId`/`memBusId`/`getTimestamp`) that
     `BusSemantics` itself has no notion of — a template borrowed wholesale, since `Circuit.legalGuest`'s
-    `sendOnly`/`polarity`/`sendsMaintain`/`payloadOk` never look at them, only `advancesClock`
-    does. In practice `r0` is `openVmGuestRules`'s own value, so `openVmGuestRules_eq` gets them
-    for free. -/
+    `sendOnly`/`polarity`/`size` never look at them, only `stepLayout` does. In practice `r0` is
+    `openVmGuestRules`'s own value, so `openVmGuestRules_eq` gets them for free. -/
 def BusSemantics.toGuestRules (bs : BusSemantics p) (r0 : GuestBusRules p) : GuestBusRules p where
   isStateful := bs.isStateful
   accepts := bs.accepts
@@ -201,8 +200,8 @@ def Host.forcesAccepts (host : Host p) (bs : BusSemantics p) : Prop :=
     entries.
 
     Nothing stateful takes part — only `Circuit.statelessSendOnly`, `Host.sinksAreTables`, bus
-    balance and the trace budget — which is what makes it safe to hand to
-    `Circuit.statefulSendsMaintain`, whose own derivation depends on it. -/
+    balance and the trace budget — which is what makes it safe to hand to `StepLayout.sendsOk`,
+    whose own derivation depends on it. -/
 theorem satisfiesStateless_of_sinks [Fact p.Prime] {host : Host p} {bs : BusSemantics p}
     {r0 : GuestBusRules p}
     {G : Guest p} {a : VmAssignment p ⟨host, G⟩}
@@ -241,7 +240,7 @@ theorem satisfiesStateless_of_sinks [Fact p.Prime] {host : Host p} {bs : BusSema
     In a satisfying VM, every stateful message a guest instance actively touches carries a payload
     that maintains the bus invariants.
 
-    For a *send* that is the chip's own obligation (`Circuit.statefulSendsMaintain`). For a
+    For a *send* that is the chip's own obligation (`StepLayout.sendsOk`). For a
     *receive* it is forced by balancing: if nothing carrying that payload maintained the
     invariants then no guest sent it and no host chip touched it, leaving a pile of receives that
     cannot sum to zero — which is where the trace budget is needed again, since `p` receives
@@ -250,8 +249,8 @@ theorem satisfiesStateless_of_sinks [Fact p.Prime] {host : Host p} {bs : BusSema
     The whole thing is a strong induction on `rm.rank`, and it has to be: balance alone
     cannot establish the invariant, because two chips can each receive a bad payload and send
     another one, cancelling perfectly. What kills that is the rank — one of the two chips would
-    have to send below the rank it received at. `Circuit.statefulSendsMaintain` may therefore lean
-    on everything the same instance touched at a strictly smaller rank, which is exactly the
+    have to send below the rank it received at. `StepLayout.sendsOk` may therefore lean on
+    everything the same instance touched at a strictly smaller rank, which is exactly the
     induction hypothesis.
 
     The one host chip `Host.exemptChip` carves out is folded into the very same pile-of-receives

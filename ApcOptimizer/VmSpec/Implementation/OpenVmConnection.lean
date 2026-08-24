@@ -65,7 +65,7 @@ theorem ConnectorBoundary.interactions_busId (r : ConnectorBoundary p) (execBusI
 
 /-- Every message an `InputRead` describes is on the execution bridge (the two clock-step
     messages `InputRead.interactions` opens with) or the memory bus (everything else) — never
-    anywhere else, mirroring `ClockStep.other` for a guest instruction. -/
+    anywhere else, mirroring `StepLayout.other` for a guest instruction. -/
 theorem InputRead.interactions_busId (r : InputRead p) (ptrReg execBusId memBusId : Nat) :
     ∀ msg ∈ r.interactions ptrReg execBusId memBusId,
       msg.busId = execBusId ∨ msg.busId = memBusId := by

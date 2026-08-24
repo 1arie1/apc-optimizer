@@ -540,7 +540,7 @@ theorem apc2105000Unopt_legalMultiplicities :
     apc2105000Unopt.statelessSendOnly apcRules ∧ apc2105000Unopt.statefulPolarity apcRules :=
   checkMultiplicitiesWith_sound apc2105000Unopt_checkMultiplicitiesWith rfl
 
---------- The gated APC: the padding row kills `advancesClock` ---------
+--------- The gated APC: the padding row kills `hasStepLayout` ---------
 
 /-- **The padding row.** Every column zero satisfies the gated APC's four constraints: they are
     `cmp * (cmp - 1)`, `(1 - cmp) * a`, `free * a - cmp`, and `is_valid * (is_valid - 1)`, each of

@@ -27,8 +27,7 @@ set_option autoImplicit false
     `Circuit.isSoundReplacementOf` a chip-level optimizer proves; what blocks assembling the two is
     its legality hypothesis on the optimizer's *output*, which soundness does not give for free —
     see the counterexample in `agent-docs/legality-preservation.md`. Closing that gap needs each
-    optimizer pass to also prove it preserves `Circuit.legalGuest`/`Circuit.advancesClock`, which
-    no pass does today. -/
+    optimizer pass to also prove it preserves `Circuit.legalGuest`, which no pass does today. -/
 
 variable {p : ℕ} [Fact p.Prime]
 

@@ -59,8 +59,8 @@ set_option autoImplicit false
 
     So, of `openVm_vmSoundReplacement`'s legality assumptions, what genuinely has to be
     established per pass is: the three bus-shape clauses on algebraically-satisfying assignments
-    that the semantics need not accept, and all of `Circuit.advancesClock`, which has no analogue
-    anywhere in `Spec.lean`. -/
+    that the semantics need not accept, and all of `StepLayout`, which has no analogue anywhere in
+    `Spec.lean`. -/
 
 variable {p : ℕ}
 
@@ -69,11 +69,11 @@ variable {p : ℕ}
 
     Not a hypothesis of anything: this is the *conclusion* of
     `ApcOptimizer.OpenVM.legalOnAccepted_of_isSoundReplacementOf`, stating what an optimizer gets
-    without asking for it. `Circuit.advancesClock` has no counterpart here — nothing in
-    `Spec.lean` mentions the execution bridge's shape at all.
+    without asking for it. `StepLayout` has no counterpart here — nothing in `Spec.lean` mentions
+    the execution bridge's shape at all.
 
     The third clause is stated for every active stateful message rather than only for sends, and
-    without `Circuit.statefulSendsMaintain`'s rank hypotheses: on an accepted assignment a receive
+    without `StepLayout.sendsOk`'s ordering hypotheses: on an accepted assignment a receive
     gets its payload invariant from `accepts` itself, so the weakening in the quantifier buys back
     strength elsewhere. -/
 structure Circuit.legalOnAccepted (c : Circuit p) (bs : BusSemantics p) (r : GuestBusRules p) :
@@ -87,8 +87,8 @@ structure Circuit.legalOnAccepted (c : Circuit p) (bs : BusSemantics p) (r : Gue
     r.isStateful bi.busId = true →
       (bi.eval asg).multiplicity = 0 ∨ (bi.eval asg).multiplicity = 1 ∨
         (bi.eval asg).multiplicity = -1
-  /-- `Circuit.statefulSendsMaintain`, on accepted assignments — and unconditionally, for receives
-      as well as sends. -/
+  /-- `StepLayout.sendsOk`'s conclusion, on accepted assignments — and unconditionally, for
+      receives as well as sends. -/
   payloadOk : ∀ asg, c.satisfies bs asg → ∀ bi ∈ c.busInteractions,
     r.isStateful bi.busId = true → (bi.eval asg).multiplicity ≠ 0 →
       r.payloadOk ((bi.eval asg).busId, (bi.eval asg).payload)
@@ -394,7 +394,7 @@ theorem looseTabled_not_isSoundReplacementOf [Fact p.Prime] (hp : 2 < p) :
   simp only [maintainsInvariants, defaultBusMap, BusInteraction.eval, Expression.eval] at hbad
   exact h2ne1 hbad
 
-/-- One instruction step (`Circuit.advancesClock`: receive `(0, 0)`, send `(0, 1)`) carrying an
+/-- One instruction step (`StepLayout`: receive `(0, 0)`, send `(0, 1)`) carrying an
     in-table range check at the literal multiplicity `1`. A genuine `Circuit.legalGuest`
     (`checkedStepChip_legalGuest`) — the chip `openVm_sound_but_illegal` replaces. -/
 def checkedStepChip (p : ℕ) : Circuit p where
@@ -483,7 +483,7 @@ private theorem checkedStepChip_legalGuest [Fact p.Prime] (hp : 18 < p)
 /-- **The residue, against a chip OpenVM would actually run.** `looseRangeCheck` leaves two ways
     out: its lookup is in no table on *any* assignment, so the chip has no satisfying assignment at
     all, and `deadRangeCheck` is not a `Circuit.legalGuest` (nothing on the execution bridge, so no
-    `Circuit.advancesClock`). Neither survives here.
+    `StepLayout`). Neither survives here.
 
     `poisonedStepChip` is a sound replacement of a chip that is legal in full; it is satisfiable,
     so nothing below is vacuous; it is not `Circuit.statelessSendOnly`; and the interaction that
