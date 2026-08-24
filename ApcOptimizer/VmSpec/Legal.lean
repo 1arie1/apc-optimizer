@@ -83,34 +83,31 @@ def Circuit.statefulSend (c : Circuit p) (r : GuestBusRules p) (asg : ChipAssign
     (i : Fin c.busInteractions.length) : Prop :=
   r.isStateful (c.busInteractions.get i).busId = true ∧ c.multAt asg i = 1
 
-/-- **How a guest instance's stateful traffic is laid out in time**, under one assignment.
+/-- The layout of a guest instance's stateful traffic in time.
 
-    The instance performs one instruction **step**, advancing the clock by fewer than `maxWindow`
-    ticks: it receives `(pcFrom, base)` from the execution bridge, sends
-    `(pcTo, base + d)` back, and puts nothing else there (`recv`, `send`, `other` — OpenVM
-    whitepaper §4.5, an executor "adds a message `(pc_from, t_from)` to the receive set and a
-    message `(pc_to, t_to)` to the send set exactly once", and "must also constrain that
-    `t_from < t_to`").
+    The instance performs one instruction step, advancing the clock by fewer than `maxWindow` ticks:
+    it receives `(pcFrom, base)` from the execution bridge, sends `(pcTo, base + d)` back, and puts
+    nothing else there (`recv`, `send`, `other` — OpenVM whitepaper §4.5, an executor "adds a
+    message `(pc_from, t_from)` to the receive set and a message `(pc_to, t_to)` to the send set
+    exactly once", and "must also constrain that `t_from < t_to`").
 
-    Every stateful interaction it makes sits at an integer **offset** (`place`) from that step's
-    `base`, somewhere in `[-maxLookback, d]`: inside the step, or up to `maxLookback` ticks before
-    it, which is where a memory *receive* lives — it names the record an earlier instruction left,
-    and OpenVM's `AssertLtSubAir` range-checks the difference to `timestamp_max_bits` bits, so it
-    cannot be further back than that. (§4.2 puts guest-state timestamps at `t_from < t < t_to`; the
-    lookback is where a real chip differs, and `placed` is the honest version.)
+    Every stateful interaction it makes sits at an integer offset (`place`) from that step's `base`,
+    somewhere in `[-maxLookback, d]`: inside the step, or up to `maxLookback` ticks before it, which
+    is where a memory *receive* lives — it names the record an earlier instruction left, and
+    OpenVM's `AssertLtSubAir` range-checks the difference to `timestamp_max_bits` bits, so it cannot
+    be further back than that. (§4.2 puts guest-state timestamps at `t_from < t < t_to`)
 
-    Offsets are integers, so comparing them is wraparound-free. That is what makes `ordered` and
-    `sendsOk` per-chip checkable: the timestamps themselves are `ZMod p` elements whose `.val`
-    order is not what any AIR constrains.
+    Offsets are integers---not field elements, hence comparisons work. The timestamps are `ZMod p`
+    elements.
 
-    A **fused** APC is one instance covering several instructions, and it is laid out by this
-    clause only once its intermediate bridge states cancel. Powdr pins each fused instruction's
-    `pc` to a literal, so consecutive ones already chain there; the missing half is the timestamps.
-    With `from_state__timestamp_{i+1} = from_state__timestamp_i + d_i` the six intermediate
-    messages of a four-instruction APC cancel against each other (their multiplicities are the
-    per-block opcode-flag sums, each pinned to `1`) and the net is the single pair above. Without
-    those equations the timestamps are free — each occurs only in its own lt gadget — the instance
-    genuinely nets one step per fused instruction, and it is *not* legal by this clause. -/
+    This assumes that a **fused** APC equates adjacent timestamps on the execution bridge, so that
+    the step's `d` is the sum of the fused instructions' `d_i`.
+
+    **NB**: currently, powdr does not do this equation, so the timestamps are free. That is odd and
+    I am not sure if somehow we can derive the equations through a global argument. Even if we can,
+    it certainly makes the local legality definition harder. I think they should just add the
+    equations to the fused APCs---I think that is their intent.
+    -/
 structure StepLayout {p : ℕ} (c : Circuit p) (r : GuestBusRules p) (asg : ChipAssignment p)
     (maxWindow maxLookback : ℕ) where
   /-- The `pc` the step starts at. -/
@@ -121,38 +118,34 @@ structure StepLayout {p : ℕ} (c : Circuit p) (r : GuestBusRules p) (asg : Chip
   base : ZMod p
   /-- How far it advances the clock. -/
   d : ℕ
-  /-- Where in the step's window each interaction sits. -/
+  /-- Where in the step's window each interaction sits.
+      Receives from previous steps get negative values. -/
   place : Fin c.busInteractions.length → ℤ
-  /-- The step advances the clock. -/
+  /-- The step *advances* the clock. -/
   dPos : 0 < d
-  /-- …and fits in the window. -/
+  /-- ... and fits in the window. -/
   dLt : d < maxWindow
-  /-- **The instance receives the state its step consumes**, exactly once. -/
+  /-- We receive `(pcFrom, base)` on the bridge -/
   recv : c.allEffects asg (r.execBusId, [pcFrom, base]) = -1
-  /-- **…and sends the state it produces**, `d` ticks later, exactly once. -/
+  /-- We send `(pcTo, base+d)` on the bridge -/
   send : c.allEffects asg (r.execBusId, [pcTo, base + (d : ZMod p)]) = 1
-  /-- **…and puts nothing else on the bridge**, which is what makes those two "exactly once". -/
+  /-- ... and nothing else. -/
   other : ∀ m : BusMessage p, m.1 = r.execBusId →
     m ≠ (r.execBusId, [pcFrom, base]) →
     m ≠ (r.execBusId, [pcTo, base + (d : ZMod p)]) →
       c.allEffects asg m = 0
-  /-- Every active stateful interaction sits in the step's window. -/
+  /-- Every active stateful interaction is placed in the step's window. -/
   placed : ∀ i : Fin c.busInteractions.length, c.activeStateful r asg i →
     -(maxLookback : ℤ) ≤ place i ∧ place i ≤ (d : ℤ) ∧
       r.getTimestamp (c.msgAt asg i) = base + ((place i : ℤ) : ZMod p)
-  /-- **A send dominates everything before it.**
-
-      Only sends are constrained: a receive may sit at a larger offset than an earlier send, and in
-      a real optimized APC one does (its second read is at offset `1 - n`, after a write at `0`). -/
+  /-- Every send is placed *after* prior interactons. -/
   ordered : ∀ i j : Fin c.busInteractions.length, j < i →
     c.statefulSend r asg i → c.activeStateful r asg j → place j < place i
-  /-- **What a guest chip sends on a stateful bus is Ok** (`GuestBusRules.payloadOk`), given that
-      everything it already touched is.
+  /-- Each send is Ok, given that prior interactions are Ok.
 
-      This is the induction step that carries the memory-byte invariant: a send is justified by the
-      receives that precede it, and `ordered` is what makes "precedes" an honest order on time. The
-      induction itself is global — `maintains_of_stateful_active` — because what a chip *receives*
-      is vouched for by whoever sent it, not by the chip.
+      This is the induction that carries the memory-byte invariant: a send is justified by the
+      receives that precede it. The induction is on timestamps, but `ordered` couples that to
+      syntactic index for the sends.
 
       OpenVM §3.2.5, elements of address spaces 1 (registers) and 2 (user memory) "are constrained
       to lie in `[0, 2^8)`". In §4.6: a message appears "if and only if at timestamp `t` the data
