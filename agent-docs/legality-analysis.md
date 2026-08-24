@@ -137,3 +137,40 @@ heuristic; what needs real proofs is the small set of lemmas the recognizers cas
 pattern is what powdr's optimizer leaves *today* — a future pass reshapes it and the recognizer
 stops matching. That is a maintenance cost, not a soundness risk, and it argues for keeping a
 recognizer for the pre-optimization form too, where the lt constraint is still algebraic.
+
+## Toward a fully automatic analysis
+
+Everything landed so far is a **checker**: given a circuit and a *human-supplied* certificate — the
+bridge endpoints, a `Recipe` per stateful interaction, a `ByteWitness` per interaction, the two
+range-check indices for each lt gadget — it decides whether the certificate is valid and, if so,
+returns the `StepLayout`. Every certificate in this repo today is `apc2105000Opt`'s, written out by
+hand once and checked by `decide` from then on.
+
+The end state is a single function `Circuit p → GuestBusRules p → Option (StepLayout certificate)`
+that *finds* the certificate, so a new circuit costs nothing to add — no `optWitnesses`, no
+`optVars`, no `lookback_of_gadget` call sites. What that needs, on top of what exists:
+
+- **A search over the bus-0 interaction list** for the receive/pairs/send shape `bridgeCheck`
+  currently takes on faith (which interaction is the receive, which is the send). Small: bus 0 has
+  few interactions and the shape is rigid.
+- **A search for each stateful interaction's `Recipe`** — try `fixed` first (does its timestamp form
+  match `base + k` for some literal `k`?), then search bus 3 for an `AssertLtSubAir` pair whose high
+  limb satisfies `gadgetIdentity` against this interaction's timestamp. Item 2 in "Next, in cost
+  order" above.
+- **A search for each interaction's `ByteWitness`** — `notSend`/`notMemory` fall out of the
+  multiplicity and bus-id checks already in place; `limbs` and `echo` are both cheap syntactic scans
+  over the normalized payload against every earlier interaction. `external` is what is left once the
+  first four fail, and is where the search should stop and defer to the assumption-set search that
+  `sendsOk`'s open tier (item 3 above) still needs.
+- **Ordering `ordered`'s obligation out of the search entirely** — once every interaction has a
+  `Recipe`, `recipe_ordered` needs no search: it is a pairwise check over the derived intervals.
+
+None of this changes what has to be *proved* — `lt_gadget_offset`, `isByte_of_xorThree`,
+`Expression.toLin_eval`, `allEffects_eq_entrySum`, and the four checkers' soundness statements are
+already the complete list of things an auditor has to trust, and a search built on top of them
+inherits their soundness for free (a `Bool` a search computes and gets wrong just fails to find a
+certificate, the same non-failure-mode a hand-written wrong index would have today). What changes is
+that `Audit/RealApcLegality.lean` (and any future real-APC file) stops carrying `optVars`,
+`optWitnesses`, or explicit gadget indices at all — those become the search's *output*, not its
+input.
+
