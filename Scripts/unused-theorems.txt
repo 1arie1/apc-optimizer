@@ -209,6 +209,28 @@ ApcOptimizer.OpenVM.unoptLookback_w_2
 ApcOptimizer.OpenVM.unoptLookback_r1_3
 ApcOptimizer.OpenVM.unoptLookback_r2_3
 
+# `Audit/RealApcLegality.lean`'s byte invariant (`StepLayout.sendsOk`) for the unoptimized APC:
+# `byteCheckAll`/`byteCheck_sendsOk` decide every echoed read and non-send interaction; the three
+# ALU writes are left to the caller, closed by deriving each limb's byte-ness from its own
+# `bitwiseLookup` row and a one-hot decomposition of the instruction's opcode selector.
+ApcOptimizer.OpenVM.accepts_congr_mult6
+ApcOptimizer.OpenVM.bitwiseTable_extract
+ApcOptimizer.OpenVM.bitwiseByteIdentities
+ApcOptimizer.OpenVM.isByte_of_xorEq
+ApcOptimizer.OpenVM.isByte_of_orEq
+ApcOptimizer.OpenVM.isByte_of_andEq
+ApcOptimizer.OpenVM.zmod_boolElim
+ApcOptimizer.OpenVM.aluOneHot
+ApcOptimizer.OpenVM.isByte_of_aluLimb
+ApcOptimizer.OpenVM.unoptAluCase0
+ApcOptimizer.OpenVM.unoptAluCase1
+ApcOptimizer.OpenVM.unoptAluCase2
+ApcOptimizer.OpenVM.unoptWriteIsByte_0
+ApcOptimizer.OpenVM.unoptWriteIsByte_1
+ApcOptimizer.OpenVM.unoptWriteIsByte_2
+ApcOptimizer.OpenVM.unoptByteCheck
+ApcOptimizer.OpenVM.apc2105000UnoptChained_sendsOk
+
 # `Audit/SendOnlyPolarity.lean`'s constant-propagation tier: its root is
 # `checkMultiplicitiesWith_sound`, used by `Audit/RealApcLegality.lean`, and the rest feed it.
 Expression.signedPart_sq

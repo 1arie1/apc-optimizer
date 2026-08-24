@@ -6,6 +6,7 @@ import ApcOptimizer.VmSpec.Audit.ByteCheck
 import ApcOptimizer.VmSpec.Audit.OpenVmLegalAudit
 import Mathlib.Tactic.LinearCombination
 import Mathlib.Tactic.NormNum
+import Mathlib.Tactic.NormNum.Prime
 import Mathlib.Algebra.Field.ZMod
 
 set_option autoImplicit false
@@ -1429,3 +1430,421 @@ theorem unoptLookback_r2_3 {asg : ChipAssignment babyBear}
     (asg ⟨"reads_aux__1__base__prev_timestamp_3", some 115⟩)
     (asg ⟨"from_state__timestamp_3", some 109⟩) hlo hhi (by push_cast at heq ⊢; linear_combination heq)
   exact ⟨n, hn29, hplace⟩
+
+--------- The unoptimized APC, timestamps chained: the byte invariant ---------
+
+/-- On bus `6` (`bitwiseLookup`), `accepts` never inspects `multiplicity`, mirroring
+    `accepts_congr_mult3` for the range checker. -/
+theorem accepts_congr_mult6 {m1 m2 x y z op : ZMod babyBear}
+    (h : accepts (p := babyBear) defaultBusMap ⟨6, m1, [x, y, z, op]⟩) :
+    accepts (p := babyBear) defaultBusMap ⟨6, m2, [x, y, z, op]⟩ := h
+
+/-- What a `bitwiseLookup` table row at `op = 1` promises, read directly off `accepts`. -/
+theorem bitwiseTable_extract {x y z : ZMod babyBear}
+    (h : accepts (p := babyBear) defaultBusMap
+      { busId := 6, multiplicity := 1, payload := [x, y, z, 1] }) :
+    isByte x ∧ isByte y ∧ z.val = Nat.xor x.val y.val := h
+
+/-- **The two arithmetic identities OpenVM's OR/AND masking tricks rest on**, plus the byte bound
+    each needs: for bytes `x, y`, `x + y` splits into `xor x y` and twice `land x y`, `lor x y`
+    is half of `x + y + xor x y`, and both `lor` and `land` of two bytes are themselves bytes. -/
+theorem bitwiseByteIdentities : ∀ x < 256, ∀ y < 256,
+    x + y = Nat.xor x y + 2 * Nat.land x y ∧
+    2 * Nat.lor x y = x + y + Nat.xor x y ∧
+    Nat.lor x y < 256 ∧ Nat.land x y < 256 := by decide
+
+/-- **`x XOR y` is a byte, from the bitwise table alone**, when a third value is pinned to it. -/
+theorem isByte_of_xorEq {x y z a : ZMod babyBear} (hx : isByte x) (hy : isByte y)
+    (hxor : z.val = Nat.xor x.val y.val) (heq : z = a) : isByte a := by
+  rw [← heq]
+  show z.val < 256
+  rw [hxor]
+  have hx8 : x.val < 2 ^ 8 := by simpa using hx
+  have hy8 : y.val < 2 ^ 8 := by simpa using hy
+  simpa using Nat.xor_lt_two_pow hx8 hy8
+
+/-- **`x OR y` is a byte**: `2a = x + y + (x xor y)` forces `a = x ||| y` via `bitwiseByteIdentities`
+    and `2`'s invertibility, the same shape as `isByte_of_xorThree`. -/
+theorem isByte_of_orEq {x y z a : ZMod babyBear} (hx : isByte x) (hy : isByte y)
+    (hxor : z.val = Nat.xor x.val y.val) (heq : z = 2 * a - x - y) : isByte a := by
+  obtain ⟨-, hlor, hlorLt, -⟩ := bitwiseByteIdentities x.val hx y.val hy
+  have hxv : ((x.val : ℕ) : ZMod babyBear) = x := by simp
+  have hyv : ((y.val : ℕ) : ZMod babyBear) = y := by simp
+  have hzv : ((z.val : ℕ) : ZMod babyBear) = z := by simp
+  have hcast : ((x.val + y.val + Nat.xor x.val y.val : ℕ) : ZMod babyBear)
+      = ((2 * Nat.lor x.val y.val : ℕ) : ZMod babyBear) := by rw [hlor]
+  push_cast at hcast
+  rw [hxv, hyv, ← hxor, hzv] at hcast
+  have h2a : (2 : ZMod babyBear) * a = 2 * ((Nat.lor x.val y.val : ℕ) : ZMod babyBear) := by
+    linear_combination hcast - heq
+  have h2inv : (1006632961 : ZMod babyBear) * 2 = 1 := by decide
+  have ha : a = ((Nat.lor x.val y.val : ℕ) : ZMod babyBear) := by
+    linear_combination (1006632961 : ZMod babyBear) * h2a
+      - (a - ((Nat.lor x.val y.val : ℕ) : ZMod babyBear)) * h2inv
+  show a.val < 256
+  rw [ha, ZMod.val_natCast_of_lt (lt_trans hlorLt (by norm_num [babyBear]))]
+  exact hlorLt
+
+/-- **`x AND y` is a byte**: `2a = x + y - (x xor y)` forces `a = x &&& y`, dually to
+    `isByte_of_orEq`. -/
+theorem isByte_of_andEq {x y z a : ZMod babyBear} (hx : isByte x) (hy : isByte y)
+    (hxor : z.val = Nat.xor x.val y.val) (heq : z = x + y - 2 * a) : isByte a := by
+  obtain ⟨hland, -, -, hlandLt⟩ := bitwiseByteIdentities x.val hx y.val hy
+  have hxv : ((x.val : ℕ) : ZMod babyBear) = x := by simp
+  have hyv : ((y.val : ℕ) : ZMod babyBear) = y := by simp
+  have hzv : ((z.val : ℕ) : ZMod babyBear) = z := by simp
+  have hcast : ((x.val + y.val : ℕ) : ZMod babyBear)
+      = ((Nat.xor x.val y.val + 2 * Nat.land x.val y.val : ℕ) : ZMod babyBear) := by rw [hland]
+  push_cast at hcast
+  rw [hxv, hyv, ← hxor, hzv] at hcast
+  have h2a : (2 : ZMod babyBear) * a = 2 * ((Nat.land x.val y.val : ℕ) : ZMod babyBear) := by
+    linear_combination heq + hcast
+  have h2inv : (1006632961 : ZMod babyBear) * 2 = 1 := by decide
+  have ha : a = ((Nat.land x.val y.val : ℕ) : ZMod babyBear) := by
+    linear_combination (1006632961 : ZMod babyBear) * h2a
+      - (a - ((Nat.land x.val y.val : ℕ) : ZMod babyBear)) * h2inv
+  show a.val < 256
+  rw [ha, ZMod.val_natCast_of_lt (lt_trans hlandLt (by norm_num [babyBear]))]
+  exact hlandLt
+
+/-- **A boolean-constrained field element is `0` or `1`.** `babyBear` is prime (`norm_num`'s
+    primality extension, not the plain `decide` the rest of this file uses — trial division to
+    `√babyBear` is well past `decide`'s reach), so `ZMod babyBear` has no zero divisors and
+    `x * (x - 1) = 0` splits. Kept separate from `aluOneHot` so the `Fact (Nat.Prime babyBear)`
+    instance doesn't linger in scope for that theorem's closing `decide`. -/
+theorem zmod_boolElim {x : ZMod babyBear} (hx : x * (x + 2013265920 * 1) = 0) :
+    x = 0 ∨ x = 1 := by
+  haveI : Fact (Nat.Prime babyBear) := ⟨by norm_num [babyBear]⟩
+  rw [babyBear_negOne] at hx
+  rcases mul_eq_zero.mp (show x * (x - 1) = 0 by linear_combination hx) with h | h
+  · exact Or.inl h
+  · exact Or.inr (by linear_combination h)
+
+/-- **One-hot decomposition of a 5-way opcode selector.** Booleanity plus a sum of `1` forces
+    exactly one flag to be `1`; `decide` closes each of the `32` literal cases the case split
+    produces (`27` contradict the sum, `5` match a disjunct). -/
+theorem aluOneHot {add sub xorf orf andf : ZMod babyBear}
+    (hsum : add + sub + xorf + orf + andf = 1)
+    (hb_add : add * (add + 2013265920 * 1) = 0)
+    (hb_sub : sub * (sub + 2013265920 * 1) = 0)
+    (hb_xor : xorf * (xorf + 2013265920 * 1) = 0)
+    (hb_or : orf * (orf + 2013265920 * 1) = 0)
+    (hb_and : andf * (andf + 2013265920 * 1) = 0) :
+    (add = 1 ∧ sub = 0 ∧ xorf = 0 ∧ orf = 0 ∧ andf = 0) ∨
+    (add = 0 ∧ sub = 1 ∧ xorf = 0 ∧ orf = 0 ∧ andf = 0) ∨
+    (add = 0 ∧ sub = 0 ∧ xorf = 1 ∧ orf = 0 ∧ andf = 0) ∨
+    (add = 0 ∧ sub = 0 ∧ xorf = 0 ∧ orf = 1 ∧ andf = 0) ∨
+    (add = 0 ∧ sub = 0 ∧ xorf = 0 ∧ orf = 0 ∧ andf = 1) := by
+  rcases zmod_boolElim hb_add with ha | ha <;> rcases zmod_boolElim hb_sub with hs | hs <;>
+    rcases zmod_boolElim hb_xor with hx | hx <;> rcases zmod_boolElim hb_or with ho | ho <;>
+    rcases zmod_boolElim hb_and with hn | hn <;>
+    subst ha <;> subst hs <;> subst hx <;> subst ho <;> subst hn <;>
+    revert hsum <;> decide
+
+/-- **The ALU result of one limb is a byte, whichever of the five ops is active.** `add`/`sub`
+    put it directly at the table's first position; `xor` puts it at the table's output; `or`/`and`
+    recover it from the output via `isByte_of_orEq`/`isByte_of_andEq`. -/
+theorem isByte_of_aluLimb {add sub xorf orf andf a b c x y z : ZMod babyBear}
+    (hcase : (add = 1 ∧ sub = 0 ∧ xorf = 0 ∧ orf = 0 ∧ andf = 0) ∨
+             (add = 0 ∧ sub = 1 ∧ xorf = 0 ∧ orf = 0 ∧ andf = 0) ∨
+             (add = 0 ∧ sub = 0 ∧ xorf = 1 ∧ orf = 0 ∧ andf = 0) ∨
+             (add = 0 ∧ sub = 0 ∧ xorf = 0 ∧ orf = 1 ∧ andf = 0) ∨
+             (add = 0 ∧ sub = 0 ∧ xorf = 0 ∧ orf = 0 ∧ andf = 1))
+    (hbx : isByte x) (hby : isByte y) (hxy : z.val = Nat.xor x.val y.val)
+    (hx : x = (1 + 2013265920 * (xorf + orf + andf)) * a + (xorf + orf + andf) * b)
+    (hy : y = (1 + 2013265920 * (xorf + orf + andf)) * a + (xorf + orf + andf) * c)
+    (hz : z = xorf * a + orf * (2 * a + 2013265920 * b + 2013265920 * c)
+              + andf * (b + c + 2013265920 * (2 * a))) :
+    isByte a := by
+  rw [babyBear_negOne] at hx hy hz
+  rcases hcase with ⟨e1,e2,e3,e4,e5⟩|⟨e1,e2,e3,e4,e5⟩|⟨e1,e2,e3,e4,e5⟩|⟨e1,e2,e3,e4,e5⟩|⟨e1,e2,e3,e4,e5⟩ <;>
+    subst e1 <;> subst e2 <;> subst e3 <;> subst e4 <;> subst e5
+  · exact (show x = a by linear_combination hx) ▸ hbx
+  · exact (show x = a by linear_combination hx) ▸ hbx
+  · exact isByte_of_xorEq hbx hby hxy (by linear_combination hz)
+  · exact isByte_of_orEq hbx hby hxy (by rw [hx, hy]; linear_combination hz)
+  · exact isByte_of_andEq hbx hby hxy (by rw [hx, hy]; linear_combination hz)
+
+/-- Instr `0`'s opcode selector is one-hot, from its booleanity constraints and `unoptPins`'s
+    flag-sum pin. -/
+theorem unoptAluCase0 {asg : ChipAssignment babyBear}
+    (halg : apc2105000UnoptChained.satisfiesAlgebraic asg) :
+    (asg ⟨"opcode_add_flag_0", some 31⟩ = 1 ∧ asg ⟨"opcode_sub_flag_0", some 32⟩ = 0 ∧
+        asg ⟨"opcode_xor_flag_0", some 33⟩ = 0 ∧ asg ⟨"opcode_or_flag_0", some 34⟩ = 0 ∧
+        asg ⟨"opcode_and_flag_0", some 35⟩ = 0) ∨
+    (asg ⟨"opcode_add_flag_0", some 31⟩ = 0 ∧ asg ⟨"opcode_sub_flag_0", some 32⟩ = 1 ∧
+        asg ⟨"opcode_xor_flag_0", some 33⟩ = 0 ∧ asg ⟨"opcode_or_flag_0", some 34⟩ = 0 ∧
+        asg ⟨"opcode_and_flag_0", some 35⟩ = 0) ∨
+    (asg ⟨"opcode_add_flag_0", some 31⟩ = 0 ∧ asg ⟨"opcode_sub_flag_0", some 32⟩ = 0 ∧
+        asg ⟨"opcode_xor_flag_0", some 33⟩ = 1 ∧ asg ⟨"opcode_or_flag_0", some 34⟩ = 0 ∧
+        asg ⟨"opcode_and_flag_0", some 35⟩ = 0) ∨
+    (asg ⟨"opcode_add_flag_0", some 31⟩ = 0 ∧ asg ⟨"opcode_sub_flag_0", some 32⟩ = 0 ∧
+        asg ⟨"opcode_xor_flag_0", some 33⟩ = 0 ∧ asg ⟨"opcode_or_flag_0", some 34⟩ = 1 ∧
+        asg ⟨"opcode_and_flag_0", some 35⟩ = 0) ∨
+    (asg ⟨"opcode_add_flag_0", some 31⟩ = 0 ∧ asg ⟨"opcode_sub_flag_0", some 32⟩ = 0 ∧
+        asg ⟨"opcode_xor_flag_0", some 33⟩ = 0 ∧ asg ⟨"opcode_or_flag_0", some 34⟩ = 0 ∧
+        asg ⟨"opcode_and_flag_0", some 35⟩ = 1) := by
+  have hb_add := halg
+    (.mul (.var ⟨"opcode_add_flag_0", some 31⟩)
+      (.add (.var ⟨"opcode_add_flag_0", some 31⟩) (.mul (.const 2013265920) (.const 1))))
+    (List.mem_append_left _ (by decide))
+  have hb_sub := halg
+    (.mul (.var ⟨"opcode_sub_flag_0", some 32⟩)
+      (.add (.var ⟨"opcode_sub_flag_0", some 32⟩) (.mul (.const 2013265920) (.const 1))))
+    (List.mem_append_left _ (by decide))
+  have hb_xor := halg
+    (.mul (.var ⟨"opcode_xor_flag_0", some 33⟩)
+      (.add (.var ⟨"opcode_xor_flag_0", some 33⟩) (.mul (.const 2013265920) (.const 1))))
+    (List.mem_append_left _ (by decide))
+  have hb_or := halg
+    (.mul (.var ⟨"opcode_or_flag_0", some 34⟩)
+      (.add (.var ⟨"opcode_or_flag_0", some 34⟩) (.mul (.const 2013265920) (.const 1))))
+    (List.mem_append_left _ (by decide))
+  have hb_and := halg
+    (.mul (.var ⟨"opcode_and_flag_0", some 35⟩)
+      (.add (.var ⟨"opcode_and_flag_0", some 35⟩) (.mul (.const 2013265920) (.const 1))))
+    (List.mem_append_left _ (by decide))
+  simp only [Expression.eval] at hb_add hb_sub hb_xor hb_or hb_and
+  exact aluOneHot (unoptPins halg).1 hb_add hb_sub hb_xor hb_or hb_and
+
+/-- Instr `1`'s opcode selector is one-hot. -/
+theorem unoptAluCase1 {asg : ChipAssignment babyBear}
+    (halg : apc2105000UnoptChained.satisfiesAlgebraic asg) :
+    (asg ⟨"opcode_add_flag_1", some 67⟩ = 1 ∧ asg ⟨"opcode_sub_flag_1", some 68⟩ = 0 ∧
+        asg ⟨"opcode_xor_flag_1", some 69⟩ = 0 ∧ asg ⟨"opcode_or_flag_1", some 70⟩ = 0 ∧
+        asg ⟨"opcode_and_flag_1", some 71⟩ = 0) ∨
+    (asg ⟨"opcode_add_flag_1", some 67⟩ = 0 ∧ asg ⟨"opcode_sub_flag_1", some 68⟩ = 1 ∧
+        asg ⟨"opcode_xor_flag_1", some 69⟩ = 0 ∧ asg ⟨"opcode_or_flag_1", some 70⟩ = 0 ∧
+        asg ⟨"opcode_and_flag_1", some 71⟩ = 0) ∨
+    (asg ⟨"opcode_add_flag_1", some 67⟩ = 0 ∧ asg ⟨"opcode_sub_flag_1", some 68⟩ = 0 ∧
+        asg ⟨"opcode_xor_flag_1", some 69⟩ = 1 ∧ asg ⟨"opcode_or_flag_1", some 70⟩ = 0 ∧
+        asg ⟨"opcode_and_flag_1", some 71⟩ = 0) ∨
+    (asg ⟨"opcode_add_flag_1", some 67⟩ = 0 ∧ asg ⟨"opcode_sub_flag_1", some 68⟩ = 0 ∧
+        asg ⟨"opcode_xor_flag_1", some 69⟩ = 0 ∧ asg ⟨"opcode_or_flag_1", some 70⟩ = 1 ∧
+        asg ⟨"opcode_and_flag_1", some 71⟩ = 0) ∨
+    (asg ⟨"opcode_add_flag_1", some 67⟩ = 0 ∧ asg ⟨"opcode_sub_flag_1", some 68⟩ = 0 ∧
+        asg ⟨"opcode_xor_flag_1", some 69⟩ = 0 ∧ asg ⟨"opcode_or_flag_1", some 70⟩ = 0 ∧
+        asg ⟨"opcode_and_flag_1", some 71⟩ = 1) := by
+  have hb_add := halg
+    (.mul (.var ⟨"opcode_add_flag_1", some 67⟩)
+      (.add (.var ⟨"opcode_add_flag_1", some 67⟩) (.mul (.const 2013265920) (.const 1))))
+    (List.mem_append_left _ (by decide))
+  have hb_sub := halg
+    (.mul (.var ⟨"opcode_sub_flag_1", some 68⟩)
+      (.add (.var ⟨"opcode_sub_flag_1", some 68⟩) (.mul (.const 2013265920) (.const 1))))
+    (List.mem_append_left _ (by decide))
+  have hb_xor := halg
+    (.mul (.var ⟨"opcode_xor_flag_1", some 69⟩)
+      (.add (.var ⟨"opcode_xor_flag_1", some 69⟩) (.mul (.const 2013265920) (.const 1))))
+    (List.mem_append_left _ (by decide))
+  have hb_or := halg
+    (.mul (.var ⟨"opcode_or_flag_1", some 70⟩)
+      (.add (.var ⟨"opcode_or_flag_1", some 70⟩) (.mul (.const 2013265920) (.const 1))))
+    (List.mem_append_left _ (by decide))
+  have hb_and := halg
+    (.mul (.var ⟨"opcode_and_flag_1", some 71⟩)
+      (.add (.var ⟨"opcode_and_flag_1", some 71⟩) (.mul (.const 2013265920) (.const 1))))
+    (List.mem_append_left _ (by decide))
+  simp only [Expression.eval] at hb_add hb_sub hb_xor hb_or hb_and
+  exact aluOneHot (unoptPins halg).2.1 hb_add hb_sub hb_xor hb_or hb_and
+
+/-- Instr `2`'s opcode selector is one-hot. -/
+theorem unoptAluCase2 {asg : ChipAssignment babyBear}
+    (halg : apc2105000UnoptChained.satisfiesAlgebraic asg) :
+    (asg ⟨"opcode_add_flag_2", some 103⟩ = 1 ∧ asg ⟨"opcode_sub_flag_2", some 104⟩ = 0 ∧
+        asg ⟨"opcode_xor_flag_2", some 105⟩ = 0 ∧ asg ⟨"opcode_or_flag_2", some 106⟩ = 0 ∧
+        asg ⟨"opcode_and_flag_2", some 107⟩ = 0) ∨
+    (asg ⟨"opcode_add_flag_2", some 103⟩ = 0 ∧ asg ⟨"opcode_sub_flag_2", some 104⟩ = 1 ∧
+        asg ⟨"opcode_xor_flag_2", some 105⟩ = 0 ∧ asg ⟨"opcode_or_flag_2", some 106⟩ = 0 ∧
+        asg ⟨"opcode_and_flag_2", some 107⟩ = 0) ∨
+    (asg ⟨"opcode_add_flag_2", some 103⟩ = 0 ∧ asg ⟨"opcode_sub_flag_2", some 104⟩ = 0 ∧
+        asg ⟨"opcode_xor_flag_2", some 105⟩ = 1 ∧ asg ⟨"opcode_or_flag_2", some 106⟩ = 0 ∧
+        asg ⟨"opcode_and_flag_2", some 107⟩ = 0) ∨
+    (asg ⟨"opcode_add_flag_2", some 103⟩ = 0 ∧ asg ⟨"opcode_sub_flag_2", some 104⟩ = 0 ∧
+        asg ⟨"opcode_xor_flag_2", some 105⟩ = 0 ∧ asg ⟨"opcode_or_flag_2", some 106⟩ = 1 ∧
+        asg ⟨"opcode_and_flag_2", some 107⟩ = 0) ∨
+    (asg ⟨"opcode_add_flag_2", some 103⟩ = 0 ∧ asg ⟨"opcode_sub_flag_2", some 104⟩ = 0 ∧
+        asg ⟨"opcode_xor_flag_2", some 105⟩ = 0 ∧ asg ⟨"opcode_or_flag_2", some 106⟩ = 0 ∧
+        asg ⟨"opcode_and_flag_2", some 107⟩ = 1) := by
+  have hb_add := halg
+    (.mul (.var ⟨"opcode_add_flag_2", some 103⟩)
+      (.add (.var ⟨"opcode_add_flag_2", some 103⟩) (.mul (.const 2013265920) (.const 1))))
+    (List.mem_append_left _ (by decide))
+  have hb_sub := halg
+    (.mul (.var ⟨"opcode_sub_flag_2", some 104⟩)
+      (.add (.var ⟨"opcode_sub_flag_2", some 104⟩) (.mul (.const 2013265920) (.const 1))))
+    (List.mem_append_left _ (by decide))
+  have hb_xor := halg
+    (.mul (.var ⟨"opcode_xor_flag_2", some 105⟩)
+      (.add (.var ⟨"opcode_xor_flag_2", some 105⟩) (.mul (.const 2013265920) (.const 1))))
+    (List.mem_append_left _ (by decide))
+  have hb_or := halg
+    (.mul (.var ⟨"opcode_or_flag_2", some 106⟩)
+      (.add (.var ⟨"opcode_or_flag_2", some 106⟩) (.mul (.const 2013265920) (.const 1))))
+    (List.mem_append_left _ (by decide))
+  have hb_and := halg
+    (.mul (.var ⟨"opcode_and_flag_2", some 107⟩)
+      (.add (.var ⟨"opcode_and_flag_2", some 107⟩) (.mul (.const 2013265920) (.const 1))))
+    (List.mem_append_left _ (by decide))
+  simp only [Expression.eval] at hb_add hb_sub hb_xor hb_or hb_and
+  exact aluOneHot (unoptPins halg).2.2.1 hb_add hb_sub hb_xor hb_or hb_and
+
+set_option maxRecDepth 32000 in
+/-- **Instr `0`'s write is byte-valued**, whichever ALU op fired: each limb's own `bitwiseLookup`
+    row (positions `0`–`3`) plus `unoptAluCase0`'s one-hot split feeds `isByte_of_aluLimb`. -/
+theorem unoptWriteIsByte_0 {asg : ChipAssignment babyBear}
+    (halg : apc2105000UnoptChained.satisfiesAlgebraic asg)
+    (hacc : apc2105000UnoptChained.satisfiesStateless apcRules asg) :
+    isByte (asg ⟨"a__0_0", some 19⟩) ∧ isByte (asg ⟨"a__1_0", some 20⟩) ∧
+      isByte (asg ⟨"a__2_0", some 21⟩) ∧ isByte (asg ⟨"a__3_0", some 22⟩) := by
+  have hgate := (unoptPins halg).1
+  have hcase := unoptAluCase0 halg
+  have h0 := accepts_congr_mult6 (m2 := 1)
+    (unoptAccepts hacc 0 (by decide) _ rfl rfl (sum5_eq1_ne_zero hgate))
+  have h1 := accepts_congr_mult6 (m2 := 1)
+    (unoptAccepts hacc 1 (by decide) _ rfl rfl (sum5_eq1_ne_zero hgate))
+  have h2 := accepts_congr_mult6 (m2 := 1)
+    (unoptAccepts hacc 2 (by decide) _ rfl rfl (sum5_eq1_ne_zero hgate))
+  have h3 := accepts_congr_mult6 (m2 := 1)
+    (unoptAccepts hacc 3 (by decide) _ rfl rfl (sum5_eq1_ne_zero hgate))
+  simp only [Expression.eval] at h0 h1 h2 h3
+  obtain ⟨hbx0, hby0, hxy0⟩ := bitwiseTable_extract h0
+  obtain ⟨hbx1, hby1, hxy1⟩ := bitwiseTable_extract h1
+  obtain ⟨hbx2, hby2, hxy2⟩ := bitwiseTable_extract h2
+  obtain ⟨hbx3, hby3, hxy3⟩ := bitwiseTable_extract h3
+  exact ⟨isByte_of_aluLimb hcase hbx0 hby0 hxy0 rfl rfl rfl,
+    isByte_of_aluLimb hcase hbx1 hby1 hxy1 rfl rfl rfl,
+    isByte_of_aluLimb hcase hbx2 hby2 hxy2 rfl rfl rfl,
+    isByte_of_aluLimb hcase hbx3 hby3 hxy3 rfl rfl rfl⟩
+
+set_option maxRecDepth 32000 in
+/-- **Instr `1`'s write is byte-valued.** -/
+theorem unoptWriteIsByte_1 {asg : ChipAssignment babyBear}
+    (halg : apc2105000UnoptChained.satisfiesAlgebraic asg)
+    (hacc : apc2105000UnoptChained.satisfiesStateless apcRules asg) :
+    isByte (asg ⟨"a__0_1", some 55⟩) ∧ isByte (asg ⟨"a__1_1", some 56⟩) ∧
+      isByte (asg ⟨"a__2_1", some 57⟩) ∧ isByte (asg ⟨"a__3_1", some 58⟩) := by
+  have hgate := (unoptPins halg).2.1
+  have hcase := unoptAluCase1 halg
+  have h0 := accepts_congr_mult6 (m2 := 1)
+    (unoptAccepts hacc 20 (by decide) _ rfl rfl (sum5_eq1_ne_zero hgate))
+  have h1 := accepts_congr_mult6 (m2 := 1)
+    (unoptAccepts hacc 21 (by decide) _ rfl rfl (sum5_eq1_ne_zero hgate))
+  have h2 := accepts_congr_mult6 (m2 := 1)
+    (unoptAccepts hacc 22 (by decide) _ rfl rfl (sum5_eq1_ne_zero hgate))
+  have h3 := accepts_congr_mult6 (m2 := 1)
+    (unoptAccepts hacc 23 (by decide) _ rfl rfl (sum5_eq1_ne_zero hgate))
+  simp only [Expression.eval] at h0 h1 h2 h3
+  obtain ⟨hbx0, hby0, hxy0⟩ := bitwiseTable_extract h0
+  obtain ⟨hbx1, hby1, hxy1⟩ := bitwiseTable_extract h1
+  obtain ⟨hbx2, hby2, hxy2⟩ := bitwiseTable_extract h2
+  obtain ⟨hbx3, hby3, hxy3⟩ := bitwiseTable_extract h3
+  exact ⟨isByte_of_aluLimb hcase hbx0 hby0 hxy0 rfl rfl rfl,
+    isByte_of_aluLimb hcase hbx1 hby1 hxy1 rfl rfl rfl,
+    isByte_of_aluLimb hcase hbx2 hby2 hxy2 rfl rfl rfl,
+    isByte_of_aluLimb hcase hbx3 hby3 hxy3 rfl rfl rfl⟩
+
+set_option maxRecDepth 32000 in
+/-- **Instr `2`'s write is byte-valued.** -/
+theorem unoptWriteIsByte_2 {asg : ChipAssignment babyBear}
+    (halg : apc2105000UnoptChained.satisfiesAlgebraic asg)
+    (hacc : apc2105000UnoptChained.satisfiesStateless apcRules asg) :
+    isByte (asg ⟨"a__0_2", some 91⟩) ∧ isByte (asg ⟨"a__1_2", some 92⟩) ∧
+      isByte (asg ⟨"a__2_2", some 93⟩) ∧ isByte (asg ⟨"a__3_2", some 94⟩) := by
+  have hgate := (unoptPins halg).2.2.1
+  have hcase := unoptAluCase2 halg
+  have h0 := accepts_congr_mult6 (m2 := 1)
+    (unoptAccepts hacc 40 (by decide) _ rfl rfl (sum5_eq1_ne_zero hgate))
+  have h1 := accepts_congr_mult6 (m2 := 1)
+    (unoptAccepts hacc 41 (by decide) _ rfl rfl (sum5_eq1_ne_zero hgate))
+  have h2 := accepts_congr_mult6 (m2 := 1)
+    (unoptAccepts hacc 42 (by decide) _ rfl rfl (sum5_eq1_ne_zero hgate))
+  have h3 := accepts_congr_mult6 (m2 := 1)
+    (unoptAccepts hacc 43 (by decide) _ rfl rfl (sum5_eq1_ne_zero hgate))
+  simp only [Expression.eval] at h0 h1 h2 h3
+  obtain ⟨hbx0, hby0, hxy0⟩ := bitwiseTable_extract h0
+  obtain ⟨hbx1, hby1, hxy1⟩ := bitwiseTable_extract h1
+  obtain ⟨hbx2, hby2, hxy2⟩ := bitwiseTable_extract h2
+  obtain ⟨hbx3, hby3, hxy3⟩ := bitwiseTable_extract h3
+  exact ⟨isByte_of_aluLimb hcase hbx0 hby0 hxy0 rfl rfl rfl,
+    isByte_of_aluLimb hcase hbx1 hby1 hxy1 rfl rfl rfl,
+    isByte_of_aluLimb hcase hbx2 hby2 hxy2 rfl rfl rfl,
+    isByte_of_aluLimb hcase hbx3 hby3 hxy3 rfl rfl rfl⟩
+
+/-- The variables `apc2105000UnoptChained`'s echoed memory sends and their preceding receives
+    mention: each instruction's `rs1` pointer, the four limbs it reads back, its own base
+    timestamp and lookback record, and (for the branch) the same for `rs2`. -/
+def unoptByteVars : List Variable :=
+  [⟨"rs1_ptr_0", some 3⟩, ⟨"b__0_0", some 23⟩, ⟨"b__1_0", some 24⟩, ⟨"b__2_0", some 25⟩,
+   ⟨"b__3_0", some 26⟩, ⟨"reads_aux__0__base__prev_timestamp_0", some 6⟩,
+   ⟨"from_state__timestamp_0", some 1⟩,
+   ⟨"rs1_ptr_1", some 39⟩, ⟨"b__0_1", some 59⟩, ⟨"b__1_1", some 60⟩, ⟨"b__2_1", some 61⟩,
+   ⟨"b__3_1", some 62⟩, ⟨"reads_aux__0__base__prev_timestamp_1", some 42⟩,
+   ⟨"from_state__timestamp_1", some 37⟩,
+   ⟨"rs1_ptr_2", some 75⟩, ⟨"b__0_2", some 95⟩, ⟨"b__1_2", some 96⟩, ⟨"b__2_2", some 97⟩,
+   ⟨"b__3_2", some 98⟩, ⟨"reads_aux__0__base__prev_timestamp_2", some 78⟩,
+   ⟨"from_state__timestamp_2", some 73⟩,
+   ⟨"rs1_ptr_3", some 110⟩, ⟨"a__0_3", some 118⟩, ⟨"a__1_3", some 119⟩, ⟨"a__2_3", some 120⟩,
+   ⟨"a__3_3", some 121⟩, ⟨"reads_aux__0__base__prev_timestamp_3", some 112⟩,
+   ⟨"from_state__timestamp_3", some 109⟩,
+   ⟨"rs2_ptr_3", some 111⟩, ⟨"b__0_3", some 122⟩, ⟨"b__1_3", some 123⟩, ⟨"b__2_3", some 124⟩,
+   ⟨"b__3_3", some 125⟩, ⟨"reads_aux__1__base__prev_timestamp_3", some 115⟩]
+
+/-- One fused instruction's twenty stateful/lookup interactions: four `bitwiseLookup` rows for the
+    ALU result's limbs, a range check for the immediate, the `rs1` gadget and its receive/echo, the
+    (structurally inactive, since `rs2_as_i = 0`) `rs2` gadget and receive/send, the write gadget
+    and its receive, the write itself (`external` — the ALU result, justified by the caller), the
+    register-file lookup, and the bridge receive/send. -/
+def unoptInstrWitnesses (base : ℕ) : List ByteWitness :=
+  [.notSend, .notSend, .notSend, .notSend, .notSend, .notSend, .notSend, .notSend,
+   .echo (base + 7), .notSend, .notSend, .notSend, .notSend, .notSend, .notSend, .notSend,
+   .external, .notSend, .notSend, .notMemory]
+
+/-- The branch instruction's eleven: the `rs1` and `rs2` gadgets and their receive/echo, the
+    register-file lookup, and the bridge receive/send — no write, so no `external`. -/
+def unoptBranchWitnesses (base : ℕ) : List ByteWitness :=
+  [.notSend, .notSend, .notSend, .echo (base + 2), .notSend, .notSend, .notSend,
+   .echo (base + 6), .notSend, .notSend, .notMemory]
+
+/-- The witness for each of `apc2105000UnoptChained`'s `71` interactions: three fused-instruction
+    blocks of `20` (indices `0`, `20`, `40`) and the branch's `11` (index `60`). -/
+def unoptWitnesses : List ByteWitness :=
+  unoptInstrWitnesses 0 ++ unoptInstrWitnesses 20 ++ unoptInstrWitnesses 40 ++
+    unoptBranchWitnesses 60
+
+theorem unoptByteCheck :
+    byteCheckAll unoptByteVars unoptPinRules apc2105000UnoptChained.busInteractions unoptWitnesses
+      = true := by decide
+
+/-- **`StepLayout.sendsOk`, by static analysis.** `byteCheckAll` accounts for every echoed read
+    and every interaction that isn't a genuine memory send; the three ALU writes are left to the
+    caller, closed by `unoptWriteIsByte_0/1/2`. -/
+theorem apc2105000UnoptChained_sendsOk {asg : ChipAssignment babyBear}
+    (halg : apc2105000UnoptChained.satisfiesAlgebraic asg)
+    (hacc : apc2105000UnoptChained.satisfiesStateless apcRules asg) :
+    ∀ i : Fin apc2105000UnoptChained.busInteractions.length,
+      apc2105000UnoptChained.statefulSend apcRules asg i →
+      (∀ j : Fin apc2105000UnoptChained.busInteractions.length, j < i →
+        apc2105000UnoptChained.activeStateful apcRules asg j →
+        apcRules.payloadOk (apc2105000UnoptChained.msgAt asg j)) →
+      apcRules.payloadOk (apc2105000UnoptChained.msgAt asg i) := by
+  haveI : Fact (1 < babyBear) := ⟨by decide⟩
+  refine byteCheck_sendsOk (unoptPinRules_hold asg halg) unoptByteCheck ?_
+  intro i hi hsend hlow
+  fin_cases i
+  all_goals try exact absurd hi (by decide)
+  · obtain ⟨h0, h1, h2, h3⟩ := unoptWriteIsByte_0 halg hacc
+    show openVmPayloadOk defaultBusMap ((1 : ℕ), [(1 : ZMod babyBear), asg ⟨"rd_ptr_0", some 2⟩,
+      asg ⟨"a__0_0", some 19⟩, asg ⟨"a__1_0", some 20⟩, asg ⟨"a__2_0", some 21⟩,
+      asg ⟨"a__3_0", some 22⟩, asg ⟨"from_state__timestamp_0", some 1⟩ + 2])
+    exact (openVmPayloadOk_mem_iff _ _ _ _ _ _).mpr ⟨h0, h1, h2, h3⟩
+  · obtain ⟨h0, h1, h2, h3⟩ := unoptWriteIsByte_1 halg hacc
+    show openVmPayloadOk defaultBusMap ((1 : ℕ), [(1 : ZMod babyBear), asg ⟨"rd_ptr_1", some 38⟩,
+      asg ⟨"a__0_1", some 55⟩, asg ⟨"a__1_1", some 56⟩, asg ⟨"a__2_1", some 57⟩,
+      asg ⟨"a__3_1", some 58⟩, asg ⟨"from_state__timestamp_1", some 37⟩ + 2])
+    exact (openVmPayloadOk_mem_iff _ _ _ _ _ _).mpr ⟨h0, h1, h2, h3⟩
+  · obtain ⟨h0, h1, h2, h3⟩ := unoptWriteIsByte_2 halg hacc
+    show openVmPayloadOk defaultBusMap ((1 : ℕ), [(1 : ZMod babyBear), asg ⟨"rd_ptr_2", some 74⟩,
+      asg ⟨"a__0_2", some 91⟩, asg ⟨"a__1_2", some 92⟩, asg ⟨"a__2_2", some 93⟩,
+      asg ⟨"a__3_2", some 94⟩, asg ⟨"from_state__timestamp_2", some 73⟩ + 2])
+    exact (openVmPayloadOk_mem_iff _ _ _ _ _ _).mpr ⟨h0, h1, h2, h3⟩
