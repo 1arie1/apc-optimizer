@@ -2,11 +2,6 @@ import ApcOptimizer.VmSpec.Basic
 import ApcOptimizer.VmSpec.Legal
 import ApcOptimizer.VmSpec.OpenVm
 import ApcOptimizer.VmSpec.Theorems
-import ApcOptimizer.VmSpec.Audit.OpenVmLegalAudit
-import ApcOptimizer.VmSpec.Audit.SendOnlyPolarity
-import ApcOptimizer.VmSpec.Audit.LegalityPreservation
-import ApcOptimizer.VmSpec.Audit.SoundnessGivesLegality
-import ApcOptimizer.VmSpec.Audit.RealApcLegality
 import ApcOptimizer.VmSpec.Implementation.Rank
 import ApcOptimizer.VmSpec.Implementation.Counting
 import ApcOptimizer.VmSpec.Implementation.Realizes
@@ -15,6 +10,12 @@ import ApcOptimizer.VmSpec.Implementation.OpenVmConnection
 import ApcOptimizer.VmSpec.Implementation.Chain
 import ApcOptimizer.VmSpec.Implementation.OpenVmChain
 import ApcOptimizer.VmSpec.Implementation.Validation
+
+-- `VmSpec/Audit/` (see below) is deliberately not imported here: `Audit/RealApcLegality.lean`
+-- alone takes ~5 minutes to compile, and nothing in this file's own claims depends on it -- see
+-- "files that audit the audit surface" below. Omitting the import keeps `lake build
+-- ApcOptimizer.VmSpec` fast without disabling `Audit/`: build it explicitly, e.g. `lake build
+-- ApcOptimizer.VmSpec.Audit.RealApcLegality`.
 
 /-! # The VM-level correctness spec
 
@@ -53,7 +54,8 @@ import ApcOptimizer.VmSpec.Implementation.Validation
     candidate circuit satisfies them, not an ingredient of the soundness argument. It still lives
     directly under `VmSpec/`, so the directory rule still applies: a mistake here is a mistake in
     what gets audited, just not a mistake that can make a theorem *wrong*, only vacuous or (for a
-    checker) unsound.
+    checker) unsound. This file does not import it (see the note above the imports) — that is a
+    build-time exclusion, not a claim it needs no audit.
 
     For a checker file, that means only its *exposed soundness statement* needs auditing — that a
     `true` result from some `Bool`-valued function really does give the legality clause it claims
