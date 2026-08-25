@@ -7,8 +7,7 @@ set_option autoImplicit false
     Defines a property `Circuit.legalGuest` of an individual circuit, and **not** with respect to a
     concrete assignemnt.
 
-    Everything here is stated against `GuestBusRules`, not `Spec.lean`'s `BusSemantics`. That is
-    deliberate: `BusSemantics` carries a fourth field, `admissible`, which is hard to audit. -/
+    Everything here is stated against `GuestBusRules`, not `Spec.lean`'s `BusSemantics`. -/
 
 variable {p : ℕ}
 
@@ -29,11 +28,7 @@ structure GuestBusRules (p : ℕ) where
   memBusId : Nat
   /-- How to get the timestamp for a memory access. -/
   getTimestamp : BusMessage p → ZMod p
-  /-- Off the memory bus, a stateful message's payload carries no invariant at all — `payloadOk`
-      is the memory-byte invariant specifically, not a general property of every stateful bus.
-      This is what lets `StepLayout.memOrdered`/`memSendsOk` restrict their reach to the memory
-      bus without losing anything: an execution-bridge (or other stateful, non-memory) message is
-      `payloadOk` unconditionally. -/
+  /-- payloadOk must only constrain the memory bus. For other it must be trivially true. -/
   memPayloadOnly : ∀ m : BusMessage p, isStateful m.1 = true → m.1 ≠ memBusId → payloadOk m
 
 /-- Whether a circuit's **algebraic** constraints alone force property `P` on every message it
@@ -150,20 +145,18 @@ structure StepLayout {p : ℕ} (c : Circuit p) (r : GuestBusRules p) (asg : Chip
     m ≠ (r.execBusId, [pcFrom, base]) →
     m ≠ (r.execBusId, [pcTo, base + (d : ZMod p)]) →
       c.allEffects asg m = 0
-  /-- Every active stateful interaction is placed in the step's window. -/
+
+  /-- Every active stateful interaction is placed in the step's window. Used for induction on the
+      next one. -/
   placed : ∀ i : Fin c.busInteractions.length, c.activeStateful r asg i →
     -(maxLookback : ℤ) ≤ place i ∧ place i ≤ (d : ℤ) ∧
       r.getTimestamp (c.msgAt asg i) = base + ((place i : ℤ) : ZMod p)
   /-- Every *memory* send is placed *after* prior *memory* interactions. Restricted to the memory
-      bus, not every stateful one: `memPayloadOnly` already settles the execution bridge (and any
-      other stateful, non-memory bus) unconditionally, so ordering them buys nothing, and — for a
-      circuit chaining several unfused instruction steps — insisting on it would force a total
-      order on messages that are only coincidentally simultaneous in time (two steps' own
-      bookkeeping can legitimately land on the same field timestamp without either justifying the
-      other's memory byte invariant). -/
+      bus, not every stateful one. This couples syntactic position and time, simplifying the next
+      clause. -/
   memOrdered : ∀ i j : Fin c.busInteractions.length, j < i →
     c.memSend r asg i → c.activeMem r asg j → place j < place i
-  /-- Each memory send is Ok, given that prior memory interactions are Ok.
+  /-- Each memory send is Ok, given that (syntactically) prior memory interactions are Ok.
 
       This is the induction that carries the memory-byte invariant: a send is justified by the
       receives that precede it. The induction is on timestamps, but `memOrdered` couples that to

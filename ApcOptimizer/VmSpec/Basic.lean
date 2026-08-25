@@ -31,23 +31,13 @@ set_option autoImplicit false
 
 variable {p : ℕ} [Fact p.Prime]
 
-/-- A host-chip (memory init/final, a lookup table, an input chip, the output
-    chip, ...). It is defined only by the effects it can have and by how many
-    instances it can have. There is no explicit circuit. -/
+/-- A host-chip (memory init/final, a lookup table, an input chip, the output chip, ...). It is
+    defined only by the effects it can have and by how many instances it can have. There is no
+    explicit circuit. -/
 structure HostChip (p : ℕ) where
   /-- Whether this `BusState` can be produced by this host-chip type. -/
   canProduce : BusState p → Prop
-  /-- The most instances of this chip a satisfying assignment may realize
-      (`HostAssignment.satisfies`). Chips a VM has one of — memory init/final, a lookup table, the
-      output chip — take `1`; an input chip, invoked once per chunk pulled, takes the VM's budget.
-
-      Every chip carries a bound, with no way to opt out: the anti-wraparound arithmetic
-      (`Host.noMultOverflow`, `Implementation/Counting.lean`) counts what touches a bus, so an
-      unbounded chip could let a bus balance only modulo `p`.
-
-      Note this bounds instances *above* only. A chip that must be present is not expressible, and
-      does not need to be: a chip whose `canProduce` holds of `0` — every chip of `openVmHost` —
-      contributes nothing when absent, which is the same run as one that instantiates it idle. -/
+  /-- The most instances of this chip a satisfying assignment may realize. -/
   instanceBound : ℕ
 
 /-- A VM's input: a stream of values. -/
@@ -85,13 +75,9 @@ structure Host (p : ℕ) where
 
       Needed to prevent clock overflows, unlocking time-inductive arguments. -/
   maxWindow : ℕ
-  /-- The furthest back in time one guest instance may reach (`Circuit.hasStepLayout`): a memory
-      *receive* names the record an earlier instruction left, so it sits before the step that
-      replaces it, not inside it.
+  /-- The furthest back in time one guest instance may reach. Needed for send->recieve induction.
 
-      For OpenVM this is `2 ^ timestamp_max_bits`, the width `AssertLtSubAir` range-checks a
-      memory access's timestamp difference to — and the same constant as the timestamp ceiling,
-      since the gadget is sized so that any difference between two legitimate timestamps fits. -/
+      For OpenVM this is `2 ^ timestamp_max_bits`, whose check relies on `AssertLtSubAir` -/
   maxLookback : ℕ
   /-- The most bus interactions one guest instance may carry.
 
@@ -106,16 +92,12 @@ structure Host (p : ℕ) where
       *not* a conjunct of `VmSat`, because they are not (and cannot) be checked in constraints.  -/
   legalGuest : Circuit p → Prop
   /-- The `chips` indices that pull the input stream. A list rather than a single index: a VM may
-      read input through several chip types — OpenVM has one per hint opcode — whose instances
-      interleave in one stream, ordered by `getInputTime`. -/
+      read input through several chip types. -/
   inputChips : List (Fin chips.length)
   /-- Map from an input chip instance's effects to its contribution to the input stream, indexed
       by which of `inputChips` produced it (chip types read the stream differently). -/
   getInputChunk : Fin chips.length → BusState p → VmInput p
-  /-- Map from an input chip instance's effects to when it ran. `VmAssignment.effects` orders
-      chunks by this rather than by an instance's arbitrary position in the assignment, which
-      carries no meaning (`VmSat.perm_iff`) — across chip types as well as within one, so the
-      shared clock is what makes the interleaving well defined. -/
+  /-- Map from an input chip instance's effects to when it ran. Input chunks are ordered by this. -/
   getInputTime : Fin chips.length → BusState p → ZMod p
   /-- The `chips` index that is the output chip type (`instanceBound` `1`, so at most one
       instance: see `VmAssignment.effects`). -/
@@ -125,7 +107,7 @@ structure Host (p : ℕ) where
   /-- No timestamp overflow: a run of `maxInstances` instructions, each advancing the clock by less
       than `maxWindow`, does not overflow.
 
-      TODO(AO): why the +1's?
+      TODO(AO): why the +1's? Are these bounds still tight?
        -/
   noTimeOverflow : (maxInstances + 1) * (maxWindow + 1) < p
   /-- No multiplicity overflow: a run of `maxInstances` instructions, each with at most
@@ -152,21 +134,19 @@ abbrev ChipAssignment (p : ℕ) := Variable → ZMod p
 
 /-- A circuit's effects: its net multiplicity contribution to each bus messsage.
 
-    Unlike `Circuit.sideEffects`, this includes all buses, not just stateful
-    ones. -/
+    Unlike `Circuit.sideEffects`, this includes all buses, not just stateful ones. -/
 def Circuit.allEffects (circuit : Circuit p) (assignment : ChipAssignment p) :
     BusState p :=
   fun message =>
     ((circuit.busInteractions.map (fun bi => bi.eval assignment)).filter
       (fun m => decide ((m.busId, m.payload) = message))).map (fun m => m.multiplicity) |>.sum
 
-/-- The guest half of a VM assignment: for each chip *type*, however many algebraic
-    assignments the witness chooses to realize. -/
+/-- The guest half of a VM assignment: for each chip *type*, however many algebraic assignments the
+    witness chooses to realize. -/
 abbrev GuestAssignment (p : ℕ) (guestChips : Guest p) :=
   Fin guestChips.length → List (ChipAssignment p)
 
-/-- The host half of a VM assignment: for each chip type, however many effects
-    it realizes, one per instance. -/
+/-- The host half of a VM assignment: for each chip type, its effects, one per instance. -/
 abbrev HostAssignment (p : ℕ) (host : Host p) := Fin host.chips.length → List (BusState p)
 
 /-- An assignment to a VM. -/
@@ -190,10 +170,7 @@ def GuestAssignment.instanceCount {G : Guest p} (gA : GuestAssignment p G) : ℕ
 def GuestAssignment.satisfiesAlgebraic {G : Guest p} (gA : GuestAssignment p G) : Prop :=
   ∀ t : Fin G.length, ∀ asg ∈ gA t, (G.get t).satisfiesAlgebraic asg
 
-/-- All host assignments are producible and stay inside their chip's instance count.
-
-    The count clause is the host-side half of `VmSat.withinBudget`: OpenVM's trace budget caps
-    every chip in a segment, not only the guest ones. -/
+/-- All host assignments are producible and stay inside their chip's instance count. -/
 structure HostAssignment.satisfies {host : Host p} (hA : HostAssignment p host) : Prop where
   /-- Every realized instance's effect is one its chip can have. -/
   producible : ∀ t : Fin host.chips.length, ∀ effect ∈ hA t, (host.chips.get t).canProduce effect
@@ -205,21 +182,19 @@ def VmAssignment.busEffect {vm : Vm p} (a : VmAssignment p vm) : BusState p :=
   fun message => a.guestAssignments.busEffect message + a.hostAssignment.busEffect message
 
 -- ANCHOR: vmSat
-/-- Whether a VM assignment is satisfying: every realized instance behaves
-    (guests meet alebraic constraints and hosts can produce their effects),
-    every bus balances, and the instance count is small enough.
+/-- Whether a VM assignment is satisfying: every realized instance behaves (guests meet alebraic
+    constraints and hosts can produce their effects), every bus balances, and the instance count is
+    small enough.
 
-    Every conjunct is and must be *directly* checked at runtime on a real OpenVM
-    run. Thus, two other kinds of constraints are explicitly *excluded* here:
+    Every conjunct is and must be *directly* checked at runtime on a real OpenVM run. Thus, two
+    other kinds of constraints are explicitly *excluded* here:
 
     * Requirements on a guest *circuit* — `Host.legalGuest`, the degree bound. These quantify
       over all assignments---not checkable or checked at runtime. These become
-      assumptions/obligations on the optimizer instead (`Host.legalGuests`,
-      `PreservesDegree`).
-    * Invariants that are *consequences* of several chips and/or the host. Such
-      invariants are proved in `Implementation/` and are not part of this
-      specification. For example, rank constraints and byte constraints on
-      writes.
+      assumptions/obligations on the optimizer instead (e.g., `Host.legalGuests`).
+    * Invariants that are *consequences* of several chips and/or the host. Such invariants are
+      proved in `Implementation/` and are not part of this specification. For example, rank
+      constraints and byte constraints on writes.
     -/
 structure VmSat (vm : Vm p) (a : VmAssignment p vm) : Prop where
   /-- Every guest-chip instance's algebraic constraints hold under `a`. -/
@@ -237,31 +212,19 @@ structure VmSat (vm : Vm p) (a : VmAssignment p vm) : Prop where
   withinBudget : a.guestAssignments.instanceCount ≤ vm.host.maxInstances
 -- ANCHOR_END: vmSat
 
-/-- Every instance of every input chip, tagged with the `Host.inputChips` index that realized it —
-    the tag is what lets `Host.getInputChunk` read a chunk off an instance whose chip type is no
-    longer implied by its position. -/
+/-- Every instance of every input chip, tagged with the `Host.inputChips` index that realized it. -/
 def VmAssignment.inputInstances {vm : Vm p} (a : VmAssignment p vm) :
     List (Fin vm.host.chips.length × BusState p) :=
   vm.host.inputChips.flatMap fun i => (a.hostAssignment i).map (fun c => (i, c))
 
 /-- The input-chip instances of a VM assignment, in the order their chunks are read: sorted by
-    `Host.getInputTime`, not by an instance's arbitrary position in the assignment
-    (`VmAssignment.effects`). One sort over every input chip's instances together, so chip types
-    interleave by time rather than concatenating chip by chip. -/
+    `Host.getInputTime`. -/
 def VmAssignment.orderedInputInstances {vm : Vm p} (a : VmAssignment p vm) :
     List (Fin vm.host.chips.length × BusState p) :=
   a.inputInstances.mergeSort
     (fun x y => decide ((vm.host.getInputTime x.1 x.2).val ≤ (vm.host.getInputTime y.1 y.2).val))
 
-/-- The effects of a VM assignment: the input stream its input-chip instances pulled, concatenated
-    in time order (`VmAssignment.orderedInputInstances`), and the array its output-chip instance
-    left behind.
-
-    Total, and so stated of any assignment rather than only a satisfying one. The output chip's
-    `HostChip.instanceBound` is `1`, so the assignment realizes it at most once and there is no
-    other instance the `headD` could be hiding; an assignment that omits it produces whatever
-    `getOutput` reads off the empty contribution, which is the same array a chip that ran and
-    received nothing would leave. -/
+/-- The effects of a VM assignment: input and outputs -/
 def VmAssignment.effects {vm : Vm p} (a : VmAssignment p vm) : VmEffect p :=
   { input := a.orderedInputInstances.flatMap (fun x => vm.host.getInputChunk x.1 x.2),
     output := vm.host.getOutput ((a.hostAssignment vm.host.outputChip).headD 0) }
