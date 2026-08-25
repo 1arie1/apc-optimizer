@@ -116,25 +116,47 @@ def byteCheckOne (vs : List Variable) (rules : List (PinRule p))
             | _, _ => false))
   | .external => true
 
-/-- Check every interaction against its witness. -/
+/-- Check every interaction against its witness, walking both lists together (as `placeCheckAll`
+    does) rather than re-indexing `L`/`W` from scratch at every position. -/
+def byteCheckAllFrom (vs : List Variable) (rules : List (PinRule p))
+    (full : List (BusInteraction (Expression p))) (i : ℕ) :
+    List (BusInteraction (Expression p)) → List ByteWitness → Bool
+  | [], _ => true
+  | _ :: _, [] => false
+  | bi :: lt, w :: wt =>
+    byteCheckOne vs rules full i bi w && byteCheckAllFrom vs rules full (i + 1) lt wt
+
 def byteCheckAll (vs : List Variable) (rules : List (PinRule p))
     (L : List (BusInteraction (Expression p))) (W : List ByteWitness) : Bool :=
-  (List.range L.length).all fun i =>
-    match L[i]?, W[i]? with
-    | some bi, some w => byteCheckOne vs rules L i bi w
-    | _, _ => false
+  byteCheckAllFrom vs rules L 0 L W
+
+theorem byteCheckAllFrom_get {vs : List Variable} {rules : List (PinRule p)}
+    {full : List (BusInteraction (Expression p))} :
+    ∀ {i : ℕ} {L : List (BusInteraction (Expression p))} {W : List ByteWitness},
+      byteCheckAllFrom vs rules full i L W = true →
+      ∀ k : Fin L.length,
+        byteCheckOne vs rules full (i + k.val) (L.get k) (W.getD k.val .notSend) = true := by
+  intro i L
+  induction L generalizing i with
+  | nil => intro W _ k; exact absurd k.isLt (by simp)
+  | cons bi bt ih =>
+    intro W h k
+    match W with
+    | [] => simp only [byteCheckAllFrom] at h; cases h
+    | w :: wt =>
+      simp only [byteCheckAllFrom, Bool.and_eq_true] at h
+      match k with
+      | ⟨0, _⟩ => exact h.1
+      | ⟨j + 1, hj⟩ =>
+        have hk := ih h.2 ⟨j, by simpa using hj⟩
+        have heq : i + (j + 1) = i + 1 + j := by omega
+        rwa [heq]
 
 theorem byteCheckAll_get {vs : List Variable} {rules : List (PinRule p)}
     {L : List (BusInteraction (Expression p))} {W : List ByteWitness}
     (h : byteCheckAll vs rules L W = true) (i : Fin L.length) :
     byteCheckOne vs rules L i.val (L.get i) (W.getD i.val .notSend) = true := by
-  have hall := List.all_eq_true.mp h i.val (List.mem_range.mpr i.isLt)
-  rw [List.getElem?_eq_getElem i.isLt] at hall
-  cases hw : W[i.val]? with
-  | none => rw [hw] at hall; simp at hall
-  | some w =>
-    rw [hw] at hall
-    rwa [List.getD_eq_getElem?_getD, hw]
+  simpa using byteCheckAllFrom_get h i
 
 --------- Soundness ---------
 
