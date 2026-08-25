@@ -151,23 +151,17 @@ structure StepLayout {p : ℕ} (c : Circuit p) (r : GuestBusRules p) (asg : Chip
   placed : ∀ i : Fin c.busInteractions.length, c.activeStateful r asg i →
     -(maxLookback : ℤ) ≤ place i ∧ place i ≤ (d : ℤ) ∧
       r.getTimestamp (c.msgAt asg i) = base + ((place i : ℤ) : ZMod p)
-  /-- Every *memory* send is placed *after* prior *memory* interactions. Restricted to the memory
-      bus, not every stateful one. This couples syntactic position and time, simplifying the next
-      clause. -/
-  memOrdered : ∀ i j : Fin c.busInteractions.length, j < i →
-    c.memSend r asg i → c.activeMem r asg j → place j < place i
-  /-- Each memory send is Ok, given that (syntactically) prior memory interactions are Ok.
+  /-- Each memory send is Ok, given that every earlier-*placed* memory interaction is Ok.
 
-      This is the induction that carries the memory-byte invariant: a send is justified by the
-      receives that precede it. The induction is on timestamps, but `memOrdered` couples that to
-      syntactic index for the sends. Restricted to the memory bus for the same reason
-      `memOrdered` is — `memPayloadOnly` already settles every other stateful bus.
+      This is the induction that carries the memory-byte invariant: a send is justified by
+      whatever actually precedes it in time. Restricted to the memory bus — `memPayloadOnly`
+      already settles every other stateful bus.
 
       OpenVM §3.2.5, elements of address spaces 1 (registers) and 2 (user memory) "are constrained
       to lie in `[0, 2^8)`". In §4.6: a message appears "if and only if at timestamp `t` the data
       memory had values `data`" at that address. -/
   memSendsOk : ∀ i : Fin c.busInteractions.length, c.memSend r asg i →
-    (∀ j : Fin c.busInteractions.length, j < i → c.activeMem r asg j →
+    (∀ j : Fin c.busInteractions.length, place j < place i → c.activeMem r asg j →
       r.payloadOk (c.msgAt asg j)) →
     r.payloadOk (c.msgAt asg i)
 

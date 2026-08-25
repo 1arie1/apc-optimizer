@@ -340,9 +340,8 @@ theorem maintains_of_stateful_active [Fact p.Prime] {host : Host p} {bs : BusSem
       · have hacc : (G.get u).satisfiesStateless (bs.toGuestRules r0 hmem) asg'' :=
           satisfiesStateless_of_sinks hunpack hsinks hGuests hsat u asg'' hasg''
         obtain ⟨L⟩ := (hlegal u).stepLayout asg'' (hsat.satisfiesGuest u asg'' hasg'') hacc
-        refine L.memSendsOk i ⟨hsendi, hbmem⟩ (fun j hji hactMemj => ?_)
+        refine L.memSendsOk i ⟨hsendi, hbmem⟩ (fun j hoff hactMemj => ?_)
         refine ih _ ?_ u asg'' hasg'' _ (List.get_mem _ _) hactMemj.1.1 hactMemj.1.2 rfl
-        have hoff := L.memOrdered i j hji ⟨hsendi, hbmem⟩ hactMemj
         have hlt := hOrders u asg'' hasg'' L i j ⟨hsti, by rw [hsendi.2]; exact one_ne_zero⟩
           hactMemj.1 hoff
         rwa [hmsgi, hrank] at hlt

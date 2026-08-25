@@ -456,7 +456,7 @@ theorem apc2105000Opt_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWindow) :
   -- The bridge, by static analysis: `optBridgeCheck` is a `decide`.
   obtain ⟨hrecv, hsend, hother⟩ := bridgeCheck_sound optBridgeCheck (optPinRules_hold asg halg)
   refine ⟨_, _, _, 11, fun i => (optOffsets n0 nw0 nr1 nw1 nr3).getD i.val 0,
-    by norm_num, hw, hrecv, hsend, hother, ?_, ?_, ?_⟩
+    by norm_num, hw, hrecv, hsend, hother, ?_, ?_⟩
   · -- The placement, offset by offset.
     rintro i ⟨hst, hm⟩
     fin_cases i
@@ -515,17 +515,23 @@ theorem apc2105000Opt_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWindow) :
     all_goals
       simp [apc2105000Opt, apcRules, openVmGuestRules, openVmIsStateful, defaultBusMap,
         OpenVmBusType.isStateful] at hst
-  · -- The ordering: numeric, via `optOffsetUb`. Restricted to the memory bus, but both extra
-    -- hypotheses go unused — `optOffsetUb_dominates` never needed them.
-    rintro i j hji ⟨⟨hsi, hmi⟩, _⟩ ⟨⟨hsj, hmj⟩, _⟩
-    obtain ⟨hmem, heq⟩ := hsendIdx i hsi hmi
-    show (optOffsets n0 nw0 nr1 nw1 nr3).getD j.val 0
-      < (optOffsets n0 nw0 nr1 nw1 nr3).getD i.val 0
-    rw [heq]
-    exact lt_of_le_of_lt (hub j hsj hmj)
-      (optOffsetUb_dominates i.val hmem j.val (Fin.lt_def.mp hji))
-  · -- The byte invariant, by static analysis: only the masked write is left by hand.
+  · -- The byte invariant, by static analysis: only the masked write is left by hand. What used to
+    -- be `memOrdered` (`optOffsetUb_dominates`) is inlined here, converting the caller's
+    -- `place`-ordered hypothesis into the index order `byteCheck_sendsOk` expects.
+    intro i hsend hlow
+    have hordered : ∀ j : Fin apc2105000Opt.busInteractions.length, j < i →
+        apc2105000Opt.activeMem apcRules asg j →
+        apcRules.payloadOk (apc2105000Opt.msgAt asg j) := by
+      intro j hji hactj
+      obtain ⟨hmem, heq⟩ := hsendIdx i hsend.1.1 hsend.1.2
+      refine hlow j ?_ hactj
+      show (optOffsets n0 nw0 nr1 nw1 nr3).getD j.val 0
+        < (optOffsets n0 nw0 nr1 nw1 nr3).getD i.val 0
+      rw [heq]
+      exact lt_of_le_of_lt (hub j hactj.1.1 hactj.1.2)
+        (optOffsetUb_dominates i.val hmem j.val (Fin.lt_def.mp hji))
     refine memSendsOk_of_sendsOk (byteCheck_sendsOk (optPinRules_hold asg halg) optByteCheck ?_)
+      i hsend hordered
     intro i hi hsend hlow
     fin_cases i
     all_goals try exact absurd hi (by decide)
@@ -801,7 +807,7 @@ theorem apc2105000GatedPinned_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWind
   -- The bridge, by static analysis: `gatedBridgeCheck` is a `decide`.
   obtain ⟨hrecv, hsend, hother⟩ := bridgeCheck_sound gatedBridgeCheck (gatedPinRules_hold asg halg)
   refine ⟨_, _, _, 11, fun i => (optOffsets n0 nw0 nr1 nw1 nr3).getD i.val 0,
-    by norm_num, hw, hrecv, hsend, hother, ?_, ?_, ?_⟩
+    by norm_num, hw, hrecv, hsend, hother, ?_, ?_⟩
   · -- The placement, offset by offset.
     rintro i ⟨hst, hm⟩
     fin_cases i
@@ -870,17 +876,23 @@ theorem apc2105000GatedPinned_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWind
     all_goals
       simp [apc2105000GatedPinned, apc2105000Gated, apcRules, openVmGuestRules, openVmIsStateful,
         defaultBusMap, OpenVmBusType.isStateful] at hst
-  · -- The ordering: numeric, via `optOffsetUb`. Restricted to the memory bus, but both extra
-    -- hypotheses go unused — `optOffsetUb_dominates` never needed them.
-    rintro i j hji ⟨⟨hsi, hmi⟩, _⟩ ⟨⟨hsj, hmj⟩, _⟩
-    obtain ⟨hmem, heq⟩ := hsendIdx i hsi hmi
-    show (optOffsets n0 nw0 nr1 nw1 nr3).getD j.val 0
-      < (optOffsets n0 nw0 nr1 nw1 nr3).getD i.val 0
-    rw [heq]
-    exact lt_of_le_of_lt (hub j hsj hmj)
-      (optOffsetUb_dominates i.val hmem j.val (Fin.lt_def.mp hji))
-  · -- The byte invariant, by static analysis: only the masked write is left by hand.
+  · -- The byte invariant, by static analysis: only the masked write is left by hand. What used to
+    -- be `memOrdered` (`optOffsetUb_dominates`) is inlined here, converting the caller's
+    -- `place`-ordered hypothesis into the index order `byteCheck_sendsOk` expects.
+    intro i hsend hlow
+    have hordered : ∀ j : Fin apc2105000GatedPinned.busInteractions.length, j < i →
+        apc2105000GatedPinned.activeMem apcRules asg j →
+        apcRules.payloadOk (apc2105000GatedPinned.msgAt asg j) := by
+      intro j hji hactj
+      obtain ⟨hmem, heq⟩ := hsendIdx i hsend.1.1 hsend.1.2
+      refine hlow j ?_ hactj
+      show (optOffsets n0 nw0 nr1 nw1 nr3).getD j.val 0
+        < (optOffsets n0 nw0 nr1 nw1 nr3).getD i.val 0
+      rw [heq]
+      exact lt_of_le_of_lt (hub j hactj.1.1 hactj.1.2)
+        (optOffsetUb_dominates i.val hmem j.val (Fin.lt_def.mp hji))
     refine memSendsOk_of_sendsOk (byteCheck_sendsOk (gatedPinRules_hold asg halg) gatedByteCheck ?_)
+      i hsend hordered
     intro i hi hsend hlow
     fin_cases i
     all_goals try exact absurd hi (by decide)
@@ -1875,7 +1887,7 @@ theorem apc2105000UnoptChained_memSendsOk {asg : ChipAssignment babyBear}
     `apc2105000Opt`'s `optOffsetUb`, one memory gadget's receive/send pair per instruction, two
     for the branch's `rs1`/`rs2`), shifted by each instruction's own `3`-tick advance
     (`chainedTimes`). Stateless positions, and the inactive `rs2` gadgets `rs2_as_i = 0` disables,
-    get a placeholder far below every real offset — `memOrdered`'s domination check never reads
+    get a placeholder far below every real offset — the domination check below never reads
     them for anything but a `<`, and they are never `activeStateful` either way. -/
 def unoptOffsetUb : List ℤ :=
   -- instr 0 (shift 0)
@@ -1891,7 +1903,7 @@ def unoptOffsetUb : List ℤ :=
   [-1000, -1000, 8, 9, -1000, -1000, 9, 10, -1000, -1000, -1000]
 
 /-- Each of `apc2105000UnoptChained`'s eight memory sends dominates every position before it —
-    the whole of `memOrdered` for this circuit, `decide` over `71` positions. Unlike
+    the ordering fact `memSendsOk` needs for this circuit, `decide` over `71` positions. Unlike
     `apc2105000Opt`, several sends share an upper bound with an *earlier, different* send's own
     predecessor (e.g. positions `36` and `47` both cap out at `5`) — harmless, since domination is
     only ever asked of a send against what precedes *it*, never between two unrelated positions. -/
@@ -1926,9 +1938,9 @@ set_option linter.unnecessarySeqFocus false in
     `unoptOffsets`, the eight memory sends dominate what precedes them (`unoptOffsetUb_dominates`),
     and `apc2105000UnoptChained_memSendsOk` closes the byte invariant.
 
-    This is what `memOrdered`/`memSendsOk`'s restriction to the memory bus buys over the old
-    cross-bus `ordered`: the bridge-round-trip-vs-echo timestamp collision that made this circuit
-    fail the old `ordered` (two unrelated instructions' own bookkeeping landing on the same field
+    This is what `memSendsOk`'s restriction to the memory bus buys over the old cross-bus
+    `ordered`: the bridge-round-trip-vs-echo timestamp collision that made this circuit fail the
+    old `ordered` (two unrelated instructions' own bookkeeping landing on the same field
     timestamp) never enters a memory-vs-memory comparison, so it is not a counterexample here. -/
 theorem apc2105000UnoptChained_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWindow) :
     apc2105000UnoptChained.hasStepLayout apcRules maxWindow openVmTimestampBound := by
@@ -1969,7 +1981,7 @@ theorem apc2105000UnoptChained_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWin
         openVmGuestRules, openVmIsStateful, defaultBusMap, openVmMemBusId,
         OpenVmBusType.isStateful, BusInteraction.eval, Expression.eval, babyBear_negOne_ne_one]
   refine ⟨_, _, _, 11, fun i => (unoptOffsets nr10 nw0 nr11 nw1 nr12 nw2 nr13 nr23).getD i.val 0,
-    by norm_num, hw, hrecv, hsend, hother, ?_, ?_, ?_⟩
+    by norm_num, hw, hrecv, hsend, hother, ?_, ?_⟩
   · -- The placement, offset by offset: `30` genuinely stateful positions (memory or bridge),
     -- read off directly; every other position is either stateless or a structurally inactive
     -- `rs2` gadget (`rs2_as_i = 0`, so its multiplicity can never be nonzero).
@@ -2111,16 +2123,18 @@ theorem apc2105000UnoptChained_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWin
         by simp [unoptOffsets, apc2105000UnoptChained, apc2105000Unopt, BusInteraction.eval,
           Expression.eval, apcRules, openVmGuestRules, openVmTimestamp, Circuit.msgAt,
           openVmMemBusId, openVmExecBusId, ht01, ht12, ht23] <;> ring⟩
-  · -- The ordering: numeric, via `unoptOffsetUb`, restricted to the memory bus.
-    rintro i j hji ⟨⟨hsi, hmi⟩, hbi⟩ ⟨⟨hsj, hmj⟩, hbj⟩
-    obtain ⟨hmem, heq⟩ := hsendIdx i hsi hbi hmi
+  · -- The byte invariant: `apc2105000UnoptChained_memSendsOk`, by static analysis. What used to be
+    -- `memOrdered` (`unoptOffsetUb_dominates`) is inlined here, converting the caller's
+    -- `place`-ordered hypothesis into the index order that theorem expects.
+    intro i hsend hlow
+    refine apc2105000UnoptChained_memSendsOk halg hacc i hsend (fun j hji hactj => ?_)
+    obtain ⟨hmem, heq⟩ := hsendIdx i hsend.1.1 hsend.2 hsend.1.2
+    refine hlow j ?_ hactj
     show (unoptOffsets nr10 nw0 nr11 nw1 nr12 nw2 nr13 nr23).getD j.val 0
       < (unoptOffsets nr10 nw0 nr11 nw1 nr12 nw2 nr13 nr23).getD i.val 0
     rw [heq]
-    exact lt_of_le_of_lt (hub j hsj hbj hmj)
+    exact lt_of_le_of_lt (hub j hactj.1.1 hactj.2 hactj.1.2)
       (unoptOffsetUb_dominates i.val hmem j.val (Fin.lt_def.mp hji))
-  · -- The byte invariant: `apc2105000UnoptChained_memSendsOk`, by static analysis.
-    exact apc2105000UnoptChained_memSendsOk halg hacc
 
 theorem apc2105000UnoptChained_legalGuest {maxWindow maxInteractions : ℕ} (hw : 11 < maxWindow)
     (hi : 71 ≤ maxInteractions) :
