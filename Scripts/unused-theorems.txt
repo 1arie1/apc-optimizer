@@ -243,6 +243,11 @@ ApcOptimizer.OpenVM.maintainsInvariants_off_mem
 # offset-upper-bound table, mirroring `optOffsetUb_dominates`.
 ApcOptimizer.OpenVM.unoptOffsetUb_dominates
 
+# `Audit/RealApcLegality.lean`'s full step layout for the chained-but-unoptimized APC, and the
+# `legalGuest` it assembles into — the closing result for finding G's memory half on this circuit.
+ApcOptimizer.OpenVM.apc2105000UnoptChained_hasStepLayout
+ApcOptimizer.OpenVM.apc2105000UnoptChained_legalGuest
+
 # `Audit/SendOnlyPolarity.lean`'s constant-propagation tier: its root is
 # `checkMultiplicitiesWith_sound`, used by `Audit/RealApcLegality.lean`, and the rest feed it.
 Expression.signedPart_sq

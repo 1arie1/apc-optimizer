@@ -1901,3 +1901,235 @@ def unoptOffsetUb : List ℤ :=
 theorem unoptOffsetUb_dominates :
     ∀ b ∈ [8, 16, 28, 36, 48, 56, 63, 67], ∀ k < b, unoptOffsetUb.getD k 0 < unoptOffsetUb.getD b 0 := by
   decide
+
+/-- The exact offset each of `apc2105000UnoptChained`'s `71` interactions sits at, mirroring
+    `unoptOffsetUb`'s shape but with each memory receive's real lookback (`δ - n`, from the eight
+    `unoptLookback_*` lemmas) rather than its upper bound `δ`, and the bridge's own literal offsets
+    filled in (the upper-bound table leaves those `-1000`, since ordering never reads them). -/
+def unoptOffsets (nr10 nw0 nr11 nw1 nr12 nw2 nr13 nr23 : ℕ) : List ℤ :=
+  -- instr 0 (shift 0)
+  [-1000, -1000, -1000, -1000, -1000, -1000, -1000, -1 - (nr10 : ℤ), 0, -1000, -1000, -1000,
+   -1000, -1000, -1000, 1 - (nw0 : ℤ), 2, -1000, 0, 3] ++
+  -- instr 1 (shift 3)
+  [-1000, -1000, -1000, -1000, -1000, -1000, -1000, 2 - (nr11 : ℤ), 3, -1000, -1000, -1000,
+   -1000, -1000, -1000, 4 - (nw1 : ℤ), 5, -1000, 3, 6] ++
+  -- instr 2 (shift 6)
+  [-1000, -1000, -1000, -1000, -1000, -1000, -1000, 5 - (nr12 : ℤ), 6, -1000, -1000, -1000,
+   -1000, -1000, -1000, 7 - (nw2 : ℤ), 8, -1000, 6, 9] ++
+  -- instr 3 / branch (shift 9)
+  [-1000, -1000, 8 - (nr13 : ℤ), 9, -1000, -1000, 9 - (nr23 : ℤ), 10, -1000, 9, 11]
+
+--------- The unoptimized APC, timestamps chained: assembling the layout ---------
+
+set_option maxRecDepth 20000 in
+set_option linter.unnecessarySeqFocus false in
+/-- **A chained-but-unoptimized APC has a step layout.** `d = 11`, matching `apc2105000Opt`'s own
+    arc: the four fused instructions' local `3`/`3`/`3`/`2`-tick advances, chained by
+    `apc2105000UnoptChained_bridge`. Every one of the `71` interactions is placed by
+    `unoptOffsets`, the eight memory sends dominate what precedes them (`unoptOffsetUb_dominates`),
+    and `apc2105000UnoptChained_memSendsOk` closes the byte invariant.
+
+    This is what `memOrdered`/`memSendsOk`'s restriction to the memory bus buys over the old
+    cross-bus `ordered`: the bridge-round-trip-vs-echo timestamp collision that made this circuit
+    fail the old `ordered` (two unrelated instructions' own bookkeeping landing on the same field
+    timestamp) never enters a memory-vs-memory comparison, so it is not a counterexample here. -/
+theorem apc2105000UnoptChained_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWindow) :
+    apc2105000UnoptChained.hasStepLayout apcRules maxWindow openVmTimestampBound := by
+  haveI : Fact (1 < babyBear) := ⟨by decide⟩
+  intro asg halg hacc
+  obtain ⟨nr10, hnr10, htr10⟩ := unoptLookback_r1_0 halg hacc
+  obtain ⟨nw0, hnw0, htw0⟩ := unoptLookback_w_0 halg hacc
+  obtain ⟨nr11, hnr11, htr11⟩ := unoptLookback_r1_1 halg hacc
+  obtain ⟨nw1, hnw1, htw1⟩ := unoptLookback_w_1 halg hacc
+  obtain ⟨nr12, hnr12, htr12⟩ := unoptLookback_r1_2 halg hacc
+  obtain ⟨nw2, hnw2, htw2⟩ := unoptLookback_w_2 halg hacc
+  obtain ⟨nr13, hnr13, htr13⟩ := unoptLookback_r1_3 halg hacc
+  obtain ⟨nr23, hnr23, htr23⟩ := unoptLookback_r2_3 halg hacc
+  obtain ⟨hs0, hs1, hs2, hs3, -, -, -, -, hrs0, hrs1, hrs2⟩ := unoptPins halg
+  obtain ⟨ht01, ht12, ht23⟩ := chainedTimes halg
+  obtain ⟨hrecv, hsend, hother⟩ := apc2105000UnoptChained_bridge halg
+  have hub : ∀ i : Fin apc2105000UnoptChained.busInteractions.length,
+      apcRules.isStateful (apc2105000UnoptChained.busInteractions.get i).busId = true →
+      (apc2105000UnoptChained.busInteractions.get i).busId = apcRules.memBusId →
+      ((apc2105000UnoptChained.busInteractions.get i).eval asg).multiplicity ≠ 0 →
+      (unoptOffsets nr10 nw0 nr11 nw1 nr12 nw2 nr13 nr23).getD i.val 0
+        ≤ unoptOffsetUb.getD i.val 0 := by
+    intro i hst hbmem _
+    fin_cases i <;>
+      simp [unoptOffsets, unoptOffsetUb, apc2105000UnoptChained, apc2105000Unopt, apcRules,
+        openVmGuestRules, openVmIsStateful, defaultBusMap, openVmMemBusId,
+        OpenVmBusType.isStateful] at hst hbmem ⊢
+  have hsendIdx : ∀ i : Fin apc2105000UnoptChained.busInteractions.length,
+      apcRules.isStateful (apc2105000UnoptChained.busInteractions.get i).busId = true →
+      (apc2105000UnoptChained.busInteractions.get i).busId = apcRules.memBusId →
+      ((apc2105000UnoptChained.busInteractions.get i).eval asg).multiplicity = 1 →
+      i.val ∈ [8, 16, 28, 36, 48, 56, 63, 67] ∧
+      (unoptOffsets nr10 nw0 nr11 nw1 nr12 nw2 nr13 nr23).getD i.val 0
+        = unoptOffsetUb.getD i.val 0 := by
+    intro i hst hbmem hm
+    fin_cases i <;>
+      simp_all [unoptOffsets, unoptOffsetUb, apc2105000UnoptChained, apc2105000Unopt, apcRules,
+        openVmGuestRules, openVmIsStateful, defaultBusMap, openVmMemBusId,
+        OpenVmBusType.isStateful, BusInteraction.eval, Expression.eval, babyBear_negOne_ne_one]
+  refine ⟨_, _, _, 11, fun i => (unoptOffsets nr10 nw0 nr11 nw1 nr12 nw2 nr13 nr23).getD i.val 0,
+    by norm_num, hw, hrecv, hsend, hother, ?_, ?_, ?_⟩
+  · -- The placement, offset by offset: `30` genuinely stateful positions (memory or bridge),
+    -- read off directly; every other position is either stateless or a structurally inactive
+    -- `rs2` gadget (`rs2_as_i = 0`, so its multiplicity can never be nonzero).
+    rintro i ⟨hst, hm⟩
+    fin_cases i <;>
+      simp [apc2105000UnoptChained, apc2105000Unopt, apcRules, openVmGuestRules,
+        openVmIsStateful, defaultBusMap, OpenVmBusType.isStateful] at hst
+    · exact ⟨by simp [unoptOffsets, openVmTimestampBound, openVmTimestampBits]<;> omega,
+        by simp [unoptOffsets]<;> omega,
+        by simpa [unoptOffsets, apc2105000UnoptChained, apc2105000Unopt, BusInteraction.eval,
+          Expression.eval, apcRules, openVmGuestRules, openVmTimestamp, Circuit.msgAt] using htr10⟩
+    · exact ⟨by simp [unoptOffsets, openVmTimestampBound, openVmTimestampBits],
+        by simp [unoptOffsets],
+        by simp [unoptOffsets, apc2105000UnoptChained, apc2105000Unopt, BusInteraction.eval,
+          Expression.eval, apcRules, openVmGuestRules, openVmTimestamp, Circuit.msgAt]⟩
+    · exact absurd (by simp [apc2105000UnoptChained, apc2105000Unopt, Circuit.multAt, BusInteraction.eval,
+        Expression.eval, hrs0]) hm
+    · exact absurd (by simp [apc2105000UnoptChained, apc2105000Unopt, Circuit.multAt, BusInteraction.eval,
+        Expression.eval, hrs0]) hm
+    · exact ⟨by simp [unoptOffsets, openVmTimestampBound, openVmTimestampBits]<;> omega,
+        by simp [unoptOffsets]<;> omega,
+        by simpa [unoptOffsets, apc2105000UnoptChained, apc2105000Unopt, BusInteraction.eval,
+          Expression.eval, apcRules, openVmGuestRules, openVmTimestamp, Circuit.msgAt] using htw0⟩
+    · exact ⟨by simp [unoptOffsets, openVmTimestampBound, openVmTimestampBits],
+        by simp [unoptOffsets],
+        by simp [unoptOffsets, apc2105000UnoptChained, apc2105000Unopt, BusInteraction.eval,
+          Expression.eval, apcRules, openVmGuestRules, openVmTimestamp, Circuit.msgAt]⟩
+    · exact ⟨by simp [unoptOffsets, openVmTimestampBound, openVmTimestampBits],
+        by simp [unoptOffsets],
+        by simp [unoptOffsets, apc2105000UnoptChained, apc2105000Unopt, BusInteraction.eval,
+          Expression.eval, apcRules, openVmGuestRules, openVmTimestamp, Circuit.msgAt,
+          openVmMemBusId, openVmExecBusId]⟩
+    · exact ⟨by simp [unoptOffsets, openVmTimestampBound, openVmTimestampBits],
+        by simp [unoptOffsets],
+        by simp [unoptOffsets, apc2105000UnoptChained, apc2105000Unopt, BusInteraction.eval,
+          Expression.eval, apcRules, openVmGuestRules, openVmTimestamp, Circuit.msgAt,
+          openVmMemBusId, openVmExecBusId]⟩
+    · exact ⟨by simp [unoptOffsets, openVmTimestampBound, openVmTimestampBits]<;> omega,
+        by simp [unoptOffsets]<;> omega,
+        by have h := htr11
+           simp [unoptOffsets, apc2105000UnoptChained, apc2105000Unopt, BusInteraction.eval,
+             Expression.eval, apcRules, openVmGuestRules, openVmTimestamp, Circuit.msgAt,
+             ht01] at h ⊢
+           linear_combination h⟩
+    · exact ⟨by simp [unoptOffsets, openVmTimestampBound, openVmTimestampBits],
+        by simp [unoptOffsets],
+        by simp [unoptOffsets, apc2105000UnoptChained, apc2105000Unopt, BusInteraction.eval,
+          Expression.eval, apcRules, openVmGuestRules, openVmTimestamp, Circuit.msgAt, ht01]⟩
+    · exact absurd (by simp [apc2105000UnoptChained, apc2105000Unopt, Circuit.multAt, BusInteraction.eval,
+        Expression.eval, hrs1]) hm
+    · exact absurd (by simp [apc2105000UnoptChained, apc2105000Unopt, Circuit.multAt, BusInteraction.eval,
+        Expression.eval, hrs1]) hm
+    · exact ⟨by simp [unoptOffsets, openVmTimestampBound, openVmTimestampBits]<;> omega,
+        by simp [unoptOffsets]<;> omega,
+        by have h := htw1
+           simp [unoptOffsets, apc2105000UnoptChained, apc2105000Unopt, BusInteraction.eval,
+             Expression.eval, apcRules, openVmGuestRules, openVmTimestamp, Circuit.msgAt,
+             ht01] at h ⊢
+           linear_combination h⟩
+    · exact ⟨by simp [unoptOffsets, openVmTimestampBound, openVmTimestampBits],
+        by simp [unoptOffsets],
+        by simp [unoptOffsets, apc2105000UnoptChained, apc2105000Unopt, BusInteraction.eval,
+          Expression.eval, apcRules, openVmGuestRules, openVmTimestamp, Circuit.msgAt, ht01] <;> ring⟩
+    · exact ⟨by simp [unoptOffsets, openVmTimestampBound, openVmTimestampBits],
+        by simp [unoptOffsets],
+        by simp [unoptOffsets, apc2105000UnoptChained, apc2105000Unopt, BusInteraction.eval,
+          Expression.eval, apcRules, openVmGuestRules, openVmTimestamp, Circuit.msgAt,
+          openVmMemBusId, openVmExecBusId, ht01]⟩
+    · exact ⟨by simp [unoptOffsets, openVmTimestampBound, openVmTimestampBits],
+        by simp [unoptOffsets],
+        by simp [unoptOffsets, apc2105000UnoptChained, apc2105000Unopt, BusInteraction.eval,
+          Expression.eval, apcRules, openVmGuestRules, openVmTimestamp, Circuit.msgAt,
+          openVmMemBusId, openVmExecBusId, ht01] <;> ring⟩
+    · exact ⟨by simp [unoptOffsets, openVmTimestampBound, openVmTimestampBits]<;> omega,
+        by simp [unoptOffsets]<;> omega,
+        by have h := htr12
+           simp [unoptOffsets, apc2105000UnoptChained, apc2105000Unopt, BusInteraction.eval,
+             Expression.eval, apcRules, openVmGuestRules, openVmTimestamp, Circuit.msgAt,
+             ht01, ht12] at h ⊢
+           linear_combination h⟩
+    · exact ⟨by simp [unoptOffsets, openVmTimestampBound, openVmTimestampBits],
+        by simp [unoptOffsets],
+        by simp [unoptOffsets, apc2105000UnoptChained, apc2105000Unopt, BusInteraction.eval,
+          Expression.eval, apcRules, openVmGuestRules, openVmTimestamp, Circuit.msgAt, ht01, ht12] <;> ring⟩
+    · exact absurd (by simp [apc2105000UnoptChained, apc2105000Unopt, Circuit.multAt, BusInteraction.eval,
+        Expression.eval, hrs2]) hm
+    · exact absurd (by simp [apc2105000UnoptChained, apc2105000Unopt, Circuit.multAt, BusInteraction.eval,
+        Expression.eval, hrs2]) hm
+    · exact ⟨by simp [unoptOffsets, openVmTimestampBound, openVmTimestampBits]<;> omega,
+        by simp [unoptOffsets]<;> omega,
+        by have h := htw2
+           simp [unoptOffsets, apc2105000UnoptChained, apc2105000Unopt, BusInteraction.eval,
+             Expression.eval, apcRules, openVmGuestRules, openVmTimestamp, Circuit.msgAt,
+             ht01, ht12] at h ⊢
+           linear_combination h⟩
+    · exact ⟨by simp [unoptOffsets, openVmTimestampBound, openVmTimestampBits],
+        by simp [unoptOffsets],
+        by simp [unoptOffsets, apc2105000UnoptChained, apc2105000Unopt, BusInteraction.eval,
+          Expression.eval, apcRules, openVmGuestRules, openVmTimestamp, Circuit.msgAt, ht01, ht12] <;> ring⟩
+    · exact ⟨by simp [unoptOffsets, openVmTimestampBound, openVmTimestampBits],
+        by simp [unoptOffsets],
+        by simp [unoptOffsets, apc2105000UnoptChained, apc2105000Unopt, BusInteraction.eval,
+          Expression.eval, apcRules, openVmGuestRules, openVmTimestamp, Circuit.msgAt,
+          openVmMemBusId, openVmExecBusId, ht01, ht12] <;> ring⟩
+    · exact ⟨by simp [unoptOffsets, openVmTimestampBound, openVmTimestampBits],
+        by simp [unoptOffsets],
+        by simp [unoptOffsets, apc2105000UnoptChained, apc2105000Unopt, BusInteraction.eval,
+          Expression.eval, apcRules, openVmGuestRules, openVmTimestamp, Circuit.msgAt,
+          openVmMemBusId, openVmExecBusId, ht01, ht12] <;> ring⟩
+    · exact ⟨by simp [unoptOffsets, openVmTimestampBound, openVmTimestampBits]<;> omega,
+        by simp [unoptOffsets]<;> omega,
+        by have h := htr13
+           simp [unoptOffsets, apc2105000UnoptChained, apc2105000Unopt, BusInteraction.eval,
+             Expression.eval, apcRules, openVmGuestRules, openVmTimestamp, Circuit.msgAt,
+             ht01, ht12, ht23] at h ⊢
+           linear_combination h⟩
+    · exact ⟨by simp [unoptOffsets, openVmTimestampBound, openVmTimestampBits],
+        by simp [unoptOffsets],
+        by simp [unoptOffsets, apc2105000UnoptChained, apc2105000Unopt, BusInteraction.eval,
+          Expression.eval, apcRules, openVmGuestRules, openVmTimestamp, Circuit.msgAt, ht01, ht12, ht23] <;> ring⟩
+    · exact ⟨by simp [unoptOffsets, openVmTimestampBound, openVmTimestampBits]<;> omega,
+        by simp [unoptOffsets]<;> omega,
+        by have h := htr23
+           simp [unoptOffsets, apc2105000UnoptChained, apc2105000Unopt, BusInteraction.eval,
+             Expression.eval, apcRules, openVmGuestRules, openVmTimestamp, Circuit.msgAt,
+             ht01, ht12, ht23] at h ⊢
+           linear_combination h⟩
+    · exact ⟨by simp [unoptOffsets, openVmTimestampBound, openVmTimestampBits],
+        by simp [unoptOffsets],
+        by simp [unoptOffsets, apc2105000UnoptChained, apc2105000Unopt, BusInteraction.eval,
+          Expression.eval, apcRules, openVmGuestRules, openVmTimestamp, Circuit.msgAt, ht01, ht12, ht23] <;> ring⟩
+    · exact ⟨by simp [unoptOffsets, openVmTimestampBound, openVmTimestampBits],
+        by simp [unoptOffsets],
+        by simp [unoptOffsets, apc2105000UnoptChained, apc2105000Unopt, BusInteraction.eval,
+          Expression.eval, apcRules, openVmGuestRules, openVmTimestamp, Circuit.msgAt,
+          openVmMemBusId, openVmExecBusId, ht01, ht12, ht23] <;> ring⟩
+    · exact ⟨by simp [unoptOffsets, openVmTimestampBound, openVmTimestampBits],
+        by simp [unoptOffsets],
+        by simp [unoptOffsets, apc2105000UnoptChained, apc2105000Unopt, BusInteraction.eval,
+          Expression.eval, apcRules, openVmGuestRules, openVmTimestamp, Circuit.msgAt,
+          openVmMemBusId, openVmExecBusId, ht01, ht12, ht23] <;> ring⟩
+  · -- The ordering: numeric, via `unoptOffsetUb`, restricted to the memory bus.
+    rintro i j hji ⟨hsi, hmi⟩ hbi ⟨hsj, hmj⟩ hbj
+    obtain ⟨hmem, heq⟩ := hsendIdx i hsi hbi hmi
+    show (unoptOffsets nr10 nw0 nr11 nw1 nr12 nw2 nr13 nr23).getD j.val 0
+      < (unoptOffsets nr10 nw0 nr11 nw1 nr12 nw2 nr13 nr23).getD i.val 0
+    rw [heq]
+    exact lt_of_le_of_lt (hub j hsj hbj hmj)
+      (unoptOffsetUb_dominates i.val hmem j.val (Fin.lt_def.mp hji))
+  · -- The byte invariant: `apc2105000UnoptChained_memSendsOk`, by static analysis.
+    exact apc2105000UnoptChained_memSendsOk halg hacc
+
+theorem apc2105000UnoptChained_legalGuest {maxWindow maxInteractions : ℕ} (hw : 11 < maxWindow)
+    (hi : 71 ≤ maxInteractions) :
+    apc2105000UnoptChained.legalGuest apcRules maxWindow openVmTimestampBound
+      maxInteractions where
+  sendOnly := apc2105000UnoptChained_legalMultiplicities.1
+  polarity := apc2105000UnoptChained_legalMultiplicities.2
+  stepLayout := apc2105000UnoptChained_hasStepLayout hw
+  size := by simpa [apc2105000UnoptChained, apc2105000Unopt] using hi
