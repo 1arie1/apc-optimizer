@@ -18,7 +18,7 @@ set_option autoImplicit false
     The chain then places every instance at a known distance before the connector, so its start
     timestamp is `1 + T` for an honest natural `T` and the whole instruction fits below the final
     timestamp — which `ConnectorBoundary.finalTimestampBounded` range-checks. Every memory access
-    of a *guest* instance sits in its own step's window, `[-maxLookback, d]` (`StepLayout.placed`
+    of a *guest* instance sits in its own step's window, `[-maxLookback, d]` (`StepLayout.tOffsetMatch`
     again), so it inherits the bound; nothing here claims the same for an input-chip instance's own
     memory accesses (see the lower tier's own note in `agent-docs/vm-spec-audit.md`), since
     `Host.pinsRanks` only bounds guest ranks.
@@ -231,19 +231,19 @@ theorem openVm_negOne_ne_one (P : OpenVmParams p) : (-1 : ZMod p) ≠ 1 := by
 def _root_.StepLayout.effect {c : Circuit p} {r : GuestBusRules p} {asg : ChipAssignment p}
     {maxWindow maxLookback : ℕ} (L : StepLayout c r asg maxWindow maxLookback)
     (m : BusMessage p) : ZMod p :=
-  (if (r.execBusId, [L.pcTo, L.base + (L.d : ZMod p)]) = m then (1 : ZMod p) else 0)
-    - (if (r.execBusId, [L.pcFrom, L.base]) = m then (1 : ZMod p) else 0)
+  (if (r.execBusId, [L.pcTo, L.tStart + (L.tWindow : ZMod p)]) = m then (1 : ZMod p) else 0)
+    - (if (r.execBusId, [L.pcFrom, L.tStart]) = m then (1 : ZMod p) else 0)
 
 /-- A step's two bridge endpoints are distinct: were they equal, `recv` and `send` would make the
     same net both `-1` and `1`. -/
 theorem _root_.StepLayout.endpoints_ne {c : Circuit p} {r : GuestBusRules p} {asg : ChipAssignment p}
     {maxWindow maxLookback : ℕ} (L : StepLayout c r asg maxWindow maxLookback)
     (h2 : (-1 : ZMod p) ≠ 1) :
-    ((r.execBusId, [L.pcFrom, L.base]) : BusMessage p)
-      ≠ (r.execBusId, [L.pcTo, L.base + (L.d : ZMod p)]) := by
+    ((r.execBusId, [L.pcFrom, L.tStart]) : BusMessage p)
+      ≠ (r.execBusId, [L.pcTo, L.tStart + (L.tWindow : ZMod p)]) := by
   intro h
-  have hr := L.recv
-  rw [h, L.send] at hr
+  have hr := L.bridgeRecv
+  rw [h, L.bridgeSend] at hr
   exact h2 hr.symm
 
 /-- **A step's bridge net is exactly what it puts there.** The `recv`/`send`/`other` triple
@@ -255,13 +255,13 @@ theorem _root_.StepLayout.net {c : Circuit p} {r : GuestBusRules p} {asg : ChipA
     ∀ m : BusMessage p, m.1 = r.execBusId → c.allEffects asg m = L.effect m := by
   intro m hm
   simp only [StepLayout.effect]
-  by_cases hd : ((r.execBusId, [L.pcTo, L.base + (L.d : ZMod p)]) : BusMessage p) = m <;>
-    by_cases hs : ((r.execBusId, [L.pcFrom, L.base]) : BusMessage p) = m
+  by_cases hd : ((r.execBusId, [L.pcTo, L.tStart + (L.tWindow : ZMod p)]) : BusMessage p) = m <;>
+    by_cases hs : ((r.execBusId, [L.pcFrom, L.tStart]) : BusMessage p) = m
   · exact absurd (hs.trans hd.symm) (L.endpoints_ne h2)
-  · rw [if_pos hd, if_neg hs, sub_zero, ← hd]; exact L.send
-  · rw [if_neg hd, if_pos hs, zero_sub, ← hs]; exact L.recv
+  · rw [if_pos hd, if_neg hs, sub_zero, ← hd]; exact L.bridgeSend
+  · rw [if_neg hd, if_pos hs, zero_sub, ← hs]; exact L.bridgeRecv
   · rw [if_neg hd, if_neg hs, sub_zero]
-    exact L.other m hm (fun h => hs h.symm) (fun h => hd h.symm)
+    exact L.bridgeNoOther m hm (fun h => hs h.symm) (fun h => hd h.symm)
 
 --------- The bridge as a chain ---------
 
@@ -290,7 +290,7 @@ variable (gA : GuestAssignment p G) {n : ℕ}
     instance alike), or, for the connector, the segment's final state. -/
 def bridgeSrc : BridgeArc gA n → BusMessage p
   | none => (0, [r.finalPc, r.finalTimestamp])
-  | some (.inl y) => (0, [(S y).pcFrom, (S y).base])
+  | some (.inl y) => (0, [(S y).pcFrom, (S y).tStart])
   | some (.inr i) => (0, [(iR i).pcFrom, (iR i).base])
 
 /-- The bridge state an arc produces: an instruction's outgoing `(pc, t + d)`, or, for the
@@ -298,13 +298,13 @@ def bridgeSrc : BridgeArc gA n → BusMessage p
 def bridgeDst : BridgeArc gA n → BusMessage p
   | none => (0, [r.initialPc, 1])
   | some (.inl y) =>
-    (0, [(S y).pcTo, (S y).base + ((S y).d : ZMod p)])
+    (0, [(S y).pcTo, (S y).tStart + ((S y).tWindow : ZMod p)])
   | some (.inr i) => (0, [(iR i).pcTo, (iR i).base + (inputStepWindow : ZMod p)])
 
 /-- How far an arc advances the clock; the connector does not. -/
 def bridgeAdv : BridgeArc gA n → ℕ
   | none => 0
-  | some (.inl y) => (S y).d
+  | some (.inl y) => (S y).tWindow
   | some (.inr _) => inputStepWindow
 
 theorem bridgeSrc_busId (e : BridgeArc gA n) : (bridgeSrc gA S iR r e).1 = 0 := by
@@ -408,7 +408,7 @@ theorem bridge_advPos : ∀ e : BridgeArc gA n, e ≠ none → 0 < bridgeAdv gA 
   | none => exact absurd rfl h
   | some e' =>
     cases e' with
-    | inl y => exact (S y).dPos
+    | inl y => exact (S y).tWindowPos
     | inr _ => exact Nat.succ_pos _
 
 theorem bridge_advTime : ∀ e : BridgeArc gA n, e ≠ none →
@@ -434,7 +434,7 @@ theorem bridge_total_le {maxInstances maxInputInstances : ℕ}
   have hsome : ∑ y : GuestArc gA, adv (some (.inl y))
       ≤ (∑ s : Fin G.length, (gA s).length) * maxWindow := by
     refine le_trans (Finset.sum_le_card_nsmul _ _ maxWindow
-      (fun y _ => le_of_lt (S y).dLt)) ?_
+      (fun y _ => le_of_lt (S y).tWindowLt)) ?_
     rw [smul_eq_mul, Finset.card_univ, Fintype.card_sigma]
     simp
   have hinput : ∑ i : Fin n, adv (some (.inr i)) ≤ n * maxWindow := by
@@ -501,8 +501,8 @@ theorem bridge_chain_bound {maxInstances maxInputInstances : ℕ}
     (hcountI : n ≤ maxInputInstances)
     (hp : (maxInstances + maxInputInstances + 1) * (maxWindow + 1) < p)
     (y : GuestArc gA) :
-    ∃ T : ℕ, (S y).base = ((1 + T : ℕ) : ZMod p) ∧
-      1 + T + (S y).d ≤ r.finalTimestamp.val := by
+    ∃ T : ℕ, (S y).tStart = ((1 + T : ℕ) : ZMod p) ∧
+      1 + T + (S y).tWindow ≤ r.finalTimestamp.val := by
   have hppos : 0 < p := Nat.lt_of_le_of_lt (Nat.zero_le _) hp
   haveI : NeZero p := ⟨by omega⟩
   obtain ⟨N, hN⟩ : ∃ N, (∑ e : BridgeArc gA n, bridgeAdv gA S e) = N := ⟨_, rfl⟩
@@ -519,9 +519,9 @@ theorem bridge_chain_bound {maxInstances maxInputInstances : ℕ}
   obtain ⟨T, hT1, hT2⟩ :=
     (bridgeChain gA S iR ptrReg r h2 hbal hIlt hcount hcountI hp).arc_position
       (some (.inl y)) (Option.some_ne_none _)
-  have hT1' : T + (S y).d ≤ ∑ e : BridgeArc gA n, bridgeAdv gA S e := hT1
+  have hT1' : T + (S y).tWindow ≤ ∑ e : BridgeArc gA n, bridgeAdv gA S e := hT1
   rw [hN] at hT1'
-  have hT2' : (S y).base = 1 + (T : ZMod p) := hT2
+  have hT2' : (S y).tStart = 1 + (T : ZMod p) := hT2
   have hconn : r.finalTimestamp = 1 + ((N : ℕ) : ZMod p) := by
     have h' : r.finalTimestamp = 1 + ((∑ e : BridgeArc gA n, bridgeAdv gA S e : ℕ) : ZMod p) :=
       (bridgeChain gA S iR ptrReg r h2 hbal hIlt hcount hcountI hp).time_conn
@@ -630,19 +630,19 @@ theorem openVmHost_ordersRanks [Fact p.Prime] (P : OpenVmParams p) :
   have hcountI : (a.hostAssignment (openVmInputChip P)).length ≤ P.maxInputInstances :=
     hsat.satisfiesHost.withinBound (openVmInputChip P)
   -- Both interactions are placed in the one step, so they share its position on the bridge.
-  obtain ⟨hlowI, hhighI, htsI⟩ := L.placed i₀ hActI
-  obtain ⟨hlowJ, hhighJ, htsJ⟩ := L.placed j₀ hActJ
+  obtain ⟨hlowI, hhighI, htsI⟩ := L.tOffsetMatch i₀ hActI
+  obtain ⟨hlowJ, hhighJ, htsJ⟩ := L.tOffsetMatch j₀ hActJ
   obtain ⟨T, hbase, hfit⟩ :=
     bridge_chain_bound a.guestAssignments S iR P.ptrReg r (openVm_negOne_ne_one P) hbal
       P.inputWindowOk hcount hcountI hp ⟨t, jx⟩
   rw [hSL] at hbase hfit
   -- One step, one `T`: the offsets decide.
-  have hfit' : 1 + T + L.d ≤ openVmTimestampBound := by
+  have hfit' : 1 + T + L.tWindow ≤ openVmTimestampBound := by
     have := r.finalTimestampBounded
     omega
   have hbase' : ∀ (x : Fin (G.get t).busInteractions.length) (off : ℤ),
       openVmTimestamp openVmMemBusId ((G.get t).msgAt ((a.guestAssignments t).get jx) x)
-          = L.base + (off : ZMod p) →
+          = L.tStart + (off : ZMod p) →
         openVmTimestamp openVmMemBusId ((G.get t).msgAt ((a.guestAssignments t).get jx) x)
           = ((1 + T : ℕ) : ZMod p) + (off : ZMod p) := by
     intro x off h

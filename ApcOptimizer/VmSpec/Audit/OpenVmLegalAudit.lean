@@ -13,7 +13,7 @@ set_option autoImplicit false
     data* back at a fresh timestamp (`+1`). The sent limbs are bytes only because the received ones
     were; no algebraic constraint and no lookup bounds them. `readEchoChip` is that shape in
     isolation, and it is where `StepLayout.memSendsOk` earns its keep — the send discharges its
-    obligation from the receive, and only because `StepLayout.place` puts the receive strictly
+    obligation from the receive, and only because `StepLayout.tOffset` puts the receive strictly
     before the send.
 
     That ordering is *derived here, not assumed*, and the derivation is the point. Legality here is
@@ -27,7 +27,7 @@ set_option autoImplicit false
     is what places the receive at a negative offset inside `stepChip`'s window rather than leaving
     it free. `earlyEchoChip_legalGuest` lists the echo *before* the read instead of after — the
     opposite of a real trace — while keeping the same real timestamps, and is legal all the same:
-    `memSendsOk` reads off `place`, not list position, so scrambling the constraint order (which no
+    `memSendsOk` reads off `tOffset`, not list position, so scrambling the constraint order (which no
     algebraic condition pins anyway) cannot be what legality depends on.
 
     **Fresh write.** A value the chip computes and writes is byte-valued because of a
@@ -207,7 +207,7 @@ theorem stepChip_hasStepLayout (hp : 3 < p) {maxWindow maxLookback : ℕ} (hw : 
   have hnegz : (-1 : ZMod p) ≠ 0 := fun hcon => one_ne_zero (α := ZMod p) (by
     linear_combination -hcon)
   intro asg _ _
-  refine ⟨⟨pcFrom, pcTo, base, 3, fun i => (i.val : ℤ), by norm_num, hw, ?_, ?_, ?_, ?_, ?_⟩⟩
+  refine ⟨⟨pcFrom, pcTo, base, 3, by norm_num, hw, ?_, ?_, ?_, fun i => (i.val : ℤ), ?_, ?_⟩⟩
   · simp [Circuit.allEffects, stepChip, bridgeRecv, bridgeSend, readEchoRecv, readEchoSend,
       assertLtLoLookup, assertLtHiLookup, BusInteraction.eval, Expression.eval,
       openVmGuestRules, h3]
@@ -243,7 +243,7 @@ theorem stepChip_hasStepLayout (hp : 3 < p) {maxWindow maxLookback : ℕ} (hw : 
     fin_cases i
     · exact absurd hmult hneg
     · exact absurd hmult hneg
-    · -- The send echoes the receive one position earlier in the very same step; `place` is list
+    · -- The send echoes the receive one position earlier in the very same step; `tOffset` is list
       -- position here, so "earlier in the step" and "earlier in the list" coincide.
       have hrecv0 := hlow ⟨1, by simp [stepChip]⟩ (by norm_num) ⟨⟨rfl, hnegz⟩, rfl⟩
       replace hrecv0 : openVmPayloadOk defaultBusMap
@@ -344,7 +344,7 @@ theorem earlyEchoChip_statefulPolarity (x : Variable) (pcFrom pcTo ptr base : ZM
 
 /-- **Scrambling the constraint list does not change legality.** Real timestamps are exactly
     `stepChip`'s — the receive at `base + 1`, the send at `base + 2` — only their position in
-    `busInteractions` is swapped. `place` tracks the timestamp, not the list position, so
+    `busInteractions` is swapped. `tOffset` tracks the timestamp, not the list position, so
     `memSendsOk`'s obligation on the send is discharged by the receive precisely as it was for
     `stepChip`: whether the constraint that computes a value comes before or after the constraint
     that uses it is not something a real VM's algebraic relations can see. -/
@@ -369,8 +369,8 @@ theorem earlyEchoChip_hasStepLayout (hp : 3 < p) {maxWindow maxLookback : ℕ} (
   have hnegz : (-1 : ZMod p) ≠ 0 := fun hcon => one_ne_zero (α := ZMod p) (by
     linear_combination -hcon)
   intro asg _ _
-  refine ⟨⟨pcFrom, pcTo, base, 3, fun i => ([0, 2, 1, 3] : List ℤ).getD i.val 0,
-    by norm_num, hw, ?_, ?_, ?_, ?_, ?_⟩⟩
+  refine ⟨⟨pcFrom, pcTo, base, 3, by norm_num, hw, ?_, ?_, ?_,
+    fun i => ([0, 2, 1, 3] : List ℤ).getD i.val 0, ?_, ?_⟩⟩
   · simp [Circuit.allEffects, earlyEchoChip, bridgeRecv, bridgeSend, readEchoRecv, readEchoSend,
       BusInteraction.eval, Expression.eval, openVmGuestRules, h3]
   · simp [Circuit.allEffects, earlyEchoChip, bridgeRecv, bridgeSend, readEchoRecv, readEchoSend,
@@ -399,7 +399,7 @@ theorem earlyEchoChip_hasStepLayout (hp : 3 < p) {maxWindow maxLookback : ℕ} (
     fin_cases i
     · exact absurd hmult hneg
     · -- The send: justified by the receive, which sits later in the list (index `2`) but earlier
-      -- in `place` (`1 < 2`).
+      -- in `tOffset` (`1 < 2`).
       have hrecv0 := hlow ⟨2, by simp [earlyEchoChip]⟩ (by simp) ⟨⟨rfl, hnegz⟩, rfl⟩
       replace hrecv0 : openVmPayloadOk defaultBusMap
         ((1 : ℕ), [(1 : ZMod p), ptr, asg x, 0, 0, 0, base + 1]) := hrecv0
@@ -517,8 +517,8 @@ theorem freshWriteStepChip_legalGuest (hp : 256 < p) {maxWindow maxLookback maxI
     · exact Or.inr (Or.inl rfl)
     · exact Or.inr (Or.inl rfl)
   · intro asg _ hacc
-    refine ⟨⟨pcFrom, pcTo, base, 3, fun i => (i.val : ℤ), by norm_num, hw,
-      ?_, ?_, ?_, ?_, ?_⟩⟩
+    refine ⟨⟨pcFrom, pcTo, base, 3, by norm_num, hw, ?_, ?_, ?_,
+      fun i => (i.val : ℤ), ?_, ?_⟩⟩
     · simp [Circuit.allEffects, freshWriteStepChip, bridgeRecv, bridgeSend, freshWriteLookup,
         freshWriteSend, BusInteraction.eval, Expression.eval, openVmGuestRules, h3]
     · simp [Circuit.allEffects, freshWriteStepChip, bridgeRecv, bridgeSend, freshWriteLookup,

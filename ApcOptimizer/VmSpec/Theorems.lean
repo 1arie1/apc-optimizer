@@ -16,8 +16,8 @@ variable {p : ℕ}
 
     -/
 theorem openVm_vmSoundReplacement [Fact p.Prime] {P : OpenVmParams p} {G G' : Guest p}
-    -- TODO(AO): we'll have to prove the `G'` half of this, probably by absorbing an additional
-    -- implication into `Circuit.isSoundReplacementOf`.
+    -- TODO(AO): the fact that `G'`'s legality is implied by `G`'s legality will have to be added to
+    -- `isSoundReplacementOf`.
     (hLegal : ∀ c ∈ G ++ G',
       c.legalGuest (openVmGuestRules defaultBusMap openVmMemBusId) P.maxWindow
         openVmTimestampBound P.maxInteractions)

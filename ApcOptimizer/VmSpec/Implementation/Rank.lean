@@ -50,5 +50,5 @@ def VmAssignment.ordersRanks {vm : Vm p} (a : VmAssignment p vm) (rm : RankModel
     ∀ L : StepLayout (vm.guest.get t) r asg maxWindow maxLookback,
       ∀ i j : Fin (vm.guest.get t).busInteractions.length,
         (vm.guest.get t).activeStateful r asg i → (vm.guest.get t).activeStateful r asg j →
-          L.place j < L.place i →
+          L.tOffset j < L.tOffset i →
             rm.rank ((vm.guest.get t).msgAt asg j) < rm.rank ((vm.guest.get t).msgAt asg i)

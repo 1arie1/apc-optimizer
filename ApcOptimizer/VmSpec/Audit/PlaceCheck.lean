@@ -4,7 +4,7 @@ set_option autoImplicit false
 
 /-! **A static check for `StepLayout`'s placement and ordering.**
 
-    `StepLayout.place` maps each interaction to an integer offset from the step's `base`, and it
+    `StepLayout.tOffset` maps each interaction to an integer offset from the step's `tStart`, and it
     depends on the assignment: a memory *receive* names the record an earlier instruction left, so
     its offset is `k - n` where `n` is whatever distance the lt gadget's range checks allow. A
     checker is a `Bool` on the circuit alone, so it cannot name `place`.
@@ -192,7 +192,7 @@ theorem recipe_ordered {maxLookback : ℕ} {a b : Recipe p} {asg : ChipAssignmen
     a.place asg < b.place asg :=
   lt_of_le_of_lt (a.place_mem ha).2 (lt_of_lt_of_le (of_decide_eq_true hb) (b.place_mem hbk).1)
 
-/-- **`StepLayout.placed`, from the recipes.** -/
+/-- **`StepLayout.tOffsetMatch`, from the recipes.** -/
 theorem placeCheck_placed {vs : List Variable} {rules : List (PinRule p)}
     {isStateful : Nat → Bool} {tsPos : TimestampPos} {baseE : Expression p} {baseF : LinForm p}
     {asg : ChipAssignment p} {maxLookback d : ℕ} {r : GuestBusRules p} {c : Circuit p}

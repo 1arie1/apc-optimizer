@@ -67,7 +67,8 @@ def Circuit.satisfiesStateless (c : Circuit p) (r : GuestBusRules p) (asg : Chip
     multiplicity. -/
 def Circuit.msgAt (c : Circuit p) (asg : ChipAssignment p)
     (i : Fin c.busInteractions.length) : BusMessage p :=
-  (((c.busInteractions.get i).eval asg).busId, ((c.busInteractions.get i).eval asg).payload)
+  let bi := (c.busInteractions.get i).eval asg
+  (bi.busId, bi.payload)
 
 /-- The multiplicity the `i`th interaction writes under `asg`. -/
 def Circuit.multAt (c : Circuit p) (asg : ChipAssignment p)
@@ -97,61 +98,73 @@ def Circuit.memSend (c : Circuit p) (r : GuestBusRules p) (asg : ChipAssignment 
 /-- The layout of a guest instance's stateful traffic in time.
 
     The instance performs one instruction step, advancing the clock by fewer than `maxWindow` ticks:
-    it receives `(pcFrom, base)` from the execution bridge, sends `(pcTo, base + d)` back, and puts
-    nothing else there (`recv`, `send`, `other` — OpenVM whitepaper §4.5, an executor "adds a
-    message `(pc_from, t_from)` to the receive set and a message `(pc_to, t_to)` to the send set
-    exactly once", and "must also constrain that `t_from < t_to`").
+    it receives `(pcFrom, tStart)` from the execution bridge, sends `(pcTo, tStart + tWindow)` back,
+    and puts nothing else there.
+    (See OpenVM whitepaper §4.5, an executor "adds a message `(pc_from, t_from)` to the receive set
+    and a message `(pc_to, t_to)` to the send set exactly once", and "must also constrain that
+    `t_from < t_to`".)
 
-    Every stateful interaction it makes sits at an integer offset (`place`) from that step's `base`,
-    somewhere in `[-maxLookback, d]`: inside the step, or up to `maxLookback` ticks before it, which
-    is where a memory *receive* lives — it names the record an earlier instruction left, and
-    OpenVM's `AssertLtSubAir` range-checks the difference to `timestamp_max_bits` bits, so it cannot
-    be further back than that. (§4.2 puts guest-state timestamps at `t_from < t < t_to`)
+    Every stateful interaction it makes sits at an integer offset (`tOffset`) from that step's
+    `tStart`, somewhere in `[-maxLookback, tWindow]`: inside the step, or up to `maxLookback` ticks
+    before it, which is where a memory *receive* might live. It names the record an earlier
+    instruction left, and OpenVM's `AssertLtSubAir` range-checks the difference to
+    `timestamp_max_bits` bits, so it cannot be further back than that. (§4.2 puts guest-state
+    timestamps at `t_from < t < t_to`)
 
     Offsets are integers---not field elements, hence comparisons work. The timestamps are `ZMod p`
     elements.
 
     This assumes that a **fused** APC equates adjacent timestamps on the execution bridge, so that
-    the step's `d` is the sum of the fused instructions' `d_i`.
+    the step's `tWindow` is the sum of the fused instructions' `tWindow_i`, and the instructions
+    must execute consecutively in time.
 
-    **NB**: currently, powdr does not do this equation, so the timestamps are free. That is odd and
-    I am not sure if somehow we can derive the equations through a global argument. Even if we can,
-    it certainly makes the local legality definition harder. I think they should just add the
-    equations to the fused APCs---I think that is their intent.
+    **NB**: currently, powdr does not add these equations, so the timestamps are free and the
+    instructions can executed out-of-order. That is odd and I think we cannot derive the equations
+    even through a global argument---instructions can genuinely execute at non-consecutive times.
+    It also makes the byte-constraint induction very odd to state.
+
+    I think they should just add the equations to the fused APCs---I think that is their intent.
     -/
 structure StepLayout {p : ℕ} (c : Circuit p) (r : GuestBusRules p) (asg : ChipAssignment p)
     (maxWindow maxLookback : ℕ) where
+
+  -- EXECUTION BRIDGE
+
   /-- The `pc` the step starts at. -/
   pcFrom : ZMod p
   /-- The `pc` it hands on. -/
   pcTo : ZMod p
   /-- The timestamp it starts at. -/
-  base : ZMod p
+  tStart : ZMod p
+
   /-- How far it advances the clock. -/
-  d : ℕ
-  /-- Where in the step's window each interaction sits.
-      Receives from previous steps get negative values. -/
-  place : Fin c.busInteractions.length → ℤ
-  /-- The step *advances* the clock. -/
-  dPos : 0 < d
+  tWindow : ℕ
+  /-- The step *advances* the clock... -/
+  tWindowPos : 0 < tWindow
   /-- ... and fits in the window. -/
-  dLt : d < maxWindow
-  /-- We receive `(pcFrom, base)` on the bridge -/
-  recv : c.allEffects asg (r.execBusId, [pcFrom, base]) = -1
-  /-- We send `(pcTo, base+d)` on the bridge -/
-  send : c.allEffects asg (r.execBusId, [pcTo, base + (d : ZMod p)]) = 1
+  tWindowLt : tWindow < maxWindow
+
+  /-- We receive `(pcFrom, tStart)` on the bridge, -/
+  bridgeRecv : c.allEffects asg (r.execBusId, [pcFrom, tStart]) = -1
+  /-- ... send `(pcTo, tStart+d)`, ... -/
+  bridgeSend : c.allEffects asg (r.execBusId, [pcTo, tStart + (tWindow : ZMod p)]) = 1
   /-- ... and nothing else. -/
-  other : ∀ m : BusMessage p, m.1 = r.execBusId →
-    m ≠ (r.execBusId, [pcFrom, base]) →
-    m ≠ (r.execBusId, [pcTo, base + (d : ZMod p)]) →
+  bridgeNoOther : ∀ m : BusMessage p, m.1 = r.execBusId →
+    m ≠ (r.execBusId, [pcFrom, tStart]) →
+    m ≠ (r.execBusId, [pcTo, tStart + (tWindow : ZMod p)]) →
       c.allEffects asg m = 0
 
+  -- MEMORY
+
+  /-- Where in the step's window each interaction sits.
+      Receives from previous steps get negative values. -/
+  tOffset : Fin c.busInteractions.length → ℤ
   /-- Every active stateful interaction is placed in the step's window. Used for induction on the
       next one. -/
-  placed : ∀ i : Fin c.busInteractions.length, c.activeStateful r asg i →
-    -(maxLookback : ℤ) ≤ place i ∧ place i ≤ (d : ℤ) ∧
-      r.getTimestamp (c.msgAt asg i) = base + ((place i : ℤ) : ZMod p)
-  /-- Each memory send is Ok, given that every earlier-*placed* memory interaction is Ok.
+  tOffsetMatch : ∀ i : Fin c.busInteractions.length, c.activeStateful r asg i →
+    -(maxLookback : ℤ) ≤ tOffset i ∧ tOffset i ≤ (tWindow : ℤ) ∧
+      r.getTimestamp (c.msgAt asg i) = tStart + ((tOffset i : ℤ) : ZMod p)
+  /-- Each memory send is Ok, given that every earlier memory interaction is Ok.
 
       This is the induction that carries the memory-byte invariant: a send is justified by
       whatever actually precedes it in time. Restricted to the memory bus — `memPayloadOnly`
@@ -161,7 +174,7 @@ structure StepLayout {p : ℕ} (c : Circuit p) (r : GuestBusRules p) (asg : Chip
       to lie in `[0, 2^8)`". In §4.6: a message appears "if and only if at timestamp `t` the data
       memory had values `data`" at that address. -/
   memSendsOk : ∀ i : Fin c.busInteractions.length, c.memSend r asg i →
-    (∀ j : Fin c.busInteractions.length, place j < place i → c.activeMem r asg j →
+    (∀ j : Fin c.busInteractions.length, tOffset j < tOffset i → c.activeMem r asg j →
       r.payloadOk (c.msgAt asg j)) →
     r.payloadOk (c.msgAt asg i)
 

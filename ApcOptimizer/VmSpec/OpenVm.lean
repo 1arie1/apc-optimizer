@@ -190,7 +190,7 @@ def wordValue (limbs : Vector (ZMod p) 4) : ZMod p :=
 
 /-- How far a `HINT_STOREW` instance advances the execution-bridge clock: one tick per memory
     access — the pointer-register peek and the word write — plus one, so both sit *strictly*
-    inside `(base, base + inputStepWindow)`, the window `StepLayout.placed` allows and
+    inside `(base, base + inputStepWindow)`, the window `StepLayout.tOffsetMatch` allows and
     `Audit/OpenVmLegalAudit.lean`'s `stepChip` exhibits. -/
 def inputStepWindow : ℕ := 3
 
@@ -488,7 +488,7 @@ structure OpenVmParams (p : ℕ) where
       (`HostAssignment.satisfies`). One instance is one `HINT_STOREW`, hence one input datum: an
       N-word chunk costs N instances of this budget. -/
   maxInputInstances : ℕ
-  /-- The `StepLayout` window bound: `StepLayout.dLt`. A property of the chips being run rather
+  /-- The `StepLayout` window bound: `StepLayout.tWindowLt`. A property of the chips being run rather
       than of OpenVM — a fused APC advances by its whole basic block, not by one instruction's
       `timestamp_delta`. -/
   maxWindow : ℕ

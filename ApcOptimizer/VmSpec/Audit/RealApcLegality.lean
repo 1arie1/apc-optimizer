@@ -120,7 +120,7 @@ theorem babyBear_negOne_ne_zero : (2013265920 : ZMod babyBear) ≠ 0 := by decid
 
     Reading it back: the access sits at `base + δ` and the record it receives sits `n` ticks
     earlier, `n = lo + 2 ^ 17 * hi < 2 ^ 29 = openVmTimestampBound`. That bound is the whole content
-    of `StepLayout.placed`'s `-maxLookback ≤ offset`, and this is why `Circuit.hasStepLayout` is
+    of `StepLayout.tOffsetMatch`'s `-maxLookback ≤ offset`, and this is why `Circuit.hasStepLayout` is
     gated on `Circuit.satisfiesStateless`: after the substitution nothing about a receive's offset
     is derivable from the algebraic constraints alone. -/
 theorem lt_gadget_offset (δ : ℤ) (prev base : ZMod babyBear) {lo hi : ZMod babyBear}
@@ -455,8 +455,8 @@ theorem apc2105000Opt_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWindow) :
         Expression.eval, babyBear_negOne_ne_one]
   -- The bridge, by static analysis: `optBridgeCheck` is a `decide`.
   obtain ⟨hrecv, hsend, hother⟩ := bridgeCheck_sound optBridgeCheck (optPinRules_hold asg halg)
-  refine ⟨_, _, _, 11, fun i => (optOffsets n0 nw0 nr1 nw1 nr3).getD i.val 0,
-    by norm_num, hw, hrecv, hsend, hother, ?_, ?_⟩
+  refine ⟨_, _, _, 11, by norm_num, hw, hrecv, hsend, hother,
+    fun i => (optOffsets n0 nw0 nr1 nw1 nr3).getD i.val 0, ?_, ?_⟩
   · -- The placement, offset by offset.
     rintro i ⟨hst, hm⟩
     fin_cases i
@@ -603,7 +603,7 @@ theorem apc2105000Gated_not_hasStepLayout {maxWindow maxLookback : ℕ} :
   obtain ⟨L⟩ := h (fun _ => 0) apc2105000Gated_satisfiesAlgebraic_zero
     (fun bi hbi _ hmult => absurd (apc2105000Gated_mults_zero_on_padding bi hbi) hmult)
   exact babyBear_negOne_ne_zero
-    (L.recv.symm.trans (allEffects_eq_zero_of_mults_zero apc2105000Gated_mults_zero_on_padding _))
+    (L.bridgeRecv.symm.trans (allEffects_eq_zero_of_mults_zero apc2105000Gated_mults_zero_on_padding _))
 
 /-- **The unoptimized APC has no padding row either**: it pins each fused instruction's opcode-flag
     sum to `1` (`1 - (add + sub + xor + or + and) = 0`, one per instruction). -/
@@ -806,8 +806,8 @@ theorem apc2105000GatedPinned_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWind
         BusInteraction.eval, Expression.eval, babyBear_negOne_ne_one]
   -- The bridge, by static analysis: `gatedBridgeCheck` is a `decide`.
   obtain ⟨hrecv, hsend, hother⟩ := bridgeCheck_sound gatedBridgeCheck (gatedPinRules_hold asg halg)
-  refine ⟨_, _, _, 11, fun i => (optOffsets n0 nw0 nr1 nw1 nr3).getD i.val 0,
-    by norm_num, hw, hrecv, hsend, hother, ?_, ?_⟩
+  refine ⟨_, _, _, 11, by norm_num, hw, hrecv, hsend, hother,
+    fun i => (optOffsets n0 nw0 nr1 nw1 nr3).getD i.val 0, ?_, ?_⟩
   · -- The placement, offset by offset.
     rintro i ⟨hst, hm⟩
     fin_cases i
@@ -1980,8 +1980,8 @@ theorem apc2105000UnoptChained_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWin
       simp_all [unoptOffsets, unoptOffsetUb, apc2105000UnoptChained, apc2105000Unopt, apcRules,
         openVmGuestRules, openVmIsStateful, defaultBusMap, openVmMemBusId,
         OpenVmBusType.isStateful, BusInteraction.eval, Expression.eval, babyBear_negOne_ne_one]
-  refine ⟨_, _, _, 11, fun i => (unoptOffsets nr10 nw0 nr11 nw1 nr12 nw2 nr13 nr23).getD i.val 0,
-    by norm_num, hw, hrecv, hsend, hother, ?_, ?_⟩
+  refine ⟨_, _, _, 11, by norm_num, hw, hrecv, hsend, hother,
+    fun i => (unoptOffsets nr10 nw0 nr11 nw1 nr12 nw2 nr13 nr23).getD i.val 0, ?_, ?_⟩
   · -- The placement, offset by offset: `30` genuinely stateful positions (memory or bridge),
     -- read off directly; every other position is either stateless or a structurally inactive
     -- `rs2` gadget (`rs2_as_i = 0`, so its multiplicity can never be nonzero).

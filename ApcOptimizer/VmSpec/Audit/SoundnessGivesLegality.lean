@@ -445,7 +445,7 @@ private theorem checkedStepChip_legalGuest [Fact p.Prime] (hp : 18 < p)
         BusInteraction.eval, Expression.eval, openVmExecBusId]
   · -- One step, `(0, 0) → (0, 1)`, with each interaction's offset its own position in the list.
     intro asg _ _
-    refine ⟨⟨0, 0, 0, 1, fun i => (i.val : ℤ), by norm_num, hw, ?_, ?_, ?_, ?_, ?_⟩⟩
+    refine ⟨⟨0, 0, 0, 1, by norm_num, hw, ?_, ?_, ?_, fun i => (i.val : ℤ), ?_, ?_⟩⟩
     · simp [Circuit.allEffects, checkedStepChip, BusInteraction.eval, Expression.eval,
         openVmGuestRules, openVmExecBusId]
     · simp [Circuit.allEffects, checkedStepChip, BusInteraction.eval, Expression.eval,
