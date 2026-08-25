@@ -96,13 +96,12 @@ theorem memSendsOk_of_sendsOk {p : ℕ} {r : GuestBusRules p} {c : Circuit p}
     (hsendsOk : ∀ i : Fin c.busInteractions.length, c.statefulSend r asg i →
       (∀ j : Fin c.busInteractions.length, j < i → c.activeStateful r asg j →
         r.payloadOk (c.msgAt asg j)) → r.payloadOk (c.msgAt asg i)) :
-    ∀ i : Fin c.busInteractions.length, c.statefulSend r asg i →
-      (c.busInteractions.get i).busId = r.memBusId →
-      (∀ j : Fin c.busInteractions.length, j < i → c.activeStateful r asg j →
-        (c.busInteractions.get j).busId = r.memBusId → r.payloadOk (c.msgAt asg j)) →
+    ∀ i : Fin c.busInteractions.length, c.memSend r asg i →
+      (∀ j : Fin c.busInteractions.length, j < i → c.activeMem r asg j →
+        r.payloadOk (c.msgAt asg j)) →
       r.payloadOk (c.msgAt asg i) :=
-  fun i hsend _ hlow => hsendsOk i hsend (fun j hji hactj =>
-    if hjmem : (c.busInteractions.get j).busId = r.memBusId then hlow j hji hactj hjmem
+  fun i ⟨hsend, _⟩ hlow => hsendsOk i hsend (fun j hji hactj =>
+    if hjmem : (c.busInteractions.get j).busId = r.memBusId then hlow j hji ⟨hactj, hjmem⟩
     else r.memPayloadOnly _ hactj.1 hjmem)
 
 --------- The gadgets a placement is read off ---------
@@ -518,7 +517,7 @@ theorem apc2105000Opt_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWindow) :
         OpenVmBusType.isStateful] at hst
   · -- The ordering: numeric, via `optOffsetUb`. Restricted to the memory bus, but both extra
     -- hypotheses go unused — `optOffsetUb_dominates` never needed them.
-    rintro i j hji ⟨hsi, hmi⟩ _ ⟨hsj, hmj⟩ _
+    rintro i j hji ⟨⟨hsi, hmi⟩, _⟩ ⟨⟨hsj, hmj⟩, _⟩
     obtain ⟨hmem, heq⟩ := hsendIdx i hsi hmi
     show (optOffsets n0 nw0 nr1 nw1 nr3).getD j.val 0
       < (optOffsets n0 nw0 nr1 nw1 nr3).getD i.val 0
@@ -873,7 +872,7 @@ theorem apc2105000GatedPinned_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWind
         defaultBusMap, OpenVmBusType.isStateful] at hst
   · -- The ordering: numeric, via `optOffsetUb`. Restricted to the memory bus, but both extra
     -- hypotheses go unused — `optOffsetUb_dominates` never needed them.
-    rintro i j hji ⟨hsi, hmi⟩ _ ⟨hsj, hmj⟩ _
+    rintro i j hji ⟨⟨hsi, hmi⟩, _⟩ ⟨⟨hsj, hmj⟩, _⟩
     obtain ⟨hmem, heq⟩ := hsendIdx i hsi hmi
     show (optOffsets n0 nw0 nr1 nw1 nr3).getD j.val 0
       < (optOffsets n0 nw0 nr1 nw1 nr3).getD i.val 0
@@ -1843,11 +1842,9 @@ theorem apc2105000UnoptChained_memSendsOk {asg : ChipAssignment babyBear}
     (halg : apc2105000UnoptChained.satisfiesAlgebraic asg)
     (hacc : apc2105000UnoptChained.satisfiesStateless apcRules asg) :
     ∀ i : Fin apc2105000UnoptChained.busInteractions.length,
-      apc2105000UnoptChained.statefulSend apcRules asg i →
-      (apc2105000UnoptChained.busInteractions.get i).busId = apcRules.memBusId →
+      apc2105000UnoptChained.memSend apcRules asg i →
       (∀ j : Fin apc2105000UnoptChained.busInteractions.length, j < i →
-        apc2105000UnoptChained.activeStateful apcRules asg j →
-        (apc2105000UnoptChained.busInteractions.get j).busId = apcRules.memBusId →
+        apc2105000UnoptChained.activeMem apcRules asg j →
         apcRules.payloadOk (apc2105000UnoptChained.msgAt asg j)) →
       apcRules.payloadOk (apc2105000UnoptChained.msgAt asg i) := by
   haveI : Fact (1 < babyBear) := ⟨by decide⟩
@@ -2115,7 +2112,7 @@ theorem apc2105000UnoptChained_hasStepLayout {maxWindow : ℕ} (hw : 11 < maxWin
           Expression.eval, apcRules, openVmGuestRules, openVmTimestamp, Circuit.msgAt,
           openVmMemBusId, openVmExecBusId, ht01, ht12, ht23] <;> ring⟩
   · -- The ordering: numeric, via `unoptOffsetUb`, restricted to the memory bus.
-    rintro i j hji ⟨hsi, hmi⟩ hbi ⟨hsj, hmj⟩ hbj
+    rintro i j hji ⟨⟨hsi, hmi⟩, hbi⟩ ⟨⟨hsj, hmj⟩, hbj⟩
     obtain ⟨hmem, heq⟩ := hsendIdx i hsi hbi hmi
     show (unoptOffsets nr10 nw0 nr11 nw1 nr12 nw2 nr13 nr23).getD j.val 0
       < (unoptOffsets nr10 nw0 nr11 nw1 nr12 nw2 nr13 nr23).getD i.val 0

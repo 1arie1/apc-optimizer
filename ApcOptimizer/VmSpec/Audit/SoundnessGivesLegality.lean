@@ -469,12 +469,12 @@ private theorem checkedStepChip_legalGuest [Fact p.Prime] (hp : 18 < p)
       · simp [checkedStepChip, openVmGuestRules, openVmIsStateful, defaultBusMap,
           OpenVmBusType.isStateful, rangeBusId] at hst
     · -- `checkedStepChip` never touches the memory bus, so `memOrdered` is vacuous.
-      exact fun i j _ _ hbmem _ _ => by
+      exact fun i j _ ⟨_, hbmem⟩ _ => by
         fin_cases i <;>
           simp [checkedStepChip, openVmGuestRules, openVmExecBusId, openVmMemBusId,
             rangeBusId] at hbmem
     · -- Same reason: no `i` here is ever on the memory bus, so `memSendsOk` is vacuous too.
-      exact fun i _ hbmem _ => by
+      exact fun i ⟨_, hbmem⟩ _ => by
         fin_cases i <;>
           simp [checkedStepChip, openVmGuestRules, openVmExecBusId, openVmMemBusId,
             rangeBusId] at hbmem

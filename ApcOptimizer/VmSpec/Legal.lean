@@ -89,6 +89,16 @@ def Circuit.statefulSend (c : Circuit p) (r : GuestBusRules p) (asg : ChipAssign
     (i : Fin c.busInteractions.length) : Prop :=
   r.isStateful (c.busInteractions.get i).busId = true ∧ c.multAt asg i = 1
 
+/-- …restricted to the memory bus. -/
+def Circuit.activeMem (c : Circuit p) (r : GuestBusRules p) (asg : ChipAssignment p)
+    (i : Fin c.busInteractions.length) : Prop :=
+  c.activeStateful r asg i ∧ (c.busInteractions.get i).busId = r.memBusId
+
+/-- …and is a memory *send*. -/
+def Circuit.memSend (c : Circuit p) (r : GuestBusRules p) (asg : ChipAssignment p)
+    (i : Fin c.busInteractions.length) : Prop :=
+  c.statefulSend r asg i ∧ (c.busInteractions.get i).busId = r.memBusId
+
 /-- The layout of a guest instance's stateful traffic in time.
 
     The instance performs one instruction step, advancing the clock by fewer than `maxWindow` ticks:
@@ -152,9 +162,7 @@ structure StepLayout {p : ℕ} (c : Circuit p) (r : GuestBusRules p) (asg : Chip
       bookkeeping can legitimately land on the same field timestamp without either justifying the
       other's memory byte invariant). -/
   memOrdered : ∀ i j : Fin c.busInteractions.length, j < i →
-    c.statefulSend r asg i → (c.busInteractions.get i).busId = r.memBusId →
-    c.activeStateful r asg j → (c.busInteractions.get j).busId = r.memBusId →
-    place j < place i
+    c.memSend r asg i → c.activeMem r asg j → place j < place i
   /-- Each memory send is Ok, given that prior memory interactions are Ok.
 
       This is the induction that carries the memory-byte invariant: a send is justified by the
@@ -165,10 +173,9 @@ structure StepLayout {p : ℕ} (c : Circuit p) (r : GuestBusRules p) (asg : Chip
       OpenVM §3.2.5, elements of address spaces 1 (registers) and 2 (user memory) "are constrained
       to lie in `[0, 2^8)`". In §4.6: a message appears "if and only if at timestamp `t` the data
       memory had values `data`" at that address. -/
-  memSendsOk : ∀ i : Fin c.busInteractions.length, c.statefulSend r asg i →
-    (c.busInteractions.get i).busId = r.memBusId →
-    (∀ j : Fin c.busInteractions.length, j < i → c.activeStateful r asg j →
-      (c.busInteractions.get j).busId = r.memBusId → r.payloadOk (c.msgAt asg j)) →
+  memSendsOk : ∀ i : Fin c.busInteractions.length, c.memSend r asg i →
+    (∀ j : Fin c.busInteractions.length, j < i → c.activeMem r asg j →
+      r.payloadOk (c.msgAt asg j)) →
     r.payloadOk (c.msgAt asg i)
 
 /-- Every assignment a guest chip admits lays out as one instruction step.

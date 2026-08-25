@@ -237,13 +237,13 @@ theorem stepChip_hasStepLayout (hp : 3 < p) {maxWindow maxLookback : ℕ} (hw : 
         OpenVmBusType.isStateful] at hst
     · simp [stepChip, assertLtHiLookup, openVmGuestRules, openVmIsStateful, defaultBusMap,
         OpenVmBusType.isStateful] at hst
-  · exact fun i j hji _ _ _ _ => by simpa using Fin.lt_def.mp hji
-  · rintro i ⟨hst, hmult⟩ hbmem hlow
+  · exact fun i j hji _ _ => by simpa using Fin.lt_def.mp hji
+  · rintro i ⟨⟨hst, hmult⟩, hbmem⟩ hlow
     fin_cases i
     · exact absurd hmult hneg
     · exact absurd hmult hneg
     · -- The send echoes the receive one position earlier in the very same step.
-      have hrecv0 := hlow ⟨1, by simp [stepChip]⟩ (by simp [Fin.lt_def]) ⟨rfl, hnegz⟩ rfl
+      have hrecv0 := hlow ⟨1, by simp [stepChip]⟩ (by simp [Fin.lt_def]) ⟨⟨rfl, hnegz⟩, rfl⟩
       replace hrecv0 : openVmPayloadOk defaultBusMap
         ((1 : ℕ), [(1 : ZMod p), ptr, asg x, 0, 0, 0, base + 1]) := hrecv0
       have hrecv := hrecv0
@@ -339,12 +339,12 @@ theorem earlyEchoChip_not_legalGuest (hp : 256 < p) {maxWindow maxLookback maxIn
           openVmIsStateful, defaultBusMap, OpenVmBusType.isStateful] at hst)
   -- The only interaction before the send is the bridge receive, and it is not on the memory bus,
   -- so `memSendsOk`'s own hypothesis excludes it: the callback has nothing to supply.
-  have hsend := L.memSendsOk ⟨1, by simp [earlyEchoChip]⟩ ⟨rfl, rfl⟩
-    (by simp [earlyEchoChip, readEchoSend, openVmGuestRules, openVmMemBusId])
-    (fun j hji _ hjmem => by
+  have hsend := L.memSendsOk ⟨1, by simp [earlyEchoChip]⟩
+    ⟨⟨rfl, rfl⟩, by simp [earlyEchoChip, readEchoSend, openVmGuestRules, openVmMemBusId]⟩
+    (fun j hji hjmem => by
       fin_cases j
-      · simp [earlyEchoChip, bridgeRecv, openVmGuestRules, openVmExecBusId, openVmMemBusId]
-          at hjmem
+      · simp [Circuit.activeMem, earlyEchoChip, bridgeRecv, openVmGuestRules, openVmExecBusId,
+          openVmMemBusId] at hjmem
       all_goals exact absurd hji (by simp [Fin.lt_def]))
   replace hsend : openVmPayloadOk defaultBusMap
     ((1 : ℕ), [(1 : ZMod p), ptr, asg x, 0, 0, 0, base + 2]) := hsend
@@ -474,8 +474,8 @@ theorem freshWriteStepChip_legalGuest (hp : 256 < p) {maxWindow maxLookback maxI
       · exact ⟨by push_cast; omega, by norm_num, by
           simp [freshWriteStepChip, bridgeSend, openVmGuestRules, openVmTimestamp, Circuit.msgAt,
             BusInteraction.eval, Expression.eval, openVmMemBusId, openVmExecBusId]⟩
-    · exact fun i j hji _ _ _ _ => by simpa using Fin.lt_def.mp hji
-    · rintro i ⟨hst, hmult⟩ hbmem -
+    · exact fun i j hji _ _ => by simpa using Fin.lt_def.mp hji
+    · rintro i ⟨⟨hst, hmult⟩, hbmem⟩ -
       fin_cases i
       · exact absurd hmult hneg
       · simp [freshWriteStepChip, freshWriteLookup, openVmGuestRules, openVmIsStateful,
