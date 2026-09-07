@@ -130,7 +130,9 @@ theorem openVmHost_memNet_or_sender (P : OpenVmParams p)
         hA.busEffect m = -((kf + ki : ℕ) : ZMod p) ∧
         (kf = 0 → ∀ e ∈ hA (openVmMemFinalizeChip P), e m = 0) ∧
         (ki = 0 → ∀ i : Fin (hA (openVmInputChip P)).length,
-          ∀ e ∈ (iR i).interactions P.ptrReg 0 1, (e.busId, e.payload) ≠ m)) := by
+          ∀ e ∈ (iR i).interactions P.ptrReg 0 1, (e.busId, e.payload) ≠ m) ∧
+        (∀ t : Fin (openVmHost P).chips.length, (t : ℕ) ≠ 5 → (t : ℕ) ≠ 6 →
+          ∀ c ∈ hA t, c m = 0)) := by
   classical
   by_cases hinit : ∃ e ∈ hA (openVmMemInitChip P), e m ≠ 0
   · exact Or.inl hinit
@@ -148,11 +150,9 @@ theorem openVmHost_memNet_or_sender (P : OpenVmParams p)
     intro i e he heq hc
     exact hin ⟨i, e, he, heq, hc⟩
   -- Every chip other than memory-finalize and the input chip is silent at `m`.
-  have hzero : ∀ t : Fin (openVmHost P).chips.length,
-      (t : ℕ) ≠ 5 → (t : ℕ) ≠ 6 → ((hA t).map (fun effect => effect m)).sum = 0 := by
-    intro t ht5 ht6
-    refine List.sum_eq_zero (fun v hv => ?_)
-    obtain ⟨e, he, rfl⟩ := List.mem_map.mp hv
+  have hzero' : ∀ t : Fin (openVmHost P).chips.length,
+      (t : ℕ) ≠ 5 → (t : ℕ) ≠ 6 → ∀ e ∈ hA t, e m = 0 := by
+    intro t ht5 ht6 e he
     have hleg := hlegal.producible t e he
     by_contra hne
     fin_cases t
@@ -171,6 +171,12 @@ theorem openVmHost_memNet_or_sender (P : OpenVmParams p)
         rw [ConnectorBoundary.interactions] at he'
         simp only [List.mem_cons, List.not_mem_nil, or_false] at he'
         rcases he' with rfl | rfl <;> simp [openVmMemBusId])
+  have hzero : ∀ t : Fin (openVmHost P).chips.length,
+      (t : ℕ) ≠ 5 → (t : ℕ) ≠ 6 → ((hA t).map (fun effect => effect m)).sum = 0 := by
+    intro t ht5 ht6
+    refine List.sum_eq_zero (fun x hx => ?_)
+    obtain ⟨e, he, rfl⟩ := List.mem_map.mp hx
+    exact hzero' t ht5 ht6 e he
   -- Memory finalization runs at most once, and only ever receives.
   obtain ⟨kf, hkfle, hkfeq, hkfzero⟩ : ∃ kf : ℕ, kf ≤ 1 ∧
       ((hA (openVmMemFinalizeChip P)).map (fun effect => effect m)).sum = -(kf : ZMod p) ∧
@@ -242,7 +248,7 @@ theorem openVmHost_memNet_or_sender (P : OpenVmParams p)
     simp only [Finset.mem_insert, Finset.mem_singleton, not_or] at ht
     exact hzero t (fun h => ht.1 (Fin.ext h)) (fun h => ht.2 (Fin.ext h))
   refine ⟨kf, ∑ i, touchCount ((iR i).interactions P.ptrReg 0 1) m,
-    hkfle, hkile, ?_, hkfzero, hkizero⟩
+    hkfle, hkile, ?_, hkfzero, hkizero, hzero'⟩
   rw [hnet, hsum, Finset.sum_pair hfj, hkfeq, hkieq]
   push_cast
   ring

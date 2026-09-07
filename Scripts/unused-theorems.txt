@@ -74,7 +74,8 @@ list_sum_map_cast_mul
 guestNet_eq_count_mul
 guestCount_le
 guestNet_ne_zero_of_uniform
-guestNet_add_ne_zero_of_uniform
+count_ne_zero_of_active
+net_ne_zero_of_recvs
 payloadOk_of_exists
 maintains_of_stateful_active
 forcesAccepts_of_hostSound

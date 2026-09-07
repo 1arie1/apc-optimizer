@@ -12,34 +12,51 @@ set_option autoImplicit false
     `BusSemantics.statefulAcceptsOfMaintains` is likewise discharged, by inspection of OpenVM's
     memory `accepts`/`maintainsInvariants` pair.
 
-    `Host.statefulChipsMaintain` is another nine-way split: the lookup chips pin their bus id to
-    a stateless bus and so cannot touch a stateful message at all, the four memory chips each
-    carry byte-valued data limbs, and the connector sits on the execution bridge, whose invariant
-    is polarity alone. `Host.absorbsStateless` pools each lookup chip's instances into the one
-    its `instanceBound` allows, plus that chip's bus's slice of `δ` — a lookup predicate is closed
+    `Host.statefulChipsMaintain` is not here: it is a claim about a whole run rather than about
+    one chip, and lives in `Implementation/HostMaintain.lean`. `Host.absorbsStateless` pools each
+    lookup chip's instances into the one its `instanceBound` allows, plus that chip's bus's slice of `δ` — a lookup predicate is closed
     under sums, so one instance nets what a whole list of them would have — which needs `δ`'s
     support confined to `{2,3,6,7}` (`defaultBusMap_stateless`).
 
-    `openVmHost_realizes` collects all five into the single `Host.realizes`, with no hypotheses
-    left over — so `openVm_vmSoundReplacement` assumes nothing about the VM, only about the
-    optimization. -/
+    `openVmHost_realizes` (`Implementation/OrderFreeRealizes.lean`) collects all five into the
+    single `Host.realizes`, with no hypotheses left over — so `openVm_vmSoundReplacement` assumes
+    nothing about the VM, only about the optimization. -/
 
 namespace ApcOptimizer.OpenVM
 
 variable {p : ℕ}
 
-/-- The `RankModel` this argument runs on. Not a field of `openVmHost`: the ordering is the
-    argument's device, not part of the VM (`Implementation/Rank.lean`). Its two components do still
-    appear inside `openVmHost`'s audited `legalGuest`, which is where an auditor meets them. -/
+/-- How far `openVmRank` shifts a timestamp before reading it as a natural.
+
+    A memory *receive* names a record from before its own step, so its offset from the step's base
+    is negative and its raw `.val` may have wrapped. Shifting by the maximum lookback moves the
+    whole window `[-maxLookback, maxWindow)` into the non-negative naturals, which is what makes
+    the rank monotone in the offset — the one thing the soundness induction needs of it. -/
+def openVmRankShift : ℕ := openVmTimestampBound
+
+/-- OpenVM's ordering on stateful state: a message's timestamp, shifted into the naturals by
+    `openVmRankShift`, which is what makes `<` well-founded and
+    `maintains_of_stateful_active`'s induction possible. Off the stateful buses the rank is `0`;
+    nothing there needs the induction. -/
+def openVmRank (memBusId : Nat := openVmMemBusId) : BusMessage p → ℕ :=
+  fun m => if m.1 = memBusId ∨ m.1 = openVmExecBusId then
+    ((openVmTimestamp memBusId m) + (openVmRankShift : ZMod p)).val else 0
+
+/-- The `RankModel.bound` that goes with `openVmRank` (see `openVmRankModel`): the timestamp
+    ceiling plus the shift that makes room for a step's lookback. `2 ^ 30` for the default
+    configuration — exactly the headroom OpenVM already reserves for `AssertLtSubAir`. -/
+def openVmRankBound : ℕ := openVmTimestampBound + openVmRankShift
+
+/-- `OpenVmParams.timestampWindowOk`, read as the rank window it is — the audited field states
+    the same bound without naming a rank. -/
+theorem openVmRankBound_lt (P : OpenVmParams p) : openVmRankBound < p := P.timestampWindowOk
+
+/-- The `RankModel` this argument runs on. Not a field of `openVmHost`, and — like `openVmRank`
+    and `openVmRankBound` above — not part of the audited surface either: the ordering is the
+    argument's device, not part of the VM (`Implementation/Rank.lean`). What the VM does state is
+    the window it lives in, as `OpenVmParams.timestampWindowOk`. -/
 def openVmRankModel (memBusId : Nat := openVmMemBusId) : RankModel p :=
   ⟨openVmRank memBusId, openVmRankBound⟩
-
-/-- `memoryFinalizeHostChip`'s slot in `openVmHost.chips` — the one host chip
-    `Host.statefulChipsMaintain` carves out as `Host.exemptChip` instead of assuming outright
-    (`openVmHost_finalize_exempt`). -/
-def openVmFinalizeIdx (P : OpenVmParams p) :
-    Fin (openVmHost P).chips.length :=
-  ⟨5, by simp [openVmHost]⟩
 
 /-- A message `busStateOf` gives a nonzero net multiplicity is carried by one of its
     interactions. -/
@@ -186,55 +203,6 @@ theorem isByte_zero : isByte (0 : ZMod p) := by
   show (0 : ZMod p).val < 256
   simp [ZMod.val_zero]
 
-/-- A memory payload laid out as `[addressSpace, pointer] ++ w.toList ++ [timestamp]` has exactly
-    `w`'s entries as its data limbs. Every four-limb word an `InputRead` touches is of this
-    shape — the two peeked registers and each overwritten cell. -/
-theorem memoryPayload?_word {as ptr ts : ZMod p} {w : Vector (ZMod p) 4} {f : MemoryPayload p}
-    (h : memoryPayload? ([as, ptr] ++ w.toList ++ [ts]) = some f) :
-    ∀ d ∈ f.data, d ∈ w.toList := by
-  obtain ⟨a1, a2, a3, a4, hl⟩ : ∃ a1 a2 a3 a4, w.toList = [a1, a2, a3, a4] := by
-    have h4 : w.toList.length = 4 := by simp
-    rcases hh : w.toList with _ | ⟨a1, t1⟩
-    · rw [hh] at h4; simp at h4
-    rcases t1 with _ | ⟨a2, t2⟩
-    · rw [hh] at h4; simp at h4
-    rcases t2 with _ | ⟨a3, t3⟩
-    · rw [hh] at h4; simp at h4
-    rcases t3 with _ | ⟨a4, t4⟩
-    · rw [hh] at h4; simp at h4
-    rcases t4 with _ | ⟨a5, t5⟩
-    · exact ⟨a1, a2, a3, a4, rfl⟩
-    · rw [hh] at h4; simp at h4
-  rw [hl] at h ⊢
-  simp only [List.cons_append, List.nil_append, memoryPayload?, Option.some.injEq] at h
-  subst h
-  intro d hd
-  simp at hd ⊢
-  tauto
-
-/-- Every message an `InputRead` describes carries byte-valued data limbs — the peeked register
-    value by `ptrLimbsAreBytes`, the overwritten word by `oldWordIsBytes`, the written value by
-    `byteIsByte`. -/
-theorem InputRead.interactions_data (r : InputRead p) (ptrReg execBusId memBusId : Nat) :
-    ∀ msg ∈ r.interactions ptrReg execBusId memBusId, ∀ f : MemoryPayload p,
-      memoryPayload? msg.payload = some f → ∀ d ∈ f.data, isByte d := by
-  intro msg hmsg f hf d hd
-  rw [InputRead.interactions] at hmsg
-  simp only [List.mem_cons, List.not_mem_nil, or_false] at hmsg
-  rcases hmsg with rfl | rfl | rfl | rfl | rfl | rfl
-  -- The two bridge messages carry a two-element payload, too short to be a memory record.
-  · simp [memoryPayload?] at hf
-  · simp [memoryPayload?] at hf
-  · exact r.ptrLimbsAreBytes d (memoryPayload?_word hf d hd)
-  · exact r.ptrLimbsAreBytes d (memoryPayload?_word hf d hd)
-  · exact r.oldWordIsBytes d (memoryPayload?_word hf d hd)
-  · simp only [memoryPayload?, Option.some.injEq] at hf
-    subst hf
-    simp at hd
-    rcases hd with rfl | rfl | rfl | rfl
-    · exact r.byteIsByte
-    all_goals exact isByte_zero
-
 /-- On the memory bus, a payload whose data limbs are bytes maintains OpenVM's invariants. This
     is the witness every memory-touching host chip supplies: multiplicity `1` satisfies the
     polarity clause, and the byte clause is the hypothesis. -/
@@ -254,91 +222,6 @@ theorem memory_maintains {payload : List (ZMod p)}
   cases hmp : memoryPayload? payload with
   | none => trivial
   | some f => exact fun _ => h f hmp
-
-/-- On the execution bridge, OpenVM's invariant is polarity alone, so any payload maintains it. -/
-theorem bridge_maintains (payload : List (ZMod p)) :
-    ∃ msg : BusInteraction (ZMod p), msg.busId = 0 ∧ msg.payload = payload ∧
-      (openVmBusSemantics p defaultBusMap).maintainsInvariants msg := by
-  refine ⟨⟨0, 1, payload⟩, rfl, rfl, ?_⟩
-  show ApcOptimizer.OpenVM.maintainsInvariants defaultBusMap
-    (⟨0, 1, payload⟩ : BusInteraction (ZMod p))
-  rw [ApcOptimizer.OpenVM.maintainsInvariants]
-  exact Or.inl rfl
-
-/-- **Memory finalization is `openVmHost`'s exempt chip.** It runs at most once
-    (`memoryFinalizeHostChip`'s `instanceBound`), and its own `canProduce` already pins every
-    active touch to multiplicity `-1` — nothing else is needed, since `Host.exemptChip` doesn't ask
-    for the byte fact `Realizes.lean`'s induction derives instead. -/
-theorem openVmHost_finalize_exempt (P : OpenVmParams p) :
-    (openVmHost P).exemptChip
-      (openVmBusSemantics p defaultBusMap)
-      (openVmFinalizeIdx P) where
-  bound := Nat.le_refl 1
-  uniform := by
-    rintro hA hlegal c hc ⟨mb, ml⟩ hst hcm
-    have hleg := hlegal.producible _ c hc
-    exact (hleg (mb, ml) hcm).2.1
-
-/-- **`openVmHost`'s stateful traffic maintains the bus invariants**, apart from memory
-    finalization (`openVmHost_finalize_exempt`). A seven-way split: the four lookup chips pin
-    their bus id to a stateless bus, so they cannot touch a stateful message at all; memory
-    initialization and the input chip each carry byte-valued data limbs, by the predicates
-    `OpenVm.lean` states for them; and the connector is on the execution bridge, whose invariant
-    is polarity alone.
-
-    Memory initialization is the one genuinely irreducible case: nothing precedes it on the rank
-    order to derive it from, so it is still asserted directly. -/
-theorem openVmHost_statefulChipsMaintain (P : OpenVmParams p) :
-    (openVmHost P).statefulChipsMaintain
-      (openVmBusSemantics p defaultBusMap)
-      (openVmFinalizeIdx P) := by
-  rintro hA hlegal t ht c hc ⟨mb, ml⟩ hst hcm
-  have hleg := hlegal.producible t c hc
-  fin_cases t
-  -- The four lookup chips pin the bus id to a stateless bus.
-  · have hbus := (hleg (mb, ml) hcm).1
-    subst hbus
-    simp [openVmBusSemantics, defaultBusMap, OpenVmBusType.isStateful] at hst
-  · have hbus := (hleg (mb, ml) hcm).1
-    subst hbus
-    simp [openVmBusSemantics, defaultBusMap, OpenVmBusType.isStateful] at hst
-  · have hbus := (hleg (mb, ml) hcm).1
-    subst hbus
-    simp [openVmBusSemantics, defaultBusMap, OpenVmBusType.isStateful] at hst
-  · have hbus := (hleg (mb, ml) hcm).1
-    subst hbus
-    simp [openVmBusSemantics, defaultBusMap, OpenVmBusType.isStateful] at hst
-  -- Memory initialization: byte-valued by the chip's own predicate.
-  · obtain ⟨hbus, -, f, hf, hbytes, -, -⟩ := hleg.1 (mb, ml) hcm
-    subst hbus
-    refine memory_maintains (fun f' hf' => ?_)
-    rw [hf] at hf'
-    cases Option.some.inj hf'
-    exact hbytes
-  -- Memory finalization: excluded by `ht` — this is exactly the exempt chip.
-  · exact absurd rfl ht
-  -- Input chip: on the execution bridge (polarity alone, like the connector) or pinned to an
-  -- `InputRead`'s memory writes, whose bytes and old words are bytes.
-  · obtain ⟨r, hr⟩ := hleg
-    rw [hr] at hcm
-    obtain ⟨msg, hmsg, heq⟩ := exists_of_busStateOf_ne_zero hcm
-    obtain ⟨hb, hpl⟩ := Prod.mk.injEq .. ▸ heq
-    rcases InputRead.interactions_busId r P.ptrReg 0 1 msg hmsg with h0 | h1
-    · have hbus : mb = 0 := hb.symm.trans h0
-      subst hbus
-      exact hpl ▸ bridge_maintains ml
-    · have hbus : mb = 1 := hb.symm.trans h1
-      subst hbus
-      exact hpl ▸ memory_maintains
-        (hpl ▸ InputRead.interactions_data r P.ptrReg 0 1 msg hmsg)
-  -- Connector: on the execution bridge, where polarity is the whole invariant.
-  · obtain ⟨r, hr⟩ := hleg
-    rw [hr] at hcm
-    obtain ⟨msg, hmsg, heq⟩ := exists_of_busStateOf_ne_zero hcm
-    obtain ⟨hb, -⟩ := Prod.mk.injEq .. ▸ heq
-    have hbus : mb = 0 := hb ▸ ConnectorBoundary.interactions_busId r 0 msg hmsg
-    subst hbus
-    exact bridge_maintains ml
 
 /-- Inverting `defaultBusMap`: the stateless bus ids are exactly the four lookup buses. This is
     what confines a legal `δ` to the buses the lookup chips can absorb. -/
@@ -597,23 +480,5 @@ theorem openVmHost_stepLayout_unpack
       Circuit.hasStepLayout c (openVmGuestRules defaultBusMap openVmMemBusId) openVmMemAddress
         P.maxWindow openVmTimestampBound :=
   fun h => h.stepLayout
-
-/-- **`Host.forcesAccepts` for a concrete OpenVM host**, with no hypotheses: in any satisfying
-    OpenVM run within the trace budget, every guest instance's assignment is
-    `Circuit.satisfies`-good, not merely algebraically consistent. -/
-theorem openVmHost_forcesAccepts [Fact p.Prime] (P : OpenVmParams p)
-    (hOrd : (openVmHost P).ordersRanks (openVmRankModel openVmMemBusId)
-      ((openVmBusSemantics p defaultBusMap).toGuestRules
-        (openVmGuestRules defaultBusMap openVmMemBusId) openVmDefaultHmem) openVmMemAddress) :
-    (openVmHost P).forcesAccepts
-      (openVmBusSemantics p defaultBusMap) :=
-  forcesAccepts_of_hostSound (openVmHost_legalGuest_unpack P)
-    (openVmHost_sinksAreTables P)
-    ⟨openVmFinalizeIdx P,
-      openVmHost_finalize_exempt P,
-      openVmHost_statefulChipsMaintain P⟩
-    (openVmBusSemantics_statefulAcceptsOfPayloadOk
-      (openVmGuestRules defaultBusMap openVmMemBusId) openVmDefaultHmem)
-    hOrd
 
 end ApcOptimizer.OpenVM

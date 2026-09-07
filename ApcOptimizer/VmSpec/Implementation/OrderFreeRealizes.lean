@@ -1,4 +1,4 @@
-import ApcOptimizer.VmSpec.Implementation.OpenVmChain
+import ApcOptimizer.VmSpec.Implementation.HostMaintain
 import ApcOptimizer.VmSpec.OrderFree
 
 set_option autoImplicit false
@@ -17,7 +17,7 @@ open ApcOptimizer.OpenVM.OrderFree
 variable {p : ℕ}
 
 /-- `openVmHost` realizes the order-free rely, by the same lemmas as `openVmHost_realizes`. -/
-theorem openVmHost_realizes (P : OpenVmParams p) (entryPc : Option (ZMod p))
+theorem openVmHost_realizes [Fact p.Prime] (P : OpenVmParams p) (entryPc : Option (ZMod p))
     (hOrd : (openVmHost P).ordersRanks (openVmRankModel openVmMemBusId)
       ((openVmBusSemantics p defaultBusMap).toGuestRules
         (openVmGuestRules defaultBusMap openVmMemBusId) openVmDefaultHmem) openVmMemAddress) :
@@ -27,9 +27,7 @@ theorem openVmHost_realizes (P : OpenVmParams p) (entryPc : Option (ZMod p))
   hmem := openVmDefaultHmem
   legalGuest := openVmHost_legalGuest_unpack P
   sinksAreTables := openVmHost_sinksAreTables P
-  statefulChipsMaintain := ⟨openVmFinalizeIdx P,
-    ⟨(openVmHost_finalize_exempt P).bound, (openVmHost_finalize_exempt P).uniform⟩,
-    openVmHost_statefulChipsMaintain P⟩
+  statefulChipsMaintain := openVmHost_statefulChipsMaintain P
   statefulAcceptsOfPayloadOk :=
     openVmBusSemantics_statefulAcceptsOfPayloadOk
       (openVmGuestRules defaultBusMap openVmMemBusId) openVmDefaultHmem

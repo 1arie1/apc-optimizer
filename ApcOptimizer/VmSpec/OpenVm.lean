@@ -134,11 +134,9 @@ def memoryInitHostChip (memBusId : Nat := openVmMemBusId) : HostChip p where
     Unlike memory initialization, no byte fact is asserted here: this chip only receives, so
     whatever it reads is bus-matched to some earlier send whose byte-ness is already established
     elsewhere (the other host chips directly, a guest chip by `maintains_of_stateful_active`'s
-    induction) — asserting it again would be redundant. `Host.exemptChip`/
-    `openVmHost_finalize_exempt` (`Implementation/OpenVmConnection.lean`) fold this chip into that
-    same induction instead, deriving rather than assuming its payload good — the manuscript's
-    `eq:legal:recv_byte`, for the one host chip simple enough (one instance, receive-only) to make
-    that possible.
+    induction) — asserting it again would be redundant. `Host.statefulChipsMaintain`
+    (`Implementation/HostMaintain.lean`) folds this chip's receives into that same induction, as
+    it does the input chip's — the manuscript's `eq:legal:recv_byte`, on the host side.
 
     `isIo`: this chip's instances are the other half of the VM's externally observable effect —
     the final memory image, every address space alike. -/
@@ -197,11 +195,10 @@ structure InputRead (p : ℕ) where
   ptrLimbs : Vector (ZMod p) 4
   byte : ZMod p
   oldWord : Vector (ZMod p) 4
-  /-- Memory holds bytes; see `memoryFinalizeHostChip`. Registers included — a peeked register is
-      a memory access like any other, so its limbs carry the same discipline. -/
+  /-- The hint is byte-valued: `Rv32HintStoreAir`'s "Checking that hint is bytes", a range check
+      on `data` through the bitwise lookup. The old byte and pointer are not explicitly byte-checked
+      here. -/
   byteIsByte : isByte byte
-  oldWordIsBytes : ∀ d ∈ oldWord.toList, isByte d
-  ptrLimbsAreBytes : ∀ d ∈ ptrLimbs.toList, isByte d
   /-- When the peeked register and the overwritten word were last set — not pinned to `0`: they
       were set by whatever earlier instruction touched them, at whatever time that was, which has
       nothing to do with *this* instance's own timing beyond being *earlier* (`ptrOffsetOk`,
@@ -317,27 +314,6 @@ def inputHostChip (ptrReg maxInstances : Nat)
 def openVmTimestamp (memBusId : Nat := openVmMemBusId) : BusMessage p → ZMod p :=
   fun m => if m.1 = memBusId then m.2[6]?.getD 0
     else if m.1 = openVmExecBusId then m.2[1]?.getD 0 else 0
-
-/-- How far `openVmRank` shifts a timestamp before reading it as a natural.
-
-    A memory *receive* names a record from before its own step, so its offset from the step's base
-    is negative and its raw `.val` may have wrapped. Shifting by the maximum lookback moves the
-    whole window `[-maxLookback, maxWindow)` into the non-negative naturals, which is what makes
-    the rank monotone in the offset — the one thing the soundness induction needs of it. -/
-def openVmRankShift : ℕ := openVmTimestampBound
-
-/-- OpenVM's ordering on stateful state: a message's timestamp, shifted into the naturals by
-    `openVmRankShift`, which is what makes `<` well-founded and
-    `maintains_of_stateful_active`'s induction possible. Off the stateful buses the rank is `0`;
-    nothing there needs the induction. -/
-def openVmRank (memBusId : Nat := openVmMemBusId) : BusMessage p → ℕ :=
-  fun m => if m.1 = memBusId ∨ m.1 = openVmExecBusId then
-    ((openVmTimestamp memBusId m) + (openVmRankShift : ZMod p)).val else 0
-
-/-- The `RankModel.bound` that goes with `openVmRank` (see `openVmRankModel`): the timestamp
-    ceiling plus the shift that makes room for a step's lookback. `2 ^ 30` for the default
-    configuration — exactly the headroom OpenVM already reserves for `AssertLtSubAir`. -/
-def openVmRankBound : ℕ := openVmTimestampBound + openVmRankShift
 
 /-- Which OpenVM buses carry VM state: the execution bridge and memory (`OpenVmBusType.isStateful`);
     the four lookup tables do not, and an unmapped id carries nothing. -/
@@ -483,11 +459,13 @@ structure OpenVmParams (p : ℕ) where
   /-- An input-chip instance's own clock advance fits the window too. Pinned rather than
       per-witness, since `inputStepWindow` is a constant (`inputHostChip`). -/
   inputWindowOk : inputStepWindow < maxWindow
-  /-- The rank window fits in the field: a timestamp below the ceiling, shifted by the maximum
-      lookback, is still an honest natural. This is OpenVM's own `2 ^ (timestamp_max_bits + 1) < p`
-      — the condition that caps `timestamp_max_bits` at `29` for BabyBear, and exactly the headroom
-      `AssertLtSubAir` already needs. -/
-  rankWindowOk : openVmRankBound < p
+  /-- A timestamp below the ceiling, plus the furthest a memory access may reach back, is still an
+      honest natural. This is OpenVM's own `2 ^ (timestamp_max_bits + 1) < p` — the condition that
+      caps `timestamp_max_bits` at `29` for BabyBear, and exactly the headroom `AssertLtSubAir`
+      already needs. It is also the window the soundness argument's ordering lives in
+      (`Implementation/OpenVmConnection.lean`'s `openVmRankBound`), stated here without it: nothing
+      an auditor reads mentions a rank. -/
+  timestampWindowOk : openVmTimestampBound + openVmTimestampBound < p
 
 /-- A concrete OpenVM `Host`: `defaultBusMap`'s four stateless lookup tables (default bus ids),
     memory initialization (all-zero) and finalization, the output chip, a `HINT_STOREW` input chip

@@ -191,13 +191,13 @@ theorem openVmHost_bridge_isolated (P : OpenVmParams p)
   rw [hnet, hsum9, Finset.sum_pair hj_ne_k, hinput, hr]
   ring
 
-/-- `-1 ≠ 1` in `ZMod p`, from the rank window: `OpenVmParams.rankWindowOk` puts `2 ^ 30` below
+/-- `-1 ≠ 1` in `ZMod p`, from the rank window: `OpenVmParams.timestampWindowOk` puts `2 ^ 30` below
     `p`. `StepLayout.net` needs it — a step whose two bridge endpoints coincided would have to net
     both `-1` and `1` there. -/
 theorem openVm_negOne_ne_one (P : OpenVmParams p) : (-1 : ZMod p) ≠ 1 := by
   have hlt : 2 < p :=
     lt_trans (by norm_num [openVmRankBound, openVmRankShift, openVmTimestampBound,
-      openVmTimestampBits]) P.rankWindowOk
+      openVmTimestampBits]) (openVmRankBound_lt P)
   haveI : NeZero p := ⟨by omega⟩
   intro h
   have h2 : (2 : ZMod p) = 0 := by
@@ -560,6 +560,40 @@ theorem bridge_chain_bound_input {maxInstances maxInputInstances : ℕ}
 
 end Bridge
 
+--------- Integers, read as field elements ---------
+
+theorem int_eq_zero_of_dvd_of_lt {n u : ℤ} (hn : 0 < n) (hd : n ∣ u) (h1 : -n < u) (h2 : u < n) :
+    u = 0 := by
+  obtain ⟨k, rfl⟩ := hd
+  rcases lt_trichotomy k 0 with h | h | h
+  · have : n * k ≤ n * (-1) := mul_le_mul_of_nonneg_left (by omega) (le_of_lt hn)
+    omega
+  · simp [h]
+  · have : n * 1 ≤ n * k := mul_le_mul_of_nonneg_left (by omega) (le_of_lt hn)
+    omega
+
+/-- **Two integers in the lookback window that agree as field elements are equal.** The window
+    `[-2^29, 2^29)` has width `openVmRankBound`, which `OpenVmParams.timestampWindowOk` puts below `p` —
+    the same headroom `AssertLtSubAir` already needs. This is what lets a record's timestamp name
+    one instant of the run rather than a residue class. -/
+theorem intCast_inj_window [Fact p.Prime] (P : OpenVmParams p) {u v : ℤ}
+    (hu1 : -(openVmTimestampBound : ℤ) ≤ u) (hu2 : u < openVmTimestampBound)
+    (hv1 : -(openVmTimestampBound : ℤ) ≤ v) (hv2 : v < openVmTimestampBound)
+    (h : ((u : ℤ) : ZMod p) = ((v : ℤ) : ZMod p)) : u = v := by
+  haveI : NeZero p := ⟨(Nat.Prime.one_lt (Fact.out)).ne_bot⟩
+  have hzero : (((u - v : ℤ)) : ZMod p) = 0 := by push_cast; rw [h]; ring
+  have hdvd : (p : ℤ) ∣ (u - v) := (ZMod.intCast_zmod_eq_zero_iff_dvd _ _).mp hzero
+  have hpb : (openVmRankBound : ℤ) < (p : ℤ) := by exact_mod_cast (openVmRankBound_lt P)
+  have hrb : (openVmRankBound : ℤ) = 2 * (openVmTimestampBound : ℤ) := by
+    simp [openVmRankBound, openVmRankShift]
+    ring
+  have hppos : (0 : ℤ) < (p : ℤ) := by
+    have : (0 : ℤ) < (openVmRankBound : ℤ) := by
+      rw [hrb]; norm_num [openVmTimestampBound, openVmTimestampBits]
+    omega
+  have := int_eq_zero_of_dvd_of_lt hppos hdvd (by omega) (by omega)
+  omega
+
 --------- The rank window ---------
 
 /-- The two stateful buses of `defaultBusMap` are the ones `openVmRank` reads a timestamp from. -/
@@ -608,7 +642,7 @@ theorem rank_of_placed {memBusId : Nat} {m : BusMessage p} {T : ℕ} {off : ℤ}
     The last undischarged assumption of the VM-level soundness theorem. Two interactions of one
     instance placed in the same step sit at `1 + T + off` for the *same* `T` — the step's position
     on the bridge, which the chain walk pins — so the one with the smaller offset has the smaller
-    rank, and `OpenVmParams.rankWindowOk` is what keeps both inside a window too narrow to wrap.
+    rank, and `OpenVmParams.timestampWindowOk` is what keeps both inside a window too narrow to wrap.
 
     The arithmetic it needs is `OpenVmParams.windowOk`, already discharged when `P` was built:
     `P.maxInstances` instances advancing the clock by less than `P.maxWindow` each cannot wrap
@@ -677,9 +711,9 @@ theorem openVmHost_ordersRanks [Fact p.Prime] (P : OpenVmParams p) :
         ((G.get t).msgAt ((a.guestAssignments t).get jx) x).1 = openVmMemBusId ∨
           ((G.get t).msgAt ((a.guestAssignments t).get jx) x).1 = openVmExecBusId :=
     fun x hx => openVmIsStateful_default hx.1
-  have hI := rank_of_placed (memBusId := openVmMemBusId) P.rankWindowOk (hstate i₀ hActI)
+  have hI := rank_of_placed (memBusId := openVmMemBusId) (openVmRankBound_lt P) (hstate i₀ hActI)
     hlowI hhighI hfit' (hbase' i₀ _ htsI)
-  have hJ := rank_of_placed (memBusId := openVmMemBusId) P.rankWindowOk (hstate j₀ hActJ)
+  have hJ := rank_of_placed (memBusId := openVmMemBusId) (openVmRankBound_lt P) (hstate j₀ hActJ)
     hlowJ hhighJ hfit' (hbase' j₀ _ htsJ)
   show (openVmRankModel (p := p) openVmMemBusId).rank _
     < (openVmRankModel (p := p) openVmMemBusId).rank _

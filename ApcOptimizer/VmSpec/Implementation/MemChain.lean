@@ -815,38 +815,6 @@ abbrev RunAcc (P : OpenVmParams p) {G : Guest p} (a : VmAssignment p ⟨openVmHo
   ((x : GuestInst P a) × Fin (G.get x.1).busInteractions.length)
   ⊕ (Fin (a.hostAssignment (openVmInputChip P)).length × Fin 2)
 
-theorem int_eq_zero_of_dvd_of_lt {n u : ℤ} (hn : 0 < n) (hd : n ∣ u) (h1 : -n < u) (h2 : u < n) :
-    u = 0 := by
-  obtain ⟨k, rfl⟩ := hd
-  rcases lt_trichotomy k 0 with h | h | h
-  · have : n * k ≤ n * (-1) := mul_le_mul_of_nonneg_left (by omega) (le_of_lt hn)
-    omega
-  · simp [h]
-  · have : n * 1 ≤ n * k := mul_le_mul_of_nonneg_left (by omega) (le_of_lt hn)
-    omega
-
-/-- **Two integers in the lookback window that agree as field elements are equal.** The window
-    `[-2^29, 2^29)` has width `openVmRankBound`, which `OpenVmParams.rankWindowOk` puts below `p` —
-    the same headroom `AssertLtSubAir` already needs. This is what lets a record's timestamp name
-    one instant of the run rather than a residue class. -/
-theorem intCast_inj_window [Fact p.Prime] (P : OpenVmParams p) {u v : ℤ}
-    (hu1 : -(openVmTimestampBound : ℤ) ≤ u) (hu2 : u < openVmTimestampBound)
-    (hv1 : -(openVmTimestampBound : ℤ) ≤ v) (hv2 : v < openVmTimestampBound)
-    (h : ((u : ℤ) : ZMod p) = ((v : ℤ) : ZMod p)) : u = v := by
-  haveI : NeZero p := ⟨(Nat.Prime.one_lt (Fact.out)).ne_bot⟩
-  have hzero : (((u - v : ℤ)) : ZMod p) = 0 := by push_cast; rw [h]; ring
-  have hdvd : (p : ℤ) ∣ (u - v) := (ZMod.intCast_zmod_eq_zero_iff_dvd _ _).mp hzero
-  have hpb : (openVmRankBound : ℤ) < (p : ℤ) := by exact_mod_cast P.rankWindowOk
-  have hrb : (openVmRankBound : ℤ) = 2 * (openVmTimestampBound : ℤ) := by
-    simp [openVmRankBound, openVmRankShift]
-    ring
-  have hppos : (0 : ℤ) < (p : ℤ) := by
-    have : (0 : ℤ) < (openVmRankBound : ℤ) := by
-      rw [hrb]; norm_num [openVmTimestampBound, openVmTimestampBits]
-    omega
-  have := int_eq_zero_of_dvd_of_lt hppos hdvd (by omega) (by omega)
-  omega
-
 namespace RunData
 
 variable {P : OpenVmParams p} {G : Guest p} {a : VmAssignment p ⟨openVmHost P, G⟩}

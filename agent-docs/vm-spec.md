@@ -69,6 +69,30 @@ ordering leave the audited surface entirely — `Implementation/Rank.lean`'s `Ra
 field of `Host`, `VmSat`, `CanProduce`, `VmEquivalent`, or `Circuit.legalGuest` mentions a rank —
 a reader checking what the theorem *says* never meets one.
 
+## The byte invariant, and what the host is held to (`Implementation/Realizes.lean`)
+
+OpenVM's memory bus carries a discipline no single chip checks: every record in a byte-checked
+address space has byte-valued data limbs. `maintains_of_stateful_active` proves it of a whole run,
+by strong induction on `RankModel.rank` — at a message nothing good sent, every touch is a receive,
+and a pile of receives cannot balance (`Counting.lean`; the trace budget is what stops `p` of them
+from wrapping to zero).
+
+The host takes part in that induction on the same terms as a guest, not on easier ones.
+`Host.statefulChipsMaintain` hands the host each stateful message *with the smaller ranks already
+settled* and asks for one of two things: the payload is good, or the host's whole net there is
+minus an honest count — a pile of its own receives, with a `k = 0 → nothing touched it` clause so
+that a message only the host touches still lands in the same pigeonhole.
+
+That shape is forced by the real chips. `Rv32HintStoreAir` range-checks the hint it writes and
+nothing else: not `write_aux.prev_data` (the word it overwrites), and not `mem_ptr_limbs` (the
+pointer register it peeks — only the top limb is checked, scaled, to bound the pointer). Asserting
+either on `InputRead` would shrink `canProduce` below what the real chip can produce, and would
+assume an instance of the very invariant being proved. What the chip does instead is *echo*: it
+re-sends the register record it just received, one tick later, and `InputRead.ptrOffsetOk` puts
+that receive at a strictly smaller rank, where the induction hypothesis already vouches for it
+(`Implementation/HostMaintain.lean`, `openVmHost_inputSend_payloadOk`). It is the move a guest
+makes with `StepLayout.memSendsOk`, on the host side.
+
 ## Connecting to a per-chip optimizer (`Implementation/Connection.lean`)
 
 `vmSoundReplacement_of_forall₂` is the soundness half: given `host.realizes bs rm r0` (the fixed

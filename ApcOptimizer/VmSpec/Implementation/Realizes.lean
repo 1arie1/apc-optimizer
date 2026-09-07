@@ -19,10 +19,11 @@ set_option autoImplicit false
     On stateless buses that is the manuscript's `bus_int.tex` induction: the host chips *are* the
     lookup tables, so a guest's active message has nowhere to go but into a chip that only
     receives table entries. On stateful buses the same shape gives the manuscript's
-    `eq:legal:recv_byte` (`maintains_of_stateful_active`): a guest need only vouch for what it
+    `eq:legal:recv_byte` (`maintains_of_stateful_active`): a chip need only vouch for what it
     *sends*, and what it *receives* is vouched for by whoever sent the same tuple. Demanding the
     receive side per-chip would be assuming something false — a chip that reads memory does not
-    constrain the value it finds there. -/
+    constrain the value it finds there. That holds of the *host's* chips as much as a guest's,
+    which is what `Host.statefulChipsMaintain` is shaped around. -/
 
 variable {p : ℕ}
 
@@ -78,40 +79,46 @@ def Host.sinksAreTables (host : Host p) (bs : BusSemantics p) : Prop :=
     ∀ m : BusMessage p, bs.isStateful m.1 = false → hA.busEffect m ≠ 0 →
       ∀ mult : ZMod p, mult ≠ 0 → bs.accepts ⟨m.1, mult, m.2⟩
 
-/-- Every stateful message a host chip *other than `idx`* touches carries a payload that
-    maintains the bus invariants.
+/-- Whether anything in the run actively touches `m`: a guest instance carries it with a nonzero
+    multiplicity, or a host-chip instance nets something there.
 
-    This still covers receives, and for those chips it is still a genuine modelling assumption:
-    these are the VM's own fixed furniture, not something the optimizer produces, so the claim is
-    inspectable once and for all against the `HostChip` predicates rather than being asserted
-    about an optimizer's output. `idx` is carved out because it need not be assumed at all — see
-    `Host.exemptChip`. -/
-def Host.statefulChipsMaintain (host : Host p) (bs : BusSemantics p)
-    (idx : Fin host.chips.length) : Prop :=
-  ∀ hA : HostAssignment p host, hA.satisfies →
-    ∀ (t : Fin host.chips.length), t ≠ idx → ∀ c ∈ hA t, ∀ m : BusMessage p,
-      bs.isStateful m.1 = true → c m ≠ 0 →
-        ∃ msg : BusInteraction (ZMod p), msg.busId = m.1 ∧ msg.payload = m.2 ∧
-          bs.maintainsInvariants msg
+    The invariant argument below runs over exactly these messages. A message *nobody* touches
+    carries whatever payload the quantifier hands it, and nothing in a satisfying run forces that
+    to be good — so it is not something the induction can be asked to prove. -/
+def VmAssignment.activeAt {vm : Vm p} (a : VmAssignment p vm) (m : BusMessage p) : Prop :=
+  (∃ (t : Fin vm.guest.length) (asg : ChipAssignment p), asg ∈ a.guestAssignments t ∧
+      ∃ bi ∈ (vm.guest.get t).busInteractions,
+        ((bi.eval asg).busId, (bi.eval asg).payload) = m ∧ (bi.eval asg).multiplicity ≠ 0)
+  ∨ (∃ (t : Fin vm.host.chips.length) (c : BusState p), c ∈ a.hostAssignment t ∧ c m ≠ 0)
 
-/-- A single host-chip instance whose every stateful touch is a receive (`0` or `-1`, never `1`)
-    — what a chip that only ever receives (`memoryFinalizeHostChip`'s `canProduce` forces
-    multiplicity `-1`) needs so `maintains_of_stateful_active` can fold it into the same
-    "nobody sent this, so the receives can't balance" pigeonhole it already runs for guest
-    receives, instead of assuming its payload is good outright. `-1` rather than a general `v`
-    because that pigeonhole is guest polarity's own (`Circuit.statefulPolarity`), not this
-    chip's to choose.
+/-- **What the host does at a stateful message whose payload might be bad.** Either the payload
+    is good after all, or the host's whole net there is *minus an honest count* `k` — a pile of
+    receives that, with the guests' own, is too small to wrap `ZMod p`.
 
-    Deliberately silent on *which* messages it touches: `canProduce` still pins that (bus id,
-    address space, ...) — this only supplies the one fact the induction cannot get any other
-    way. `HostChip.instanceBound` is what caps the chip at one term in the sum, so folding it in
-    costs the budget exactly one extra unit of headroom (`Counting.lean`'s
-    `guestNet_add_ne_zero_of_uniform`), not an unbounded one. -/
-structure Host.exemptChip (host : Host p) (bs : BusSemantics p) (idx : Fin host.chips.length) :
-    Prop where
-  bound : (host.chips.get idx).instanceBound ≤ 1
-  uniform : ∀ hA : HostAssignment p host, hA.satisfies →
-    ∀ c ∈ hA idx, ∀ m : BusMessage p, bs.isStateful m.1 = true → c m ≠ 0 → c m = -1
+    Stated over a whole satisfying run, and with the lower ranks already settled, because that is
+    what a real VM can actually deliver. Neither clause may be strengthened to "every message a
+    host chip touches is good": a host chip that *reads* memory does not constrain the value it
+    finds there any more than a guest does — OpenVM's `Rv32HintStoreAir` range-checks the hint it
+    writes and neither the word it overwrites nor the pointer register it peeks. What it does
+    instead is *echo*: the record it re-sends is one it received at a strictly smaller rank, which
+    is exactly what the induction hypothesis vouches for. So a host chip is held to the same
+    standard as a guest's `StepLayout.memSendsOk`, no more.
+
+    The `k = 0` clause is what makes the pile a genuine pigeonhole for a message only the host
+    touches: a vanishing count means the host chips did not touch it at all. -/
+def Host.statefulChipsMaintain (host : Host p) (bs : BusSemantics p) (rm : RankModel p)
+    (r0 : GuestBusRules p)
+    (hmem : ∀ m : BusMessage p, bs.isStateful m.1 = true → m.1 ≠ r0.memBusId →
+      ∃ mult : ZMod p, bs.maintainsInvariants ⟨m.1, mult, m.2⟩) : Prop :=
+  ∀ (G : Guest p), host.legalGuests G →
+    ∀ a : VmAssignment p ⟨host, G⟩, VmSat ⟨host, G⟩ a →
+      ∀ m : BusMessage p, bs.isStateful m.1 = true →
+        (∀ m' : BusMessage p, bs.isStateful m'.1 = true → rm.rank m' < rm.rank m →
+          a.activeAt m' → (bs.toGuestRules r0 hmem).payloadOk m') →
+        (bs.toGuestRules r0 hmem).payloadOk m ∨
+          ∃ k : ℕ, host.maxInteractions * host.maxInstances + k < p ∧
+            a.hostAssignment.busEffect m = -((k : ℕ) : ZMod p) ∧
+            (k = 0 → ∀ t : Fin host.chips.length, ∀ c ∈ a.hostAssignment t, c m = 0)
 
 /-- The host can re-balance a stateless change: given a legal host assignment and a `δ` supported
     on stateless messages the semantics accepts, some legal host assignment nets exactly `δ` more,
@@ -177,13 +184,9 @@ structure Host.realizes (host : Host p) (bs : BusSemantics p) (rm : RankModel p)
     host.legalGuest c →
       c.legalGuest (bs.toGuestRules r0 hmem) memAddress host.maxWindow host.maxLookback host.maxInteractions
   sinksAreTables : host.sinksAreTables bs
-  /-- One host-chip type is carved out and derivable instead of assumed — for `openVmHost`,
-      `memoryFinalizeHostChip` (see `Host.exemptChip`). Existential rather than two separate data
-      fields: a `Fin host.chips.length` cannot itself be projected back out of a `Prop`-valued
-      structure, and nothing outside this file needs to name the index — every use of it is
-      itself proving a `Prop`, where `obtain`ing the witness is unrestricted. -/
-  statefulChipsMaintain : ∃ idx : Fin host.chips.length,
-    host.exemptChip bs idx ∧ host.statefulChipsMaintain bs idx
+  /-- The one field that is not about a single chip: what the host's chips leave, together, at a
+      message whose payload might be bad. -/
+  statefulChipsMaintain : host.statefulChipsMaintain bs rm r0 hmem
   statefulAcceptsOfPayloadOk : bs.statefulAcceptsOfPayloadOk r0 hmem
   absorbsStateless : host.absorbsStateless bs
   ordersRanks : host.ordersRanks rm (bs.toGuestRules r0 hmem) memAddress
@@ -195,9 +198,8 @@ structure Host.realizes (host : Host p) (bs : BusSemantics p) (rm : RankModel p)
     Every chip in `G` must be one the host will run: the balancing argument is over the whole
     list, so one illegal chip anywhere on a bus breaks it. That legality is also where the
     anti-wraparound bookkeeping comes from — `Circuit.legalGuest`'s `size` clause bounds each
-    chip's bus-interaction count, and `Host.budgetOk` says the resulting pile fits in `ZMod p`
-    (see `Counting.lean`), with one unit to spare for the receive the exempt host chip
-    (`Host.exemptChip`) can add to it.
+    chip's bus-interaction count, and `Host.statefulChipsMaintain` budgets the host's own pile
+    alongside it (see `Counting.lean`).
 
     Proved from `Host.realizes` — see `forcesAccepts_of_hostSound`. -/
 def Host.forcesAccepts (host : Host p) (bs : BusSemantics p) : Prop :=
@@ -254,25 +256,22 @@ theorem satisfiesStateless_of_sinks [Fact p.Prime] {host : Host p} {bs : BusSema
   exact hsinks a.hostAssignment (hsat.satisfiesHost) _ hm hhost (bi.eval asg).multiplicity hmult
 
 /-- **The stateful analogue of the manuscript's stateless induction — its `eq:legal:recv_byte`.**
-    In a satisfying VM, every stateful message a guest instance actively touches carries a payload
-    that maintains the bus invariants.
+    In a satisfying VM, every stateful message anything in the run actively touches carries a
+    payload that maintains the bus invariants.
 
-    For a *send* that is the chip's own obligation (`StepLayout.sendsOk`). For a
-    *receive* it is forced by balancing: if nothing carrying that payload maintained the
-    invariants then no guest sent it and no host chip touched it, leaving a pile of receives that
-    cannot sum to zero — which is where the trace budget is needed again, since `p` receives
-    would.
+    For a guest's *send* that is the chip's own obligation (`StepLayout.memSendsOk`); for a host
+    chip's, `Host.statefulChipsMaintain`'s. For a *receive* it is forced by balancing: if nothing
+    carrying that payload maintained the invariants then no guest sent it and no host chip sent it
+    either, leaving a pile of receives that cannot sum to zero — which is where the trace budget
+    is needed again, since `p` receives would.
 
     The whole thing is a strong induction on `rm.rank`, and it has to be: balance alone
     cannot establish the invariant, because two chips can each receive a bad payload and send
     another one, cancelling perfectly. What kills that is the rank — one of the two chips would
-    have to send below the rank it received at. `StepLayout.sendsOk` may therefore lean on
-    everything the same instance touched at a strictly smaller rank, which is exactly the
-    induction hypothesis.
-
-    The one host chip `Host.exemptChip` carves out is folded into the very same pile-of-receives
-    step as the guest side, rather than settled outright — it costs the one extra unit of budget
-    `guestNet_add_ne_zero_of_uniform` needs. -/
+    have to send below the rank it received at. A sender may therefore lean on everything touched
+    at a strictly smaller rank, which is exactly the induction hypothesis; both the guest clause
+    and the host one are stated to take it, and the host side needs it for the same reason a guest
+    does (`Host.statefulChipsMaintain`). -/
 theorem maintains_of_stateful_active [Fact p.Prime] {host : Host p} {bs : BusSemantics p}
     {rm : RankModel p} {r0 : GuestBusRules p}
     {hmem : ∀ m : BusMessage p, bs.isStateful m.1 = true → m.1 ≠ r0.memBusId →
@@ -284,44 +283,37 @@ theorem maintains_of_stateful_active [Fact p.Prime] {host : Host p} {bs : BusSem
         c.legalGuest (bs.toGuestRules r0 hmem) memAddress host.maxWindow host.maxLookback
           host.maxInteractions)
     (hsinks : host.sinksAreTables bs)
-    (hstateful : ∃ idx : Fin host.chips.length,
-      host.exemptChip bs idx ∧ host.statefulChipsMaintain bs idx)
+    (hstateful : host.statefulChipsMaintain bs rm r0 hmem)
     (hGuests : host.legalGuests G)
     (hsat : VmSat ⟨host, G⟩ a)
     (hOrders : a.ordersRanks rm (bs.toGuestRules r0 hmem) memAddress host.maxWindow host.maxLookback)
-    {t : Fin G.length} {asg : ChipAssignment p} (hasg : asg ∈ a.guestAssignments t)
-    {bi : BusInteraction (Expression p)} (hbi : bi ∈ (G.get t).busInteractions)
-    (hst : bs.isStateful bi.busId = true) (hmult : (bi.eval asg).multiplicity ≠ 0) :
-    (bs.toGuestRules r0 hmem).payloadOk ((bi.eval asg).busId, (bi.eval asg).payload) := by
-  obtain ⟨idx, hexempt, hstateful⟩ := hstateful
+    {m : BusMessage p} (hst : bs.isStateful m.1 = true) (hact : a.activeAt m) :
+    (bs.toGuestRules r0 hmem).payloadOk m := by
   have hSize : ∀ c ∈ G, c.busInteractions.length ≤ host.maxInteractions :=
     fun c hc => (hunpack c (hGuests c hc)).size
-  have hBudget : host.maxInteractions * host.maxInstances + 1 < p := host.noMultOverflow
   have hlegal : ∀ s : Fin G.length,
       (G.get s).legalGuest (bs.toGuestRules r0 hmem) memAddress host.maxWindow host.maxLookback
         host.maxInteractions :=
     fun s => hunpack _ (hGuests _ (List.get_mem G s))
-  suffices key : ∀ r : ℕ, ∀ (s : Fin G.length) (asg' : ChipAssignment p),
-      asg' ∈ a.guestAssignments s → ∀ bi' ∈ (G.get s).busInteractions,
-      bs.isStateful bi'.busId = true → (bi'.eval asg').multiplicity ≠ 0 →
-      rm.rank ((bi'.eval asg').busId, (bi'.eval asg').payload) = r →
-      (bs.toGuestRules r0 hmem).payloadOk ((bi'.eval asg').busId, (bi'.eval asg').payload) by
-    exact key _ t asg hasg bi hbi hst hmult rfl
+  suffices key : ∀ r : ℕ, ∀ msg : BusMessage p, rm.rank msg = r → bs.isStateful msg.1 = true →
+      a.activeAt msg → (bs.toGuestRules r0 hmem).payloadOk msg by
+    exact key _ m rfl hst hact
   intro r
   induction r using Nat.strong_induction_on with
   | _ r ih =>
-  intro s asg' hasg' bi' hbi' hst' hmult' hrank
-  by_contra hcon
-  -- The payload is not good.
-  have hno : ¬ (bs.toGuestRules r0 hmem).payloadOk
-      ((bi'.eval asg').busId, (bi'.eval asg').payload) := hcon
-  -- Hence no guest *sends* it, so every guest multiplicity at this message is `0` or `-1`.
+  intro msg hrank hstm hactm
+  by_contra hno
+  -- Everything of strictly smaller rank that anybody touches is already good.
+  have hIH : ∀ m' : BusMessage p, bs.isStateful m'.1 = true → rm.rank m' < rm.rank msg →
+      a.activeAt m' → (bs.toGuestRules r0 hmem).payloadOk m' :=
+    fun m' hst' hlt hact' => ih (rm.rank m') (hrank ▸ hlt) m' rfl hst' hact'
+  -- The payload is not good, hence no guest *sends* it: every guest multiplicity is `0` or `-1`.
   have huni : ∀ u : Fin G.length, ∀ asg'' ∈ a.guestAssignments u,
-      (G.get u).uniformAt asg'' ((bi'.eval asg').busId, (bi'.eval asg').payload) (-1) := by
+      (G.get u).uniformAt asg'' msg (-1) := by
     intro u asg'' hasg'' bi'' hbi'' hmsg''
-    have hbus : bi''.busId = (bi'.eval asg').busId := congrArg Prod.fst hmsg''
-    have hst'' : bs.isStateful bi''.busId = true := by rw [hbus]; exact hst'
-    rcases (hlegal u).polarity asg'' (hsat.satisfiesGuest u asg'' hasg'') bi'' hbi'' hst'' with
+    have hbus : bi''.busId = msg.1 := congrArg Prod.fst hmsg''
+    have hstb : bs.isStateful bi''.busId = true := by rw [hbus]; exact hstm
+    rcases (hlegal u).polarity asg'' (hsat.satisfiesGuest u asg'' hasg'') bi'' hbi'' hstb with
       h0 | h1 | hm1
     · exact Or.inl h0
     · -- A send has to vouch for itself, given everything it touched earlier that is *also on the
@@ -329,11 +321,10 @@ theorem maintains_of_stateful_active [Fact p.Prime] {host : Host p} {bs : BusSem
       -- ranks. Off the memory bus, `memPayloadOnly` settles it outright: no induction needed.
       obtain ⟨i, hi⟩ := List.get_of_mem hbi''
       have hsti : (bs.toGuestRules r0 hmem).isStateful
-          ((G.get u).busInteractions.get i).busId = true := by rw [hi]; exact hst''
+          ((G.get u).busInteractions.get i).busId = true := by rw [hi]; exact hstb
       have hmulti : (((G.get u).busInteractions.get i).eval asg'').multiplicity = 1 := by
         rw [hi]; exact h1
-      have hmsgi : (G.get u).msgAt asg'' i
-          = ((bi'.eval asg').busId, (bi'.eval asg').payload) := by
+      have hmsgi : (G.get u).msgAt asg'' i = msg := by
         rw [Circuit.msgAt, hi]; exact hmsg''
       have hsendi : (G.get u).statefulSend (bs.toGuestRules r0 hmem) asg'' i := ⟨hsti, hmulti⟩
       refine absurd ?_ hno
@@ -344,49 +335,21 @@ theorem maintains_of_stateful_active [Fact p.Prime] {host : Host p} {bs : BusSem
           satisfiesStateless_of_sinks hunpack hsinks hGuests hsat u asg'' hasg''
         obtain ⟨L⟩ := (hlegal u).stepLayout asg'' (hsat.satisfiesGuest u asg'' hasg'') hacc
         refine L.memSendsOk i ⟨hsendi, hbmem⟩ (fun j hoff hactMemj => ?_)
-        refine ih _ ?_ u asg'' hasg'' _ (List.get_mem _ _) hactMemj.1.1 hactMemj.1.2 rfl
         have hlt := hOrders u asg'' hasg'' L i j ⟨hsti, by rw [hsendi.2]; exact one_ne_zero⟩
           hactMemj.1 hoff
-        rwa [hmsgi, hrank] at hlt
+        rw [hmsgi] at hlt
+        exact hIH _ hactMemj.1.1 hlt
+          (Or.inl ⟨u, asg'', hasg'', _, List.get_mem _ _, rfl, hactMemj.1.2⟩)
       · exact (bs.toGuestRules r0 hmem).memPayloadOnly _ hsti hbmem
     · exact Or.inr hm1
-  -- Every *non-exempt* host chip is silent too — same argument as before, just narrowed.
-  have hzero : ∀ u : Fin host.chips.length, u ≠ idx →
-      ((a.hostAssignment u).map (fun effect => effect
-        ((bi'.eval asg').busId, (bi'.eval asg').payload))).sum = 0 := by
-    intro u hu
-    refine List.sum_eq_zero (fun x hx => ?_)
-    obtain ⟨c, hc, rfl⟩ := List.mem_map.mp hx
-    by_contra hcm
-    exact hno (payloadOk_of_exists
-      (hstateful a.hostAssignment (hsat.satisfiesHost) u hu c hc _ hst' hcm))
-  -- So the host's whole net at this message is exactly the exempt chip's own (single) touch.
-  have hhost_eq : a.hostAssignment.busEffect ((bi'.eval asg').busId, (bi'.eval asg').payload)
-      = ((a.hostAssignment idx).map (fun effect => effect
-          ((bi'.eval asg').busId, (bi'.eval asg').payload))).sum :=
-    Finset.sum_eq_single idx (fun u _ hu => hzero u hu)
-      (fun h => absurd (Finset.mem_univ idx) h)
-  -- And that touch — at most one instance — is `0` or `-1`, never a genuine sender either.
-  have hlen : (a.hostAssignment idx).length ≤ 1 :=
-    le_trans (hsat.satisfiesHost.withinBound idx) hexempt.bound
-  have he : ((a.hostAssignment idx).map (fun effect => effect
-        ((bi'.eval asg').busId, (bi'.eval asg').payload))).sum = 0
-      ∨ ((a.hostAssignment idx).map (fun effect => effect
-        ((bi'.eval asg').busId, (bi'.eval asg').payload))).sum = (-1 : ZMod p) := by
-    match hc0 : a.hostAssignment idx, hlen with
-    | [], _ => exact Or.inl rfl
-    | [c0], _ =>
-      rw [List.map_cons, List.map_nil, List.sum_cons, List.sum_nil, add_zero]
-      by_cases hc0m : c0 ((bi'.eval asg').busId, (bi'.eval asg').payload) = 0
-      · exact Or.inl hc0m
-      · exact Or.inr (hexempt.uniform a.hostAssignment (hsat.satisfiesHost) c0
-          (hc0 ▸ List.mem_cons_self) _ hst' hc0m)
-  -- A pile of receives — guest and (at most) the one exempt host touch — that cannot balance.
-  have hneg : (-1 : ZMod p) ≠ 0 := neg_ne_zero.mpr one_ne_zero
-  refine guestNet_add_ne_zero_of_uniform hsat hSize hBudget hneg huni hasg' hbi' rfl hmult' he ?_
-  have hbal := hsat.balances ((bi'.eval asg').busId, (bi'.eval asg').payload)
-  rw [busEffect_apply, hhost_eq] at hbal
-  exact hbal
+  -- Nor does the host: what it leaves at `msg` is minus an honest count of its own receives.
+  obtain ⟨k, hbud, hhost, hzero⟩ := (hstateful G hGuests a hsat msg hstm hIH).resolve_left hno
+  -- Somebody touched `msg`, so that pile is not empty — and a pile of receives cannot balance.
+  have hne : a.guestAssignments.count msg ≠ 0 ∨ k ≠ 0 := by
+    rcases hactm with ⟨u, asg'', hasg'', bi'', hbi'', hmsg'', hmult''⟩ | ⟨u, c, hc, hcm⟩
+    · exact Or.inl (count_ne_zero_of_active hasg'' hbi'' hmsg'' hmult'')
+    · exact Or.inr (fun hk => hcm (hzero hk u c hc))
+  exact net_ne_zero_of_recvs hsat hSize hbud huni hhost hne (hsat.balances msg)
 
 /-- **`Host.forcesAccepts` is derivable.** Honest table sinks on the stateless buses, host chips
     that maintain the invariants on the stateful ones, bus semantics whose stateful acceptance
@@ -403,8 +366,7 @@ theorem forcesAccepts_of_hostSound [Fact p.Prime] {host : Host p} {bs : BusSeman
         c.legalGuest (bs.toGuestRules r0 hmem) memAddress host.maxWindow host.maxLookback
           host.maxInteractions)
     (hsinks : host.sinksAreTables bs)
-    (hstateful : ∃ idx : Fin host.chips.length,
-      host.exemptChip bs idx ∧ host.statefulChipsMaintain bs idx)
+    (hstateful : host.statefulChipsMaintain bs rm r0 hmem)
     (hbs : bs.statefulAcceptsOfPayloadOk r0 hmem)
     (hord : host.ordersRanks rm (bs.toGuestRules r0 hmem) memAddress) :
     host.forcesAccepts bs := by
@@ -413,7 +375,7 @@ theorem forcesAccepts_of_hostSound [Fact p.Prime] {host : Host p} {bs : BusSeman
   refine ⟨hsat.satisfiesGuest t asg hasg, fun bi hbi hmult => ?_⟩
   by_cases hst : bs.isStateful bi.busId
   · exact hbs _ hst (maintains_of_stateful_active hunpack hsinks hstateful hGuests
-      hsat hRanks hasg hbi hst hmult)
+      hsat hRanks hst (Or.inl ⟨t, asg, hasg, bi, hbi, rfl, hmult⟩))
   · exact satisfiesStateless_of_sinks hunpack hsinks hGuests hsat t asg hasg bi hbi
       (by simpa using hst) hmult
 

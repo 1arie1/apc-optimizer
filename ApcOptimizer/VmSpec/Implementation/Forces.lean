@@ -528,7 +528,7 @@ def openVmRecordGood (m : BusMessage p) : Prop :=
 
 theorem openVmTimestampBound_lt (P : OpenVmParams p) : openVmTimestampBound < p :=
   lt_trans (by norm_num [openVmRankBound, openVmRankShift, openVmTimestampBound,
-    openVmTimestampBits]) P.rankWindowOk
+    openVmTimestampBits]) (openVmRankBound_lt P)
 
 /-- A field element that *is* an honest natural below OpenVM's ceiling reads back as one. -/
 theorem val_lt_of_cast [Fact p.Prime] (P : OpenVmParams p) {x : ZMod p} {n : ℕ}
@@ -686,12 +686,14 @@ theorem openVmHost_no_recv_of_no_send [Fact p.Prime] (P : OpenVmParams p) {G : G
   have hpm := openVmHost_pmAt P hGuests hsat hst
   have h0 : (1 : ZMod p) ≠ 0 := one_ne_zero
   have h1 : (1 : ZMod p) ≠ -1 := fun h => openVm_negOne_ne_one P h.symm
-  obtain ⟨kf, ki, hkf, hki, hFeq, hkfz, hkiz⟩ :
+  obtain ⟨kf, ki, hkf, hki, hFeq, hkfz, hkiz, -⟩ :
       ∃ kf ki : ℕ, kf ≤ 1 ∧ ki ≤ 6 * P.maxInputInstances ∧
         a.hostAssignment.busEffect m = -((kf + ki : ℕ) : ZMod p) ∧
         (kf = 0 → ∀ e ∈ a.hostAssignment (openVmMemFinalizeChip P), e m = 0) ∧
         (ki = 0 → ∀ i : Fin (a.hostAssignment (openVmInputChip P)).length,
-          ∀ e ∈ (iR i).interactions P.ptrReg 0 1, (e.busId, e.payload) ≠ m) := by
+          ∀ e ∈ (iR i).interactions P.ptrReg 0 1, (e.busId, e.payload) ≠ m) ∧
+        (∀ t : Fin (openVmHost P).chips.length, (t : ℕ) ≠ 5 → (t : ℕ) ≠ 6 →
+          ∀ c ∈ a.hostAssignment t, c m = 0) := by
     rcases openVmHost_memNet_or_sender P hsat.satisfiesHost iR hiR hm with h | h | h
     · exact absurd h hinit
     · exact absurd h hin
