@@ -125,7 +125,7 @@ A {deftech}_circuit_ is simply a collection of algebraic constraints and symboli
 
 {docstring Circuit}
 
-A circuit is satisfied under an assignment when all algebraic constraints evaluate to zero and every bus interaction message is accepted by the bus semantics. The algebraic half is named separately, so that it can be referred to (elsewhere) without assuming bus semantics.
+A circuit is satisfied under an assignment when all algebraic constraints evaluate to zero and every bus interaction message is accepted by the bus semantics.
 
 ```anchor satisfiesAlgebraic
 /-- Whether an assignment satisfies a circuit's *algebraic* constraints alone —
