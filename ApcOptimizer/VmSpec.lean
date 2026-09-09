@@ -11,11 +11,11 @@ import ApcOptimizer.VmSpec.Implementation.Chain
 import ApcOptimizer.VmSpec.Implementation.OpenVmChain
 import ApcOptimizer.VmSpec.Implementation.FuseLegal
 import ApcOptimizer.VmSpec.Implementation.Validation
+import ApcOptimizer.VmSpec.Audit
 
--- `VmSpec/Audit/` (see below) is deliberately not imported here: `Audit/Apcs/`
--- alone takes ~10 minutes to compile, and nothing in this file's own claims depends on it -- see
--- "files that audit the audit surface" below. Omitting the import keeps `lake build
--- ApcOptimizer.VmSpec` fast without disabling `Audit/`: build it explicitly, e.g. `lake build
+-- `Audit.lean` leaves out `Audit/Apcs/` and the `Audit/Legality/` results resting on it: those
+-- alone take ~10 minutes to compile, and nothing in this file's own claims depends on them -- see
+-- "files that audit the audit surface" below. Build them explicitly: `lake build
 -- ApcOptimizer.VmSpec.Audit.Legality.All`.
 
 /-! # The VM-level correctness spec
@@ -61,8 +61,9 @@ import ApcOptimizer.VmSpec.Implementation.Validation
     candidate circuit satisfies them, not an ingredient of the soundness argument. It still lives
     directly under `VmSpec/`, so the directory rule still applies: a mistake here is a mistake in
     what gets audited, just not a mistake that can make a theorem *wrong*, only vacuous or (for a
-    checker) unsound. This file does not import it (see the note above the imports) — that is a
-    build-time exclusion, not a claim it needs no audit.
+    checker) unsound. `Audit.lean` gathers all of it except `Audit/Apcs/` and the
+    `Audit/Legality/` results resting on that (see the note above the imports) — a build-time
+    exclusion, not a claim those need no audit.
 
     For a checker file, that means only its *exposed soundness statement* needs auditing — that a
     `true` result from some `Bool`-valued function really does give the legality clause it claims
