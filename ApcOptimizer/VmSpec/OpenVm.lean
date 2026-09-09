@@ -1,6 +1,6 @@
 import ApcOptimizer.VmSpec.Legal
-import ApcOptimizer.VmSpec.Legal
 import ApcOptimizer.OpenVmSemantics
+import ApcOptimizer.VmSpec.Implementation.OpenVmSemanticsFacts
 
 set_option autoImplicit false
 
@@ -242,8 +242,10 @@ structure InputRead (p : ℕ) where
       constrain that it adds a message `(pc_from, t_from)` to the receive set and `(pc_to, t_to)`
       to the send set"), not traffic outside the instruction stream. -/
   pcFrom : ZMod p
-  /-- The `pc` it hands on. -/
-  pcTo : ZMod p
+
+/-- The `pc` an instance hands on: `Rv32HintStoreAir` runs `execute_and_increment_pc`
+    (`crates/vm/src/arch/execution.rs`), which sets the next `pc` to the previous one plus `1`. -/
+def InputRead.pcTo (r : InputRead p) : ZMod p := r.pcFrom + 1
 
 /-- The address the write lands at, decoded from the pointer register's limbs. -/
 def InputRead.ptr (r : InputRead p) : ZMod p := wordValue r.ptrLimbs

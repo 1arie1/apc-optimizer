@@ -23,6 +23,9 @@ import ApcOptimizer.VmSpec.Implementation.Validation
     `Spec.lean` says what it means to replace *one* circuit correctly. This folder says what it
     means to replace the guest chips of a *whole VM* correctly, and connects the two.
 
+    "Whitepaper §x.y" throughout this folder cites the OpenVM whitepaper,
+    <https://openvm.dev/whitepaper.pdf>.
+
     ## What has to be audited
 
     The split is by directory, matching the convention `AGENTS.md` sets for the repository as a
@@ -115,6 +118,9 @@ import ApcOptimizer.VmSpec.Implementation.Validation
       Deliberately *not* a field of `Host`: see that file for why a wrong choice cannot make the
       theorem unsound.
     * `Implementation/Counting.lean` — the anti-wraparound counting lemmas.
+    * `Implementation/OpenVmSemanticsFacts.lean` — the facts about `OpenVmSemantics.lean`'s bus map
+      and bus semantics that `OpenVm.lean`'s `openVmGuestRules` is built from, kept out of that
+      audited file.
     * `Implementation/Realizes.lean` — `Host.realizes` and what it buys (`Host.forcesAccepts`).
     * `Implementation/Connection.lean` — per-chip `isSoundReplacementOf` to `VmSoundReplacement`.
     * `Implementation/OpenVmConnection.lean` — the same, discharged for `openVmHost`.
